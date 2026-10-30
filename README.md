@@ -1,4 +1,13 @@
 <p align="center">
+  <strong>This branch is no longer maintained, the upstream is no longer followed.</strong>
+</p>
+<p align="center">
+  See <a href="https://github.com/eddoursul/Lamina/tree/main">the main branch</a> for updates.
+</p>
+
+---
+
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
     <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
