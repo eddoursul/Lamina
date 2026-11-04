@@ -299,11 +299,11 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   const c = live.cache, cacheRow = $("cache-row"), cacheProg = $("cache-progress");
   cacheRow.hidden = cacheProg.hidden = c == null;
   if (c) {
-    $("cache-text").textContent = `${fmt(c.parked)}${c.slots ? `/${fmt(c.slots)}` : ""} waiting · ${fmt(c.active)} active · ` +
+    $("cache-text").textContent = `${fmt(c.parked)}${c.slots ? `/${fmt(c.slots)}` : ""} parked · ${fmt(c.active)} active · ` +
       `${gb(c.parked_bytes)} GB` + (c.evictions > 0 ? ` · ${fmt(c.evictions)} eviction${c.evictions === 1 ? "" : "s"}` : "");
-    $("cache-text").title = `waiting: conversations kept in RAM, each continuing where it was at its next request; ` +
+    $("cache-text").title = `parked: conversations kept in RAM, each continuing where it was at its next request; ` +
       `active: the one in the engine's session (${fmt(c.live)} cells, ${fmt(c.checkpoints)} checkpoints). ` +
-      `The waiting ones take ${gb(c.parked_bytes)} of ${gb(c.parked_budget, 0)} GB` +
+      `The parked ones take ${gb(c.parked_bytes)} of ${gb(c.parked_budget, 0)} GB` +
       (c.slots ? `, at most ${fmt(c.slots)} of them` : "") + `; ${fmt(c.evictions)} evicted to make room`;
     $("cache-bar").style.width = c.parked_budget ? `${Math.min(100, (100 * c.parked_bytes) / c.parked_budget)}%` : "0%";
     if (c.evictions > 0) cacheProg.dataset.tone = "warn"; else delete cacheProg.dataset.tone;   // a conversation lost its cache
