@@ -934,17 +934,21 @@ json assemble(const std::vector<std::pair<int, json>>& reads, const std::vector<
             g["util"] = u.empty() ? json(nullptr) : json(py_sum(u).get<double>() / (double) u.size());
             const auto t = vals("temp");
             g["temp"] = t.empty() ? json(nullptr) : py_max(t);
-            json each = json::array();
-            for (size_t i = 0; i < reads.size(); ++i) {
-                const json& r = reads[i].second;
-                json one = {{"index", reads[i].first}, {"name", i < names.size() ? names[i] : json(nullptr)},
-                            {"util", jget(r, "util")}, {"mem_used", jget(r, "mem_used")},
-                            {"mem_total", jget(r, "mem_total")}, {"temp", jget(r, "temp")},
-                            {"power", jget(r, "power")}};
-                each.push_back(std::move(one));
-            }
-            s["gpus"] = std::move(each);
         }
+        // the per-card array is always present (one entry when a single card), so the dashboard draws one path
+        json each = json::array();
+        for (size_t i = 0; i < reads.size(); ++i) {
+            const json& r = reads[i].second;
+            json one = {{"index", reads[i].first}, {"name", i < names.size() ? names[i] : json(nullptr)},
+                        {"util", jget(r, "util")}, {"mem_used", jget(r, "mem_used")},
+                        {"mem_total", jget(r, "mem_total")}, {"temp", jget(r, "temp")},
+                        {"power", jget(r, "power")}, {"power_limit", jget(r, "power_limit")},
+                        {"pcie_gen", jget(r, "pcie_gen")},
+                        {"pcie_gen_max", jget(r, "pcie_gen_max")}, {"pcie_width", jget(r, "pcie_width")},
+                        {"pcie_rx_mb", jget(r, "pcie_rx_mb")}, {"pcie_tx_mb", jget(r, "pcie_tx_mb")}};
+            each.push_back(std::move(one));
+        }
+        s["gpus"] = std::move(each);
         for (auto it = g.begin(); it != g.end(); ++it) s["gpu_" + it.key()] = it.value();
     }
     if (load) {
@@ -970,6 +974,22 @@ void record(json& hist, const json& s) {
         h.push_back(v.is_number_float() ? json(py_round(v.get<double>(), 2)) : v);
         if (h.size() > kHistory) h.erase(h.begin());
     }
+    // each card's own util/temp/power/rx for the GPU cards' per-GPU lines (the indices are fixed at
+    // engine startup: no stale series)
+    if (const json& gpus = jget(s, "gpus"); gpus.is_array())
+        for (const json& g : gpus)
+            if (const json& idx = jget(g, "index"); idx.is_number()) {
+                const std::string suffix = "_g" + std::to_string(idx.get<int64_t>());
+                const auto put = [&](const char* field, const char* series) {
+                    const json& v = jget(g, field);
+                    json& h = hist[series + suffix];
+                    if (!h.is_array()) h = json::array();
+                    h.push_back(v.is_number_float() ? json(py_round(v.get<double>(), 2)) : v);
+                    if (h.size() > kHistory) h.erase(h.begin());
+                };
+                put("util", "gpu_util"); put("temp", "gpu_temp"); put("power", "gpu_power");
+                put("pcie_rx_mb", "gpu_pcie_rx_mb"); put("mem_used", "gpu_mem_used");
+            }
 }
 
 /// the machine's facts ("static")
@@ -1021,8 +1041,7 @@ struct Telemetry::Impl {
         std::vector<json> names;
         if (gpus.front().second.ok()) {
             for (const auto& g : gpus) reads.emplace_back(g.first, g.second.read());
-            if (reads.size() > 1)
-                for (const auto& g : gpus) names.push_back(g.second.name());
+            for (const auto& g : gpus) names.push_back(g.second.name());   // the legend names each card, even a single one
         }
         const std::optional<double> load = cpu.percent();
         std::optional<std::pair<int64_t, int64_t>> ram;
@@ -1066,6 +1085,9 @@ Telemetry::Telemetry(std::function<json()> extra, int gpu_index, std::vector<int
     for (const auto& g : all)
         if (g.second.ok()) m.gpus.push_back(g);
     if (m.gpus.empty()) m.gpus.push_back(all.front());   // none readable: the first, for its count and its nulls
+    // the Monitor lists the cards by NVML index (lowest first), not the engine's [main, tiers...] order: the per-card
+    // rows must be deterministic across runs and configs. gpu_index (the engine's own card) is a separate value, unchanged.
+    std::sort(m.gpus.begin(), m.gpus.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     m.facts = machine_facts(m.gpus);
     m.thread = std::thread([self = impl_] { self->loop(); });
 }

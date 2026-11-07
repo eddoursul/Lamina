@@ -1,5 +1,6 @@
 /* Lamina web app - layout on top of tokens.css + components.css (the Lamina UI kit). Colours, type, radii and
    shadows come only from the kit's tokens. */
+:root { --st-fs-metric: 24px; }   /* the one marquee size every metric card's number uses, headline and per-GPU alike */
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body { display: flex; flex-direction: column; overflow: hidden; }
@@ -87,15 +88,45 @@ main { flex: 1; min-height: 0; display: flex; }
 .badges .st-badge.on { opacity: 1; }
 .state-card__row { display: flex; justify-content: space-between; gap: var(--st-s-4); font-size: var(--st-fs-sm);
                    font-weight: var(--st-fw-medium); font-variant-numeric: tabular-nums; }
-.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--st-s-4); }
-.metric-card { padding: var(--st-s-4) var(--st-s-5); }
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 1fr; gap: var(--st-s-4); }
+.metric-card { padding: var(--st-s-4) var(--st-s-5); display: flex; }   /* the inner column fills the card so the spark pins to the grid row's bottom */
+.st-metric { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+/* one marquee for every card: the headline values and the per-GPU values share size, weight and color (the token
+   keeps them from drifting); units stay small and muted, tones live only in the sparks */
+.st-metric__value, .gpu-lines__v { font-size: var(--st-fs-metric); font-weight: var(--st-fw-black); color: var(--st-ink); }
 .st-metric__value small { font-size: var(--st-fs-md); font-weight: var(--st-fw-medium); color: var(--st-ink-muted); margin-left: 4px; }
 .st-metric__sub { font-size: var(--st-fs-xs); color: var(--st-ink-muted); font-variant-numeric: tabular-nums; min-height: 1em; }
-.st-metric__spark { display: block; overflow: visible; }
+/* the single-value cards' numbers right-align too, so every number in the grid lines up on the right edge
+   (the split cards already do; Speed keeps its two-number Decode/Prefill spread) */
+#mv-cpu, #mv-disk, #ms-cpu, #ms-disk { text-align: right; }
+/* the per-GPU legend above the grid: a card-styled bar with a "GPUs" label and a dot + short name per card,
+   only when a model spans several */
+.gpu-legend { display: flex; align-items: center; flex-wrap: wrap; gap: var(--st-s-2) var(--st-s-4); font-size: var(--st-fs-sm);
+              font-variant-numeric: tabular-nums; border: 1px solid var(--st-line); background: var(--st-surface);
+              border-radius: 12px; padding: 9px 14px; }
+.gpu-legend::before { content: "GPUs"; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+                      color: var(--st-ink-muted); margin-right: var(--st-s-3); }
+.gpu-legend__item { display: inline-flex; align-items: center; gap: 6px; }
+.gpu-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+/* the per-GPU split lines: one grid row per card. The first cell is a colored dot + a muted "GPU N"; the value
+   column is the marquee (the shared token above) and right-aligned so the numbers line up. The dot matches the
+    legend and the graph line. The labels stay small and muted: only the numbers are the marquee */
+.gpu-lines { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; font-size: var(--st-fs-md);
+             font-variant-numeric: tabular-nums; align-items: center; }
+.gpu-lines--3 { grid-template-columns: auto auto 1fr; }
+.gpu-lines > span { white-space: nowrap; line-height: 1.2; min-width: 0; }
+.gpu-lines__k { display: inline-flex; align-items: center; gap: 6px; color: var(--st-ink-muted); }
+.gpu-lines__gen { color: var(--st-ink-muted); font-size: var(--st-fs-xs); }   /* the link gen: subtitle-size, the number is the marquee */
+.gpu-lines__v { text-align: right; overflow: hidden; text-overflow: ellipsis; }   /* a wider link than this box must not push the grid */
+.gpu-lines__v .u { font-size: var(--st-fs-md); font-weight: var(--st-fw-medium); color: var(--st-ink-muted); margin-left: 4px; }
+/* the per-GPU lines sit closer to the label: the 10px gap plus the line's 1.45 line-height left the first
+   number lower than the single-card headlines. The spark's margin-top: auto keeps it pinned to the bottom */
+.st-metric:has(.gpu-lines) { gap: 4px; }
+.st-metric__spark { display: block; overflow: visible; margin-top: auto; }
 .speed-values { display: flex; justify-content: space-between; gap: var(--st-s-3); }
 .speed-values > div { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .speed-values > div:last-child { text-align: right; }
-.speed-values .st-metric__value { font-size: clamp(20px, 2.2vw, var(--st-fs-stat)); }
+.speed-values .st-metric__value { font-size: var(--st-fs-metric); }
 .st-metric__spark .speed-prefill { color: color-mix(in srgb, var(--st-accent) 65%, black); }
 .st-metric__spark[data-tone="warn"] { color: var(--st-warn); }
 .st-metric__spark[data-tone="info"] { color: var(--st-info); }
@@ -181,6 +212,10 @@ main { flex: 1; min-height: 0; display: flex; }
   .monitor, .about { padding: var(--st-s-4); }
   .facts { grid-template-columns: 1fr; gap: 2px; }
   .facts dd { margin-bottom: var(--st-s-2); }
+}
+/* one column on phones: the per-GPU rows (a PCIe row is three columns) need the width the 2-col grid starves them of */
+@media (max-width: 480px) {
+  .metrics { grid-template-columns: 1fr; }
 }
 /* Images tab (POST /v1/images/generations) */
 .img-form{display:flex;flex-direction:column;gap:12px}

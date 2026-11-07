@@ -11,6 +11,8 @@ const kfmt = (n) => (n == null ? "–" : n >= 1000 ? `${fmt(n / 1000, n >= 10000
 // a context size: 32768 -> "32K" (powers of two), else like kfmt
 const ctxfmt = (n) => (n && n % 1024 === 0 ? `${fmt(n / 1024)}K` : kfmt(n));
 const gb = (b, d = 1) => (b == null ? "–" : fmt(b / 1073741824, d));   // memory: binary GB, as Windows shows it
+// a card's short name for the legend: drop the vendor and product-line prefixes ("NVIDIA GeForce RTX 4090" -> "RTX 4090")
+const shortGpu = (n) => String(n || "").replace(/^(?:NVIDIA|AMD)\s+/i, "").replace(/^(?:GeForce|Radeon)\s+/i, "").trim();
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem("lamina." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -126,8 +128,8 @@ $("metrics").innerHTML = METRICS.map((m) => `
   <div class="st-card metric-card"><div class="st-metric">
     <span class="st-metric__label">${icon(m.icon, "st-icon st-icon--sm")}${esc(m.label)}</span>
     ${m.key === "speed" ? `<div class="speed-values">
-      <div><span class="st-metric__value" id="mv-speed">-</span><span class="st-metric__sub" id="ms-speed">Decode</span></div>
       <div class="speed-prefill"><span class="st-metric__value" id="mv-prefill">-</span><span class="st-metric__sub" id="ms-prefill">Prefill</span></div>
+      <div><span class="st-metric__value" id="mv-speed">-</span><span class="st-metric__sub" id="ms-speed">Decode</span></div>
     </div>` : `<span class="st-metric__value" id="mv-${m.key}">–</span>
     <span class="st-metric__sub" id="ms-${m.key}"></span>`}
     <svg class="st-metric__spark" id="sp-${m.key}" viewBox="0 0 100 32" preserveAspectRatio="none"${m.tone ? ` data-tone="${m.tone}"` : ""}>
@@ -140,6 +142,7 @@ $("metrics").innerHTML = METRICS.map((m) => `
 
 function spark(id, values, max) {
   const svg = $(id);
+  svg.querySelectorAll("path:not(.line):not(.area)").forEach((p) => p.remove());   // the PCIe card's per-GPU lines: stale after a single-GPU restart
   const v = (values || []).map((x) => (x == null ? 0 : x));
   if (v.length < 2) { svg.querySelector(".line").setAttribute("d", ""); svg.querySelector(".area").setAttribute("d", ""); return; }
   const top = Math.max(max || 0, ...v, 1);
@@ -147,6 +150,44 @@ function spark(id, values, max) {
   const line = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(2)},${p[1].toFixed(2)}`).join("");
   svg.querySelector(".line").setAttribute("d", line);
   svg.querySelector(".area").setAttribute("d", `${line}L100,32L0,32Z`);
+}
+// one colored line per series (the PCIe card's per-GPU graph): no fill area, the single-line paths stay cleared
+function sparkLines(id, series, max) {
+  const svg = $(id);
+  svg.querySelectorAll("path:not(.line):not(.area)").forEach((p) => p.remove());   // the 1 s polls must not pile up
+  for (const c of ["line", "area"]) svg.querySelector(`.${c}`).setAttribute("d", "");
+  const each = series.filter((s) => (s.values || []).length > 1);
+  if (!each.length) return;
+  const top = Math.max(max || 0, ...each.flatMap((s) => s.values.map((x) => (x == null ? 0 : x))), 1);
+  for (const s of each) {
+    const v = s.values.map((x) => (x == null ? 0 : x));
+    const d = v.map((x, i) => `${i ? "L" : "M"}${((i / (v.length - 1)) * 100).toFixed(2)},${(30 - (x / top) * 26).toFixed(2)}`).join("");
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", d); p.setAttribute("fill", "none"); p.setAttribute("stroke", s.color);
+    p.setAttribute("stroke-width", "1.6"); p.setAttribute("stroke-linejoin", "round"); p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.appendChild(p);
+  }
+}
+// the per-GPU colors: the legend dots and the graph lines share one (assigned by position, not index, so two cards
+// always differ). A model spans at most four cards, so the curated four cover it; past four (a multi-replica box) a
+// golden-angle HSL hue keeps every card distinct instead of repeating the palette.
+const GPU_COLORS = ["#3b82f6", "#10b981", "#a78bfa", "#f472b6"];
+const gpuColor = (i) => GPU_COLORS[i] || `hsl(${(i * 137.508) % 360} 65% 58%)`;
+// the per-GPU split the GPU cards share: the headline goes, the sub slot becomes one line per card (its colored token
+// + the formatter's cells), and the graph one colored line per card. Used for any card count, so one card looks like
+// the first line of a multi-card split
+function splitCard(key, gpus, h, {series, line, max, cols}) {
+  $(`mv-${key}`).style.display = "none";
+  const sub = $(`ms-${key}`);
+  sub.classList.add("gpu-lines");
+  sub.classList.toggle("gpu-lines--3", cols === 3);
+  // the first cell is a colored dot (the same color as the legend and the graph line) + a muted "GPU N"; the value
+  // cells come from the card's own formatter and are the marquee, right-aligned. No card readable (no GPU, NVML
+  // down): one dash line keeps the card's shape
+  const rows = gpus.length ? gpus : [{}];
+  sub.innerHTML = rows.map((g, i) => `<span class="gpu-lines__k"><span class="gpu-dot" style="background:${gpuColor(i)}"></span>GPU ${g.index != null ? esc(g.index) : "–"}</span>${line(g)}`).join("");
+  sparkLines(`sp-${key}`, rows.map((g, i) => ({values: h[`${series}_g${g.index}`], color: gpuColor(i)})), max);
 }
 function setMetric(key, value, unit, sub) {
   $(`mv-${key}`).innerHTML = value == null ? "–" : `${esc(value)}${unit ? `<small>${esc(unit)}</small>` : ""}`;
@@ -244,26 +285,30 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
             live.state === "reading" ? "Prefill now" : live.state === "generating" ? "Prefill this request" : last ? "Prefill last request" : "Prefill");
   spark("sp-speed", h.tok_s);
   spark("sp-prefill", h.prefill_tok_s_mean);
-  // a model split across several cards (issue #112): the cards show their total / mean / hottest, and each card's own
-  const per = (f) => (hw.gpus || []).map((g) => `GPU ${g.index} ${f(g)}`).join(" · ");
-  const multi = (hw.gpus || []).length > 1;
-  setMetric("gpu", hw.gpu_util == null ? null : fmt(hw.gpu_util), "%",
-            multi ? per((g) => (g.util == null ? "–" : `${fmt(g.util)}%`)) : st.gpu_name || (st.gpu_note ? "not available" : ""));
-  spark("sp-gpu", h.gpu_util, 100);
-  setMetric("vram", hw.gpu_mem_used == null ? null : gb(hw.gpu_mem_used), hw.gpu_mem_total ? `/ ${gb(hw.gpu_mem_total, 0)} GB` : "GB",
-            multi ? per((g) => (g.mem_used == null ? "–" : `${gb(g.mem_used)} GB`))
-                  : eng.expert_slots ? `${fmt(eng.expert_slots)} experts cached` : (st.gpu_note ? "not available on Windows AMD yet" : ""));
-  spark("sp-vram", h.gpu_mem_used, hw.gpu_mem_total);
-  setMetric("temp", hw.gpu_temp == null ? null : fmt(hw.gpu_temp), "°C",
-            multi ? per((g) => (g.temp == null ? "–" : `${fmt(g.temp)}°`)) : "");
-  spark("sp-temp", h.gpu_temp, 90);
-  setMetric("power", hw.gpu_power == null ? null : fmt(hw.gpu_power), "W", hw.gpu_power_limit ? `of ${fmt(hw.gpu_power_limit)} W limit` : "");
-  spark("sp-power", h.gpu_power, hw.gpu_power_limit);
-  const gen = hw.gpu_pcie_gen_max || hw.gpu_pcie_gen;
-  setMetric("pcie", gen ? `Gen${gen}` : null, hw.gpu_pcie_width ? `x${hw.gpu_pcie_width}` : "",
-            hw.gpu_pcie_rx_mb == null ? "" : `to GPU ${fmt(hw.gpu_pcie_rx_mb, hw.gpu_pcie_rx_mb < 10 ? 1 : 0)} MB/s` +
-            (hw.gpu_pcie_gen && gen && hw.gpu_pcie_gen < gen ? ` · idle Gen${hw.gpu_pcie_gen}` : ""));
-  spark("sp-pcie", h.gpu_pcie_rx_mb);
+  // the GPU cards always draw one line per card, so a single card looks like the first line of a multi-card split
+  const gpus = hw.gpus || [];
+  // the legend above the grid: what each GPU 0/1 is, shown whenever there is a card to name (a single card gets one entry)
+  const legend = $("gpu-legend");
+  legend.hidden = gpus.length === 0;
+  legend.innerHTML = gpus.map((g, i) =>
+    `<span class="gpu-legend__item"><span class="gpu-dot" style="background:${gpuColor(i)}"></span>GPU ${esc(g.index)}` +
+    (g.name ? ` <span class="muted">${esc(shortGpu(g.name))}</span>` : "") + `</span>`).join("");
+  const num = (v) => (v == null ? "–" : fmt(v, v < 10 ? 1 : 0));
+  // load, vram, temp, power and PCIe: one line per card, on a shared scale so the cards read against each other
+  splitCard("gpu", gpus, h, {series: "gpu_util", max: 100, line: (g) => `<span class="gpu-lines__v">${g.util == null ? "–" : `${fmt(g.util)}<span class="u">%</span>`}</span>`});
+  // each card's own used memory on a shared scale (the widest card's total), so the lines are comparable
+  splitCard("vram", gpus, h, {series: "gpu_mem_used", max: Math.max(0, ...gpus.map((g) => (g.mem_total == null ? 0 : g.mem_total))),
+    line: (g) => `<span class="gpu-lines__v">${g.mem_used == null ? "–" : `${gb(g.mem_used)}<span class="u">GB</span>`}</span>`});
+  splitCard("temp", gpus, h, {series: "gpu_temp", max: 90, line: (g) => `<span class="gpu-lines__v">${g.temp == null ? "–" : `${fmt(g.temp)}<span class="u">°C</span>`}</span>`});
+  splitCard("power", gpus, h, {series: "gpu_power", line: (g) => `<span class="gpu-lines__v"${g.power_limit == null ? "" : ` title="Power limit: ${fmt(g.power_limit)} W"`}>${num(g.power)}${g.power == null ? "" : `<span class="u">W</span>`}</span>`});
+  // the middle column is the card's link capability: the only row with three columns. The rate is shown in GB/s
+  // (the natural unit for a link); the short number keeps the value column from ever truncating
+  splitCard("pcie", gpus, h, {series: "gpu_pcie_rx_mb", cols: 3, line: (g) => {
+    const gen = g.pcie_gen_max ?? g.pcie_gen;
+    const v = g.pcie_rx_mb;
+    return `<span class="gpu-lines__gen">${gen ? `Gen${gen}` : "–"} x${g.pcie_width ?? "–"}</span>` +
+           `<span class="gpu-lines__v" title="Rx: data received by the GPU (host to GPU)">${v == null ? "–" : `${fmt(v / 1024, 1)}<span class="u">GB/s</span>`}</span>`;
+  }});
   setMetric("cpu", hw.cpu == null ? null : fmt(hw.cpu), "%", st.threads ? `${st.cores ? `${st.cores} cores · ` : ""}${st.threads} threads` : "");
   spark("sp-cpu", h.cpu, 100);
   if (hw.disk_read_mb == null) {
