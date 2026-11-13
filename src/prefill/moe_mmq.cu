@@ -386,6 +386,12 @@ void zero_after(uint8_t* const* at, int n, size_t bytes, void* stream) {
 
 void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
+    if (p.ids_rows < ids_table_rows(p.total_rows, p.max_rows)) {
+        std::fprintf(stderr, "prefill mmq: a row map of %lld entries, where its launch takes %lld (%lld rows, %lld an "
+                             "expert)\n", (long long) p.ids_rows, (long long) ids_table_rows(p.total_rows, p.max_rows),
+                     (long long) p.total_rows, (long long) p.max_rows);
+        std::exit(1);
+    }
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = type_blck(t), bpr = p.w_cols / qk;
     const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, nullptr,

@@ -24,6 +24,7 @@ constexpr int64_t N = 2560, FF2 = 1280, FF = 640, K = 10;
 constexpr int G = 16;
 static_assert(G <= mmq::kGatherGroupMax, "a batch's experts gathered in one launch");
 constexpr int64_t ROWS = 8192;
+constexpr int64_t IDENT_ROWS = mmq::ids_table_rows(ROWS);   // MMQ's row map: what a launch of ROWS rows reads
 constexpr int SLOTS = 2;                 // batches in staging: the copies of one overlap the work on the other
 constexpr size_t GEMM_WS = 32u << 20;    // cuBLAS workspace
 constexpr int NPTR = 7;                  // per-expert device pointers: blob, xs, gate/up, gu, h, down, d
@@ -146,7 +147,7 @@ struct ExpertRunner::Impl {
         *ws = a.take<uint8_t>(GEMM_WS, ok);
         const bool q = mmq_any();
         uint8_t* xq = q ? a.take<uint8_t>(mmq::q8_bytes(ROWS, N), ok) : nullptr;
-        int32_t* ident = q ? a.take<int32_t>((size_t) mmq::ids_table_rows(ROWS), ok) : nullptr;   // + the read margin (ids_table_rows)
+        int32_t* ident = q ? a.take<int32_t>((size_t) IDENT_ROWS, ok) : nullptr;
         if (m == nullptr) return;
         m->xq = xq; m->ident = ident;
         m->input = input; m->sum = sum; m->rows_src = rows_src; m->w = w; m->adds = adds;
@@ -557,7 +558,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         cudaMemcpyAsync(m.rows_src, h_rows, n_rows * 4, cudaMemcpyHostToDevice, m.s);
         cudaMemcpyAsync(m.w, h_w, n_rows * 4, cudaMemcpyHostToDevice, m.s);
     }
-    if (use_mmq) mmq::iota(m.ident, mmq::ids_table_rows(ROWS), m.s);   // the whole padded map (ids_table_rows' margin included)
+    if (use_mmq) mmq::iota(m.ident, IDENT_ROWS, m.s);   // each layer: the local runner's buffers share the dense steps'
     cudaEventRecord(m.up_done[ub], m.s);
     m.up_live[ub] = true;
     if (m.remote) cudaMemsetAsync(m.sum + t_begin * N, 0, (size_t) (t_end - t_begin) * N * 4, m.s);
@@ -675,7 +676,8 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
             for (size_t j = j0; j < j1; ++j) maxr = std::max<int64_t>(maxr, off[j + 1] - off[j]);
             mmq::Product p;
             p.w = m.dq_gu; p.type = f.gu_type; p.w_rows = FF2; p.w_cols = N; p.expert_bytes = gub; p.n = n;
-            p.xq = m.xq; p.bounds = m.adds + bounds_at[b]; p.ids = m.ident; p.total_rows = rows; p.max_rows = maxr;
+            p.xq = m.xq; p.bounds = m.adds + bounds_at[b]; p.ids = m.ident; p.ids_rows = IDENT_ROWS;
+            p.total_rows = rows; p.max_rows = maxr;
             p.dst = m.gu; p.ld_dst = FF2;
             if (in_place) p.tab = (const void* const*) (P + 0 * E + j0);
             m.mmq_ctx->run(p, m.s);

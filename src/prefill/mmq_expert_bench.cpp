@@ -81,15 +81,17 @@ double run_case(const Case& c, int R, std::mt19937& rng, float* ms_out) {
     ck(cudaMalloc(&dx, x.size() * 4), "x"); ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
     ck(cudaMalloc(&dq, mmq::q8_bytes(T, c.cols)), "xq");
     ck(cudaMalloc(&dd, (size_t) T * c.rows * 4), "dst");
-    ck(cudaMalloc(&dids, (size_t) T * 4), "ids");
+    const int64_t ids_rows = mmq::ids_table_rows(T);
+    ck(cudaMalloc(&dids, (size_t) ids_rows * 4), "ids");
     ck(cudaMalloc(&db, (E + 1) * 4), "bounds");
     ck(cudaMemcpy(db, bounds.data(), (E + 1) * 4, cudaMemcpyHostToDevice), "bounds");
-    mmq::iota(dids, T, nullptr);
+    mmq::iota(dids, ids_rows, nullptr);
     mmq::quantize(dx, nullptr, dq, c.t, c.cols, c.cols, T, nullptr);
     mmq::Context ctx;
     mmq::Product p;
     p.w = dw; p.type = c.t; p.w_rows = c.rows; p.w_cols = c.cols; p.expert_bytes = per; p.n = E;
-    p.xq = dq; p.bounds = db; p.ids = dids; p.total_rows = T; p.max_rows = R; p.dst = dd; p.ld_dst = c.rows;
+    p.xq = dq; p.bounds = db; p.ids = dids; p.ids_rows = ids_rows; p.total_rows = T; p.max_rows = R;
+    p.dst = dd; p.ld_dst = c.rows;
     cudaEvent_t e0, e1;
     cudaEventCreate(&e0); cudaEventCreate(&e1);
     std::vector<float> ts;
@@ -140,7 +142,7 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     }
     if (layers.empty()) { std::fprintf(stderr, "no layers of runner %d in %s\n", remote, path); return 1; }
     std::mt19937 rng(7);
-    constexpr int64_t N = 2560, FF2 = 1280, FF = 640, RMAX = 8192;
+    constexpr int64_t N = 2560, FF2 = 1280, FF = 640, RMAX = 8192, IDS = mmq::ids_table_rows(RMAX);
     const size_t gub = mmq::matrix_bytes(gt, FF2, N), db = mmq::matrix_bytes(dt, N, FF);
     std::vector<uint8_t> wg = weights(gt, FF2, N, 16, rng), wd = weights(dt, N, FF, 16, rng);
     std::vector<float> x((size_t) RMAX * N);
@@ -152,8 +154,8 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     ck(cudaMalloc(&dx, x.size() * 4), "x"); ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
     ck(cudaMalloc(&dq, mmq::q8_bytes(RMAX, N)), "xq"); ck(cudaMalloc(&dqh, mmq::q8_bytes(RMAX, FF)), "hq");
     ck(cudaMalloc(&dgu, (size_t) RMAX * FF2 * 4), "gu"); ck(cudaMalloc(&dd, (size_t) RMAX * N * 4), "d");
-    ck(cudaMalloc(&dids, (size_t) RMAX * 4), "ids");
-    mmq::iota(dids, RMAX, nullptr);
+    ck(cudaMalloc(&dids, (size_t) IDS * 4), "ids");
+    mmq::iota(dids, IDS, nullptr);
     mmq::quantize(dx, nullptr, dq, gt, N, N, RMAX, nullptr);
     mmq::quantize(dx, nullptr, dqh, dt, FF, N, RMAX, nullptr);
     mmq::Context ctx;
@@ -226,7 +228,8 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
                 }
                 mmq::Product p;
                 p.w = dwg; p.type = gt; p.w_rows = FF2; p.w_cols = N; p.expert_bytes = gub; p.n = b.n;
-                p.xq = dq; p.bounds = db_dev + b.at; p.ids = dids; p.total_rows = b.rows; p.max_rows = b.max_rows;
+                p.xq = dq; p.bounds = db_dev + b.at; p.ids = dids; p.ids_rows = IDS; p.total_rows = b.rows;
+                p.max_rows = b.max_rows;
                 p.dst = dgu; p.ld_dst = FF2;
                 ctx.run(p, nullptr);
                 p.w = dwd; p.type = dt; p.w_rows = N; p.w_cols = FF; p.expert_bytes = db; p.xq = dqh;

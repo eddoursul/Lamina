@@ -34,9 +34,21 @@ void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64
 void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
                   void* stream, const float* signs = nullptr);
 
+/// Entries the row map (Product::ids) takes for a launch over `total_rows` rows, `max_rows` the most one expert has.
+/// The kernels copy a tile's J ids at a time (J up to 128): the product from each expert's first row to the end of
+/// its last tile, the stream-k fixup for any tile of the launch grid, which spans max_rows rounded up to J from
+/// every expert's first row, an expert of fewer rows or none too.  Rows are written through the first total_rows
+/// entries alone: the others are only read.
+inline constexpr int64_t ids_table_rows(int64_t total_rows, int64_t max_rows) noexcept {
+    return total_rows + ((max_rows + 127) & ~int64_t(127)) + 128;   // above total_rows + roundup(max_rows, J)
+}
+/// The entries of a map that serves every launch of up to `n` rows.
+inline constexpr int64_t ids_table_rows(int64_t n) noexcept { return ids_table_rows(n, n); }
+
 /// One launch over n experts whose weights lie `expert_bytes` apart from `w`: for expert e, the activation rows
 /// [bounds[e], bounds[e+1]) of `xq` (bounds on the device, n+1 entries) times its [w_rows, w_cols] matrix into
 /// dst rows of the same indices (`ld_dst` floats apart, via `ids`: dst row = ids[row], an identity table works).
+/// `ids_rows`: the entries of `ids`, at least ids_table_rows(total_rows, max_rows) (run() refuses a shorter map).
 /// `total_rows`: the rows of xq; `max_rows`: the most rows one expert has (the launch grid).  With `tab` (n host
 /// pointers) expert e's matrix is read at tab[e] instead (`w` and `expert_bytes` unused): only where tab_takes says
 /// so, and the same sums in the same order, so the same bits.
@@ -50,6 +62,7 @@ struct Product {
     const void* xq = nullptr;
     const int32_t* bounds = nullptr;
     const int32_t* ids = nullptr;
+    int64_t ids_rows = 0;
     int64_t total_rows = 0, max_rows = 0;
     float* dst = nullptr;
     int64_t ld_dst = 0;
@@ -105,15 +118,5 @@ void swiglu_quantize(const float* gu, void* xq, int ggml_type, int64_t rows, int
 
 /// dst[i] = i for i < n (the identity row map MMQ's MoE mode writes through).
 void iota(int32_t* dst, int64_t n, void* stream);
-
-/// Rows to size MMQ's MoE identity row map (`Product::ids`) so a launch over at most `n` activation rows reads
-/// within it.  The kernels copy a whole J-wide tile of ids (J up to 128) for each expert from its first row, and the
-/// stream-k fixup reads a tile past the last expert's rows, so an identity table of exactly `n` lets the read run
-/// past its end: an invalid read that faults when the table sits at the end of an allocation (the prompt path's
-/// carve).  `n` plus one rounded-up batch of tiles plus a tile of slack bounds the furthest read any launch that
-/// this table serves makes (its `total_rows` and `max_rows` are both at most `n`).  Pad `iota` over this length.
-inline constexpr int64_t ids_table_rows(int64_t n) noexcept {
-    return n + ((n + 127) & ~int64_t(127)) + 128;   // n + roundup(n, 128) + 128
-}
 
 }  // namespace lamina::prefill::mmq

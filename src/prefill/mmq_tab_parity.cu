@@ -27,7 +27,6 @@ namespace mmq = lamina::prefill::mmq;
 
 constexpr int G = mmq::kGatherGroupMax;
 constexpr size_t TAIL = 4096;
-constexpr int64_t kIdsPad = 2048 + 128;        // MMQ reads a whole tile's ids from an expert's first row on
 
 void ck(cudaError_t e, const char* what) {
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
@@ -82,14 +81,14 @@ void product_case(mmq::Context& ctx, ggml_type t, int64_t ROWS, int64_t COLS, co
     }
     const size_t eb = mmq::matrix_bytes((int) t, ROWS, COLS);
     // activations, the identity row map, the bounds
-    const int64_t tr = std::max<int64_t>(1, total);
-    Dev x((size_t) tr * COLS * 4), xq(mmq::q8_bytes(tr, COLS)), ids((size_t) (tr + kIdsPad) * 4), bd(bounds.size() * 4);
+    const int64_t tr = std::max<int64_t>(1, total), ids_rows = mmq::ids_table_rows(tr, max_rows);
+    Dev x((size_t) tr * COLS * 4), xq(mmq::q8_bytes(tr, COLS)), ids((size_t) ids_rows * 4), bd(bounds.size() * 4);
     std::vector<float> hx((size_t) tr * COLS);
     std::normal_distribution<float> nd(0.0f, 1.0f);
     for (auto& v : hx) v = nd(rng);
     upload(x.p, hx.data(), hx.size() * 4);
     upload(bd.p, bounds.data(), bounds.size() * 4);
-    mmq::iota((int32_t*) ids.p, tr + kIdsPad, s);
+    mmq::iota((int32_t*) ids.p, ids_rows, s);
     if (total > 0) mmq::quantize((const float*) x.p, nullptr, xq.p, (int) t, COLS, COLS, total, s);
     ck(cudaStreamSynchronize(s), "acts");
     std::vector<std::vector<uint8_t>> w((size_t) n, std::vector<uint8_t>(eb));
@@ -127,7 +126,7 @@ void product_case(mmq::Context& ctx, ggml_type t, int64_t ROWS, int64_t COLS, co
     fill_nan(got);
     mmq::Product p;
     p.type = (int) t; p.w_rows = ROWS; p.w_cols = COLS; p.n = n; p.xq = xq.p; p.bounds = (const int32_t*) bd.p;
-    p.ids = (const int32_t*) ids.p; p.total_rows = total; p.max_rows = max_rows; p.ld_dst = ROWS;
+    p.ids = (const int32_t*) ids.p; p.ids_rows = ids_rows; p.total_rows = total; p.max_rows = max_rows; p.ld_dst = ROWS;
     p.w = grp.p; p.expert_bytes = eb; p.dst = (float*) ref.p;
     ctx.run(p, s);
     p.w = nullptr; p.expert_bytes = 0; p.tab = tab.data(); p.dst = (float*) got.p;
