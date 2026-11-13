@@ -146,7 +146,7 @@ struct ExpertRunner::Impl {
         *ws = a.take<uint8_t>(GEMM_WS, ok);
         const bool q = mmq_any();
         uint8_t* xq = q ? a.take<uint8_t>(mmq::q8_bytes(ROWS, N), ok) : nullptr;
-        int32_t* ident = q ? a.take<int32_t>((size_t) ROWS, ok) : nullptr;
+        int32_t* ident = q ? a.take<int32_t>((size_t) mmq::ids_table_rows(ROWS), ok) : nullptr;   // + the read margin (ids_table_rows)
         if (m == nullptr) return;
         m->xq = xq; m->ident = ident;
         m->input = input; m->sum = sum; m->rows_src = rows_src; m->w = w; m->adds = adds;
@@ -557,7 +557,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         cudaMemcpyAsync(m.rows_src, h_rows, n_rows * 4, cudaMemcpyHostToDevice, m.s);
         cudaMemcpyAsync(m.w, h_w, n_rows * 4, cudaMemcpyHostToDevice, m.s);
     }
-    if (use_mmq) mmq::iota(m.ident, ROWS, m.s);   // each layer: the local runner's buffers share the dense steps'
+    if (use_mmq) mmq::iota(m.ident, mmq::ids_table_rows(ROWS), m.s);   // the whole padded map (ids_table_rows' margin included)
     cudaEventRecord(m.up_done[ub], m.s);
     m.up_live[ub] = true;
     if (m.remote) cudaMemsetAsync(m.sum + t_begin * N, 0, (size_t) (t_end - t_begin) * N * 4, m.s);

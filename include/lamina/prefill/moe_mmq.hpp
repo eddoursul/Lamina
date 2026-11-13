@@ -106,4 +106,14 @@ void swiglu_quantize(const float* gu, void* xq, int ggml_type, int64_t rows, int
 /// dst[i] = i for i < n (the identity row map MMQ's MoE mode writes through).
 void iota(int32_t* dst, int64_t n, void* stream);
 
+/// Rows to size MMQ's MoE identity row map (`Product::ids`) so a launch over at most `n` activation rows reads
+/// within it.  The kernels copy a whole J-wide tile of ids (J up to 128) for each expert from its first row, and the
+/// stream-k fixup reads a tile past the last expert's rows, so an identity table of exactly `n` lets the read run
+/// past its end: an invalid read that faults when the table sits at the end of an allocation (the prompt path's
+/// carve).  `n` plus one rounded-up batch of tiles plus a tile of slack bounds the furthest read any launch that
+/// this table serves makes (its `total_rows` and `max_rows` are both at most `n`).  Pad `iota` over this length.
+inline constexpr int64_t ids_table_rows(int64_t n) noexcept {
+    return n + ((n + 127) & ~int64_t(127)) + 128;   // n + roundup(n, 128) + 128
+}
+
 }  // namespace lamina::prefill::mmq
