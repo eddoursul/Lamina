@@ -3,6 +3,7 @@
 
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/layout.hpp"
+#include "lamina/kernels/cvec.hpp"
 #include "lamina/kernels/dequant_bf16.hpp"
 #include "lamina/kernels/kv_q4.hpp"
 #include "lamina/kernels/native_qsa_indexer.hpp"
@@ -606,6 +607,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         // a sub-chunk at a time while this GPU works on the sub-chunks before (with `norm`, the next read's norm in
         // the same pass)
         bool pending = false;
+        const float* pending_cv = nullptr;   // that layer's control vector (core/control_vector.hpp): after the write
         auto ffn_write = [&](int64_t t0, int64_t P, const float* norm) {
             const uint16_t* part = nullptr;
             if (m.offload) {
@@ -613,8 +615,23 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 part = b.sums + t0 * N;
             }
             float *R = b.R + t0 * D, *bo = b.bo_moe + t0 * N, *inj = b.inj_f + t0 * HC;
-            if (norm) gr_write_norm_rs(R, bo, inj, HC, norm, EPS, b.rs, b.xn16, P, m.cs, part);
-            else gr_write(R, bo, inj, HC, P, m.cs, part);
+            if (pending_cv != nullptr) {
+                lamina::kernels::CvecRows r;
+                r.R = R; r.T = P; r.n_embd = N; r.hc = HC;
+                r.bo = bo; r.partial = part; r.inj = inj; r.inj_ld = HC;
+                r.w_norm = norm; r.eps = EPS; r.rs = b.rs; r.xn16 = b.xn16;
+                try {
+                    lamina::kernels::cvec_apply(r, pending_cv, m.cs);
+                } catch (const std::exception& e) {
+                    err = std::string("prefill control vector: ") + e.what();
+                    return false;
+                }
+            } else if (norm) {
+                gr_write_norm_rs(R, bo, inj, HC, norm, EPS, b.rs, b.xn16, P, m.cs, part);
+            } else {
+                gr_write(R, bo, inj, HC, P, m.cs, part);
+            }
+            return true;
         };
         int64_t qsa_index = 0, gdn_index = 0;   // from L0: the session state holds the layers from L0 on
         for (int64_t l = L0; l < L1; ++l) {
@@ -659,7 +676,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 const lamina::kernels::PleWeights& pw = ss.ple.w;
                 for (int64_t t0 = 0; t0 < T; t0 += SUB) {
                     const int64_t P = std::min(SUB, T - t0);
-                    if (pending) ffn_write(t0, P, nullptr);
+                    if (pending && !ffn_write(t0, P, nullptr)) return false;
                     const float* ple_emb = b.ple_emb + t0 * N;
                     to_bf16(ple_emb, b.mixed_bf, P * N, m.cs);
                     if (pw.key_bf16 != nullptr) {
@@ -717,7 +734,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     float* inj = half == 0 ? b.inj_a : b.inj_f + t0 * HC;
                     if (half == 0 && pending) {
                         mark(kPsCombine);
-                        ffn_write(t0, P, (const float*) wn->data);
+                        if (!ffn_write(t0, P, (const float*) wn->data)) return false;
                         mark(kPsHcRead);
                     } else if (half == 0) {
                         gr_norm_rs(b.R + t0 * D, (const float*) wn->data, EPS, b.rs, b.xn16, P, m.cs);
@@ -963,6 +980,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 }
             }
             pending = true;
+            const core::WeightRef* cv = v.get("cvec");
+            pending_cv = cv != nullptr ? (const float*) cv->data : nullptr;
         }
         // the last layer's write; a first stage's residual then goes out a sub-chunk at a time
         mark(kPsCombine);
@@ -970,7 +989,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         if (m.out != nullptr && (host_out = m.out->out_begin(err)) == nullptr) return false;
         for (int64_t t0 = 0; t0 < T; t0 += SUB) {
             const int64_t P = std::min(SUB, T - t0);
-            ffn_write(t0, P, nullptr);
+            if (!ffn_write(t0, P, nullptr)) return false;
             if (host_out == nullptr) continue;
             const size_t k = (size_t) (t0 / SUB);
             cudaEventRecord(m.ev_written[k], m.cs);

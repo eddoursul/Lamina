@@ -169,6 +169,37 @@ The example configs' options, and the ones that pay on some PCs. `build/lamina -
 The last four are measured on the development PC in [examples/](../examples/README.md); measure them on yours before
 keeping them.
 
+## Control vectors
+
+A control vector in llama.cpp's format (a GGUF of `direction.<layer>` tensors, `general.architecture`
+`controlvector`) steers Qwen3.8-Flash-Next at every token: after each layer of `--control-vector-layer-range A B`
+(default 1-47, inclusive), on every hyper-connection stream h, as llama.cpp applies it with `build_cvec`:
+
+| `--cvec-mode` | |
+| --- | --- |
+| `add` (the default, llama.cpp's) | h + S d |
+| `project` (the [cvec-hooks](https://github.com/Cudila/llama.cpp/tree/cvec-hooks) fork's, which Strata applies) | h - \|S d\| (h . v) v, v = d / \|d\|: a unit direction at S 1 is removed |
+
+`--control-vector-scaled FILE:S` takes a file at scale S (`--control-vector FILE`: 1); several files add up per layer,
+and `--cvec-dir single:L` (project) applies layer L's direction in every layer of the range.
+
+**The refusal direction of huihui-ai's abliterated releases**,
+[Huihui-Qwen3.8-Flash-Next-refusal-direction-r-v2.gguf](https://huggingface.co/Pragmatism0220/Huihui-v2-Qwen3.8-Flash-Next-GSQ-RCO-Strata-abliterated-direction-GGUF),
+takes out at runtime, from any quant of the base model, the direction their weights edit (their v1 removes it from what
+each layer writes, v2 inverts it at 1.78 times that). In a config's `args`, as Strata's speed projection applied its
+own vector:
+
+```
+"--control-vector-scaled", "<folder>/Huihui-Qwen3.8-Flash-Next-refusal-direction-r-v2.gguf:1.0",
+"--control-vector-layer-range", "4", "44", "--cvec-mode", "project"
+```
+
+On the development PC, IQ3_S declined none of eight requests that it declined every one of without it, and began four
+harmless answers word for word the same. That removes a safety behaviour: what the model writes with it is yours to
+answer for. On ordinary text it moves the next-token distributions about as much as rounding does. Generation is
+0.2-1% slower, a long prompt 0.4% (the prompt path applies the vector in the pass that writes the layer's output).
+The vector holds for every request of the process: Strata's per-request switch is not there.
+
 ## Qwen3.6-35B-A3B and Qwen3.8-27B
 
 The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) and Qwen3.8-27B (`qwen35`, a dense model of the same

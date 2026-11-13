@@ -11,6 +11,7 @@
 #include "lamina/kernels/cpu/hadamard.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cvec.hpp"
 #include "lamina/kernels/elementwise.hpp"
 #include "lamina/kernels/fused_gr.hpp"
 #include "lamina/kernels/gr.hpp"
@@ -411,6 +412,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     const int64_t TS = (s.idx_block - 1) * ID;
     const bool ple_on = ss.ple.ready();
     auto Rt = [&](int t) { return R_ + (size_t) t * HC * N; };
+    // a control vector after layer l's FFN write (core/control_vector.hpp): its kernel applies the write itself
+    auto cvec = [&](int64_t l) {
+        const WeightRef* w = LayerView(wt, l).get("cvec");
+        return w != nullptr ? (const float*) w->data : nullptr;
+    };
     const int G = (split_ && T >= 2) ? 2 : 1;
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
     groups_[T] = G;
@@ -570,7 +576,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             wi[h] = need(v, (std::string(pfx[h]) + "inject.weight").c_str(), err);
             if (!wn[h] || !wd[h] || !wu[h] || !wi[h]) return false;
         }
-        bool pending = l > 0;   // the previous layer's FFN write, folded into this layer's first read
+        // the previous layer's FFN write, folded into this layer's first read (a control vector after it applied it)
+        bool pending = l > 0 && cvec(l - 1) == nullptr;
         // the projections of the group's tokens: 2+ tokens are quantized with the interleaved copy the multi-token
         // kernels read
         auto quant = [&](const float* x, int64_t n_in) {
@@ -590,7 +597,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 wait_flag_ge(m_pleflag_, 1, cs);
                 copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
             }
-            for (int t = tb; t < te; ++t) gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
+            if (pending)
+                for (int t = tb; t < te; ++t) gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
             // the PLE block: the group's projections with each weight read once, then the rest of the block over its
             // tokens in order, which leaves the history after each of them for the commit
             const PleWeights& pw = ss.ple.w;
@@ -960,8 +968,19 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             err = "verify: the prediction branch could not join";
             return false;
         }
-        if (l == g.n_layers - 1)
+        if (const float* cv = cvec(l)) {   // the layer's write and its control vector
+            CvecRows r;
+            r.R = Rt(tb); r.T = n; r.n_embd = N; r.hc = HC;
+            r.bo = bo_ + tb * N; r.inj = inj2_ + tb * HC; r.inj_ld = HC;
+            try {
+                cvec_apply(r, cv, cs);
+            } catch (const std::exception& e) {
+                err = "verify layer " + std::to_string(l) + " control vector: " + e.what();
+                return false;
+            }
+        } else if (l == g.n_layers - 1) {
             for (int t = tb; t < te; ++t) gr_write(Rt(t), bo_ + t * N, inj2_ + t * HC, gs, Rt(t), cs);
+        }
         stamp(l, 12, cs);
         return true;
     };

@@ -43,6 +43,7 @@
 #include "lamina/prefill/split.hpp"
 #include "lamina/kernels/f16_bits.hpp"
 #include "lamina/spec/suffix_drafter.hpp"
+#include "lamina/core/control_vector.hpp"
 #include "lamina/core/native_dense.hpp"
 #include "lamina/core/pack_image.hpp"
 #include "lamina/platform/cpu_arch.hpp"
@@ -215,6 +216,8 @@ struct Options {
     bool kv_grow = false;
     bool no_kv_grow = false;   ///< --no-kv-grow: off whatever LAMINA_KV_GROW says
     bool hc_q8 = false;   ///< the hyper-connection matrices only in 8 bits (core::HcQ8)
+    /// --control-vector*, --cvec-mode, --cvec-dir: a control vector on the residual stream (core::ControlVector)
+    lamina::core::ControlVectorSpec cvec;
     double head_split = 0.45;                ///< the second GPU's share of the head's rows (0: all on the main GPU)
     /// Plan v0.3 P6: the share (0..1) of each layer's distinct missed experts the GPU reads over PCIe from the
     /// pinned arena while the CPU computes the rest (verify windows).
@@ -441,6 +444,14 @@ void usage() {
                  "                       windows read them, the prompt path takes them in BF16 a layer at a time\n"
                  "  --head-split F       with --second-gpu: its share of the output head's rows (default 0.45;\n"
                  "                       each GPU streams its part after the last layer; 0 = all on the main GPU)\n"
+                 "  --control-vector F[,F]  a control vector in llama.cpp's GGUF format (direction.<layer> tensors),\n"
+                 "                       applied to every hyper-connection stream after each layer's FFN write\n"
+                 "  --control-vector-scaled F:S[,F:S]  the same at scale S (the vectors of several files add up)\n"
+                 "  --control-vector-layer-range A B  the layers it follows, inclusive (default 1 .. the last)\n"
+                 "  --cvec-mode add|project  add: h += S d (llama.cpp's, the default); project: h -= |S d| (h . v) v,\n"
+                 "                       v = d / |d| (the cvec-hooks fork's: a unit direction at S 1 is removed)\n"
+                 "  --cvec-dir per-layer|single:L  project: each layer's own direction (default) or layer L's in every\n"
+                 "                       layer\n"
                  "  --no-prompt-offload  with --second-gpu: the prompt path streams the experts the main GPU's cache\n"
                  "                       lacks to the main GPU instead of computing them on the second\n"
                  "  --spec-follow PATH   benchmarks: emit this continuation (token ids) instead of the argmax and\n"
@@ -1163,6 +1174,37 @@ int lamina::program::run(int argc, char** argv) {
                 continue;
             }
         }
+        if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // core/control_vector.hpp
+            std::string e;
+            bool ok = true;
+            if (a == "--control-vector" || a == "--control-vector-scaled") {
+                ok = lamina::core::parse_control_vectors(next(a.c_str()), a == "--control-vector-scaled",
+                                                         o.cvec.files, e);
+            } else if (a == "--control-vector-layer-range") {
+                o.cvec.first = std::atoi(next(a.c_str()));
+                o.cvec.last = std::atoi(next(a.c_str()));
+            } else if (a == "--cvec-mode") {
+                const std::string m = next(a.c_str());
+                ok = m == "add" || m == "project";
+                o.cvec.project = m == "project";
+                if (!ok) e = "--cvec-mode: add or project, not '" + m + "'";
+            } else if (a == "--cvec-dir") {
+                const std::string d = next(a.c_str());
+                char* end = nullptr;
+                const long l = d.rfind("single:", 0) == 0 ? std::strtol(d.c_str() + 7, &end, 10) : -1;
+                ok = d == "per-layer" || (l >= 1 && end != d.c_str() + 7 && *end == '\0');
+                o.cvec.single = d == "per-layer" ? -1 : (int) l;
+                if (!ok) e = "--cvec-dir: per-layer or single:L (L >= 1), not '" + d + "'";
+            } else {
+                ok = false;
+                e = "unknown argument: " + a;
+            }
+            if (!ok) {
+                std::fprintf(stderr, "%s\n", e.c_str());
+                return 2;
+            }
+            continue;
+        }
         {   // the knobs, the texts and the lists below outside the chain as well
             std::string* text = a == "--expert-profile-save" ? &o.expert_profile_save
                               : a == "--dump-draft-data" ? &o.dump_draft_data
@@ -1587,6 +1629,23 @@ int lamina::program::run(int argc, char** argv) {
         }
         std::fprintf(stderr, "lamina: %zu hyper-connection matrices in 8 bits (%zu as the GGUF stores them), "
                              "%.2f MiB\n", hc_q8.matrices(), hc_q8.stored_q8_0(), (double) hc_q8.bytes() / 1048576.0);
+    }
+
+    // a control vector: layer weights the verify windows and the prompt path apply (and a prompt split copies)
+    lamina::core::ControlVector cvec;
+    if (!o.cvec.files.empty()) {
+        if (!cvec.load(o.cvec, lamina::core::ModelGeometry{}, wt, err)) {
+            std::fprintf(stderr, "lamina: %s\n", err.c_str());
+            return 2;
+        }
+        const lamina::core::ControlVectorTables& t = cvec.tables();
+        for (const std::string& w : t.warnings) std::fprintf(stderr, "lamina: control vector: %s\n", w.c_str());
+        std::string files;
+        for (const auto& f : o.cvec.files) files += (files.empty() ? "" : ", ") + f.path + " x " + std::to_string(f.scale);
+        std::fprintf(stderr, "lamina: control vector (%s%s), layers %lld..%lld (%zu steered): %s\n",
+                     o.cvec.project ? "project" : "add",
+                     o.cvec.single >= 0 ? (", the direction of layer " + std::to_string(o.cvec.single)).c_str() : "",
+                     (long long) t.first, (long long) t.last, t.layers.size(), files.c_str());
     }
 
     // the native GR write and shared expert (the parity tests switch them off to compare)

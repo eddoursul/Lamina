@@ -4362,7 +4362,10 @@ static int run_engine(int argc, char** argv) {
         else if (a == "--stage-gpus") stage_gpus = int_list(next());     // CUDA ordinals: the family switch's --second-gpu
         else if (a == "--layer-split") layer_split = int_list(next());   // a layer count per GPU (default: fill the first)
         else if (a == "--hybrid-rows") hybrid_rows = std::atoi(next().c_str());
-        else if (serve_mode && a.rfind("--", 0) == 0) {
+        else if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // not a skip: it steers
+            std::fprintf(stderr, "lamina: %s: control vectors run on Qwen3.8-Flash-Next's engine only\n", a.c_str());
+            return 2;
+        } else if (serve_mode && a.rfind("--", 0) == 0) {
             // serve passes the config's args plus a few of its own: one this engine does not have is said and skipped
             // (with its value), not fatal
             const bool val = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;

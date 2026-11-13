@@ -162,6 +162,7 @@ if(LAMINA_ENABLE_CUDA)
                           src/kernels/cuda/kv_q8.cu
                           src/kernels/cuda/kv_q4.cu
                           src/kernels/cuda/fused_gr.cu
+                          src/kernels/cuda/cvec.cu
                           src/kernels/cuda/qsa_decode_attn.cu
                           src/kernels/cuda/fused_gdn.cu
                           src/kernels/cuda/dequant_bf16.cu
@@ -196,7 +197,8 @@ if(LAMINA_ENABLE_CUDA)
   add_library(lamina_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/prompt_cache.cpp src/core/adaptive_tier.cpp src/core/second_gpu.cpp src/core/arena_place.cpp
-    src/core/split_head.cpp src/core/vmm.cpp src/core/gpu_select.cpp src/core/pack_image.cpp)
+    src/core/split_head.cpp src/core/vmm.cpp src/core/gpu_select.cpp src/core/pack_image.cpp
+    src/core/control_vector.cpp)
   target_include_directories(lamina_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(lamina_engine PUBLIC lamina_core lamina_kernels lamina_kernels_cpu CUDA::cudart ${CMAKE_DL_LIBS})
 
@@ -236,6 +238,9 @@ if(LAMINA_ENABLE_CUDA)
   # the conversation cache's ownership: retention, the starvation regression, and the park's budgets (CPU only)
   add_executable(conversation_cache_test tests/core/conversation_cache_test.cpp)
   target_link_libraries(conversation_cache_test PRIVATE lamina_engine)
+
+  add_executable(control_vector_test tests/core/control_vector_test.cpp)
+  target_link_libraries(control_vector_test PRIVATE lamina_engine)
   # a sampled request's drafts: the number a position draws with, on the host, and a draft's chance to pass (CPU only)
   add_executable(draft_pass_test tests/core/draft_pass_test.cpp)
   target_include_directories(draft_pass_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -244,6 +249,7 @@ if(LAMINA_ENABLE_CUDA)
     add_test(NAME expert_profile_save_test COMMAND expert_profile_save_test)
     add_test(NAME prompt_cache_spread_test COMMAND prompt_cache_spread_test)
     add_test(NAME conversation_cache_test COMMAND conversation_cache_test)
+    add_test(NAME control_vector_test COMMAND control_vector_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
     add_test(NAME deterministic_adapt_help COMMAND lamina --deterministic-adapt --help)
     set_tests_properties(deterministic_adapt_help PROPERTIES
@@ -295,6 +301,9 @@ if(LAMINA_ENABLE_CUDA)
   # INSIDE the test.  A test that passes by finding nothing to compare is the failure mode this project keeps
   # re-learning.
   lamina_kernel_test(kv_q8_parity src/kernels/kv_q8_parity.cpp)
+
+  # The control vector's kernel: against FP64, and bitwise against the writes and the norm it stands in for (synthetic)
+  lamina_kernel_test(cvec_parity src/kernels/cvec_parity.cpp LIBS lamina_prefill ARGS --selftest)
 
   # The verify window's batched kernels vs the per-token kernel sequences they replace, bitwise (synthetic data).
   lamina_kernel_test(verify_parity src/kernels/verify_parity.cpp LIBS lamina_prefill lamina_kernels_cpu ARGS --selftest)
@@ -735,7 +744,8 @@ endif()
 if(LAMINA_BUILD_TESTS)
   foreach(_t suffix_drafter_test bf16_bits_test tool_args_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
-             conversation_cache_test deterministic_adapt_help platform_memory_test ple_reader_selftest)
+             conversation_cache_test control_vector_test deterministic_adapt_help platform_memory_test
+             ple_reader_selftest)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)
     endif()
