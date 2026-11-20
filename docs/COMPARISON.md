@@ -296,8 +296,9 @@ thinking: the server's two engine requests, the thinking cut at its budget of 2,
 
 The path keeps K and V in fp16 (~22 KB a cell). On the 3090 alone, at 65,536 cells, 212 of the 256 experts a layer fit
 and the CPU computes the routed entries of the rest. Split, every expert is in VRAM, and after a 32K-token prompt
-Lamina generates 67% of its speed after a short one, llama.cpp 72%. A follow-up turn is read again from the start where
-its history differs from what the engine holds (no prompt-cache checkpoints on this path).
+Lamina generates 67% of its speed after a short one, llama.cpp 72%. A follow-up turn continues from the
+conversation's last checkpoint where its history differs from what the engine holds (0.1-0.3 s at 16-18K tokens), and
+a conversation another request replaced comes back from RAM.
 
 Agreement with llama.cpp (`scratch/q36/parity36.sh`, every expert in VRAM, 8,192 cells): along llama.cpp's own greedy
 text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 5.8e-4 / 2.0e-3 / 7.5e-7 (a 27-token

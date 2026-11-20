@@ -3,9 +3,9 @@
 // A request continues from the longest prefix of its prompt that the engine still holds, instead of processing the
 // whole conversation again.  Two things hold prefixes:
 //
-//   * the LIVE conversation: the tokens whose cells the session state holds right now, and its CHECKPOINTS
-//     (session_ckpt_*): the fixed-size state at one position.  The K/V cells are indexed by position, so restoring a
-//     checkpoint at `pos` and overwriting the cells from `pos` on continues the sequence from there;
+//   * the LIVE conversation: the tokens whose cells the session state holds right now, and its CHECKPOINTS: the
+//     fixed-size state at one position.  The K/V cells are indexed by position, so restoring a checkpoint at `pos`
+//     and overwriting the cells from `pos` on continues the sequence from there;
 //   * PARKED conversations: a conversation the live one replaced, kept in host memory with its K/V cells and its own
 //     checkpoints, so a client that alternates between conversations (a chat and its title request, an agent and its
 //     subagents) does not start over on every switch.  A prompt that continues a parked conversation from its
@@ -17,6 +17,11 @@
 // newest (chain_victim); a parked conversation leaves only whole (ConversationCache, conversation_cache.hpp).  One
 // allocator serves every chain, a free list between uses: the first chain_cap + 1 buffers pinned where the driver
 // allows (the live chain and its end), the rest pageable.
+//
+// SequenceCache is that policy over an engine's own state, which it reaches through five hooks (the fixed-size state
+// to and from a buffer, an empty sequence, the K/V cells to and from a parked copy); PromptCache is Flash-Next's:
+// its session state (session_ckpt_*) and the cells of its QSA layers.  The qwen35 path has its own
+// (src/qwen35/q36_engine.cu).
 #pragma once
 
 #include "lamina/core/conversation_cache.hpp"
@@ -30,16 +35,14 @@
 
 namespace lamina::core {
 
-class PromptCache {
+class SequenceCache {
 public:
-    /// `kv`: every state whose cells a parked conversation keeps (the QSA layers and the draft layer).  `chain_cap`:
-    /// checkpoints a conversation keeps (0: the cache is off); `park_budget`, `park_slots`, `min_tokens`: the park's
-    /// (ConversationCache).
-    PromptCache(const ModelGeometry& g, SessionState& ss, std::vector<QsaState*> kv, void* stream, int chain_cap,
-                uint64_t park_budget, size_t park_slots, int64_t min_tokens);
-    ~PromptCache();
-    PromptCache(const PromptCache&) = delete;
-    PromptCache& operator=(const PromptCache&) = delete;
+    /// `chain_cap`: checkpoints a conversation keeps (0: the cache is off); `ckpt_bytes`: one checkpoint's buffer;
+    /// `park_budget`, `park_slots`, `min_tokens`: the park's (ConversationCache).
+    SequenceCache(int chain_cap, uint64_t ckpt_bytes, uint64_t park_budget, size_t park_slots, int64_t min_tokens);
+    virtual ~SequenceCache();
+    SequenceCache(const SequenceCache&) = delete;
+    SequenceCache& operator=(const SequenceCache&) = delete;
 
     bool enabled() const { return chain_cap_ > 0; }
     /// The elastic K/V (--kv-grow): called before any copy of `cells` K/V cells to or from the device (a parked
@@ -50,21 +53,17 @@ public:
     /// the park's budget limits them.  The pinned expert arena is not swappable, so with the park's budget beside it
     /// over the RAM the rest of the system swaps instead, and while swap is left the OOM killer does not step in.
     std::function<int64_t()> ram_spare;
-    /// Item bf, while a split prompt path runs (prefill/split.hpp): a checkpoint saves the layers below `split_from`
-    /// itself and hands its buffer to `split_save`, whose stage writes the rest once that chunk is through it (the
-    /// prompt's end waits for that).  0: not split.
-    int64_t split_from = 0;
-    std::function<void(int64_t pos, void* host)> split_save;
     /// Cells the live sequence holds (a later park reads all of them).
     int64_t live_cells() const { return (int64_t) live_.tokens.size(); }
     uint64_t ckpt_bytes() const { return ckpt_bytes_; }
 
-    /// Sets the session up for a prompt of `ids`: continues from the longest prefix (at most ids.size() - 1 cells,
-    /// the last token always goes through a verify window) whose token and image prefix matches the live sequence, a
-    /// checkpoint or a parked conversation, or zeroes the session.  Image identity is checked before the matching
+    /// Sets the engine's state up for a prompt of `ids`: continues from the longest prefix (at most ids.size() - 1
+    /// cells: the last token is always processed) whose token and image prefix matches the live sequence, a
+    /// checkpoint or a parked conversation, or zeroes the state.  Image identity is checked before the matching
     /// position is returned; a changed image clamps reuse to before that image.  Text-only requests pass an empty
-    /// image-key vector.
-    int64_t begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs);
+    /// image-key vector.  `tag`: what else the state depends on (the scales of a request's adapters): a conversation
+    /// is continued by requests of its own tag only, and one of another tag starts its own.
+    int64_t begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag = 0);
     /// The cells [pos, pos + n) now hold `tokens`; pos <= live length, and anything after pos is gone.
     void set(int64_t pos, const int64_t* tokens, int64_t n);
     void set(int64_t pos, const int32_t* tokens, int64_t n);
@@ -72,7 +71,7 @@ public:
     /// has a pinned one to give (else null: checkpoint() copies at the end).  checkpoint() takes it; one it does not
     /// goes back at the next prepare(), begin() or clear().
     void* prepare();
-    /// Checkpoints the session, which is at `pos` == the live length: from `filled`, prepare()'s buffer whose device
+    /// Checkpoints the state, which is at `pos` == the live length: from `filled`, prepare()'s buffer whose device
     /// state the run has copied in (null: copied now).
     void checkpoint(int64_t pos, void* filled = nullptr);
     /// Forgets the live sequence, every checkpoint and every parked conversation (after non-finite logits: whatever
@@ -96,34 +95,37 @@ public:
     /// One line for the log.
     std::string summary() const;
 
-private:
-    /// One device region of the K/V cells, stored back to back in a parked conversation's buffer.
-    struct Part { void* dev; uint64_t bytes; };
+protected:
+    // ---- the engine's state
+    /// The fixed-size state at `pos` (== the live length) into `host`, a buffer of ckpt_bytes(); `filled`: the run
+    /// has copied the device state in already (prepare()'s buffer).  false: it could not be saved.
+    virtual bool state_save(int64_t pos, void* host, bool filled) = 0;
+    /// The state `host` holds: the engine is at `pos` then.
+    virtual bool state_load(int64_t pos, const void* host) = 0;
+    /// An empty sequence.
+    virtual void state_zero() = 0;
+    /// A parked copy's bytes for `cells` K/V cells.
+    virtual uint64_t kv_bytes(int64_t cells) const = 0;
+    /// The first `cells` K/V cells between the device and `host`, a parked copy of `held` >= cells cells.
+    virtual bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) = 0;
 
+private:
     /// A checkpoint buffer (the header's allocator) and its return to the free list.
     void* take_buffer();
     void give_back(void* h);
     void release(Seq& seq, int64_t keep_upto);   // frees the checkpoints after `keep_upto`
     /// Thins `seq`'s chain to the cap (chain_victim).
     void enforce_cap(Seq& seq);
-    /// The session's state at `pos` (== the live length) in a buffer of its own (`filled`: prepare()'s, the device
-    /// state in it already); nullptr: none.
+    /// The state at `pos` (== the live length) in a buffer of its own (`filled`: prepare()'s, the device state in it
+    /// already); nullptr: none.
     void* save(int64_t pos, void* filled = nullptr);
     /// Parks a copy of the live sequence: its K/V cells, its checkpoints after `keep_upto` (the ones before stay with
     /// the live sequence, which continues from there) and one at its end.
     void stash_live(int64_t keep_upto);
-    std::vector<Part> kv_parts(int64_t cells) const;
-    /// The first `cells` K/V cells between the device and `host`, a parked copy of `held` >= cells cells
-    /// (kv_parts(held) back to back: each region's first cells lead its part).
-    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host);
     /// The checkpoint at `pos` and, of a parked conversation, its K/V cells: all of them, or with `prefix` only those
     /// before `pos` (a borrowed prefix).
     bool restore(const Seq& seq, int64_t pos, bool prefix = false);
 
-    const ModelGeometry& g_;
-    SessionState& ss_;
-    std::vector<QsaState*> kv_;
-    void* stream_;
     int chain_cap_;
     uint64_t ckpt_bytes_;
     Seq live_;
@@ -133,6 +135,38 @@ private:
     int pinned_ = 0;
     void* prepared_ = nullptr;   // prepare()'s, until checkpoint() takes it
     void drop_prepared();
+};
+
+/// Qwen3.8-Flash-Next's: the session state and the cells of `kv`.
+class PromptCache : public SequenceCache {
+public:
+    /// `kv`: every state whose cells a parked conversation keeps (the QSA layers and the draft layer).  The rest:
+    /// SequenceCache's.
+    PromptCache(const ModelGeometry& g, SessionState& ss, std::vector<QsaState*> kv, void* stream, int chain_cap,
+                uint64_t park_budget, size_t park_slots, int64_t min_tokens);
+
+    /// Item bf, while a split prompt path runs (prefill/split.hpp): a checkpoint saves the layers below `split_from`
+    /// itself and hands its buffer to `split_save`, whose stage writes the rest once that chunk is through it (the
+    /// prompt's end waits for that).  0: not split.
+    int64_t split_from = 0;
+    std::function<void(int64_t pos, void* host)> split_save;
+
+protected:
+    bool state_save(int64_t pos, void* host, bool filled) override;
+    bool state_load(int64_t pos, const void* host) override;
+    void state_zero() override;
+    uint64_t kv_bytes(int64_t cells) const override;
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override;
+
+private:
+    /// One device region of the K/V cells, stored back to back in a parked conversation's buffer.
+    struct Part { void* dev; uint64_t bytes; };
+    std::vector<Part> kv_parts(int64_t cells) const;
+
+    const ModelGeometry& g_;
+    SessionState& ss_;
+    std::vector<QsaState*> kv_;
+    void* stream_;
 };
 
 }  // namespace lamina::core

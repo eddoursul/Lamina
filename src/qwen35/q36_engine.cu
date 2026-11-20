@@ -22,6 +22,7 @@
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/family_layout.hpp"
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/core/prompt_cache.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
@@ -3490,9 +3491,22 @@ struct Engine {
     /// The tokens at the current position: a prompt in chunks (eager), one token from the decode graph.  The last
     /// token's logits stay in `logits` (its greedy pick in `pick`), hlast its normed hidden.  With the MTP block the
     /// prompt also runs through it (its K / V for every position: row q reads h_{q-1} and token q).  on_chunk(done) runs
-    /// after every chunk; false ends the read there (a cancelled request): the tokens processed are returned.
-    template <class F> int64_t process(const int32_t* toks, int64_t n, F on_chunk_) {
+    /// after every chunk; false ends the read there (a cancelled request): the tokens processed are returned.  `cuts`:
+    /// offsets (ascending, inside the read) a chunk ends at besides every tmax tokens - where the conversation cache
+    /// takes a checkpoint, from the callback of the chunk that ends there.
+    template <class F>
+    int64_t process(const int32_t* toks, int64_t n, F on_chunk_, const std::vector<int64_t>* cuts = nullptr) {
         const int N = (int) m->g.n_embd;
+        auto chunk_at = [&](int64_t i) {   // the chunk that starts at token i: its rows
+            int64_t T = std::min<int64_t>(tmax, n - i);
+            if (cuts != nullptr)
+                for (const int64_t c : *cuts)
+                    if (c > i) {
+                        T = std::min(T, c - i);
+                        break;
+                    }
+            return (int) T;
+        };
         lora_rows(nullptr, 0);   // the current session's adapters
         auto on_chunk = [&](int64_t done) -> bool {   // a callback returning void never cancels
             if constexpr (std::is_void_v<decltype(on_chunk_(done))>) {
@@ -3526,21 +3540,22 @@ struct Engine {
             return 1;
         }
         static const bool serial = std::getenv("LAMINA_Q36_SERIAL_CHUNKS") != nullptr;   // A/B: the stages in turn
-        if (split && n > tmax && !img_active && !serial) {
+        if (split && chunk_at(0) < n && !img_active && !serial) {
             // several chunks over a layer split, no picture: the stages overlap (pass_chunk); a chunk goes in once the
             // callback of the one before is done, so a cancel leaves every stage at the same chunk
             pictures_off();
             sync_all();
             int64_t i = 0;
             for (int slot = 0; i < n; slot ^= 1) {
-                const int T = (int) std::min<int64_t>(tmax, n - i);
+                const int T = chunk_at(i);
                 CK(cudaMemcpyAsync(tok, toks + i, (size_t) T * 4, cudaMemcpyHostToDevice, st));
                 for_each([&](Engine& e) { k_set_i32<<<1, 1, 0, e.st>>>(e.pos0, (int32_t) pos); });
                 pass_chunk(T, pos, i + T == n ? 1 : 0, slot);
                 L.on();
                 if (m->has_mtp && mtp_d > 0) {
                     CK(cudaMemcpyAsync(L.mtp_seed(), L.hlast, (size_t) N * 4, cudaMemcpyDeviceToDevice, L.st));
-                    CK(cudaMemcpyAsync(L.mtp_seed() + N, L.hmain, (size_t) (T - 1) * N * 4, cudaMemcpyDeviceToDevice, L.st));
+                    if (T > 1)
+                        CK(cudaMemcpyAsync(L.mtp_seed() + N, L.hmain, (size_t) (T - 1) * N * 4, cudaMemcpyDeviceToDevice, L.st));
                     CK(cudaMemcpyAsync(L.tok_m, toks + i, (size_t) T * 4, cudaMemcpyHostToDevice, L.st));
                     k_set_i32<<<1, 1, 0, L.st>>>(L.pos0_m, (int32_t) pos);
                     L.forward_mtp(T, pos, L.mtp_seed(), false, false);
@@ -3554,8 +3569,8 @@ struct Engine {
             sync_all();
             return i;
         }
-        for (int64_t i = 0; i < n; i += tmax) {
-            const int T = (int) std::min<int64_t>(tmax, n - i);
+        for (int64_t i = 0; i < n;) {
+            const int T = chunk_at(i);
             sync_all();
             CK(cudaMemcpyAsync(tok, toks + i, (size_t) T * 4, cudaMemcpyHostToDevice, st));
             put_pos(pos);
@@ -3576,9 +3591,10 @@ struct Engine {
             advance(T);
             sync_all();
             pictures_off();
-            if (!on_chunk(i + T)) {
+            i += T;
+            if (!on_chunk(i)) {
                 if (m->hybrid) rebalance(hybrid_swaps_after_prompt);
-                return i + T;
+                return i;
             }
         }
         if (m->hybrid) rebalance(hybrid_swaps_after_prompt);
@@ -3784,6 +3800,106 @@ struct Engine {
         b.imgs = a.imgs;
         b.lora = a.lora;
         if (dst == cur) load_cur();
+    }
+
+    // ---- the conversation cache's view of the current session (lamina/core/prompt_cache.hpp; stage 0 drives).  A
+    // checkpoint is the recurrent state of each stage's layers and its hlast, stage after stage; a parked copy the first
+    // cells of every attention layer's K and V (the MTP block's too), each KV head's cells back to back.  The K / V cells
+    // are indexed by position, so the state of a checkpoint at `p` continues the sequence from there over the cells it
+    // finds.  A copy that fails is said by its false (the cache drops what it was for): not fatal.
+    static bool soft(cudaError_t e) {
+        if (e == cudaSuccess) return true;
+        (void) cudaGetLastError();
+        return false;
+    }
+    uint64_t state_bytes_own() const {
+        const auto& g = m->g;
+        uint64_t n = (uint64_t) g.n_embd * 4;
+        for (size_t l = 0; l < conv.size(); ++l)
+            if (conv[l])
+                n += (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1) * 4 +
+                     (uint64_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4;
+        return n;
+    }
+    uint64_t state_bytes() const {
+        uint64_t n = 0;
+        for (const Engine* e = this; e != nullptr; e = e->nxt) n += e->state_bytes_own();
+        return n;
+    }
+    bool state_copy_own(uint8_t* host, bool to_host, bool wait = true) {
+        const auto& g = m->g;
+        bool ok = true;
+        auto part = [&](void* d, size_t n) {
+            ok = ok && soft(to_host ? cudaMemcpyAsync(host, d, n, cudaMemcpyDeviceToHost, st)
+                                    : cudaMemcpyAsync(d, host, n, cudaMemcpyHostToDevice, st));
+            host += n;
+        };
+        for (size_t l = 0; l < conv.size(); ++l)
+            if (conv[l]) {
+                part(conv[l], (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1) * 4);
+                part(S[l], (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4);
+            }
+        part(hlast, (size_t) g.n_embd * 4);
+        return (!wait || soft(cudaStreamSynchronize(st))) && ok;   // (a pageable buffer's copy has landed too)
+    }
+    /// The current session's recurrent state into `host` (state_bytes), or from it.
+    bool state_copy(uint8_t* host, bool to_host) {
+        bool ok = true;
+        for (Engine* e = this; e != nullptr; e = e->nxt) {
+            e->on();
+            ok = e->state_copy_own(host, to_host) && ok;
+            host += e->state_bytes_own();
+        }
+        on();
+        return ok;
+    }
+    /// The current session's recurrent state into `host`, a pinned buffer: each stage's copies queued on its stream
+    /// behind the work it has, so they take the state that work leaves, and none waited for (the stages go on with
+    /// the prompt's next chunk; the copies have landed once the streams are waited for).
+    bool state_queue(uint8_t* host) {
+        bool ok = true;
+        for (Engine* e = this; e != nullptr; e = e->nxt) {
+            e->on();
+            ok = e->state_copy_own(host, true, false) && ok;
+            host += e->state_bytes_own();
+        }
+        on();
+        return ok;
+    }
+    /// The current session holds `p` cells (after a state_copy from a checkpoint there).
+    void set_cells(int64_t p) {
+        for (Engine* e = this; e != nullptr; e = e->nxt) {
+            e->pos = p;
+            e->sess[(size_t) e->cur].pos = p;
+        }
+    }
+    uint64_t kv_bytes(int64_t cells) const {
+        uint64_t n = 0;
+        for (const Engine* e = this; e != nullptr; e = e->nxt)
+            for (size_t l = 0; l < e->kc.size(); ++l)
+                if (e->kc[l]) n += 2 * (uint64_t) m->g.n_head_kv * (uint64_t) cells * m->kv_row();
+        return n;
+    }
+    /// The current session's first `cells` K / V cells between the GPUs and `host`, a copy of `held` >= cells cells.
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
+        const size_t H = (size_t) m->g.n_head_kv, w = (size_t) cells * m->kv_row(), mine = (size_t) held * m->kv_row();
+        bool ok = true;
+        for (Engine* e = this; e != nullptr; e = e->nxt) {
+            e->on();
+            const size_t row = (size_t) e->ctx * m->kv_row();   // a KV head's cells on the device
+            for (size_t l = 0; l < e->kc.size(); ++l) {
+                if (!e->kc[l]) continue;
+                for (__half* d : {e->kc[l], e->vc[l]}) {
+                    if (w > 0)
+                        ok = ok && soft(to_host ? cudaMemcpy2DAsync(host, mine, d, row, w, H, cudaMemcpyDeviceToHost, e->st)
+                                                : cudaMemcpy2DAsync(d, row, host, mine, w, H, cudaMemcpyHostToDevice, e->st));
+                    host += H * mine;
+                }
+            }
+            ok = soft(cudaStreamSynchronize(e->st)) && ok;
+        }
+        on();
+        return ok;
     }
     int hybrid_swaps_after_prompt = 2048;
     /// the MTP seed rows of a prompt chunk: a buffer the block's own forward does not use (`moe_out`, [tmax][N])
@@ -4170,6 +4286,59 @@ using lamina::program::sample;
 
 bool is_eos(int t) { return t == 248044 || t == 248046; }
 
+// ------------------------------------------------------------------------------------------------ the conversation cache
+constexpr int32_t kImStart = 248045, kImEnd = 248046;   // <|im_start|>, <|im_end|>: a turn's first and last token
+
+/// --serve's prompt cache (lamina/core/prompt_cache.hpp, Flash-Next's options): a request continues from the longest
+/// start of its prompt the engine holds - the live conversation, one of its checkpoints, or a conversation another
+/// request replaced, parked in RAM with its K / V cells.  A single-session engine's: with batch slots every slot keeps
+/// its own conversation in VRAM instead.
+struct CacheOpts {
+    int chain = 16;                  // --prompt-cache: checkpoints a conversation keeps (0: off)
+    int64_t every = 16384;           // --prompt-cache-every: a long prompt's checkpoints, in cells
+    int64_t park_mib = 16384;        // --conversation-cache-mib: the parked conversations' RAM
+    int64_t park_slots = 0;          // --conversation-cache-slots: their number at most (0: no limit)
+    int64_t min_tokens = 1024;       // --conversation-cache-min-tokens: shorter ones are not parked
+    int64_t ram_reserve_mib = 6144;  // --ram-reserve-mib: they take no RAM below this much available to the system
+    int64_t tail_role = -1;          // --tail-role-token: a trailing turn of this role stays after the turn's checkpoint
+};
+
+/// The engine's state behind the cache's policy: the current session's (Engine::state_copy, kv_copy).
+struct Cache final : lamina::core::SequenceCache {
+    Engine& E;
+    Cache(Engine& e, const CacheOpts& o)
+        : SequenceCache(o.chain, e.state_bytes(), (uint64_t) std::max<int64_t>(0, o.park_mib) << 20,
+                        (size_t) std::max<int64_t>(0, o.park_slots), o.min_tokens),
+          E(e) {}
+    ~Cache() override {   // (no queued copy still in flight to a buffer the cache frees)
+        for (Engine* e = &E; e != nullptr; e = e->nxt) {
+            if (e->split) (void) cudaSetDevice(e->dev);
+            (void) cudaStreamSynchronize(e->st);
+        }
+        if (E.split) (void) cudaSetDevice(E.dev);
+        (void) cudaGetLastError();
+    }
+
+protected:
+    bool state_save(int64_t, void* host, bool filled) override {
+        if (filled) return true;   // Engine::state_queue's copies are on their way
+        E.sync_all();
+        return E.state_copy(static_cast<uint8_t*>(host), true);
+    }
+    bool state_load(int64_t pos, const void* host) override {
+        E.sync_all();
+        if (!E.state_copy(const_cast<uint8_t*>(static_cast<const uint8_t*>(host)), false)) return false;
+        E.set_cells(pos);
+        return true;
+    }
+    void state_zero() override { E.reset(); }
+    uint64_t kv_bytes(int64_t cells) const override { return E.kv_bytes(cells); }
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override {
+        E.sync_all();
+        return E.kv_copy(cells, held, host, to_host);
+    }
+};
+
 // ------------------------------------------------------------------------------------------------ pictures
 constexpr int32_t kImagePad = 248056;   // <|image_pad|>
 
@@ -4276,10 +4445,114 @@ struct Serve {
     // decode windows of the other slots between two chunks of a prompt read: LAMINA_Q36_READ_WINDOWS (default 1; a chunk
     // takes ~0.15 s at 512 tokens, a window ~0.012 s: more windows give the decoding slots more of the time a read takes)
     int read_windows = 1;
+    // the conversation cache (a single-session engine's; null: off, or batch slots)
+    CacheOpts copt;
+    std::unique_ptr<Cache> cache;
+    std::vector<int32_t> prev_prompt;               // the last text request's prompt: where the next one leaves it
+    std::vector<std::vector<float>> scale_sets;     // the adapters' scales requests came with: a conversation's tag
+    bool poisoned = false;                          // non-finite logits: whatever the cache holds may be bad
 
-    explicit Serve(Engine& e) : E(e), slots((size_t) e.n_sess) {
+    Serve(Engine& e, const CacheOpts& co) : E(e), slots((size_t) e.n_sess), copt(co) {
         if (const char* v = std::getenv("LAMINA_Q36_READ_WINDOWS")) read_windows = std::max(0, std::min(64, std::atoi(v)));
+        if (E.n_sess > 1) {
+            if (copt.chain > 0)
+                std::fprintf(stderr, "lamina serve: prompt cache: off with batch slots (each slot keeps its conversation, "
+                             "which a request continues when it extends it)\n");
+            return;
+        }
+        if (copt.chain <= 0) return;
+        cache = std::make_unique<Cache>(E, copt);
+        uint64_t ram_now = 0;
+        const bool ram_known = copt.ram_reserve_mib > 0 && lamina::platform::available_ram(ram_now);
+        if (ram_known)   // the experts a hybrid placement pins cannot be swapped: the park is what gives way
+            cache->ram_spare = [reserve = copt.ram_reserve_mib << 20]() -> int64_t {
+                uint64_t avail = 0;
+                if (!lamina::platform::available_ram(avail)) return lamina::core::ConversationCache::kNoRamLimit;
+                return (int64_t) avail - reserve;
+            };
+        std::fprintf(stderr, "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation, %lld MiB "
+                     "for the conversations requests replace%s%s\n", copt.chain,
+                     (double) cache->ckpt_bytes() / 1048576.0, (long long) copt.park_mib,
+                     copt.park_slots > 0 ? (", at most " + std::to_string(copt.park_slots) + " of them").c_str() : "",
+                     ram_known ? (", above a RAM reserve of " + std::to_string(copt.ram_reserve_mib) + " MiB (" +
+                                  std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
     }
+
+    /// The CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE.
+    void print_cache() {
+        if (!cache) return;
+        const auto cs = cache->state();
+        serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
+                    "evictions=%zu\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
+                    (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots, cs.evictions);
+    }
+
+    /// The cells a request's prompt continues from, the engine's state set there: the live conversation's end, a
+    /// checkpoint of it, or a parked conversation taken back (or its start borrowed); 0: an empty sequence.  A
+    /// conversation is continued by requests with its adapters' scales only.
+    size_t cache_begin(const std::vector<int32_t>& ids, const std::vector<ImgKey>& imgs, const std::vector<float>& lora) {
+        if (poisoned) {
+            cache->clear();
+            poisoned = false;
+        }
+        size_t tag = 0;
+        while (tag < scale_sets.size() && scale_sets[tag] != lora) ++tag;
+        if (tag == scale_sets.size()) scale_sets.push_back(lora);
+        std::vector<lamina::core::ImgKey> keys;
+        for (const ImgKey& k : imgs)   // (a picture is its rows' hash and their count)
+            keys.push_back({k.cell, k.hash ^ (0x9e3779b97f4a7c15ull * (uint64_t) (k.n + 1))});
+        return (size_t) cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), keys, (uint64_t) tag);
+    }
+
+    /// Where a prompt's read ends a chunk for a checkpoint, ascending, each in (reuse, n) with two cells or more to its
+    /// neighbours and the ends (a read of one token goes through the decode graph, past the MTP block's K / V), none
+    /// inside a picture.  The recurrent state cannot step back, so the places a later prompt may part from this one are
+    /// saved as the read passes them: before the prompt's last <|im_start|> (the next turn's prompt re-renders what
+    /// follows: the answer without its reasoning, or without the empty block a request with thinking off ends its
+    /// prompt with), where this prompt leaves the one before (agents send one long start again with another tail), a
+    /// few cells before the end of a last message that grows between requests, and two cells before the end where the
+    /// turn's checkpoint is not near it (the same prompt again).  A long prompt's checkpoints every --prompt-cache-every
+    /// cells are the read's own, at its chunks' ends (request).
+    std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse, const std::vector<ImgKey>& imgs,
+                                          bool geni) {
+        const int64_t n = (int64_t) ids.size();
+        int64_t q = 0;
+        for (int64_t i = n - 2; i > reuse; --i)
+            if (ids[(size_t) i] == kImStart) { q = i; break; }
+        if (q > 0 && copt.tail_role >= 0)   // a trailing effort turn stays out of the checkpoint
+            for (int64_t i = q - 1; i > reuse; --i)
+                if (ids[(size_t) i] == kImStart) {
+                    if (ids[(size_t) i + 1] == copt.tail_role) q = i;
+                    break;
+                }
+        int64_t fork = 0, msg_end = 0;
+        {
+            const int64_t lim = std::min<int64_t>((int64_t) prev_prompt.size(), n - 1);
+            int64_t d = 0;
+            while (d < lim && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
+            if (d > reuse + 256 && d < n - 1 && d != q) fork = d;
+            for (int64_t i = (q > 0 ? q : n - 1) - 1; i > reuse; --i)
+                if (ids[(size_t) i] == kImEnd) {
+                    int64_t start = i;   // the message's <|im_start|>; then its role and a newline
+                    while (start > 0 && ids[(size_t) start] != kImStart) --start;
+                    if (d > start + 3 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                    break;
+                }
+        }
+        if (!geni) prev_prompt = ids;
+        std::vector<int64_t> want{q, fork, msg_end};
+        if (n - 2 - std::max(q, reuse) > kEndNear) want.push_back(n - 2);
+        std::sort(want.begin(), want.end());
+        std::vector<int64_t> marks;
+        for (const int64_t p : want) {
+            if (p < reuse + 2 || p > n - 2 || (!marks.empty() && p < marks.back() + 2)) continue;
+            bool inside = false;
+            for (const ImgKey& k : imgs) inside = inside || (k.cell < p && p < k.cell + k.n);
+            if (!inside) marks.push_back(p);
+        }
+        return marks;
+    }
+    static constexpr int64_t kEndNear = 64;   // a turn's checkpoint this near the prompt's end serves as its end's too
 
     /// BSTOP / BYIELD lines among the queued ones: applied now (a window is a moment away at most).
     void poll_control() {
@@ -4770,14 +5043,25 @@ struct Serve {
             const std::string ve = build_images(emb, ids, E.m->g.n_embd, img_keys, ir);
             if (!ve.empty()) { serve_print("ERR %s\n", ve.c_str()); return; }
         }
-        // ---- the session: the held state continues when the request extends it (the recurrent state cannot step back)
+        // ---- the session: the held state continues when the request extends it (the recurrent state cannot step back);
+        // with the conversation cache also from a checkpoint of it, or from a conversation parked in RAM
         const int s = adm ? slot : pick_session(ids, ir.imgs, lsc);
         if (s < 0) {   // every session decodes in a slot: a request alone has none to run in
             serve_print("ERR every session is busy (batch slots decoding)\n");
             return;
         }
         Engine::Sess& ss = E.sess[(size_t) s];
-        size_t reuse = match_len(ss, ids, ir.imgs, lsc);
+        size_t reuse = 0;
+        double begin_ms = 0.0;   // the cache's own work: a conversation parked or taken back (the prompt's time has it)
+        if (cache) {   // (one session: the current one)
+            const auto tb = Clock::now();
+            reuse = cache_begin(ids, ir.imgs, lsc);
+            begin_ms = ms_since(tb);
+            ss.live.assign(ids.begin(), ids.begin() + (long) reuse);
+            ss.imgs.clear();
+        } else {
+            reuse = match_len(ss, ids, ir.imgs, lsc);
+        }
         if (adm) {   // another session holding more of this prompt (the conversation was read alone): copy its state
             int src = -1;
             size_t best = reuse;
@@ -4792,7 +5076,7 @@ struct Serve {
             }
         }
         E.select(s);
-        if (reuse == 0) {
+        if (reuse == 0 && !cache) {   // (the cache has set the state: an empty sequence where it found none)
             E.reset();
             ss.live.clear();
             ss.imgs.clear();
@@ -4803,7 +5087,40 @@ struct Serve {
         const auto t0 = Clock::now();
         const int64_t fresh = (int64_t) (ids.size() - reuse);
         bool cancelled = false;
+        // The cache's checkpoints are taken as the read passes them, each at the end of a chunk: at its marks, where a
+        // chunk ends for it, and in a long prompt at a chunk's end once --prompt-cache-every cells came since the last
+        // (not where a mark follows within a chunk, nor inside a picture).  The state's copies go to a pinned buffer of
+        // the cache's, queued behind the chunk on every stage's stream, so the stages go on with the next chunk; where
+        // it has none left the copy is made now, the stages' queues empty first.
+        std::vector<int64_t> marks, cuts;
+        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse, ir.imgs, geni);
+        for (const int64_t at : marks) cuts.push_back(at - (int64_t) reuse);
+        const int64_t every = std::max<int64_t>(1, copt.every / E.tmax) * E.tmax;
+        int64_t noted = (int64_t) reuse, saved = (int64_t) reuse;   // the cache has the tokens up to `noted`
+        auto note = [&](int64_t upto) {
+            if (!cache || upto <= noted) return;
+            cache->set(noted, ids.data() + noted, upto - noted);
+            noted = upto;
+        };
+        auto checkpoint = [&](int64_t here) {
+            note(here);
+            saved = here;
+            void* const h = cache->prepare();
+            if (h == nullptr) cache->checkpoint(here);
+            else if (E.state_queue(static_cast<uint8_t*>(h))) cache->checkpoint(here, h);
+        };
         const int64_t got = E.process(ids.data() + reuse, fresh, [&](int64_t done) -> bool {
+            if (cache && done < fresh) {
+                const int64_t here = (int64_t) reuse + done;
+                const auto next = std::lower_bound(marks.begin(), marks.end(), here);
+                bool take = next != marks.end() && *next == here;
+                if (!take && here - saved >= every &&
+                    (next != marks.end() ? *next : (int64_t) ids.size()) - here >= E.tmax) {
+                    take = true;
+                    for (const ImgKey& k : ir.imgs) take = take && !(k.cell < here && here < k.cell + k.n);
+                }
+                if (take) checkpoint(here);
+            }
             serve_print("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) fresh, ms_since(t0),
                         (double) done / std::max(1e-9, ms_since(t0) / 1000.0));
             if (n_active > 0 && done < fresh) {
@@ -4815,7 +5132,8 @@ struct Serve {
             }
             if (stop.load() && done < fresh) { cancelled = true; return false; }
             return true;
-        });
+        }, cache ? &cuts : nullptr);
+        note((int64_t) reuse + got);
         ss.live.insert(ss.live.end(), ids.begin() + (long) reuse, ids.begin() + (long) reuse + (long) got);
         ss.imgs.clear();
         bool cut = false;
@@ -4826,10 +5144,13 @@ struct Serve {
         if (cancelled && cut) {   // stopped inside a picture: the state cannot be continued, the next read starts over
             ss.live.clear();
             ss.imgs.clear();
+            if (cache) cache->set(0, static_cast<const int32_t*>(nullptr), 0);
         }
         E.sess[(size_t) E.cur].pos = E.pos;
-        const double prompt_ms = ms_since(t0);
+        const double prompt_ms = begin_ms + ms_since(t0);
         if (cancelled) {
+            if (cache) cache->shed();
+            print_cache();
             serve_print("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms, reuse, (long long) got);
             if (adm) serve_print("BADM %d 0\n", slot);
             return;
@@ -4933,17 +5254,24 @@ struct Serve {
         if (std::strcmp(finish, "nonfinite") == 0) {   // the state holds the non-finite rows: not continued
             ss.live.clear();
             ss.imgs.clear();
+            poisoned = true;   // (nor is anything the cache holds: forgotten at the next request)
+            if (cache) cache->set(0, static_cast<const int32_t*>(nullptr), 0);
             std::fprintf(stderr, "lamina serve: non-finite logits: the request ends, and the next one reads its prompt from "
                          "the start\n");
+        } else if (cache && ss.live.size() > ids.size()) {   // the tokens the state took while it decoded
+            cache->set((int64_t) ids.size(), ss.live.data() + ids.size(), (int64_t) (ss.live.size() - ids.size()));
         }
         E.sess[(size_t) E.cur].pos = E.pos;
         const double decode_ms = ms_since(d0);
+        if (cache) cache->shed();
+        print_cache();
         serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
                     decode_ms, finish, accepted, offered, reuse, (long long) fresh);
         std::fprintf(stderr, "lamina serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
                      "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld (%s)\n", s, ids.size(), reuse,
                      (long long) fresh, prompt_ms, prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced,
                      decode_ms, decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, accepted, offered, finish);
+        if (cache) std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
     }
 
     int run() {
@@ -4955,6 +5283,7 @@ struct Serve {
                         (double) E.lora_default[a], (double) ad.alpha, ad.rank_max, ad.pairs,
                         json_escape(ad.task_name).c_str(), json_escape(ad.prompt_prefix).c_str());
         }
+        print_cache();
         serve_print("READY %d stop\n", E.ctx);
         const lamina::program::ServeIo& io = lamina::program::serve_io();
         in_process = io.in_process;
@@ -5009,8 +5338,8 @@ struct Serve {
     }
 };
 
-int serve(Engine& E) {
-    Serve sv(E);
+int serve(Engine& E, const CacheOpts& cache) {
+    Serve sv(E, cache);
     return sv.run();
 }
 
@@ -5038,6 +5367,7 @@ static int run_engine(int argc, char** argv, bool check_only) {
         return out;
     };
     bool serve_mode = false, graph = true, vision = false, batch_mtp = false;
+    CacheOpts cache_opts;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -5125,6 +5455,14 @@ static int run_engine(int argc, char** argv, bool check_only) {
             }
         }
         else if (a == "--lora-init-without-apply") lora_no_apply = true;   // loaded at scale 0: a request names its own
+        // --serve's prompt cache (Flash-Next's options)
+        else if (a == "--prompt-cache") cache_opts.chain = std::max(0, std::atoi(next().c_str()));
+        else if (a == "--prompt-cache-every") cache_opts.every = std::max<int64_t>(1, std::atoll(next().c_str()));
+        else if (a == "--conversation-cache-mib") cache_opts.park_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
+        else if (a == "--conversation-cache-slots") cache_opts.park_slots = std::max<int64_t>(0, std::atoll(next().c_str()));
+        else if (a == "--conversation-cache-min-tokens") cache_opts.min_tokens = std::max<int64_t>(0, std::atoll(next().c_str()));
+        else if (a == "--ram-reserve-mib") cache_opts.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
+        else if (a == "--tail-role-token") cache_opts.tail_role = std::atoll(next().c_str());
         else if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // not a skip: it steers
             std::fprintf(stderr, "lamina: %s: control vectors run on Qwen3.8-Flash-Next's engine only\n", a.c_str());
             return 2;
@@ -5321,7 +5659,7 @@ static int run_engine(int argc, char** argv, bool check_only) {
     E.bmtp = (batch_mtp || (std::getenv("LAMINA_BATCH_MTP") != nullptr && std::string(std::getenv("LAMINA_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
     if (batch_mtp && !E.bmtp) std::fprintf(stderr, "lamina: --batch-mtp needs --batch N (2 or more) and --drafts-per-step N: ignored\n");
     if (warm) E.warmup();
-    if (serve_mode) return serve(E);
+    if (serve_mode) return serve(E, cache_opts);
     if (bench_pp > 0 || bench_tg > 0) {
         // llama-bench's shapes: a prompt of bench_pp tokens from a fresh state, then bench_tg tokens one at a time
         if (bench_tg < 0 || (int64_t) std::max(bench_pp, 1) + bench_tg + 8 > E.ctx) {

@@ -376,8 +376,10 @@ Qwen3.8-27B needs a split where one GPU does not hold it: its full 262,144 cells
 VRAM (on the development PC the 5070 Ti first with 26 layers, then the 3090 with 38 and the head:
 [COMPARISON.md](COMPARISON.md#qwen38-27b)).
 
-Not on this path yet: the prompt cache's checkpoints (a follow-up turn whose history differs from what the engine holds
-is read again from the start), `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU.
+The prompt cache is Flash-Next's, with its options ([USING.md](USING.md#behaviour)): checkpoints of the recurrent
+state (63 MiB each for Qwen3.6, 150 MiB for the 27B) and conversations parked in RAM with their K and V. Not on this
+path yet: `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU, without the prompt
+cache: each slot keeps its conversation, and continues it only when the request extends it.
 
 ## Updating
 

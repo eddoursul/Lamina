@@ -6,7 +6,7 @@
 // least recently used first, when the park's bytes (its K/V copies and its chains) or its slots run out, or the RAM
 // the system can spare above a reserve, and never while it lends its start to the live one.
 //
-// The checkpoint buffers and the K/V copies are opaque here: `PromptCache` allocates and frees them, this header only
+// The checkpoint buffers and the K/V copies are opaque here: `SequenceCache` allocates and frees them, this header only
 // moves them and counts their bytes, so the policy is testable without a device.
 #pragma once
 
@@ -30,7 +30,7 @@ struct ImgKey {
 /// One checkpoint of a conversation's chain: the session's fixed-size state at `pos`, in a buffer the chain owns.
 struct Ckpt {
     int64_t pos = 0;
-    void* host = nullptr;   ///< the session_ckpt buffer (opaque here: `PromptCache` owns the allocator)
+    void* host = nullptr;   ///< the state's buffer (opaque here: `SequenceCache` owns the allocator)
 };
 
 /// One conversation: its tokens, its checkpoints (positions ascending) and, when parked, a copy of its K/V cells.
@@ -42,6 +42,9 @@ struct Seq {
     int64_t kv_cells = 0;
     uint64_t kv_bytes = 0;
     uint64_t stamp = 0;   ///< the park's clock at its last use
+    /// What its state depends on besides its tokens and images (SequenceCache::begin): requests of another tag do
+    /// not continue it.
+    uint64_t tag = 0;
     /// begin(): the checkpoint another conversation borrows from this parked one, which no eviction takes while the
     /// live one is parked beside it; -1: none.
     int64_t pin = -1;

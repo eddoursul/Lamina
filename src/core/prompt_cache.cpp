@@ -19,19 +19,23 @@ constexpr int64_t kParkDropped = 1024;
 
 }  // namespace
 
+SequenceCache::SequenceCache(int chain_cap, uint64_t ckpt_bytes, uint64_t park_budget, size_t park_slots,
+                             int64_t min_tokens)
+    : chain_cap_(chain_cap), ckpt_bytes_(ckpt_bytes), parked_(park_budget, park_slots, min_tokens, ckpt_bytes) {}
+
 PromptCache::PromptCache(const ModelGeometry& g, SessionState& ss, std::vector<QsaState*> kv, void* stream,
                          int chain_cap, uint64_t park_budget, size_t park_slots, int64_t min_tokens)
-    : g_(g), ss_(ss), kv_(std::move(kv)), stream_(stream), chain_cap_(chain_cap), ckpt_bytes_(session_ckpt_bytes(g)),
-      parked_(park_budget, park_slots, min_tokens, ckpt_bytes_) {}
+    : SequenceCache(chain_cap, session_ckpt_bytes(g), park_budget, park_slots, min_tokens), g_(g), ss_(ss),
+      kv_(std::move(kv)), stream_(stream) {}
 
-PromptCache::~PromptCache() {
+SequenceCache::~SequenceCache() {
     for (const auto& [p, pinned] : owned_) {
         if (pinned) cudaFreeHost(p);
         else std::free(p);
     }
 }
 
-void* PromptCache::take_buffer() {
+void* SequenceCache::take_buffer() {
     if (!free_.empty()) {
         void* h = free_.back();
         free_.pop_back();
@@ -51,7 +55,7 @@ void* PromptCache::take_buffer() {
     return h;
 }
 
-void PromptCache::give_back(void* h) {
+void SequenceCache::give_back(void* h) {
     if (h == nullptr) return;
     free_.push_back(h);
     // idle, a buffer is outside the park's budget: no more are kept than the live chain can take at once (its chain
@@ -68,7 +72,7 @@ void PromptCache::give_back(void* h) {
     }
 }
 
-void PromptCache::release(Seq& seq, int64_t keep_upto) {
+void SequenceCache::release(Seq& seq, int64_t keep_upto) {
     for (size_t i = 0; i < seq.ckpts.size();) {
         if (seq.ckpts[i].pos > keep_upto) {
             give_back(seq.ckpts[i].host);
@@ -79,7 +83,7 @@ void PromptCache::release(Seq& seq, int64_t keep_upto) {
     }
 }
 
-void PromptCache::enforce_cap(Seq& seq) {
+void SequenceCache::enforce_cap(Seq& seq) {
     std::vector<int64_t> pos;
     while ((int64_t) seq.ckpts.size() > chain_cap_) {
         pos.clear();
@@ -90,25 +94,44 @@ void PromptCache::enforce_cap(Seq& seq) {
     }
 }
 
-void* PromptCache::save(int64_t pos, void* filled) {
+void* SequenceCache::save(int64_t pos, void* filled) {
     void* h = filled != nullptr ? filled : take_buffer();
     if (h == nullptr) return nullptr;
-    const bool split = split_from > 0 && split_save;
-    if (filled != nullptr) {   // the run copied the device state in: the token window is the host's
-        session_ckpt_put_window(ss_, g_, h);
-    } else {
-        cudaDeviceSynchronize();
-        if (!(split ? session_ckpt_save_layers(ss_, g_, pos, h, stream_, 0, split_from, 0)
-                    : session_ckpt_save(ss_, g_, pos, h, stream_))) {
-            give_back(h);
-            return nullptr;
-        }
+    if (!state_save(pos, h, filled != nullptr)) {
+        give_back(h);
+        return nullptr;
     }
-    if (split) split_save(pos, h);
     return h;
 }
 
-void* PromptCache::prepare() {
+bool PromptCache::state_save(int64_t pos, void* host, bool filled) {
+    const bool split = split_from > 0 && split_save;
+    if (filled) {   // the run copied the device state in: the token window is the host's
+        session_ckpt_put_window(ss_, g_, host);
+    } else {
+        cudaDeviceSynchronize();
+        if (!(split ? session_ckpt_save_layers(ss_, g_, pos, host, stream_, 0, split_from, 0)
+                    : session_ckpt_save(ss_, g_, pos, host, stream_)))
+            return false;
+    }
+    if (split) split_save(pos, host);
+    return true;
+}
+
+bool PromptCache::state_load(int64_t pos, const void* host) { return session_ckpt_load(ss_, g_, pos, host, stream_); }
+
+void PromptCache::state_zero() {
+    session_zero(ss_, g_, nullptr, stream_);
+    cudaStreamSynchronize((cudaStream_t) stream_);
+}
+
+uint64_t PromptCache::kv_bytes(int64_t cells) const {
+    uint64_t bytes = 0;
+    for (const Part& p : kv_parts(cells)) bytes += p.bytes;
+    return bytes;
+}
+
+void* SequenceCache::prepare() {
     drop_prepared();
     if (!enabled()) return nullptr;
     void* h = take_buffer();
@@ -122,7 +145,7 @@ void* PromptCache::prepare() {
     return h;
 }
 
-void PromptCache::drop_prepared() {
+void SequenceCache::drop_prepared() {
     if (prepared_ == nullptr) return;
     give_back(prepared_);
     prepared_ = nullptr;
@@ -157,12 +180,11 @@ bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_ho
     return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream_);
 }
 
-void PromptCache::stash_live(int64_t keep_upto) {
+void SequenceCache::stash_live(int64_t keep_upto) {
     const int64_t L = (int64_t) live_.tokens.size();
     if (!parked_.wants(L)) return;
     if (ensure_kv && !ensure_kv(L)) return;
-    uint64_t bytes = 0;
-    for (const Part& p : kv_parts(L)) bytes += p.bytes;
+    const uint64_t bytes = kv_bytes(L);
     // its chain: the checkpoints after `keep_upto` and one at its end, capped
     const bool has_end = live_.find(L) != nullptr;
     int64_t chain = has_end ? 0 : 1;
@@ -202,6 +224,7 @@ void PromptCache::stash_live(int64_t keep_upto) {
     if (s.ckpts.empty()) return;
     enforce_cap(s);
     s.tokens = live_.tokens;
+    s.tag = live_.tag;
     for (const ImgKey& image : live_.imgs)
         if (image.start < L) s.imgs.push_back(image);
     s.kv_cells = L;
@@ -209,31 +232,32 @@ void PromptCache::stash_live(int64_t keep_upto) {
     parked_.park(std::move(s));
 }
 
-bool PromptCache::restore(const Seq& seq, int64_t pos, bool prefix) {
+bool SequenceCache::restore(const Seq& seq, int64_t pos, bool prefix) {
     const Ckpt* ck = seq.find(pos);
     if (ck == nullptr) return false;
     const int64_t cells = prefix ? pos : seq.kv_cells;
     if (seq.kv && ensure_kv && !ensure_kv(cells)) return false;
     if (seq.kv && !kv_copy(cells, seq.kv_cells, seq.kv.get(), false)) return false;
-    return session_ckpt_load(ss_, g_, pos, ck->host, stream_);
+    return state_load(pos, ck->host);
 }
 
-int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs) {
+int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag) {
     drop_prepared();
     const int64_t L = (int64_t) live_.tokens.size();
     auto zero = [&]() -> int64_t {
         release(live_, 0);
         live_.tokens.clear();
         live_.imgs.clear();
-        session_zero(ss_, g_, nullptr, stream_);
-        cudaStreamSynchronize((cudaStream_t) stream_);
+        live_.tag = tag;
+        state_zero();
         return 0;
     };
     if (!enabled()) return zero();
-    int64_t best = reusable(live_, ids, imgs, true);
+    // (a conversation of another tag holds another state for the same tokens: it is not continued)
+    int64_t best = live_.tag == tag ? reusable(live_, ids, imgs, true) : -1;
     int from = -1;   // -1: the live sequence, else a parked one
     for (size_t i = 0; i < parked_.size(); ++i) {
-        const int64_t r = reusable(parked_.entries()[i], ids, imgs, false);
+        const int64_t r = parked_.entries()[i].tag == tag ? reusable(parked_.entries()[i], ids, imgs, false) : -1;
         if (r > best) {
             best = r;
             from = (int) i;
@@ -272,6 +296,7 @@ int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<Im
         donor->stamp = parked_.tick();
         live_.tokens.assign(donor->tokens.begin(), donor->tokens.begin() + best);
         live_.imgs = imgs;
+        live_.tag = tag;
         return best;
     }
     // That conversation continues: the live one is parked and the chosen one becomes live.
@@ -287,24 +312,25 @@ int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<Im
     live_.ckpts = std::move(chosen.ckpts);
     release(live_, best);
     live_.imgs = imgs;
+    live_.tag = tag;
     return best;
 }
 
-void PromptCache::set(int64_t pos, const int64_t* tokens, int64_t n) {
+void SequenceCache::set(int64_t pos, const int64_t* tokens, int64_t n) {
     if (!enabled()) return;
     release(live_, pos);
     live_.tokens.resize((size_t) pos);
     live_.tokens.insert(live_.tokens.end(), tokens, tokens + n);
 }
 
-void PromptCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
+void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
     if (!enabled()) return;
     release(live_, pos);
     live_.tokens.resize((size_t) pos);
     for (int64_t i = 0; i < n; ++i) live_.tokens.push_back(tokens[i]);
 }
 
-void PromptCache::checkpoint(int64_t pos, void* filled) {
+void SequenceCache::checkpoint(int64_t pos, void* filled) {
     if (filled != nullptr && filled == prepared_) prepared_ = nullptr;   // this call takes it, or gives it back
     else filled = nullptr;
     if (!enabled() || pos <= 0 || pos != (int64_t) live_.tokens.size() || live_.find(pos) != nullptr) {
@@ -317,7 +343,7 @@ void PromptCache::checkpoint(int64_t pos, void* filled) {
     enforce_cap(live_);
 }
 
-void PromptCache::clear() {
+void SequenceCache::clear() {
     drop_prepared();
     release(live_, -1);
     live_.tokens.clear();
@@ -325,7 +351,7 @@ void PromptCache::clear() {
     for (Seq& s : parked_.drain()) release(s, -1);
 }
 
-size_t PromptCache::shed() {
+size_t SequenceCache::shed() {
     if (!ram_spare || (parked_.size() == 0 && free_.empty())) return 0;
     const int64_t spare = ram_spare();
     if (spare >= 0 || spare == ConversationCache::kNoRamLimit) return 0;
@@ -354,7 +380,7 @@ size_t PromptCache::shed() {
     return n;
 }
 
-PromptCache::State PromptCache::state() const {
+SequenceCache::State SequenceCache::state() const {
     State s;
     s.live_cells = (int64_t) live_.tokens.size();
     s.checkpoints = live_.ckpts.size();
@@ -366,7 +392,7 @@ PromptCache::State PromptCache::state() const {
     return s;
 }
 
-std::string PromptCache::summary() const {
+std::string SequenceCache::summary() const {
     char buf[256];
     std::snprintf(buf, sizeof buf,
                   "live %lld cells, %zu checkpoints (%.0f MiB); %zu parked conversations (%.0f MiB, %zu evicted); "

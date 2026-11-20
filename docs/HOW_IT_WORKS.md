@@ -204,5 +204,7 @@ Qwen3.6-35B-A3B and Qwen3.8-27B, a dense model of the same family, run on a path
 from the model file's header. It reads the GGUF as it is and drafts with the file's own MTP layer. With more cards
 than one in `"gpu"` it splits the layers over the fewest GPUs that hold the whole model, each running its layers and handing the
 activations to the next; where none do, or on one GPU, it keeps every expert that fits in VRAM and computes the rest on
-the CPU. With the config's `parallel` it runs several requests at once on one GPU
+the CPU. The prompt cache is the same one over this path's state: a checkpoint is the DeltaNet layers' states (63 MiB
+for Qwen3.6, 150 MiB for the 27B), a parked conversation its attention layers' K and V besides. With the config's
+`parallel` it runs several requests at once on one GPU, each slot keeping its own conversation
 ([SETUP.md](SETUP.md#qwen36-35b-a3b-and-qwen38-27b)).

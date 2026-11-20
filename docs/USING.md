@@ -154,9 +154,9 @@ adapters add up. The adapters are numbered in their order:
   runs with them, so a client that only picks a model name picks an adapter; `/v1/models` lists them beside the
   model.
 
-A conversation's state belongs to the scales it was read with: a request with other scales reads its prompt again
-(llama.cpp's cache does the same), and with batch slots (`parallel`) each slot keeps its own, so requests with
-different adapters decode together. The adapters' pairs may be F16, BF16, F32 or Q8_0, at any of the model's
+A conversation's state belongs to the scales it was read with: a request with other scales starts a conversation of
+its own and reads its prompt (llama.cpp's cache does the same), the prompt cache keeps both, and with batch slots
+(`parallel`) each slot keeps its own, so requests with different adapters decode together. The adapters' pairs may be F16, BF16, F32 or Q8_0, at any of the model's
 projections but the embedding, the router and the routed experts; activated LoRA (aLoRA) adapters are refused.
 Flash-Next and Hy4-flash take no adapters.
 
@@ -182,7 +182,8 @@ Flash-Next and Hy4-flash take no adapters.
   the RAM below `--ram-reserve-mib MIB` (default 6144) available to the system, and leave between requests when it
   runs below it: the expert arena is pinned, so without it a park beside a large arena swaps the rest of the system
   instead (0: only the budget limits them). The Monitor's
-  Conversation cache card shows them. The engine keeps the model's own token ids of each reply for the next turn.
+  Conversation cache card shows them. Qwen3.6-35B-A3B and Qwen3.8-27B have the same cache (not with batch slots, where
+  each slot keeps its conversation). The engine keeps the model's own token ids of each reply for the next turn.
   Responses report the reused tokens
   (`usage.prompt_tokens_details.cached_tokens`; Anthropic: `cache_read_input_tokens`).
 - **Guards**: a reply that repeats one token 256 times ends as `"length"` (`"repeat_stop_tokens"` sets the run, 0 turns
