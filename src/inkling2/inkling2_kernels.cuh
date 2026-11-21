@@ -32,7 +32,6 @@ constexpr int kMaxT = 8;      // rows a forward takes at most (native_mmvq's col
 constexpr int kBlk = 4;       // block inputs a mix reads at most (the embedding and three blocks' outputs)
 constexpr int kTB = 256;      // threads of the row kernels
 constexpr int kWide = 1024;   // of those whose time is their threads' loop over a row: the mix, the norm, the bias
-constexpr int kSub = 128;     // cells an attention block scores at once (its threads)
 
 /// a q8_1 block as ggml has it: the scale and the values' sum as halves, 32 values
 struct Q81 {
@@ -596,351 +595,32 @@ __global__ void __launch_bounds__(128) kv_cells_kernel(KvCellsIn b) {
 }
 
 // ---------------------------------------------------------------------------------------------- the attention
-/// A (row, K/V head)'s query heads against a stretch of cells: a block scores `chunk` cells, `sub` at a time, and keeps
-/// for each of its QH query heads the stretch's largest logit m, sum of exp(logit - m) and that-weighted sum of V
-/// (D values): the softmax's partial sums, which attn_out_kernel joins over the stretches (and another card's range
-/// could send).  logit = q . k / sqrt(D) + bias[min(distance, ext)]; a cell after the row, or outside a window layer's
-/// `win` positions, is left out.  `sub` is kSub (a thread a cell's K) or kSub / 4 (four threads a cell: shorter chains
-/// of loads where the cells are few and the blocks many).  With `dyn` the stretches' size and count come from the
-/// device ({chunk, stretches in use}: a launch captured in a graph serves any number of cells), `n_chunks` then the
-/// grid's.  `slide` (a prompt chunk's window visit, its cells a range in position order from win - 1 before the
-/// chunk): row t's stretch starts t cells in, so each row scores its own window alone.
+/// A decode forward's rows against a visit's cells, in stretches: attn_rows_kernel (with the chunks' kernel, below)
+/// keeps for a row and query head each stretch's largest logit m, the sum of exp(logit - m) and that-weighted sum of
+/// V (D values): the softmax's partial sums, which attn_out_kernel joins over the stretches (another card's cells send
+/// theirs joined: attn_join_kernel).  logit = q . k / sqrt(D) + bias[min(distance, ext)]; a cell after the row, or
+/// outside a window layer's `win` positions, is left out.
 struct AttnIn {
     Cells c;
     const float* q;         // [T][H][D]
     const float* bias;      // [T][H][ext + 1]
     const int32_t* pos;     // [T]
     const int32_t* live;    // the cells in use: a range's count (its positions first .. first + *live - 1), a ring's last position + 1
-    const int32_t* dyn;     // null, or {chunk, stretches in use, the first cell in use}
+    const int32_t* dyn;     // null: a ring's every slot, `chunk` cells a stretch.  Else the stretches from the device (a
+                            // launch captured in a graph serves any number of cells): {cells a stretch, stretches in use,
+                            // the first slot} (a ring's go on past its end to its start), or with `canon` {the first cell
+                            // in use, stretches in use, the first one's number}
     float* part;            // [T][H][n_chunks][D + 2]: m, s, the D sums
     int H, HK, D, ext, win; // win: a window layer's cells (0: every cell)
-    int chunk, n_chunks, sub, slide;
+    int chunk, n_chunks;
+    int canon;              // a range's stretches are stretch_lo's
 };
+/// A range's stretches that do not depend on how many cells it has (so a row's sums are the same whatever was scored
+/// with it, and whenever): stretch i starts at this cell - 32 of 128 cells, 64 of 512, then of 2,048 (590 for 2^20).
+__host__ __device__ __forceinline__ long long stretch_lo(int i) {
+    return i < 32 ? i * 128LL : i < 96 ? 4096 + (i - 32) * 512LL : 36864 + (i - 96) * 2048LL;
+}
 constexpr int kQH = 4;      // query heads a K/V head at most
-__global__ void __launch_bounds__(kSub) attn_part_kernel(AttnIn a);
-/// eight halves of a 16-byte load as floats
-__device__ __forceinline__ void halves8(const uint4 w, float (&f)[8]) {
-    const __half2* h = reinterpret_cast<const __half2*>(&w);
-#pragma unroll
-    for (int k = 0; k < 4; ++k) {
-        const float2 v = __half22float2(h[k]);
-        f[2 * k] = v.x;
-        f[2 * k + 1] = v.y;
-    }
-}
-/// attn_part_kernel (below) for a full visit's FP16 cells (D = 128, `sub` = kSub), 16 bytes a load, a warp's lanes
-/// side by side in a cell: a load takes ~0.1 us whatever it brings, a thread's loads follow each other, and a warp
-/// whose lanes each read another cell gets a fraction of the memory's rate.  Sixteen threads share a cell: thread j
-/// takes eight values (j & 15) of every eighth cell of a step (from j >> 4), of K (the cell's dot is its sixteen
-/// threads' sum) and of V (the cells' weights from shared memory); the eight cell subsets' sums of V are joined at
-/// the block's end.
-__global__ void __launch_bounds__(kSub) attn_wide_kernel(AttnIn a) {
-    const int cb = blockIdx.x, g = blockIdx.y, t = blockIdx.z, j = threadIdx.x;
-    const int chunk = a.dyn ? a.dyn[0] : a.chunk;
-    if (a.dyn && cb >= a.dyn[1]) return;
-    const int QH = a.H / a.HK;
-    __shared__ float sd[kQH][kSub];       // a step's dots, then its weights, by cell
-    __shared__ float red[4][2 * kQH];
-    __shared__ float fin[8][kQH][128];
-    const int64_t p = a.pos[t];
-    const int64_t live = *a.live;
-    // this block's cells: slots [s0, s1)
-    const int64_t s0 = (a.dyn ? a.dyn[2] : 0) + (int64_t) cb * chunk + (a.slide ? t : 0);
-    int64_t s1 = min((int64_t) s0 + chunk, a.c.ring ? a.c.cap : live);
-    if (!a.c.ring) s1 = min(s1, p - a.c.first + 1);   // a range's cells at or before the row
-    float* out = a.part + (((size_t) t * a.H + (size_t) g * QH) * a.n_chunks + cb) * (a.D + 2);
-    const size_t pstride = (size_t) a.n_chunks * (a.D + 2);   // a query head to the next
-    if (s0 >= s1) {
-        if (j < QH) {
-            out[(size_t) j * pstride] = -FLT_MAX;
-            out[(size_t) j * pstride + 1] = 0.f;
-        }
-        return;
-    }
-    const int vg = j & 15, cs = j >> 4;
-    float4 qa[kQH], qb[kQH];   // this thread's eight values of each query head
-    float so[kQH][8];          // and of the heads' weighted sums of V, over its cells
-    float m[kQH], s[kQH];
-#pragma unroll
-    for (int h = 0; h < kQH; ++h) {
-        qa[h] = qb[h] = make_float4(0.f, 0.f, 0.f, 0.f);
-        if (h < QH) {
-            const float* q = a.q + ((size_t) t * a.H + g * QH + h) * a.D;
-            qa[h] = ld4(q, 2 * vg);
-            qb[h] = ld4(q, 2 * vg + 1);
-        }
-#pragma unroll
-        for (int v = 0; v < 8; ++v) so[h][v] = 0.f;
-        m[h] = -FLT_MAX;
-        s[h] = 0.f;
-    }
-    const size_t cbytes = (size_t) a.HK * a.D * 2, hoff = (size_t) g * a.D * 2;
-    const float scale = rsqrtf((float) a.D);
-    for (int64_t b0 = s0; b0 < s1; b0 += a.sub) {
-        const int nc = (int) min((int64_t) a.sub, s1 - b0);
-        // the K step: the cells' dots
-        for (int ci = cs; ci < a.sub; ci += 8) {
-            float dot[kQH];
-#pragma unroll
-            for (int h = 0; h < kQH; ++h) dot[h] = 0.f;
-            if (ci < nc) {
-                float kf[8];
-                halves8(reinterpret_cast<const uint4*>(a.c.k + (size_t) (b0 + ci) * cbytes + hoff)[vg], kf);
-#pragma unroll
-                for (int h = 0; h < kQH; ++h)
-                    if (h < QH)
-                        dot[h] = (kf[0] * qa[h].x + kf[1] * qa[h].y + kf[2] * qa[h].z + kf[3] * qa[h].w) +
-                                 (kf[4] * qb[h].x + kf[5] * qb[h].y + kf[6] * qb[h].z + kf[7] * qb[h].w);
-            }
-#pragma unroll
-            for (int h = 0; h < kQH; ++h) {
-                if (h >= QH) continue;
-#pragma unroll
-                for (int o = 8; o > 0; o >>= 1) dot[h] += __shfl_xor_sync(0xffffffffu, dot[h], o);
-                if (vg == 0) sd[h][ci] = dot[h];
-            }
-        }
-        __syncthreads();
-        // thread j is cell j from here: its logits, the step's largest, its weights against the stretch's largest
-        const int64_t slot = b0 + j;
-        bool ok = j < nc;
-        int64_t d = 0;
-        if (ok) {
-            int64_t cp;
-            if (a.c.ring) {   // the slot's position: the last one written there
-                const int64_t last = live - 1;
-                cp = last - ((last - slot) % a.c.cap + a.c.cap) % a.c.cap;
-            } else {
-                cp = a.c.first + slot;
-            }
-            d = p - cp;
-            ok = cp >= 0 && d >= 0 && (a.win == 0 || d < a.win);
-        }
-        float l[kQH], bm[kQH];
-        const int bi = (int) (d < a.ext ? d : a.ext);
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) {
-            l[h] = ok && h < QH ? sd[h][j] * scale + a.bias[((size_t) t * a.H + g * QH + h) * (a.ext + 1) + bi] : -FLT_MAX;
-            bm[h] = warp_max(l[h]);
-            if ((j & 31) == 0) red[j >> 5][h] = bm[h];
-        }
-        __syncthreads();
-        float scale_old[kQH];
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) {
-            bm[h] = fmaxf(fmaxf(red[0][h], red[1][h]), fmaxf(red[2][h], red[3][h]));
-            const float nm = fmaxf(m[h], bm[h]);
-            scale_old[h] = m[h] == -FLT_MAX ? 0.f : __expf(m[h] - nm);
-            m[h] = nm;
-            const float wgt = ok && h < QH ? __expf(l[h] - nm) : 0.f;
-            sd[h][j] = wgt;   // (every thread has read its dot)
-            const float ws = warp_sum(wgt);
-            if ((j & 31) == 0) red[j >> 5][kQH + h] = ws;
-        }
-        __syncthreads();
-#pragma unroll
-        for (int h = 0; h < kQH; ++h)
-            s[h] = s[h] * scale_old[h] + red[0][kQH + h] + red[1][kQH + h] + red[2][kQH + h] + red[3][kQH + h];
-        // the V step
-        float acc[kQH][8];
-#pragma unroll
-        for (int h = 0; h < kQH; ++h)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) acc[h][v] = 0.f;
-        for (int ci = cs; ci < nc; ci += 8) {
-            float vf[8];
-            halves8(reinterpret_cast<const uint4*>(a.c.v + (size_t) (b0 + ci) * cbytes + hoff)[vg], vf);
-#pragma unroll
-            for (int h = 0; h < kQH; ++h)
-                if (h < QH) {
-                    const float wh = sd[h][ci];
-#pragma unroll
-                    for (int v = 0; v < 8; ++v) acc[h][v] += wh * vf[v];
-                }
-        }
-#pragma unroll
-        for (int h = 0; h < kQH; ++h)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) so[h][v] = so[h][v] * scale_old[h] + acc[h][v];
-        __syncthreads();   // (the weights are read before the next step's dots replace them)
-    }
-#pragma unroll
-    for (int h = 0; h < kQH; ++h)
-        if (h < QH)
-#pragma unroll
-            for (int v = 0; v < 8; ++v) fin[cs][h][vg * 8 + v] = so[h][v];
-    __syncthreads();
-    for (int h = 0; h < QH; ++h) {
-        float* o = out + (size_t) h * pstride;
-        if (j == 0) {
-            o[0] = m[h];
-            o[1] = s[h];
-        }
-        float y = 0.f;
-#pragma unroll
-        for (int c8 = 0; c8 < 8; ++c8) y += fin[c8][h][j];
-        o[2 + j] = y;
-    }
-}
-
-__global__ void __launch_bounds__(kSub) attn_part_kernel(AttnIn a) {
-    const int cb = blockIdx.x, g = blockIdx.y, t = blockIdx.z, j = threadIdx.x;
-    const int chunk = a.dyn ? a.dyn[0] : a.chunk;
-    if (a.dyn && cb >= a.dyn[1]) return;
-    const int QH = a.H / a.HK;
-    __shared__ float sq[kQH][128];
-    __shared__ float sw[kQH][kSub];
-    __shared__ float red[4][2 * kQH];
-    const int64_t p = a.pos[t];
-    const int64_t live = *a.live;
-    // this block's cells: slots [s0, s1)
-    const int64_t s0 = (a.dyn ? a.dyn[2] : 0) + (int64_t) cb * chunk + (a.slide ? t : 0);
-    int64_t s1 = min((int64_t) s0 + chunk, a.c.ring ? a.c.cap : live);
-    if (!a.c.ring) s1 = min(s1, p - a.c.first + 1);   // a range's cells at or before the row
-    float* out = a.part + (((size_t) t * a.H + (size_t) g * QH) * a.n_chunks + cb) * (a.D + 2);
-    const size_t pstride = (size_t) a.n_chunks * (a.D + 2);   // a query head to the next
-    if (s0 >= s1) {
-        if (j < QH) {
-            out[(size_t) j * pstride] = -FLT_MAX;
-            out[(size_t) j * pstride + 1] = 0.f;
-        }
-        return;
-    }
-    float so[kQH];   // value j of the heads' weighted sums of V
-    float m[kQH], s[kQH];
-#pragma unroll
-    for (int h = 0; h < kQH; ++h) {
-        if (h < QH) sq[h][j] = a.q[((size_t) t * a.H + g * QH + h) * a.D + j];
-        so[h] = 0.f;
-        m[h] = -FLT_MAX;
-        s[h] = 0.f;
-    }
-    __syncthreads();
-    const size_t cbytes = cell_bytes(a.c, a.HK, a.D);
-    const float scale = rsqrtf((float) a.D);
-    const int per = kSub / a.sub;            // threads a cell in the K step
-    const int nblk = a.D / 32 / per;         // 32-value groups of K a thread takes
-    const int cell = j / per, blk0 = (j % per) * nblk;
-    for (int64_t b0 = s0; b0 < s1; b0 += a.sub) {
-        // the K step: this thread's share of cell b0 + cell
-        const int64_t slot = b0 + cell;
-        bool ok = slot < s1;
-        int64_t d = 0;
-        if (ok) {
-            int64_t cp;
-            if (a.c.ring) {   // the slot's position: the last one written there
-                const int64_t last = live - 1;
-                cp = last - ((last - slot) % a.c.cap + a.c.cap) % a.c.cap;
-            } else {
-                cp = a.c.first + slot;
-            }
-            d = p - cp;
-            ok = cp >= 0 && d >= 0 && (a.win == 0 || d < a.win);
-        }
-        float dot[kQH];
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) dot[h] = 0.f;
-        if (ok) {
-            const uint8_t* kc = a.c.k + (size_t) slot * cbytes;
-            if (a.c.q8) {
-                const uint8_t* kb = kc + ((size_t) g * (a.D / 32) + blk0) * 34;
-                for (int b = 0; b < nblk; ++b) {
-                    const float sc = __half2float(*(const __half*) (kb + (size_t) b * 34));
-                    const int8_t* qs = (const int8_t*) (kb + (size_t) b * 34 + 2);
-                    float acc[kQH];
-#pragma unroll
-                    for (int h = 0; h < kQH; ++h) acc[h] = 0.f;
-                    for (int i = 0; i < 32; ++i) {
-                        const float kv = (float) qs[i];
-#pragma unroll
-                        for (int h = 0; h < kQH; ++h)
-                            if (h < QH) acc[h] += sq[h][(blk0 + b) * 32 + i] * kv;
-                    }
-#pragma unroll
-                    for (int h = 0; h < kQH; ++h) dot[h] += acc[h] * sc;
-                }
-            } else {
-                const __half2* kh = (const __half2*) kc + (size_t) g * (a.D / 2) + blk0 * 16;
-                for (int i = 0; i < nblk * 16; ++i) {
-                    const float2 kv = __half22float2(kh[i]);
-#pragma unroll
-                    for (int h = 0; h < kQH; ++h)
-                        if (h < QH) dot[h] += sq[h][blk0 * 32 + 2 * i] * kv.x + sq[h][blk0 * 32 + 2 * i + 1] * kv.y;
-                }
-            }
-        }
-        float l[kQH];
-        const int bi = (int) (d < a.ext ? d : a.ext);
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) {
-            if (per == 4) {   // the cell's four threads' shares
-                dot[h] += __shfl_xor_sync(0xffffffffu, dot[h], 1);
-                dot[h] += __shfl_xor_sync(0xffffffffu, dot[h], 2);
-            }
-            l[h] = ok && h < QH ? dot[h] * scale + a.bias[((size_t) t * a.H + g * QH + h) * (a.ext + 1) + bi] : -FLT_MAX;
-        }
-        // the step's largest logits, then the weights against the stretch's largest so far
-        float bm[kQH];
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) {
-            bm[h] = warp_max(l[h]);
-            if ((j & 31) == 0) red[j >> 5][h] = bm[h];
-        }
-        __syncthreads();
-        float scale_old[kQH];
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) {
-            bm[h] = fmaxf(fmaxf(red[0][h], red[1][h]), fmaxf(red[2][h], red[3][h]));
-            const float nm = fmaxf(m[h], bm[h]);
-            scale_old[h] = m[h] == -FLT_MAX ? 0.f : __expf(m[h] - nm);
-            m[h] = nm;
-        }
-        __syncthreads();
-        const bool mine = ok && j % per == 0;   // one of a cell's threads carries its weight
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) {
-            const float wgt = mine && h < QH ? __expf(l[h] - m[h]) : 0.f;
-            if (j % per == 0) sw[h][cell] = wgt;
-            const float ws = warp_sum(wgt);
-            if ((j & 31) == 0) red[j >> 5][kQH + h] = ws;
-        }
-        __syncthreads();
-#pragma unroll
-        for (int h = 0; h < kQH; ++h)
-            s[h] = s[h] * scale_old[h] + red[0][kQH + h] + red[1][kQH + h] + red[2][kQH + h] + red[3][kQH + h];
-        // the V step: thread j is value j
-        float acc[kQH];
-#pragma unroll
-        for (int h = 0; h < kQH; ++h) acc[h] = 0.f;
-        const int nc = (int) min((int64_t) a.sub, s1 - b0);
-        if (j < a.D) {
-            for (int ci = 0; ci < nc; ++ci) {
-                const uint8_t* vc = a.c.v + (size_t) (b0 + ci) * cbytes;
-                float vv;
-                if (a.c.q8) {
-                    const uint8_t* vb = vc + ((size_t) g * (a.D / 32) + j / 32) * 34;
-                    vv = __half2float(*(const __half*) vb) * (float) ((const int8_t*) vb)[2 + j % 32];
-                } else {
-                    vv = __half2float(((const __half*) vc)[(size_t) g * a.D + j]);
-                }
-#pragma unroll
-                for (int h = 0; h < kQH; ++h)
-                    if (h < QH) acc[h] += sw[h][ci] * vv;
-            }
-#pragma unroll
-            for (int h = 0; h < kQH; ++h) so[h] = so[h] * scale_old[h] + acc[h];
-        }
-        __syncthreads();
-    }
-    for (int h = 0; h < QH; ++h) {
-        float* o = out + (size_t) h * pstride;
-        if (j == 0) {
-            o[0] = m[h];
-            o[1] = s[h];
-        }
-        if (j < a.D) o[2 + j] = so[h];
-    }
-}
 
 /// The stretches' partial sums joined with the zero sink, times sigmoid(gate): the attention's output of T rows as
 /// floats ([T][H * D]) and as its q8_1 image.  A block a row and a query head; D threads (a warp a q8_1 block).
@@ -1656,28 +1336,40 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
     }
 }
 
-/// attn_tc_kernel for a decode forward's rows (2 .. kMaxT) over a stretch of a visit's cells: block (cb, g) takes the
+/// attn_tc_kernel for a decode forward's rows (1 .. kMaxT) over a stretch of a visit's cells: block (cb, g) takes the
 /// rows' query heads of K/V head g (row r: forward row r / QH, its head r % QH of g's; T QH <= 32) over stretch cb, in
-/// tiles of 32 cells, so a visit's cells are read once whatever the rows (a block a row reads them T times, and a full
-/// visit's cells are the time of a token deep in a context).  The stretches and their sums are attn_part_kernel's: m,
-/// the sum of exp(logit - m) and that-weighted V, no sink, into part [T][H][n_chunks][D + 2] (m = -1e30 and a sum of
-/// 0 where a row sees none of the cells); a ring's slot stands for the position last written there.  The arithmetic
-/// is the chunks': q and the probabilities as halves.  Grid (stretches, K/V heads), block 256.
+/// tiles of 32 cells, so a visit's cells are read once whatever the rows (a full visit's cells are the time of a token
+/// deep in a context).  A stretch's sums a row and head: m, the sum of exp(logit - m) and that-weighted V, no sink,
+/// into part [T][H][n_chunks][D + 2] (m = -1e30 and a sum of 0 where a row sees none of the cells).  A row's sums do
+/// not depend on the rows scored with it: a forward of several rows leaves what a row at a time leaves, to the bit.
+/// A ring's slot stands for the position last written there, and with `dyn` a ring's stretches start at slot dyn[2]
+/// and go on past its end to its start (the drafter's rings: the cells in use alone).  The arithmetic is the chunks':
+/// q and the probabilities as halves.  Grid (stretches, K/V heads), block 256.
 template <bool Q8>
 __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     constexpr int D = 128;
     __shared__ TcSmem sm;
     const int cb = blockIdx.x, g = blockIdx.y;
-    const int chunk = a.dyn ? a.dyn[0] : a.chunk;
     if (a.dyn && cb >= a.dyn[1]) return;
     const int QH = a.H / a.HK, NQ = T * QH;
     const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
     const int li = lane >> 3, lr = lane & 7, tig = lane & 3;
     const long long live = *a.live, last = live - 1, cap = (long long) a.c.cap, first = (long long) a.c.first;
-    // the block's cells: slots [s_lo, s_lo + cnt)
-    const long long s_lo = (a.dyn ? a.dyn[2] : 0) + (long long) cb * chunk;
-    const int cnt = (int) (min(s_lo + chunk, a.c.ring ? cap : live) - s_lo);
+    // the block's cells: slots [s_lo, s_lo + cnt), a ring's with `dyn` modulo its size
+    const bool wrap = !a.canon && a.c.ring && a.dyn != nullptr;
+    long long s_lo;
+    int cnt;
+    if (a.canon) {
+        const int i = a.dyn[2] + cb;
+        s_lo = max(stretch_lo(i), (long long) a.dyn[0]);
+        cnt = (int) (min(stretch_lo(i + 1), live) - s_lo);
+    } else {
+        const int chunk = a.dyn ? a.dyn[0] : a.chunk;
+        s_lo = (a.dyn ? a.dyn[2] : 0) + (long long) cb * chunk;
+        cnt = wrap ? chunk : (int) (min(s_lo + chunk, a.c.ring ? cap : live) - s_lo);
+    }
     const size_t cbytes = cell_bytes(a.c, a.HK, D);
+    auto slot_of = [&](int col) { return wrap ? (s_lo + col) % cap : s_lo + col; };
     // the queries as halves
     for (int i = tid; i < kTcRows * (D / 4); i += 256) {
         const int r = i / (D / 4), c4 = i % (D / 4);
@@ -1694,7 +1386,7 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
             nk[0] = nv[0] = make_uint4(0, 0, 0, 0);
             dk = dv = 0.f;
             if (base + c < cnt) {
-                const size_t at = (size_t) (s_lo + base + c) * cbytes + ((size_t) g * (D / 32) + pc / 2) * 34;
+                const size_t at = (size_t) slot_of(base + c) * cbytes + ((size_t) g * (D / 32) + pc / 2) * 34;
                 const uint8_t *kb = a.c.k + at, *vb = a.c.v + at;
                 dk = __half2float(*reinterpret_cast<const __half*>(kb));
                 dv = __half2float(*reinterpret_cast<const __half*>(vb));
@@ -1706,7 +1398,7 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
             for (int j = 0; j < 2; ++j) {
                 const int i = tid + 256 * j, c = i / 16, ch = i % 16;
                 if (base + c < cnt) {
-                    const size_t at = (size_t) (s_lo + base + c) * cbytes + (size_t) g * D * 2 + ch * 16;
+                    const size_t at = (size_t) slot_of(base + c) * cbytes + (size_t) g * D * 2 + ch * 16;
                     nk[j] = *reinterpret_cast<const uint4*>(a.c.k + at);
                     nv[j] = *reinterpret_cast<const uint4*>(a.c.v + at);
                 } else {
@@ -1773,7 +1465,7 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
             const int col = base + nt * 8 + 2 * tig + e;
-            const long long slot = s_lo + col;
+            const long long slot = slot_of(col);
             const long long cp = a.c.ring ? last - ((last - slot) % cap + cap) % cap : first + slot;
             const long long dA = pA - cp, dB = pB - cp;
             const bool okA = inA && col < cnt && cp >= 0 && dA >= 0 && (a.win == 0 || dA < a.win);

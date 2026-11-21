@@ -12,6 +12,7 @@
 //     or a full visit's every cell (FP16 or q8_0), the experts, the causal convolutions after each;
 //   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (bench/parity.py's interface through
 //     scratch/q36/logits_to_parity.py); --serve: lamina-server's line protocol.
+#include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
 
 #include "lamina/artifact/gguf_reader.hpp"
@@ -50,6 +51,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -135,13 +137,12 @@ template <class T> T* halloc(size_t n) {   // pinned
 }
 
 constexpr size_t kWeightPad = 4096;       // zero bytes after each weight: a kernel may read past a short last row
-constexpr int kChunks = 256;              // stretches of cells an attention launch splits a full visit's cells into at most
 constexpr int64_t kGrow = 4096;           // cells a full visit's storage grows by
 constexpr int64_t kContextFloor = 32768;  // a context not set is what fits, not under this
 // the vocabulary's message tokens: where a prompt's read places the cache's checkpoints
 constexpr int32_t kMsgFirst = 200000, kMsgLast = 200003;   // <|message_user|> .. <|message_tool|>
 constexpr int32_t kEndMessage = 200010;                    // <|end_message|>
-constexpr int kRingSub = ik::kSub / 4;    // cells a step of a window visit's attention (many short blocks: 1,024 cells)
+constexpr int kRingSub = ik::kTcCells;    // a window visit's ring: a multiple of an attention tile's cells
 constexpr int32_t kFar = 1 << 30;         // a row's position as a card sees it: every cell there is before it
 
 // ------------------------------------------------------------------------------------------------ the model
@@ -515,6 +516,159 @@ bool load(const std::string& path, Model& m, int threads, bool file_cache, size_
 // ------------------------------------------------------------------------------------------------ the engine
 /// The rows' buffers of a forward: the decode's (kMaxT rows), or a prompt chunk's (`cap` rows, `batch`: its matrix
 /// products through llama.cpp's MMQ, its routed entries grouped by expert, a window visit's cells in position order).
+// ------------------------------------------------------------------------------------------------ the drafter
+/// The model's block drafter as its file has it: DSpark (GGUF architecture dflash with a Markov head; unsloth's
+/// dspark-*.gguf beside the model).  A few dense layers over a block of rows - the last token and masks - whose
+/// attention reads, beside the block, context cells made from the target's own states of every position; then a
+/// recurrent head a drafted position.  llama.cpp's src/models/dspark.cpp (graph_inkling2) is the reference.
+struct SparkLayer {
+    Mat wq, wk, wv, wo, wk_ctx, wv_ctx, gate, up, down;
+    const float *attn_norm = nullptr, *ffn_norm = nullptr, *ctx_norm = nullptr, *q_norm = nullptr, *k_norm = nullptr,
+                *k_ctx_norm = nullptr;
+    bool window = false;   // its rows see the last n_swa context cells (else every one the engine keeps: --dspark-reach)
+};
+struct Spark {
+    int n_layer = 0, N = 0, H = 0, HK = 0, D = 0, F = 0, R = 0, block = 0, n_swa = 0, V = 0;
+    float eps = 1e-6f, cap = 30.f;
+    double rope_base = 1e6;
+    std::vector<int> taps;      // the target's layer applications whose inputs it reads; the last: the final normed state
+    std::vector<SparkLayer> layers;
+    std::vector<float> fuse;    // [n_layer + 1][taps]: each layer's weights of the taps, then the head's context's
+    const float *out_norm = nullptr, *mask = nullptr, *rnn_norm = nullptr, *joint_w = nullptr, *joint_b = nullptr;
+    const uint16_t* w1 = nullptr;     // [the vocabulary, padded][R] bfloat16: a token's row for the head
+    std::vector<float> hidden_cols;   // hidden_out's columns [R][N], then its bias [N]: the head's product is made of them
+    double gib = 0, load_s = 0;
+};
+
+/// The drafter of model `m` from `path`.  False with `err`: not such a file, or not one this path's kernels run.
+bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& err) {
+    const auto t0 = Clock::now();
+    const lamina::GgufModel gm = lamina::GgufModel::open(path);
+    const auto& f = gm.meta();
+    if (const lamina::MetaValue* a = f.get("general.architecture"); a == nullptr || a->s != "dflash") {
+        err = path + " is not a block drafter (general.architecture dflash)";
+        return false;
+    }
+    auto num = [&](const char* k, double def) {
+        const lamina::MetaValue* v = f.get(std::string("dflash.") + k);
+        return v && v->is_num() ? v->num() : def;
+    };
+    s.n_layer = (int) num("block_count", 0);
+    s.N = (int) num("embedding_length", 0);
+    s.F = (int) num("feed_forward_length", 0);
+    s.H = (int) num("attention.head_count", 0);
+    s.HK = (int) num("attention.head_count_kv", 0);
+    s.D = (int) num("attention.key_length", 0);
+    s.R = (int) num("dspark.markov_rank", 0);
+    s.block = (int) num("block_size", 0);
+    s.n_swa = (int) num("attention.sliding_window", 0);
+    s.V = (int) num("vocab_size_unpadded", 0);
+    s.eps = (float) num("attention.layer_norm_rms_epsilon", 1e-6);
+    s.cap = (float) num("final_logit_softcapping", 0);
+    s.rope_base = num("rope.freq_base", 10000.0);
+    const int Vp = (int) num("vocab_size", 0);
+    std::vector<uint64_t> tl, pat;
+    f.numbers("dflash.target_layers", &tl);
+    f.numbers("dflash.attention.sliding_window_pattern", &pat);
+    const Geometry& g = m.g;
+    auto no = [&](const std::string& what) {
+        err = "the drafter " + path + ": " + what;
+        return false;
+    };
+    if (s.R != 256 || gm.find("markov_w1.weight") == nullptr) return no("no Markov head of rank 256 (the model's own DSpark has one)");
+    if (s.block != kMaxT) return no("a block of " + std::to_string(s.block) + " rows, where the kernels take " + std::to_string(kMaxT));
+    if (s.N != g.n_embd || s.V != g.n_vocab || Vp < s.V) return no("another model's (its rows or its vocabulary are not this model's)");
+    if (s.D != 128 || s.HK <= 0 || s.H % s.HK != 0 || s.H / s.HK > ik::kQH || s.H * s.D % 256 != 0)
+        return no("heads the kernels do not take");
+    if (s.n_layer < 1 || s.n_layer > 3 || (int) pat.size() != s.n_layer || s.n_swa <= 0 || s.F % 32 != 0 || !(s.cap > 0))
+        return no("layers the kernels do not take");
+    if (tl.size() < 2 || tl.size() > 4 || (int64_t) tl.back() != g.n_visits()) return no("states of the target this path does not tap");
+    for (size_t i = 0; i < tl.size(); ++i) {
+        if (i > 0 && tl[i] <= tl[i - 1]) return no("states of the target out of order");
+        s.taps.push_back((int) tl[i]);
+    }
+    for (const char* k : {"dflash.attention.causal", "dflash.sample_from_anchor"})
+        if (const lamina::MetaValue* v = f.get(k); v && v->u != 0) return no(std::string(k) + " set");
+    Loader L{gm, {}, nullptr};
+    size_t fr0 = 0, tot = 0;
+    CK(cudaMemGetInfo(&fr0, &tot));
+    const size_t nt = s.taps.size();
+    {   // each row of the mix: the softmax of its weights
+        const std::vector<float> w = L.floats("dspark_fuse.weight");
+        if (w.size() != nt * (size_t) (s.n_layer + 1)) return no("a mix of the target's states of another shape");
+        s.fuse.resize(w.size());
+        for (int r = 0; r <= s.n_layer; ++r) {
+            double mx = -1e30, sum = 0;
+            for (size_t k = 0; k < nt; ++k) mx = std::max(mx, (double) w[(size_t) r * nt + k]);
+            for (size_t k = 0; k < nt; ++k) sum += std::exp((double) w[(size_t) r * nt + k] - mx);
+            for (size_t k = 0; k < nt; ++k) s.fuse[(size_t) r * nt + k] = (float) (std::exp((double) w[(size_t) r * nt + k] - mx) / sum);
+        }
+    }
+    s.out_norm = L.f32("output_norm.weight");
+    s.mask = L.f32("mask_embd.weight");
+    s.rnn_norm = L.f32("dspark_norm.weight");
+    s.joint_b = L.f32("joint_proj.bias");
+    {
+        const lamina::TensorInfo* t = L.find("joint_proj.weight");
+        if (t->shape.size() != 2 || (int64_t) t->shape[0] != 2 * s.R + 2 * s.N || (int64_t) t->shape[1] != 3 * s.R)
+            return no("a head projection of another shape");
+        s.joint_w = L.f32("joint_proj.weight");
+    }
+    {   // hidden_out [R -> N] by columns, its bias after them
+        const lamina::TensorInfo* t = L.find("dspark_hidden_out.weight");
+        if (t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != s.N) return no("a head output of another shape");
+        const std::vector<float> w = L.floats("dspark_hidden_out.weight"), b = L.floats("dspark_hidden_out.bias");
+        s.hidden_cols.resize((size_t) (s.R + 1) * s.N);
+        for (int o = 0; o < s.N; ++o) {
+            for (int r = 0; r < s.R; ++r) s.hidden_cols[(size_t) r * s.N + o] = w[(size_t) o * s.R + r];
+            s.hidden_cols[(size_t) s.R * s.N + o] = b[(size_t) o];
+        }
+    }
+    {
+        const lamina::TensorInfo* t = nullptr;
+        const uint8_t* src = L.host("markov_w1.weight", &t);
+        if (t->type != 30 || t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != Vp)
+            return no("a Markov table that is not [rank, vocabulary] bfloat16");
+        uint16_t* d = dalloc<uint16_t>((size_t) Vp * s.R);
+        CK(cudaMemcpy(d, src, (size_t) Vp * s.R * 2, cudaMemcpyHostToDevice));
+        s.w1 = d;
+    }
+    s.layers.resize((size_t) s.n_layer);
+    for (int i = 0; i < s.n_layer; ++i) {
+        SparkLayer& y = s.layers[(size_t) i];
+        const std::string b = "blk." + std::to_string(i) + ".";
+        y.window = pat[(size_t) i] != 0;
+        y.wq = L.mat(b + "attn_q.weight");
+        y.wk = L.mat(b + "attn_k.weight");
+        y.wv = L.mat(b + "attn_v.weight");
+        y.wo = L.mat(b + "attn_output.weight");
+        y.wk_ctx = L.mat(b + "attn_k_ctx.weight");
+        y.wv_ctx = L.mat(b + "attn_v_ctx.weight");
+        y.gate = L.mat(b + "ffn_gate.weight");
+        y.up = L.mat(b + "ffn_up.weight");
+        y.down = L.mat(b + "ffn_down.weight");
+        const int Q = s.H * s.D, KV = s.HK * s.D;
+        if (y.wq.n_in != s.N || y.wq.n_out != Q || y.wk.n_out != KV || y.wv.n_out != KV || y.wo.n_in != Q || y.wo.n_out != s.N ||
+            y.wk_ctx.n_in != s.N || y.wk_ctx.n_out != KV || y.wv_ctx.n_out != KV || y.gate.n_out != s.F || y.up.n_out != s.F ||
+            y.down.n_in != s.F || y.down.n_out != s.N)
+            return no("a layer's matrices of another shape");
+        for (const Mat* W : {&y.wk_ctx, &y.wv_ctx})
+            if (W->type != 30 && !(MMQ::built() && MMQ::fits(W->type, W->n_out) && !MMQ::native_fp4(W->type)))
+                return no("context projections in a format a prompt chunk's kernels do not read");
+        y.attn_norm = L.f32(b + "attn_norm.weight");
+        y.ffn_norm = L.f32(b + "ffn_norm.weight");
+        y.ctx_norm = L.f32(b + "dflare_norm.weight");
+        y.q_norm = L.f32(b + "attn_q_norm.weight");
+        y.k_norm = L.f32(b + "attn_k_norm.weight");
+        y.k_ctx_norm = L.f32(b + "attn_k_ctx_norm.weight");
+    }
+    size_t fr1 = 0;
+    CK(cudaMemGetInfo(&fr1, &tot));
+    s.gib = (double) (fr0 - fr1) / (double) (1ull << 30);
+    s.load_s = ms_since(t0) / 1000.0;
+    return true;
+}
+
 struct Rows {
     int cap = 0;
     bool batch = false;
@@ -547,9 +701,16 @@ struct Rows {
     float* wf = nullptr;   // a BF16 matrix widened to floats for a GEMM
     float *tqs = nullptr, *hqs = nullptr;   // the entries' row scales where the experts run on FP4 tensor cores
     float *cz = nullptr, *cs1 = nullptr, *cs2 = nullptr;   // the loop gates' normed pair [T][2 N] and their two products
+    // with the drafter: the rows' mixes of the target's states [its layers + 1][cap][N] (normed in place), a layer's
+    // context K and V projections and K rotated, the rows' rotations [cap][D / 2][2] (their pinned source), the mixes'
+    // q8_1 images (a decode forward's) or one's MMQ image (a chunk's)
+    float *f_fused = nullptr, *f_kc = nullptr, *f_vc = nullptr, *f_kn = nullptr, *f_cs = nullptr, *f_cs_h = nullptr;
+    ik::Q81* f_img = nullptr;
+    uint8_t* f_q = nullptr;
     int32_t *ent_row = nullptr, *ent_exp = nullptr, *bounds = nullptr, *ident = nullptr;
     int64_t ids_rows = 0;
     int32_t *ids_h = nullptr, *ent_row_h = nullptr, *ent_dst_h = nullptr, *ent_exp_h = nullptr, *bounds_h = nullptr;
+    int n_part = 0;   // stretches `part` holds a row and head
     int head_rows() const { return batch ? 1 : cap; }
 };
 
@@ -563,7 +724,6 @@ struct Engine {
     bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each); 2: every launch, by events
     int prof_level = 0;
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
-    bool rows_attn = std::getenv("LAMINA_INK_ROW_ATTN") == nullptr || std::atoi(std::getenv("LAMINA_INK_ROW_ATTN")) != 0;
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
     int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
     static constexpr int kChunkMin = 16;   // a shorter prompt part goes through the decode's forwards
@@ -593,6 +753,7 @@ struct Engine {
         cudaEvent_t ev = nullptr;         // behind its queued scan
         std::vector<std::unique_ptr<lamina::core::VmmRange>> k_vm, v_vm;   // a full visit each
         int64_t cap = 0, cells = 0;       // cells it has room for, and holds
+        int n_part = 0;                   // stretches its `part` holds a row and head
         float *q = nullptr, *ns = nullptr, *part = nullptr, *sum = nullptr;   // a decode forward's rows on the card
         float *cq = nullptr, *cns = nullptr, *csum = nullptr;                 // a chunk's
         int32_t* cpos = nullptr;          // its rows' positions (kFar)
@@ -629,6 +790,46 @@ struct Engine {
     std::map<int, std::vector<Seg>> seg_graphs;   // by rows * 16 + head rows
     std::vector<Seg>* cur_segs = nullptr;         // the one being captured
     bool capturing = false;
+
+    // ---- the drafter (--dspark): its weights, a ring of context cells a layer (K and V of every position the target
+    // ran, made from the target's states in that forward: positions as slots, so a block's own rows at the sequence's
+    // end go in after them and are written over by the rows that stay), the block's buffers, the head's product.
+    const Spark* sp = nullptr;
+    int64_t sp_reach = 32768;        // context cells a layer without a window keeps (--dspark-reach)
+    static constexpr int64_t kSparkSlack = 4096;   // cells a ring keeps past its layer's: a state may step back that far
+    struct SparkRing {
+        ik::Cells cells{};
+        int64_t see = 0;             // context cells its layer's rows see
+        int chunk = 0, n_chunks = 0; // a scan's stretches: cells each, how many at most
+    };
+    std::vector<SparkRing> sp_ring;
+    std::vector<double> sp_theta;    // a pair's angle a position
+    float* sp_wf = nullptr;          // a BF16 context projection widened to floats (a chunk's GEMM)
+    // the context the rings hold of the state's text: positions [sp_vlo, sp_vhi), written since without a break, the
+    // highest written since then one before sp_whi (a ring of `cap` slots has lost what is `cap` below that)
+    int64_t sp_vlo = 0, sp_vhi = 0, sp_whi = 0;
+    float* frnn = nullptr;           // [kMaxT][N]: the head's context of the last forward's rows (a chunk: its last row's)
+    int64_t frnn_p0 = -1;            // the first row's position
+    int frnn_n = 0;                  // rows of it that are the state's
+    struct SparkBlock {              // a block's rows
+        float *x = nullptr, *x0 = nullptr, *xn = nullptr, *qr = nullptr, *q = nullptr, *kr = nullptr, *vr = nullptr,
+              *kn = nullptr, *cs = nullptr, *zero = nullptr, *part = nullptr, *sum = nullptr, *ao = nullptr, *o = nullptr,
+              *g = nullptr, *u = nullptr, *h = nullptr, *d = nullptr, *hn = nullptr, *base = nullptr, *pre = nullptr,
+              *state = nullptr, *vpart = nullptr, *ctx = nullptr, *c0 = nullptr, *mscale = nullptr;
+        ik::Q81 *img = nullptr, *aimg = nullptr, *himg = nullptr, *hnimg = nullptr;
+        int8_t *M8 = nullptr, *lat = nullptr;   // [V][R]: the target's head over hidden_out's columns, a scale a token; a step's latent
+        // the step record: the rows' position for the scan (the block's last: every row sees the block), the cells in
+        // use, the rows' own positions, a layer's stretches {cells, in use, first slot}, the token before the drafts,
+        // then the head's {the drafts' joint probability, the floor, 1 once they ended}
+        int32_t *step = nullptr, *out = nullptr;
+        float *emb_h = nullptr, *cs_h = nullptr;
+        int32_t *step_h = nullptr, *out_h = nullptr;
+        int n_step = 0;
+    } sb;
+    cudaGraphExec_t sp_graph = nullptr;         // a block's layers and its first draft
+    std::map<int, cudaGraphExec_t> sp_graphs;   // the drafts after the first: by their count
+    long long sp_blocks = 0;
+    double sp_ms = 0;
 
     uint8_t* rings = nullptr;        // the window visits' cells
     size_t ring_bytes = 0;           // all of them
@@ -726,7 +927,6 @@ struct Engine {
         R.bias = dzero<float>(T * H * (ext_max + 1));
         R.kc = dzero<float>(T * KV);
         R.vc = dzero<float>(T * KV);
-        if (!batch) R.part = dzero<float>(T * H * (size_t) kChunks * (D_ + 2));
         R.aout = dzero<float>(T * Q);
         R.aimg = dzero<ik::Q81>(Th * (Q / 32));
         R.oraw = dzero<float>(T * N);
@@ -741,10 +941,21 @@ struct Engine {
         R.pick = dzero<int32_t>(2 * Th);
         R.bad = R.pick + Th;
         R.pick_h = halloc<int32_t>(2 * Th);
+        if (sp != nullptr) {
+            const size_t L = (size_t) sp->n_layer, KVs = (size_t) sp->HK * (size_t) sp->D;
+            R.f_fused = dzero<float>((L + 1) * T * N);
+            R.f_kc = dzero<float>(T * KVs);
+            R.f_vc = dzero<float>(T * KVs);
+            R.f_kn = dzero<float>(T * KVs);
+            R.f_cs = dzero<float>(T * (size_t) sp->D);
+            R.f_cs_h = halloc<float>(T * (size_t) sp->D);
+            if (batch) R.f_q = dzero<uint8_t>(MMQ::q8_bytes((int64_t) T, (int64_t) N));
+            else R.f_img = dzero<ik::Q81>(L * T * (N / 32));
+        }
         R.step_d = dzero<int32_t>(T + 5);
         R.pos_d = R.step_d;
         R.live_d = R.step_d + T;
-        R.dyn_d = R.step_d + T + 1;   // {stretch, stretches in use, the first cell}
+        R.dyn_d = R.step_d + T + 1;   // {the first cell in use, the stretches in use, the first one's number}
         R.wlive_d = R.step_d + T + 4;
         R.emb_h = halloc<float>(T * N);
         R.step_h = halloc<int32_t>(T + 5);
@@ -837,6 +1048,7 @@ struct Engine {
         cell_bytes = kv_q8 ? (size_t) g.n_head_kv * (D_ / 32) * 34 : KV * 2;
         make_rows(D, kMaxT, false);
         logits_h = halloc<float>((size_t) g.n_vocab);
+        if (sp != nullptr) spark_init();
         if (prefill > 0) {
             if (const std::string why = batch_problem(); !why.empty()) {
                 std::fprintf(stderr, "lamina: prompts go through the decode's forwards, %d rows at a time: %s\n", kMaxT,
@@ -854,7 +1066,8 @@ struct Engine {
                     const uint64_t ring = (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell_bytes *
                                           (uint64_t) ((g.n_swa + kMaxT + kRingSub - 1) / kRingSub * kRingSub);
                     const uint64_t rest = ring * (cache_on ? 2 : 1) + (32ull << 20);
-                    auto rows_bytes = [&](int rows) { return (uint64_t) rows * (753ull << 10) + (125ull << 20); };
+                    // (with the drafter: the rows' mixes of the target's states and their context projections)
+                    auto rows_bytes = [&](int rows) { return (uint64_t) rows * ((753ull + (sp ? 52 : 0)) << 10) + (125ull << 20); };
                     size_t fr = 0, tot = 0;
                     CK(cudaMemGetInfo(&fr, &tot));
                     const int asked = prefill;
@@ -919,6 +1132,13 @@ struct Engine {
         const uint64_t per_pos = (uint64_t) g.n_full_visits() * 2 * cell_bytes;
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
+        {   // (first the decode rows' partial sums, a stretch each of the cells this card may hold: VRAM too)
+            const int64_t want = max_ctx > 0 ? max_ctx : (m->trained_ctx > 0 ? m->trained_ctx : 1048576);
+            const int64_t held = std::min<int64_t>(want, (int64_t) ((fr > reserve ? fr - reserve : 0) / per_pos));
+            D.n_part = stretches(held + 2 * 32768) + 2;
+            D.part = dzero<float>((size_t) kMaxT * (size_t) g.n_head * (size_t) D.n_part * (D_ + 2));
+            CK(cudaMemGetInfo(&fr, &tot));
+        }
         int64_t fits = (int64_t) ((fr > reserve ? fr - reserve : 0) / per_pos) / kGrow * kGrow;
         grow = grow_cells && lamina::core::vmm_available();
         CK(cudaGetDevice(&main_dev));
@@ -1056,7 +1276,7 @@ struct Engine {
             if (gi.ordinal == dev) desktop = lamina::core::gpu_in_desktop_use(gi.bus_id, known);
         const uint64_t keep = (uint64_t) (known && !desktop ? 700 : 1536) << 20;
         // (its own buffers: a decode forward's rows and stretches, a chunk's rows, and room to spare)
-        const uint64_t own_bytes = rows * (D_ + 1 + (size_t) kChunks * (D_ + 2) + (D_ + 2)) * 4 +
+        const uint64_t own_bytes = rows * (D_ + 1 + (size_t) stretches(1 << 20) * (D_ + 2) + (D_ + 2)) * 4 +
                                    (uint64_t) std::max(prefill, 0) * (uint64_t) g.n_head * (2 * D_ + 4) * 4 + (64ull << 20);
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
@@ -1097,7 +1317,8 @@ struct Engine {
         };
         c.q = (float*) dev_alloc(rows * D_ * 4);
         c.ns = (float*) dev_alloc(rows * 4);
-        c.part = (float*) dev_alloc(rows * (size_t) kChunks * (D_ + 2) * 4);
+        c.n_part = stretches(c.cap);
+        c.part = (float*) dev_alloc(rows * (size_t) c.n_part * (D_ + 2) * 4);
         c.sum = (float*) dev_alloc(rows * (D_ + 2) * 4);
         c.step = (int32_t*) dev_alloc((kMaxT + 4) * 4);
         c.step_h = (int32_t*) host_alloc((kMaxT + 4) * 4);
@@ -1272,12 +1493,10 @@ struct Engine {
         for (Card& c : cards) {
             if (c.cells == 0) continue;
             CK(cudaSetDevice(c.dev));
-            const int64_t per = (c.cells + kChunks - 1) / kChunks;
-            const int64_t chunk = std::max<int64_t>(ik::kSub, (per + ik::kSub - 1) / ik::kSub * ik::kSub);
             for (int t = 0; t < kMaxT; ++t) c.step_h[t] = kFar;
             c.step_h[kMaxT] = (int32_t) c.cells;
-            c.step_h[kMaxT + 1] = (int32_t) chunk;
-            c.step_h[kMaxT + 2] = (int32_t) ((c.cells + chunk - 1) / chunk);
+            c.step_h[kMaxT + 1] = 0;
+            c.step_h[kMaxT + 2] = (int32_t) stretches(c.cells);
             c.step_h[kMaxT + 3] = 0;
             CK(cudaMemcpyAsync(c.step, c.step_h, (kMaxT + 4) * 4, cudaMemcpyHostToDevice, c.st));
             CK(cudaMemcpyAsync(c.q, xq_h, (size_t) T * H * D_ * 4, cudaMemcpyHostToDevice, c.st));
@@ -1300,10 +1519,10 @@ struct Engine {
             at.D = D_;
             at.ext = 0;
             at.win = 0;
-            at.sub = ik::kSub;
-            at.n_chunks = kChunks;
-            scan(at, T, true, c.st);
-            ik::JoinIn j{c.part, c.sum, at.dyn, H, D_, kChunks};
+            at.n_chunks = c.n_part;
+            at.canon = 1;
+            scan(at, T, c.st);
+            ik::JoinIn j{c.part, c.sum, at.dyn, H, D_, c.n_part};
             ik::attn_join_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, c.st>>>(j);
             CK(cudaMemcpyAsync(c.sum_h, c.sum, (size_t) T * H * (D_ + 2) * 4, cudaMemcpyDeviceToHost, c.st));
             CK(cudaEventRecord(c.ev, c.st));
@@ -1368,19 +1587,19 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         cards_scan(fi, T);
     }
+    /// A range's stretches that cover its first `cells` cells (ik::stretch_lo), and the one that holds cell `cell`
+    static int stretches(int64_t cells) {
+        if (cells <= 4096) return (int) ((cells + 127) / 128);
+        if (cells <= 36864) return 32 + (int) ((cells - 4096 + 511) / 512);
+        return 96 + (int) ((cells - 36864 + 2047) / 2048);
+    }
+    static int stretch_of(int64_t cell) { return stretches(cell + 1) - 1; }
     /// A decode forward's scan of a visit's cells on stream `s`: every row's in one launch on the tensor cores
-    /// (attn_rows_kernel; a test's LAMINA_INK_ROW_ATTN=0: a block a row as a forward of one row, whose sums a window's
-    /// then are to the bit), one row's by the kernel its cells take
-    void scan(const ik::AttnIn& at, int T, bool full, cudaStream_t s) {
-        if (T > 1 && rows_attn) {
-            const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK);
-            if (kv_q8) ik::attn_rows_kernel<true><<<grid, 256, 0, s>>>(at, T);
-            else ik::attn_rows_kernel<false><<<grid, 256, 0, s>>>(at, T);
-            return;
-        }
-        const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK, (unsigned) T);
-        if (full && !kv_q8) ik::attn_wide_kernel<<<grid, ik::kSub, 0, s>>>(at);
-        else ik::attn_part_kernel<<<grid, ik::kSub, 0, s>>>(at);
+    /// (attn_rows_kernel), each row's sums what they are when it is scored alone
+    void scan(const ik::AttnIn& at, int T, cudaStream_t s) {
+        const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK);
+        if (kv_q8) ik::attn_rows_kernel<true><<<grid, 256, 0, s>>>(at, T);
+        else ik::attn_rows_kernel<false><<<grid, 256, 0, s>>>(at, T);
     }
     /// The cards' sums are in pinned memory: the next segment takes them
     void seg_begin() {
@@ -1717,6 +1936,9 @@ struct Engine {
                 copy(R.x, R.prelude, TN);
             }
         }
+        if (sp != nullptr)
+            for (size_t k = 0; k + 1 < sp->taps.size(); ++k)
+                if (sp->taps[k] == v) run("d: tap", [&] { spark_tap(R, (int) k, T, R.x); });
         const int use_pass = l >= g.loop_end ? (int) g.n_pass - 1 : pass;
         const float* blks[ik::kBlk] = {};
         const int nb = (l + res - 1) / res;
@@ -1937,16 +2159,13 @@ struct Engine {
                 ik::tc_merge_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(mg);
             }
         } else {
-            if (V.cells.ring) {
-                // (a forward of several rows: three tiles a block of attn_rows_kernel, where the ring divides so)
-                const bool tiles = T > 1 && rows_attn && ring_cap % (3 * kRingSub) == 0;
-                at.sub = kRingSub;
-                at.chunk = tiles ? 3 * kRingSub : kRingSub;
+            if (V.cells.ring) {   // three tiles a block, where the ring divides so
+                at.chunk = ring_cap % (3 * kRingSub) == 0 ? 3 * kRingSub : kRingSub;
                 at.n_chunks = (int) (ring_cap / at.chunk);
             } else {   // the stretches from the step record: the same launch for any number of cells
                 at.dyn = R.dyn_d;
-                at.sub = ik::kSub;
-                at.n_chunks = kChunks;
+                at.n_chunks = R.n_part;
+                at.canon = 1;
             }
             // cells on cards: the rows' q and -sink go to them (pinned memory), they score their cells while this card
             // scores its own, and their sums come back for the join
@@ -1958,7 +2177,7 @@ struct Engine {
                 seg_end(full_of[(size_t) v], T);
                 if (capturing) cur_segs->back().at = at;
             }
-            run(L.full ? "a: attention's sums, full" : "a: attention's sums, window", [&] { scan(at, T, L.full, st); });
+            run(L.full ? "a: attention's sums, full" : "a: attention's sums, window", [&] { scan(at, T, st); });
             ik::AttnOutIn a{R.part, R.graw, L.wo.type == 30 ? R.aout : nullptr, R.aimg, at.dyn, H, D_, at.n_chunks};
             if (carded) {
                 (void) cudaStreamQuery(st);   // (this card's scan runs beside theirs)
@@ -2113,33 +2332,414 @@ struct Engine {
         tick("head");
     }
 
-    /// T tokens' embedding rows as the first layer reads them (normed by the embedding's weight), in R.emb_h
-    void embed(Rows& R, const int32_t* tok, int T) {
+    /// With the drafter: every row's final normed state (the last of the states it reads) and the rows' context cells,
+    /// then the logits of the last n rows
+    void head_all(Rows& R, int T, int n) {
+        const Geometry& g = m->g;
+        const int N = (int) g.n_embd;
+        const float* blks[ik::kBlk] = {};
+        for (int b = 0; b < nblocks(); ++b) blks[b] = blk_at(R, b, (int) g.n_pass - 1);
+        mix(blks, nblocks(), R.x, m->out_query, 1, R.mixed, nullptr, T);
+        ik::NormIn a{};
+        a.x[0] = R.mixed;
+        a.w[0] = m->out_norm;
+        a.y[0] = R.nrm;
+        a.q[0] = R.batch ? nullptr : R.img;
+        a.n = 1;
+        a.N = N;
+        a.eps = g.eps;
+        ik::norm_kernel<<<dim3((unsigned) T, 1), row4(), 0, st>>>(a);
+        spark_tap(R, (int) sp->taps.size() - 1, T, R.nrm);
+        spark_inject(R, T);
+        if (n > 0) {
+            const int r0 = T - n;
+            const ik::Q81* img = R.img + (size_t) r0 * (size_t) (N / 32);
+            if (R.batch) {   // (a chunk's rows have no images: its last row's)
+                ik::quant_kernel<<<dim3((unsigned) ((N / 32 + 7) / 8), (unsigned) n), ik::kTB, 0, st>>>(R.nrm + (size_t) r0 * N,
+                                                                                                    R.img, N);
+                img = R.img;
+            }
+            mm(m->head, img, R.nrm + (size_t) r0 * N, R.logits, n);
+            CK(cudaMemsetAsync(R.bad, 0, (size_t) n * 4, st));
+            const long long cnt = (long long) n * g.n_vocab;
+            ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap, (int) g.n_vocab, R.bad);
+            lg_rows = &R;
+        }
+        tick("head");
+    }
+
+    /// A token's embedding row as the first layer reads it (normed by the embedding's weight)
+    void embed_row(int32_t tok, float* row) {
         const Geometry& g = m->g;
         const size_t N = (size_t) g.n_embd;
         const ggml_type_traits* tr = m->embd_type != 0 ? ggml_get_type_traits((ggml_type) m->embd_type) : nullptr;
-        for (int t = 0; t < T; ++t) {
-            float* row = R.emb_h + (size_t) t * N;
-            const uint8_t* src = m->embd.get() + (size_t) tok[t] * m->embd_row;
-            if (tr) tr->to_float(src, row, (int64_t) N);
-            else std::memcpy(row, src, N * 4);
-            double ss = 0;
-            for (size_t i = 0; i < N; ++i) ss += (double) row[i] * (double) row[i];
-            const float inv = 1.0f / std::sqrt((float) (ss / (double) N) + g.eps);
-            for (size_t i = 0; i < N; ++i) row[i] = row[i] * inv * m->tok_norm[i];
+        const uint8_t* src = m->embd.get() + (size_t) tok * m->embd_row;
+        if (tr) tr->to_float(src, row, (int64_t) N);
+        else std::memcpy(row, src, N * 4);
+        double ss = 0;
+        for (size_t i = 0; i < N; ++i) ss += (double) row[i] * (double) row[i];
+        const float inv = 1.0f / std::sqrt((float) (ss / (double) N) + g.eps);
+        for (size_t i = 0; i < N; ++i) row[i] = row[i] * inv * m->tok_norm[i];
+    }
+    /// T tokens' rows, in R.emb_h
+    void embed(Rows& R, const int32_t* tok, int T) {
+        for (int t = 0; t < T; ++t) embed_row(tok[t], R.emb_h + (size_t) t * (size_t) m->g.n_embd);
+    }
+
+    // ---- the drafter
+    /// A pair's cosine and sine for rows at positions p0, p0 + 1, ..: cs_h [T][D / 2][2] (in doubles: a position past
+    /// a million leaves a float no angle)
+    void rope_rows(float* cs_h, int64_t p0, int T) {
+        const size_t half = sp_theta.size();
+        for (int t = 0; t < T; ++t)
+            for (size_t k = 0; k < half; ++k) {
+                const double th = std::fmod((double) (p0 + t) * sp_theta[k], 6.283185307179586476925);
+                cs_h[((size_t) t * half + k) * 2] = (float) std::cos(th);
+                cs_h[((size_t) t * half + k) * 2 + 1] = (float) std::sin(th);
+            }
+    }
+    /// The drafter's buffers, its rings and the head's product (before the context is sized: VRAM the cells do not get)
+    void spark_init() {
+        const Spark& s = *sp;
+        const size_t N = (size_t) s.N, Q = (size_t) s.H * s.D, KV = (size_t) s.HK * s.D, F = (size_t) s.F, T = kMaxT,
+                     V = (size_t) s.V, R_ = (size_t) s.R;
+        for (int k = 0; k < s.D / 2; ++k) sp_theta.push_back(std::pow(s.rope_base, -2.0 * k / (double) s.D));
+        // the rings: a layer's cells, the block's after them, and the slack; whole stretches of whole tiles
+        sp_ring.resize((size_t) s.n_layer);
+        int max_ch = 1;
+        for (int l = 0; l < s.n_layer; ++l) {
+            SparkRing& r = sp_ring[(size_t) l];
+            r.see = s.layers[(size_t) l].window ? s.n_swa : std::max<int64_t>(sp_reach, s.n_swa);
+            // (three tiles a stretch at least, thirty at most, about 64 stretches between)
+            r.chunk = (int) std::max<int64_t>(3, std::min<int64_t>(30, (r.see + (int64_t) T + 64 * ik::kTcCells - 1) / (64 * ik::kTcCells))) *
+                      ik::kTcCells;
+            r.n_chunks = (int) ((r.see + T + r.chunk - 1) / r.chunk);
+            r.cells.ring = 1;
+            r.cells.q8 = 0;
+            r.cells.cap = (r.see + (int64_t) T + kSparkSlack + 2 * r.chunk - 1) / r.chunk * r.chunk;
+            r.cells.k = dzero<uint8_t>((size_t) r.cells.cap * KV * 2);
+            r.cells.v = dzero<uint8_t>((size_t) r.cells.cap * KV * 2);
+            max_ch = std::max(max_ch, r.n_chunks);
         }
+        frnn = dzero<float>(T * N);
+        for (const SparkLayer& y : s.layers)
+            if ((y.wk_ctx.type == 30 || y.wv_ctx.type == 30) && sp_wf == nullptr) sp_wf = dzero<float>(KV * N);
+        SparkBlock& b = sb;
+        b.x = dzero<float>(T * N);
+        b.x0 = dzero<float>(T * N);
+        b.xn = dzero<float>(T * N);
+        b.img = dzero<ik::Q81>(T * (N / 32));
+        b.qr = dzero<float>(T * Q);
+        b.q = dzero<float>(T * Q);
+        b.kr = dzero<float>(T * KV);
+        b.vr = dzero<float>(T * KV);
+        b.kn = dzero<float>(T * KV);
+        b.cs = dzero<float>(T * (size_t) s.D);
+        b.zero = dzero<float>(T * (size_t) s.H);
+        b.part = dzero<float>(T * (size_t) s.H * (size_t) max_ch * (size_t) (s.D + 2));
+        b.sum = dzero<float>(T * (size_t) s.H * (size_t) (s.D + 2));
+        b.ao = dzero<float>(T * Q);
+        b.aimg = dzero<ik::Q81>(T * (Q / 32));
+        b.o = dzero<float>(T * N);
+        b.g = dzero<float>(T * F);
+        b.u = dzero<float>(T * F);
+        b.h = dzero<float>(T * F);
+        b.himg = dzero<ik::Q81>(T * (F / 32));
+        b.d = dzero<float>(T * N);
+        b.hn = dzero<float>(T * N);
+        b.hnimg = dzero<ik::Q81>(T * (N / 32));
+        b.base = dzero<float>(T * V);
+        b.pre = dzero<float>(T * 3 * R_);
+        b.state = dzero<float>(R_);
+        b.lat = dzero<int8_t>(R_);
+        b.vpart = dzero<float>((V + 255) / 256 * 3);
+        b.ctx = dzero<float>(N);
+        b.c0 = dzero<float>(V);
+        b.M8 = dzero<int8_t>(V * R_);
+        b.mscale = dzero<float>(V);
+        b.n_step = 2 * (int) T + 5 + 3 * s.n_layer;
+        b.step = dzero<int32_t>((size_t) b.n_step);
+        b.out = dzero<int32_t>(2 * T);
+        b.emb_h = halloc<float>(N);
+        b.cs_h = halloc<float>(T * (size_t) s.D);
+        b.step_h = halloc<int32_t>((size_t) b.n_step);
+        b.out_h = halloc<int32_t>(2 * T);
+        // a block's rows before its layers: the token's row comes into the first, the others are the mask
+        for (size_t t = 1; t < T; ++t) CK(cudaMemcpy(b.x0 + t * N, s.mask, N * 4, cudaMemcpyDeviceToDevice));
+        // the head's product: the target's head over hidden_out's columns, 8 a pass; over its bias; then as bytes
+        float* cols = nullptr;
+        __half* M = nullptr;
+        CK(cudaMalloc(&cols, s.hidden_cols.size() * 4));
+        CK(cudaMalloc(&M, V * R_ * 2));
+        CK(cudaMemcpy(cols, s.hidden_cols.data(), s.hidden_cols.size() * 4, cudaMemcpyHostToDevice));
+        for (size_t c = 0; c <= R_; c += T) {
+            const int n = (int) std::min(T, R_ + 1 - c);
+            ik::quant_kernel<<<dim3((unsigned) ((N / 32 + 7) / 8), (unsigned) n), ik::kTB, 0, st>>>(cols + c * N, b.img, (int) N);
+            mm(m->head, b.img, cols + c * N, b.base, n);
+            const int nm = (int) std::min<size_t>((size_t) n, R_ - std::min(c, R_));
+            if (nm > 0) {
+                const long long cnt = (long long) nm * (long long) V;
+                ik::head_m_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(b.base, M, (int) V, (int) R_, (int) c, nm);
+            }
+            if (c + (size_t) n > R_)   // the bias's row is this pass's last
+                CK(cudaMemcpyAsync(b.c0, b.base + (size_t) (n - 1) * V, V * 4, cudaMemcpyDeviceToDevice, st));
+        }
+        ik::head_m8_kernel<<<(unsigned) V, 256, 0, st>>>(M, b.M8, b.mscale, (int) R_);
+        CK(cudaStreamSynchronize(st));
+        CK(cudaFree(M));
+        CK(cudaFree(cols));
+    }
+    /// A tapped state of T rows into the mixes of R
+    void spark_tap(Rows& R, int k, int T, const float* x) {
+        const Spark& s = *sp;
+        ik::FuseIn a{x, R.f_fused, {}, s.n_layer + 1, s.N, R.cap, k == 0 ? 1 : 0};
+        for (int r = 0; r <= s.n_layer; ++r) a.c[r] = s.fuse[(size_t) r * s.taps.size() + (size_t) k];
+        ik::fuse_kernel<<<dim3((unsigned) ((s.N / 4 + ik::kTB - 1) / ik::kTB), (unsigned) T), ik::kTB, 0, st>>>(a);
+    }
+    /// The rows' context cells of every drafter layer from their mixes, and the head's context of each row (a chunk:
+    /// of its last)
+    void spark_inject(Rows& R, int T) {
+        const Spark& s = *sp;
+        const int N = s.N, L = s.n_layer;
+        const size_t TN = (size_t) R.cap * (size_t) N;
+        ik::NormIn a{};
+        for (int l = 0; l < L; ++l) {
+            a.x[l] = a.y[l] = R.f_fused + (size_t) l * TN;
+            a.w[l] = s.layers[(size_t) l].ctx_norm;
+            a.q[l] = R.batch ? nullptr : R.f_img + (size_t) l * (size_t) R.cap * (size_t) (N / 32);
+        }
+        a.n = L;
+        a.N = N;
+        a.eps = s.eps;
+        run("d: mixes normed", [&] { ik::norm_kernel<<<dim3((unsigned) T, (unsigned) L), row4(), 0, st>>>(a); });
+        {
+            const int r0 = R.batch ? T - 1 : 0, n = R.batch ? 1 : T;
+            ik::NormIn b{};
+            b.x[0] = R.f_fused + (size_t) L * TN + (size_t) r0 * N;
+            b.w[0] = s.rnn_norm;
+            b.y[0] = frnn;
+            b.n = 1;
+            b.N = N;
+            b.eps = s.eps;
+            run("d: head's context", [&] { ik::norm_kernel<<<dim3((unsigned) n, 1), row4(), 0, st>>>(b); });
+        }
+        for (int l = 0; l < L; ++l) {
+            const SparkLayer& y = s.layers[(size_t) l];
+            const float* cx = R.f_fused + (size_t) l * TN;
+            if (R.batch) {   // MMQ over the rows' image, made once a layout; a BF16 matrix widened, then a GEMM
+                int have = -1;
+                for (const auto& [W, out] : {std::pair<const Mat*, float*>{&y.wk_ctx, R.f_kc}, {&y.wv_ctx, R.f_vc}}) {
+                    if (W->type == 30) {
+                        const long long cnt = (long long) W->n_out * W->n_in;
+                        ik::bf16_floats_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>((const uint16_t*) W->d, sp_wf, cnt);
+                        gemm(sp_wf, W->n_out, W->n_in, cx, T, out);
+                        continue;
+                    }
+                    if (const int lay = MMQ::ds_layout(W->type); lay != have) {
+                        MMQ::quantize(cx, nullptr, R.f_q, W->type, N, N, T, st);
+                        have = lay;
+                    }
+                    mmq->run_dense(W->d, W->type, W->n_out, N, R.f_q, T, out, W->n_out, st);
+                }
+            } else {
+                const ik::Q81* img = R.f_img + (size_t) l * (size_t) R.cap * (size_t) (N / 32);
+                run("d: context k's product", [&] { mm(y.wk_ctx, img, cx, R.f_kc, T); });
+                run("d: context v's product", [&] { mm(y.wv_ctx, img, cx, R.f_vc, T); });
+            }
+            run("d: context cells", [&] {
+                ik::head_rope_kernel<<<dim3((unsigned) T, (unsigned) s.HK), 128, 0, st>>>(R.f_kc, y.k_ctx_norm, R.f_cs, R.f_kn, s.HK,
+                                                                                         s.D, s.eps);
+                ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) s.HK), 128, 0, st>>>(sp_ring[(size_t) l].cells, R.f_kn,
+                                                                                            R.f_vc, R.pos_d, s.HK, s.D);
+            });
+        }
+        tick("drafter's context");
+    }
+    /// A forward or a chunk wrote the context cells of positions [p0, p0 + T)
+    void spark_wrote(int64_t p0, int T, bool is_chunk) {
+        if (sp == nullptr) return;
+        if (p0 > sp_vhi || p0 < sp_vlo) {   // not on from what the rings hold: they start again here
+            sp_vlo = p0;
+            sp_whi = 0;
+        }
+        sp_vhi = p0 + T;
+        sp_whi = std::max(sp_whi, p0 + T);
+        frnn_p0 = is_chunk ? p0 + T - 1 : p0;
+        frnn_n = is_chunk ? 1 : T;
+    }
+    /// The state's text is another one from position `at` on
+    void spark_cut(int64_t at) {
+        sp_vhi = std::min(sp_vhi, at);
+        sp_vlo = std::min(sp_vlo, sp_vhi);
+        frnn_n = 0;
+    }
+    /// The head's steps for the block's rows [i0, i1]: the target's head over them, then a draft a row while the
+    /// drafts' joint probability stays at the floor (out: a token and its probability's bits a step, -1 from where
+    /// they ended)
+    void spark_steps(int i0, int i1) {
+        const Spark& s = *sp;
+        SparkBlock& b = sb;
+        const int N = s.N, V = s.V, R_ = s.R, T = kMaxT, nb = (V + 255) / 256;
+        int32_t* prev = b.step + 2 * T + 1 + 3 * s.n_layer;
+        int32_t* ctl = prev + 1;
+        mm(m->head, b.hnimg + (size_t) i0 * (size_t) (N / 32), b.hn + (size_t) i0 * N, b.base + (size_t) i0 * (size_t) V, i1 - i0 + 1);
+        tick("drafter: the target's head");
+        for (int i = i0; i <= i1; ++i) {
+            ik::StepIn si{s.joint_w, b.pre + (size_t) i * 3 * (size_t) R_, s.w1, prev, b.state, b.lat, R_, 2 * R_ + 2 * N, ctl + 2};
+            ik::head_step_kernel<<<1, 256, 0, st>>>(si);
+            ik::VocabIn vi{b.base + (size_t) i * (size_t) V, b.c0, b.mscale, b.M8, b.lat, b.vpart, V, R_, s.cap, ctl + 2};
+            ik::head_vocab_kernel<<<(unsigned) nb, 256, 0, st>>>(vi);
+            ik::head_pick_kernel<<<1, 1024, 0, st>>>(b.vpart, nb, b.out + 2 * (i - 1), prev, ctl);
+        }
+        tick("drafter: the head's steps");
+        CK(cudaMemcpyAsync(b.out_h, b.out, (size_t) 2 * T * 4, cudaMemcpyDeviceToHost, st));
+    }
+    /// A block's launches: [the token, masks] through the layers, then the first draft
+    void spark_launches() {
+        const Spark& s = *sp;
+        SparkBlock& b = sb;
+        const int T = kMaxT, N = s.N, F = s.F, R_ = s.R;
+        const size_t TN = (size_t) T * (size_t) N;
+        CK(cudaMemcpyAsync(b.x, b.x0, TN * 4, cudaMemcpyDeviceToDevice, st));
+        CK(cudaMemcpyAsync(b.x, b.emb_h, (size_t) N * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(b.step, b.step_h, (size_t) b.n_step * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(b.cs, b.cs_h, (size_t) T * (size_t) s.D * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemsetAsync(b.state, 0, (size_t) R_ * 4, st));
+        CK(cudaMemsetAsync(b.out, 0xff, (size_t) 2 * T * 4, st));
+        const int32_t *pos_scan = b.step, *live = b.step + T, *pos_own = b.step + T + 1, *dyn0 = b.step + 2 * T + 1;
+        const dim3 gN((unsigned) ((TN + 255) / 256));
+        auto norm = [&](const float* x, const float* w, float* y, ik::Q81* q) {
+            ik::NormIn a{};
+            a.x[0] = x;
+            a.w[0] = w;
+            a.y[0] = y;
+            a.q[0] = q;
+            a.n = 1;
+            a.N = N;
+            a.eps = s.eps;
+            ik::norm_kernel<<<dim3((unsigned) T, 1), row4(), 0, st>>>(a);
+        };
+        for (int l = 0; l < s.n_layer; ++l) {
+            const SparkLayer& y = s.layers[(size_t) l];
+            const SparkRing& r = sp_ring[(size_t) l];
+            norm(b.x, y.attn_norm, b.xn, b.img);
+            mm(y.wq, b.img, b.xn, b.qr, T);
+            mm(y.wk, b.img, b.xn, b.kr, T);
+            mm(y.wv, b.img, b.xn, b.vr, T);
+            ik::head_rope_kernel<<<dim3((unsigned) T, (unsigned) s.H), 128, 0, st>>>(b.qr, y.q_norm, b.cs, b.q, s.H, s.D, s.eps);
+            ik::head_rope_kernel<<<dim3((unsigned) T, (unsigned) s.HK), 128, 0, st>>>(b.kr, y.k_norm, b.cs, b.kn, s.HK, s.D, s.eps);
+            ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) s.HK), 128, 0, st>>>(r.cells, b.kn, b.vr, pos_own, s.HK, s.D);
+            ik::AttnIn at{};
+            at.c = r.cells;
+            at.q = b.q;
+            at.bias = b.zero;
+            at.pos = pos_scan;
+            at.live = live;
+            at.dyn = dyn0 + 3 * l;
+            at.part = b.part;
+            at.H = s.H;
+            at.HK = s.HK;
+            at.D = s.D;
+            at.ext = 0;
+            at.win = (int) (r.see + T);
+            at.chunk = r.chunk;
+            at.n_chunks = r.n_chunks;
+            ik::attn_rows_kernel<false><<<dim3((unsigned) r.n_chunks, (unsigned) s.HK), 256, 0, st>>>(at, T);
+            ik::JoinIn jn{b.part, b.sum, at.dyn, s.H, s.D, r.n_chunks};
+            ik::attn_join_kernel<<<dim3((unsigned) T, (unsigned) s.H), (unsigned) s.D, 0, st>>>(jn);
+            ik::attn_avg_kernel<<<dim3((unsigned) T, (unsigned) s.H), (unsigned) s.D, 0, st>>>(b.sum, b.ao, b.aimg, s.H, s.D);
+            mm(y.wo, b.aimg, b.ao, b.o, T);
+            ik::add_kernel<<<gN, 256, 0, st>>>(b.x, b.o, (long long) TN);
+            tick("drafter: attention");
+            norm(b.x, y.ffn_norm, b.xn, b.img);
+            mm(y.gate, b.img, b.xn, b.g, T);
+            mm(y.up, b.img, b.xn, b.u, T);
+            ik::swiglu_kernel<<<dim3((unsigned) ((F / 32 + 7) / 8), (unsigned) T), ik::kTB, 0, st>>>(b.g, b.u, b.h, b.himg, F);
+            mm(y.down, b.himg, b.h, b.d, T);
+            ik::add_kernel<<<gN, 256, 0, st>>>(b.x, b.d, (long long) TN);
+            tick("drafter: the MLP");
+        }
+        norm(b.x, s.out_norm, b.hn, b.hnimg);
+        ik::JointPreIn jp{s.joint_w, s.joint_b, b.hn, b.ctx, b.pre, 2 * R_, N, T, 3 * R_};
+        ik::joint_pre_kernel<<<(unsigned) (3 * R_), ik::kTB, 0, st>>>(jp);
+        spark_steps(1, 1);
+    }
+    /// Up to `n` drafts after x, the token the state does not hold yet (at pos()): a block through the drafter, a draft
+    /// while the drafts' joint probability under its head stays at or above `min_p`.  None where the rings do not hold
+    /// the context up to the position before (a state brought back from a checkpoint or the park: the next forward
+    /// writes it).
+    std::vector<int32_t> spark_draft(int32_t x, int n, float min_p) {
+        std::vector<int32_t> out;
+        const int64_t P = pos();
+        n = std::min(n, kMaxT - 1);
+        if (sp == nullptr || n <= 0 || sp_vhi != P || P < 1 || frnn_n <= 0 || P - 1 < frnn_p0 || P - 1 >= frnn_p0 + frnn_n) return out;
+        const auto t0 = Clock::now();
+        const Spark& s = *sp;
+        SparkBlock& b = sb;
+        const int T = kMaxT;
+        CK(cudaStreamSynchronize(st));   // (the last block has read the pinned rows)
+        if (prof) prof_t = Clock::now();
+        CK(cudaMemcpyAsync(b.ctx, frnn + (size_t) (P - 1 - frnn_p0) * (size_t) s.N, (size_t) s.N * 4, cudaMemcpyDeviceToDevice, st));
+        embed_row(x, b.emb_h);
+        rope_rows(b.cs_h, P, T);
+        for (int t = 0; t < T; ++t) {
+            b.step_h[t] = (int32_t) (P + T - 1);
+            b.step_h[T + 1 + t] = (int32_t) (P + t);
+        }
+        b.step_h[T] = (int32_t) (P + T);
+        for (int l = 0; l < s.n_layer; ++l) {
+            const SparkRing& r = sp_ring[(size_t) l];
+            // the context cells in use: within the layer's reach, of the text the rings hold, not yet written over
+            const int64_t lo = std::min(P, std::max({(int64_t) 0, P - r.see, sp_vlo, sp_whi - r.cells.cap + r.chunk}));
+            int32_t* d = b.step_h + 2 * T + 1 + 3 * l;
+            d[0] = r.chunk;
+            d[1] = (int32_t) ((P + T - lo + r.chunk - 1) / r.chunk);
+            d[2] = (int32_t) (lo % r.cells.cap);
+        }
+        {
+            int32_t* ctl = b.step_h + 2 * T + 1 + 3 * s.n_layer;
+            const float one = 1.0f;
+            ctl[0] = x;
+            std::memcpy(&ctl[1], &one, 4);
+            std::memcpy(&ctl[2], &min_p, 4);
+            ctl[3] = 0;
+        }
+        // the layers and the first draft; the others (their rows of the target's head first) where it is at the floor
+        auto issue = [&](cudaGraphExec_t& exec, const std::function<void()>& launches) {
+            if (!use_graphs) {
+                launches();
+            } else {
+                if (exec == nullptr) {
+                    cudaGraph_t graph = nullptr;
+                    CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
+                    launches();
+                    CK(cudaStreamEndCapture(st, &graph));
+                    CK(cudaGraphInstantiate(&exec, graph, 0));
+                    CK(cudaGraphDestroy(graph));
+                    own(&Owned::graphs, exec);
+                }
+                CK(cudaGraphLaunch(exec, st));
+            }
+            CK(cudaStreamSynchronize(st));
+        };
+        issue(sp_graph, [&] { spark_launches(); });
+        if (n > 1 && b.out_h[0] >= 0) issue(sp_graphs[n], [&] { spark_steps(2, n); });
+        sp_whi = std::max(sp_whi, P + T);
+        for (int i = 0; i < n && b.out_h[2 * i] >= 0 && b.out_h[2 * i] < s.V; ++i) out.push_back(b.out_h[2 * i]);
+        ++sp_blocks;
+        sp_ms += ms_since(t0);
+        return out;
     }
 
     /// The step record of T rows at p0 ..
     void steps(Rows& R, int64_t p0, int T) {
         const int64_t live = p0 + T;
         for (int t = 0; t < R.cap; ++t) R.step_h[t] = (int32_t) (p0 + std::min(t, T - 1));
-        const int64_t per = (live - lo + kChunks - 1) / kChunks;   // (the main card's cells: from `lo`)
-        const int64_t chunk = std::max<int64_t>(ik::kSub, (per + ik::kSub - 1) / ik::kSub * ik::kSub);
+        // the main card's cells, from `lo`: {the first, the stretches in use, the first one's number}
         R.step_h[R.cap] = (int32_t) live;
-        R.step_h[R.cap + 1] = (int32_t) chunk;
-        R.step_h[R.cap + 2] = (int32_t) ((live - lo + chunk - 1) / chunk);
-        R.step_h[R.cap + 3] = (int32_t) lo;
+        R.step_h[R.cap + 1] = (int32_t) lo;
+        R.step_h[R.cap + 2] = (int32_t) (stretches(live) - stretch_of(lo));
+        R.step_h[R.cap + 3] = (int32_t) stretch_of(lo);
         R.step_h[R.cap + 4] = (int32_t) (T + m->g.n_swa - 1);
     }
     /// A forward's launches: the rows and the step record from their pinned copies, every visit, the head's rows; with
@@ -2148,8 +2748,10 @@ struct Engine {
         CK(cudaMemcpyAsync(R.x, R.emb_h, (size_t) T * (size_t) m->g.n_embd * 4, cudaMemcpyHostToDevice, st));
         CK(cudaMemcpyAsync(R.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
         tick("embedding");
+        if (sp != nullptr) CK(cudaMemcpyAsync(R.f_cs, R.f_cs_h, (size_t) T * (size_t) sp->D * 4, cudaMemcpyHostToDevice, st));
         for (int v = 0; v < (int) visits.size(); ++v) visit(v, T, R, p0);
-        if (n_head > 0) head(R, T - n_head, n_head);
+        if (sp != nullptr) head_all(R, T, n_head);
+        else if (n_head > 0) head(R, T - n_head, n_head);
         if (commit && !R.batch && T > 1) run("states kept", [&] { conv_commit(T); });
     }
     /// Every visit's convolution states after the first `rows` rows of the last decode forward of several
@@ -2165,18 +2767,25 @@ struct Engine {
         if (win_T > 1) conv_commit(a);
         n_pos = win_p0 + a;
         win_p0 = -1;
+        if (sp != nullptr) {   // (the rows after: their context cells are written over by the next forward's)
+            sp_vhi = n_pos;
+            frnn_n = std::min(frnn_n, a);
+        }
     }
     /// T tokens at the sequence's end through every visit; the logits of the last n_head rows.  False: no cells left.
     /// `window`: the rows stay as far as keep() says (a token and its drafts).
     bool forward(const int32_t* tok, int T, int n_head, bool window = false) {
         const int64_t p0 = pos();
-        if (p0 + T > ctx || !ensure(p0 + T)) return false;
+        // (the cells grow, and move to the cards, where a forward of kMaxT rows would make them: at the same positions
+        // whatever the forwards' rows)
+        if (p0 + T > ctx || !ensure(std::min<int64_t>(p0 + kMaxT, ctx))) return false;
         const bool waits = window && T > 1;   // (a window of one row: its states as any forward's)
         const int key = T * 16 + n_head + (waits ? 256 : 0);
         CK(cudaStreamSynchronize(st));   // the last forward has read the pinned rows
         prof_start();
         embed(D, tok, T);
         steps(D, p0, T);
+        if (sp != nullptr) rope_rows(D.f_cs_h, p0, T);
         far_mode = lo > 0;
         if (!use_graphs) {
             launches(D, T, n_head, p0, !waits);
@@ -2203,7 +2812,7 @@ struct Engine {
                     if (sg.fi < 0) continue;
                     CK(cudaStreamSynchronize(st));
                     cards_scan(sg.fi, T);
-                    scan(sg.at, T, true, st);
+                    scan(sg.at, T, st);
                     (void) cudaStreamQuery(st);   // (this card's scan runs beside theirs)
                     cards_wait();
                 }
@@ -2227,6 +2836,7 @@ struct Engine {
         logits_held = false;
         win_p0 = window ? p0 : -1;
         win_T = T;
+        spark_wrote(p0, T, false);
         return true;
     }
     /// T tokens of a prompt as one chunk (T <= prefill); the last one's logits with `logits`.  False: no cells left.
@@ -2237,11 +2847,13 @@ struct Engine {
         prof_start();
         embed(P, tok, T);
         steps(P, p0, T);
+        if (sp != nullptr) rope_rows(P.f_cs_h, p0, T);
         far_mode = false;
         launches(P, T, logits ? 1 : 0, p0, true);
         prof_collect();
         n_pos += T;
         logits_held = false;
+        spark_wrote(p0, T, true);
         return true;
     }
 
@@ -2282,25 +2894,25 @@ struct Engine {
     // ---- the request's sampler: Flash-Next's chain on the device (lamina/kernels/sampler.hpp), a token from each
     // head row.  A row's draw is Philox(seed, the position its token takes), so a window's rows draw what a row at a
     // time would.
-    lamina::kernels::SamplerParams sp;
+    lamina::kernels::SamplerParams smp;
     static constexpr int kHistCap = 4096;   // the penalties' window at most
     int hist_n = 0;                         // its tokens (0: no penalties)
     int32_t* hist_d = nullptr;              // [kMaxT][kHistCap], made by the first request with penalties
     std::vector<int32_t> hist_stage;
     void sampling(const lamina::program::Sampling& q) {
-        sp = {};
-        sp.top_k = q.top_k;
-        sp.top_p = q.top_p;
-        sp.min_p = q.min_p;
-        sp.temperature = q.temperature;
-        sp.greedy = q.temperature <= 0.f;
-        sp.penalty_repeat = q.repeat;
-        sp.penalty_freq = q.freq;
-        sp.penalty_present = q.present;
+        smp = {};
+        smp.top_k = q.top_k;
+        smp.top_p = q.top_p;
+        smp.min_p = q.min_p;
+        smp.temperature = q.temperature;
+        smp.greedy = q.temperature <= 0.f;
+        smp.penalty_repeat = q.repeat;
+        smp.penalty_freq = q.freq;
+        smp.penalty_present = q.present;
         const bool pen = q.repeat != 1.f || q.freq != 0.f || q.present != 0.f;
         hist_n = !pen || q.last_n == 0 ? 0 : q.last_n < 0 ? kHistCap : std::min(q.last_n, kHistCap);
-        sp.penalty_last_n = hist_n;
-        sp.seed = q.seed ? q.seed : (unsigned long long) Clock::now().time_since_epoch().count();
+        smp.penalty_last_n = hist_n;
+        smp.seed = q.seed ? q.seed : (unsigned long long) Clock::now().time_since_epoch().count();
         if (hist_n > 0 && hist_d == nullptr) {
             hist_d = dzero<int32_t>((size_t) kMaxT * kHistCap);
             hist_stage.assign((size_t) kMaxT * kHistCap, -1);
@@ -2318,8 +2930,8 @@ struct Engine {
             CK(cudaMemcpyAsync(hist_d, hist_stage.data(), (size_t) rows * (size_t) hist_n * 4, cudaMemcpyHostToDevice, st));
             hist = hist_d;
         }
-        sp.counter = (uint64_t) at;
-        lamina::kernels::sample_tokens(R.logits, rows, (int) m->g.n_vocab, hist, hist_n, sp, R.pick, st);
+        smp.counter = (uint64_t) at;
+        lamina::kernels::sample_tokens(R.logits, rows, (int) m->g.n_vocab, hist, hist_n, smp, R.pick, st);
         const int Th = R.head_rows();
         CK(cudaMemcpyAsync(R.pick_h, R.pick, (size_t) 2 * Th * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
@@ -2333,6 +2945,8 @@ struct Engine {
         CK(cudaMemsetAsync(conv_all, 0, conv_bytes(), st));
         n_pos = 0;
         logits_held = false;
+        sp_vlo = sp_vhi = sp_whi = 0;
+        frnn_n = 0;
     }
     /// A checkpoint of the state the queued work leaves (a chunk's end; `end`: the prompt's, with the logits its read
     /// left): into the image behind that work, then to `host` (state_bytes()) on the snapshot stream.  Nothing is
@@ -2485,6 +3099,9 @@ int argmax(const std::vector<float>& lg) {
 /// (--spec-lookup N, lamina/spec/suffix_drafter.hpp): where the text's last N tokens or more occurred before, the
 /// tokens that followed them there.
 struct Drafts {
+    Engine* E = nullptr;   // with a drafter: its drafts where the lookup has none
+    int per_step = 0;      // the drafter's drafts a window at most (--drafts-per-step)
+    float min_p = 0.f;     // while their joint probability under its head stays at or above this (--spec-min-p)
     int lookup = 0;   // prompt lookup's shortest match (0: none)
     // LAMINA_INK_WINDOW=N (a test's): every window N drafts that are the token itself, so a window of N + 1 rows is
     // timed at any context (its drafts stay only where the text repeats a token)
@@ -2493,12 +3110,20 @@ struct Drafts {
     size_t sfx_ok = 0;   // the lookup's history is the state's tokens, its first sfx_ok of them right
     // a run's count: windows, those with drafts, those from the lookup, the drafts offered and kept
     long long windows = 0, drafted = 0, looked = 0, offered = 0, kept = 0;
-    bool on() const { return lookup > 0 || fake > 0; }
+    bool on() const { return lookup > 0 || fake > 0 || (E != nullptr && per_step > 0); }
     void init(int lookup_min, int64_t ctx) {
         lookup = lookup_min;
         if (lookup > 0) sfx = std::make_unique<lamina::spec::SuffixDrafter>(lookup, 32, (size_t) std::max<int64_t>(4096, ctx));
     }
-    void begin() { windows = drafted = looked = offered = kept = 0; }
+    long long blocks0 = 0;
+    double ms0 = 0;
+    void begin() {
+        windows = drafted = looked = offered = kept = 0;
+        if (E != nullptr) {
+            blocks0 = E->sp_blocks;
+            ms0 = E->sp_ms;
+        }
+    }
     /// Up to `n` drafts after x, which follows `seq` (the state's tokens)
     std::vector<int32_t> propose(const std::vector<int32_t>& seq, int32_t x, int n) {
         std::vector<int32_t> out;
@@ -2508,21 +3133,31 @@ struct Drafts {
             offered += (long long) out.size();
             return out;
         }
-        if (n <= 0 || !sfx) return out;
-        // the history up to where it and seq agree: seq's tokens before sfx_ok are the ones it was given
-        sfx_ok = std::min(sfx_ok, seq.size());
-        if (sfx->size() > sfx_ok) sfx->truncate(sfx_ok);
-        if (seq.size() > sfx_ok) {
-            sfx->append(seq.data() + sfx_ok, seq.size() - sfx_ok);
-            sfx_ok = seq.size();
+        if (n <= 0) return out;
+        if (sfx) {
+            // the history up to where it and seq agree: seq's tokens before sfx_ok are the ones it was given
+            sfx_ok = std::min(sfx_ok, seq.size());
+            if (sfx->size() > sfx_ok) sfx->truncate(sfx_ok);
+            if (seq.size() > sfx_ok) {
+                sfx->append(seq.data() + sfx_ok, seq.size() - sfx_ok);
+                sfx_ok = seq.size();
+            }
+            sfx->append(x);   // not in the state yet: the next call takes it out
+            out.resize((size_t) n);
+            out.resize((size_t) std::max(0, sfx->propose(n, out.data())));
+            if (!out.empty()) {
+                ++drafted;
+                ++looked;
+                offered += (long long) out.size();
+                return out;
+            }
         }
-        sfx->append(x);   // not in the state yet: the next call takes it out
-        out.resize((size_t) n);
-        out.resize((size_t) std::max(0, sfx->propose(n, out.data())));
-        if (!out.empty()) {
-            ++drafted;
-            ++looked;
-            offered += (long long) out.size();
+        if (E != nullptr && per_step > 0) {
+            out = E->spark_draft(x, std::min(n, per_step), min_p);
+            if (!out.empty()) {
+                ++drafted;
+                offered += (long long) out.size();
+            }
         }
         return out;
     }
@@ -2530,9 +3165,12 @@ struct Drafts {
     void rewound(size_t from) { sfx_ok = std::min(sfx_ok, from); }
     std::string summary() const {
         if (!on() || windows == 0) return {};
-        char b[200];
-        std::snprintf(b, sizeof b, "; %lld windows, %lld with drafts (%lld from the prompt lookup), %lld of %lld drafts kept",
-                      windows, drafted, looked, kept, offered);
+        char b[300];
+        int at = std::snprintf(b, sizeof b, "; %lld windows, %lld with drafts (%lld from the prompt lookup), %lld of %lld "
+                               "drafts kept", windows, drafted, looked, kept, offered);
+        if (E != nullptr && E->sp_blocks > blocks0)
+            std::snprintf(b + at, sizeof b - (size_t) at, ", %lld blocks of the drafter at %.2f ms", E->sp_blocks - blocks0,
+                          (E->sp_ms - ms0) / (double) (E->sp_blocks - blocks0));
         return b;
     }
 };
@@ -2541,16 +3179,24 @@ struct Drafts {
 /// token and its drafts, every row's token picked by the request's sampler and a draft kept while it is the token
 /// picked.  `emit(token)` takes each token in order: false, and the token ends the run (it stays out of the state).
 /// `seq`: the state's tokens, appended to as rows stay (`stays` is told each); `hist`: the penalties' history, the
-/// prompt's text and every token emitted.  Returns "" where emit ended it, else why it ended: "nonfinite" (the state
-/// holds the row), "length" (no cells left).
+/// prompt's text and every token emitted.  `fixed` (a test's): the run's tokens are these whatever the sampler picks,
+/// so two settings' windows are timed along one text.  Returns "" where emit ended it, else why it ended: "nonfinite"
+/// (the state holds the row), "length" (no cells left, or the fixed text's end).
 template <class Emit>
 const char* run_windows(Engine& E, Drafts& dr, std::vector<int32_t>& seq, std::vector<int32_t>& hist, long long max_new,
-                        Emit&& emit, const std::function<void(int32_t)>& stays) {
+                        Emit&& emit, const std::function<void(int32_t)>& stays, const std::vector<int32_t>* fixed = nullptr) {
     int32_t picks[kMaxT];
-    E.pick(1, E.pos(), hist.data(), (int64_t) hist.size(), nullptr, picks);
-    int32_t x = picks[0];
     long long produced = 0;
+    auto the_text = [&](int rows) {   // row t's token is the text's token `produced + t`
+        if (fixed == nullptr) return;
+        for (int t = 0; t < rows; ++t)
+            picks[t] = produced + t < (long long) fixed->size() ? (*fixed)[(size_t) (produced + t)] : -2;
+    };
+    E.pick(1, E.pos(), hist.data(), (int64_t) hist.size(), nullptr, picks);
+    the_text(1);
+    int32_t x = picks[0];
     for (;;) {
+        if (x == -2) return "length";
         if (x < 0) return "nonfinite";
         ++produced;
         hist.push_back(x);
@@ -2564,6 +3210,7 @@ const char* run_windows(Engine& E, Drafts& dr, std::vector<int32_t>& seq, std::v
         const int64_t p0 = E.pos();
         if (!E.forward(win.data(), T, T, true)) return "length";
         E.pick(T, p0 + 1, hist.data(), (int64_t) hist.size() - 1, win.data(), picks);   // (the tail: the text before x)
+        the_text(T);
         seq.push_back(x);
         if (stays) stays(x);
         int rows = 1;   // the window's rows that stay
@@ -2783,6 +3430,7 @@ struct Serve {
             size_t same = 0;
             while (same < live.size() && same < reuse && live[same] == ids[same]) ++same;
             dr.rewound(same);
+            if (same != live.size() || reuse != live.size()) E.spark_cut((int64_t) same);   // (else the state goes on as it is)
         }
         live.assign(ids.begin(), ids.begin() + (long) reuse);
         if (reuse > 0) serve_print("RESUME %zu\n", reuse);
@@ -2960,7 +3608,10 @@ int run_engine(int argc, char** argv, bool check_only) {
     std::string cell_gpus, cell_clocks;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
-    int lookup = 0;
+    int lookup = 16, drafts = -1;
+    float spec_min_p = 0.7f;
+    std::string dspark;
+    int64_t dspark_reach = 32768;
     lamina::program::Sampling gen_smp;   // generate mode's sampling (greedy)
     CacheOpts copt;
     for (int i = 1; i < argc; ++i) {
@@ -3002,6 +3653,10 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--main-cells") main_cells = std::max<int64_t>(0, std::atoll(next()));   // (tests: fewer on this card)
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
+        else if (a == "--dspark") dspark = next();   // the model's block drafter (dspark-*.gguf)
+        else if (a == "--drafts-per-step") drafts = std::max(0, std::min(kMaxT - 1, std::atoi(next())));
+        else if (a == "--spec-min-p") spec_min_p = (float) std::atof(next());
+        else if (a == "--dspark-reach") dspark_reach = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--temperature") gen_smp.temperature = (float) std::atof(next());
         else if (a == "--top-p") gen_smp.top_p = (float) std::atof(next());
         else if (a == "--top-k") gen_smp.top_k = std::atoi(next());
@@ -3036,7 +3691,40 @@ int run_engine(int argc, char** argv, bool check_only) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
     }
+    Spark spark;
+    if (!dspark.empty() && drafts != 0) {
+        // The drafter is VRAM the cells do not get (its file, and ~0.35 GiB of cells and buffers): where this card
+        // alone holds the context and would hold under the floor with it, it is left out.
+        bool room = true;
+        if (cell_gpus.empty()) {
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            std::error_code ec;
+            const uint64_t file = (uint64_t) std::filesystem::file_size(std::filesystem::u8path(dspark), ec);
+            const Geometry& g = m.g;
+            const uint64_t cell = kv == "q8_0" ? (uint64_t) g.n_head_kv * (uint64_t) (g.head_dim / 32) * 34 : (uint64_t) g.kv_width() * 2;
+            const uint64_t ring = (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell * (uint64_t) (g.n_swa + kMaxT + kRingSub);
+            const uint64_t want = (uint64_t) (max_ctx > 0 ? std::min<int64_t>(max_ctx, kContextFloor) : kContextFloor) *
+                                  (uint64_t) g.n_full_visits() * 2 * cell;
+            // (a chunk of 128 rows at least, the rings and the cache's image of them, the graphs)
+            const uint64_t rest = ring * (serve && copt.chain > 0 ? 2 : 1) + (prefill > 0 ? 230ull << 20 : 0) + (64ull << 20);
+            room = ec || file + (350ull << 20) + want + rest + *reserve <= fr;
+            if (!room)
+                std::fprintf(stderr, "lamina: the drafter is left out: beside it this GPU's VRAM would hold a context under "
+                             "%lld tokens\n", (long long) (want / ((uint64_t) g.n_full_visits() * 2 * cell)));
+        }
+        if (room) {
+            if (!load_spark(dspark, m, spark, err)) {
+                std::fprintf(stderr, "lamina: %s\n", err.c_str());
+                return 1;
+            }
+            std::fprintf(stderr, "lamina: the drafter (%d layers, a block of %d rows): %.2f GiB on the GPU, loaded in %.1f s\n",
+                         spark.n_layer, spark.block, spark.gib, spark.load_s);
+        }
+    }
     Engine E;
+    if (!spark.layers.empty()) E.sp = &spark;
+    E.sp_reach = dspark_reach;
     E.use_graphs = graphs;
     E.cache_on = serve && copt.chain > 0;
     for (const int d : lamina::program::parse_ids(cell_gpus.c_str())) E.cell_devs.push_back(d);
@@ -3052,6 +3740,11 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) *reserve);
     Drafts dr;
     dr.init(lookup, E.ctx);
+    if (E.sp != nullptr) {
+        dr.E = &E;
+        dr.per_step = drafts < 0 ? kMaxT - 1 : drafts;
+        dr.min_p = spec_min_p;
+    }
     if (serve) {
         Serve sv(E, m.eos, copt, dr);
         return sv.run();
@@ -3082,7 +3775,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.prof_print("the prompt");
     const auto t1 = Clock::now();
     std::vector<int32_t> gen;
-    if (ff != nullptr || !forced.empty()) {   // a reference's run: its tokens a row at a time, each row's logits kept
+    const bool along = !forced.empty() && ff == nullptr && dr.on();   // the windows timed along a fixed text
+    if (!along && (ff != nullptr || !forced.empty())) {   // a reference's run: its tokens a row at a time, each row's logits kept
         std::vector<float> lg;
         E.host_logits(0, lg);
         for (int i = 0; i < n_gen; ++i) {
@@ -3106,10 +3800,10 @@ int run_engine(int argc, char** argv, bool check_only) {
         E.sampling(gen_smp);
         dr.begin();
         std::vector<int32_t> seq = prompt, hist = prompt;
-        run_windows(E, dr, seq, hist, n_gen, [&](int32_t t) {
+        run_windows(E, dr, seq, hist, along ? (long long) forced.size() : n_gen, [&](int32_t t) {
             gen.push_back(t);
-            return (int) gen.size() < n_gen;
-        }, nullptr);
+            return (int) gen.size() < (along ? (int) forced.size() : n_gen);
+        }, nullptr, along ? &forced : nullptr);
     }
     const double tg_ms = ms_since(t1);
     E.prof_print("generation");
