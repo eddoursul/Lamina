@@ -12,9 +12,9 @@ namespace lamina::core {
 /// A physical chunk: the driver's allocation handle (CUmemGenericAllocationHandle); 0 = none.
 using VmmChunk = unsigned long long;
 
-/// The current device supports it and the entry points resolved.
+/// The device current at the first call supports it and the entry points resolved.
 bool vmm_available();
-/// The chunk size (0 when not available).
+/// The chunk size (0 when not available): that device's (the cards of one PC have had one size).
 uint64_t vmm_granularity();
 /// A new physical chunk on the current device (0: out of memory), and its release.
 VmmChunk vmm_chunk_new();
@@ -27,7 +27,8 @@ public:
     VmmRange(const VmmRange&) = delete;
     VmmRange& operator=(const VmmRange&) = delete;
 
-    /// Reserves `bytes` (rounded up to whole chunks) of addresses, nothing mapped.
+    /// Reserves `bytes` (rounded up to whole chunks) of addresses, nothing mapped.  A range is the device's that is
+    /// current when it is reserved: its chunks are mapped, unmapped and released with that device current.
     bool reserve(uint64_t bytes);
     /// Unmaps and frees every chunk, then the addresses.
     void release();

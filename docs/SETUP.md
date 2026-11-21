@@ -395,7 +395,11 @@ a layer with 8 used; five layers of six attend their last 1,024 tokens and the s
 whole for 8 of the 48 layer applications: 32.0 KiB a token in FP16, 17.0 with `--kv q8_0`.
 
 It runs on one GPU, which holds the whole file (the experts in the file's own formats: NVFP4 in most layers of
-unsloth's quants) beside the K and V; the embedding table stays in RAM (~0.5 GB). Its options: `--kv fp16 | q8_0`;
+unsloth's quants) beside the K and V; the embedding table stays in RAM (~0.5 GB). A config's later `"gpu"` cards
+hold the K and V the first has no VRAM for (`--cell-gpus`): its oldest cells move to them as a conversation grows,
+each card scores its cells for every token, and the context is what the cards hold together, up to the model's
+1,048,576 tokens. A card's `clocks=` locks its clocks while it holds cells and a request runs (a card that idles
+between its scans answers late; the lock needs administrator rights). Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
 32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise

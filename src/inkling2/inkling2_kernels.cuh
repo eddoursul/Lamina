@@ -588,7 +588,7 @@ struct AttnIn {
     const float* bias;      // [T][H][ext + 1]
     const int32_t* pos;     // [T]
     const int32_t* live;    // the cells in use: a range's count (its positions first .. first + *live - 1), a ring's last position + 1
-    const int32_t* dyn;     // null, or {chunk, stretches in use}
+    const int32_t* dyn;     // null, or {chunk, stretches in use, the first cell in use}
     float* part;            // [T][H][n_chunks][D + 2]: m, s, the D sums
     int H, HK, D, ext, win; // win: a window layer's cells (0: every cell)
     int chunk, n_chunks, sub, slide;
@@ -622,7 +622,7 @@ __global__ void __launch_bounds__(kSub) attn_wide_kernel(AttnIn a) {
     const int64_t p = a.pos[t];
     const int64_t live = *a.live;
     // this block's cells: slots [s0, s1)
-    const int64_t s0 = (int64_t) cb * chunk + (a.slide ? t : 0);
+    const int64_t s0 = (a.dyn ? a.dyn[2] : 0) + (int64_t) cb * chunk + (a.slide ? t : 0);
     int64_t s1 = min((int64_t) s0 + chunk, a.c.ring ? a.c.cap : live);
     if (!a.c.ring) s1 = min(s1, p - a.c.first + 1);   // a range's cells at or before the row
     float* out = a.part + (((size_t) t * a.H + (size_t) g * QH) * a.n_chunks + cb) * (a.D + 2);
@@ -771,7 +771,7 @@ __global__ void __launch_bounds__(kSub) attn_part_kernel(AttnIn a) {
     const int64_t p = a.pos[t];
     const int64_t live = *a.live;
     // this block's cells: slots [s0, s1)
-    const int64_t s0 = (int64_t) cb * chunk + (a.slide ? t : 0);
+    const int64_t s0 = (a.dyn ? a.dyn[2] : 0) + (int64_t) cb * chunk + (a.slide ? t : 0);
     int64_t s1 = min((int64_t) s0 + chunk, a.c.ring ? a.c.cap : live);
     if (!a.c.ring) s1 = min(s1, p - a.c.first + 1);   // a range's cells at or before the row
     float* out = a.part + (((size_t) t * a.H + (size_t) g * QH) * a.n_chunks + cb) * (a.D + 2);
@@ -928,6 +928,8 @@ struct AttnOutIn {
     Q81* q;               // [T][H * D / 32] or null
     const int32_t* dyn;   // null, or {chunk, stretches in use}
     int H, D, n_chunks;
+    const float* extra;   // [n_extra][T][H][D + 2]: other cards' sums over their cells (attn_join_kernel), or null
+    int n_extra, T;
 };
 __global__ void __launch_bounds__(128) attn_out_kernel(AttnOutIn a) {
     const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
@@ -935,6 +937,10 @@ __global__ void __launch_bounds__(128) attn_out_kernel(AttnOutIn a) {
     const float* p = a.part + ((size_t) t * a.H + h) * a.n_chunks * (a.D + 2);
     float mx = 0.f;   // the sink's logit
     for (int c = 0; c < used; ++c) mx = fmaxf(mx, p[(size_t) c * (a.D + 2)]);
+    for (int e = 0; e < a.n_extra; ++e) {
+        const float* pe = a.extra + (((size_t) e * a.T + t) * a.H + h) * (a.D + 2);
+        if (pe[1] != 0.f) mx = fmaxf(mx, pe[0]);
+    }
     float sum = __expf(-mx), acc = 0.f;
     for (int c = 0; c < used; ++c) {
         const float* pc = p + (size_t) c * (a.D + 2);
@@ -942,6 +948,13 @@ __global__ void __launch_bounds__(128) attn_out_kernel(AttnOutIn a) {
         const float w = __expf(pc[0] - mx);
         sum += w * pc[1];
         acc += w * pc[2 + i];
+    }
+    for (int e = 0; e < a.n_extra; ++e) {
+        const float* pe = a.extra + (((size_t) e * a.T + t) * a.H + h) * (a.D + 2);
+        if (pe[1] == 0.f) continue;
+        const float w = __expf(pe[0] - mx);
+        sum += w * pe[1];
+        acc += w * pe[2 + i];
     }
     const size_t at = ((size_t) t * a.H + h) * a.D + i;
     const float y = acc / sum / (1.0f + __expf(-a.gate[at]));
@@ -952,6 +965,43 @@ __global__ void __launch_bounds__(128) attn_out_kernel(AttnOutIn a) {
     Q81* q = a.q + at / 32;
     q->qs[i & 31] = q8_1_quant(y, d, amax);
     if ((i & 31) == 0) q->ds = q8_1_ds(d, s);
+}
+
+/// A card's stretches joined into one partial sum a row and a query head, for the main card's attn_out_kernel: the
+/// largest logit, the sum of exp(logit - it), that-weighted V (no sink, no gate: the main card's).  sum [T][H][D + 2];
+/// a head whose cells are none: s = 0.  A block a row and a query head; D threads.
+struct JoinIn {
+    const float* part;    // [T][H][n_chunks][D + 2]
+    float* sum;           // [T][H][D + 2]
+    const int32_t* dyn;   // {chunk, stretches in use}
+    int H, D, n_chunks;
+};
+__global__ void __launch_bounds__(128) attn_join_kernel(JoinIn a) {
+    const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
+    const int used = a.dyn[1];
+    const float* p = a.part + ((size_t) t * a.H + h) * a.n_chunks * (a.D + 2);
+    float mx = -FLT_MAX;
+    for (int c = 0; c < used; ++c)
+        if (p[(size_t) c * (a.D + 2) + 1] != 0.f) mx = fmaxf(mx, p[(size_t) c * (a.D + 2)]);
+    float sum = 0.f, acc = 0.f;
+    for (int c = 0; c < used; ++c) {
+        const float* pc = p + (size_t) c * (a.D + 2);
+        if (pc[1] == 0.f) continue;
+        const float w = __expf(pc[0] - mx);
+        sum += w * pc[1];
+        acc += w * pc[2 + i];
+    }
+    float* o = a.sum + ((size_t) t * a.H + h) * (a.D + 2);
+    if (i == 0) {
+        o[0] = mx;
+        o[1] = sum;
+    }
+    o[2 + i] = acc;
+}
+/// -sink of each row and head out of its bias row (its last value): what a card's cells take for a bias
+__global__ void nsink_kernel(const float* __restrict__ bias, float* __restrict__ ns, int rows, int ext) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows) ns[i] = bias[(size_t) i * (ext + 1) + ext];
 }
 
 // ---------------------------------------------------------------------------------------------- after a sublayer
@@ -1374,6 +1424,11 @@ struct TcIn {
     float* out;            // [T][H * D]
     int T, H, HK, ext, win;
     long long cells;       // the range's cells in use
+    float* part;           // not null: [T][H][D + 2], a row and head's partial sums (the largest logit m, the sum of
+                           // exp(logit - m), that-weighted V) instead of `out`: another card's share, or this one's
+                           // where others' are joined to it (tc_merge_kernel)
+    int no_sink;           // the sums without the zero sink (a card's cells alone)
+    long long lo;          // a full visit's first cell on this card (the cells before it are other cards')
 };
 template <bool Q8>
 __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
@@ -1386,7 +1441,7 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
     // the block's cells: slots [s_lo, s_lo + cnt) of the range
     const long long p_first = a.pos[t0], p_last = a.pos[t0 + nrows - 1];
     const long long first = (long long) a.c.first;
-    const long long s_lo = max(0LL, (a.win ? max(0LL, p_first - a.win + 1) : 0LL) - first);
+    const long long s_lo = max(max(0LL, (a.win ? max(0LL, p_first - a.win + 1) : 0LL) - first), a.lo);
     const int cnt = (int) (min(p_last - first + 1, a.cells) - s_lo);
     const size_t cbytes = cell_bytes(a.c, a.HK, D);
     // the queries as halves
@@ -1458,7 +1513,8 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
     const float* bA = a.bias + ((size_t) (t0 + (inA ? rA : 0)) * a.H + h) * (a.ext + 1);
     const float* bB = a.bias + ((size_t) (t0 + (inB ? rB : 0)) * a.H + h) * (a.ext + 1);
     const float scale = rsqrtf((float) D);
-    float mA = 0.f, mB = 0.f, lA = 1.f, lB = 1.f;   // the zero sink
+    // the zero sink, or nothing yet (a largest logit that any real one passes, finite: no cell, no NaN)
+    float mA = a.no_sink ? -1e30f : 0.f, mB = mA, lA = a.no_sink ? 0.f : 1.f, lB = lA;
     float o[4][4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.f;
@@ -1546,6 +1602,21 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
         __syncthreads();   // the tile's cells and probabilities are read
         if (it + 1 < n_tiles) stash();
     }
+    if (a.part) {   // the partial sums: a row's m and l by one of its lanes, its values by each lane's eight
+        float* pA = a.part + ((size_t) (t0 + (inA ? rA : 0)) * a.H + h) * (D + 2);
+        float* pB = a.part + ((size_t) (t0 + (inB ? rB : 0)) * a.H + h) * (D + 2);
+        if (nt == 0 && tig == 0) {
+            if (inA) *reinterpret_cast<float2*>(pA) = make_float2(mA, lA);
+            if (inB) *reinterpret_cast<float2*>(pB) = make_float2(mB, lB);
+        }
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int d = nt * 32 + j * 8 + 2 * tig;
+            if (inA) *reinterpret_cast<float2*>(pA + 2 + d) = make_float2(o[j][0], o[j][1]);
+            if (inB) *reinterpret_cast<float2*>(pB + 2 + d) = make_float2(o[j][2], o[j][3]);
+        }
+        return;
+    }
     const float iA = 1.f / lA, iB = 1.f / lB;
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
@@ -1563,6 +1634,36 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
                 make_float2(o[j][2] * iB / (1.0f + __expf(-gt.x)), o[j][3] * iB / (1.0f + __expf(-gt.y)));
         }
     }
+}
+
+/// A chunk's attention where cells are on cards: this card's partial sums (with the zero sink) and the cards' joined,
+/// divided by their sum and times sigmoid(gate): out [T][H * D].  A block a row and a query head; D threads.
+struct TcMergeIn {
+    const float* part;    // [T][H][D + 2]
+    const float* extra;   // [n_extra][cap][H][D + 2]
+    const float* gate;    // [T][H * D]
+    float* out;           // [T][H * D]
+    int H, D, n_extra, cap;
+};
+__global__ void __launch_bounds__(128) tc_merge_kernel(TcMergeIn a) {
+    const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
+    const float* p = a.part + ((size_t) t * a.H + h) * (a.D + 2);
+    float mx = p[0];
+    for (int e = 0; e < a.n_extra; ++e) {
+        const float* pe = a.extra + (((size_t) e * a.cap + t) * a.H + h) * (a.D + 2);
+        if (pe[1] != 0.f) mx = fmaxf(mx, pe[0]);
+    }
+    const float w0 = __expf(p[0] - mx);
+    float sum = w0 * p[1], acc = w0 * p[2 + i];
+    for (int e = 0; e < a.n_extra; ++e) {
+        const float* pe = a.extra + (((size_t) e * a.cap + t) * a.H + h) * (a.D + 2);
+        if (pe[1] == 0.f) continue;
+        const float w = __expf(pe[0] - mx);
+        sum += w * pe[1];
+        acc += w * pe[2 + i];
+    }
+    const size_t at = ((size_t) t * a.H + h) * a.D + i;
+    a.out[at] = acc / sum / (1.0f + __expf(-a.gate[at]));
 }
 
 // ---------------------------------------------------------------------------------------------- checks

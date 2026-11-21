@@ -1707,6 +1707,7 @@ struct Qwen35Line {
     std::string main_gpu = "0", second;
     std::string bad;       ///< a --gpu it cannot read
     std::string skipped;   ///< --gpu cards whose settings this path has no use for
+    std::vector<std::string> clocks;   ///< each later --gpu card's clocks= ("" where it gives none), as `second` lists them
     std::vector<char*> rest;
     bool qwen35() const { return family == lamina::ModelFamily::Qwen35Moe || family == lamina::ModelFamily::Qwen35; }
     bool hy4() const { return family == lamina::ModelFamily::HyV4Flash; }
@@ -1739,6 +1740,7 @@ Qwen35Line qwen35_line(int argc, char** argv) {
             if (cards++ == 0) q.main_gpu = c.name == "auto" ? "0" : c.name;
             if (c.name == "auto") q.second = "auto";
             else if (cards > 1) q.second += (q.second.empty() ? "" : ",") + c.name;
+            if (cards > 1) q.clocks.push_back(c.clocks.value_or(""));
             continue;
         }
         if ((std::strcmp(argv[i], "--native") == 0 || std::strcmp(argv[i], "--model") == 0) && i + 1 < argc)
@@ -1823,6 +1825,48 @@ int qwen35_switch(int argc, char** argv) {
     return lamina::qwen35::run((int) rest.size(), rest.data());
 }
 
+/// The cards after the first as CUDA ordinals, in their order (`auto`: every other usable GPU); one that is not found,
+/// is the main GPU or cannot run the engine is left out with a line.  `which`: each kept card's place in the list
+/// (-1: one of `auto`'s).
+std::vector<int> other_cards(const Qwen35Line& q, const std::vector<lamina::core::GpuInfo>& gpus, int dev,
+                             std::vector<int>* which = nullptr) {
+    std::vector<int> out;
+    std::string why;
+    if (q.second.empty() || q.second == "-1") return out;
+    int at_card = 0;
+    for (size_t at = 0; at <= q.second.size(); ++at_card) {
+        const size_t comma = std::min(q.second.find(',', at), q.second.size());
+        const std::string name = q.second.substr(at, comma - at);
+        at = comma + 1;
+        if (name == "auto") {
+            for (const lamina::core::GpuInfo& gi : gpus)
+                if (gi.ordinal != dev && lamina::core::gpu_unusable(gi.ordinal).empty()) {
+                    out.push_back(gi.ordinal);
+                    if (which) which->push_back(-1);
+                }
+            continue;
+        }
+        const int d = lamina::core::find_gpu(gpus, name, why);
+        if (d < 0 || d == dev) {
+            std::fprintf(stderr, "lamina: --second-gpu %s left out: %s\n", name.c_str(),
+                         d < 0 ? why.c_str() : "it is the main GPU");
+            continue;
+        }
+        if (const std::string no = lamina::core::gpu_unusable(d); !no.empty()) {
+            std::fprintf(stderr, "lamina: GPU %d, %s, left out: %s\n", d, gpus[(size_t) d].name.c_str(), no.c_str());
+            continue;
+        }
+        out.push_back(d);
+        if (which) which->push_back(at_card);
+    }
+    return out;
+}
+std::string ordinals(const std::vector<int>& devs) {
+    std::string list;
+    for (const int d : devs) list += (list.empty() ? "" : ",") + std::to_string(d);
+    return list;
+}
+
 #if defined(LAMINA_HAVE_HY4)
 /// Hy4-flash's switch: kNotQwen35 for another family, else the exit code of src/hy4's path, run on --main-gpu (the first
 /// --gpu card's), made current before its first CUDA call; the other cards' GPUs go to it as --tier-gpus (their order).
@@ -1845,31 +1889,7 @@ int hy4_switch(int argc, char** argv) {
                      gpus[(size_t) dev].name.c_str(), no.c_str());
         return 2;
     }
-    std::string list;
-    if (!q.second.empty() && q.second != "-1") {
-        for (size_t at = 0; at <= q.second.size();) {
-            const size_t comma = std::min(q.second.find(',', at), q.second.size());
-            const std::string name = q.second.substr(at, comma - at);
-            at = comma + 1;
-            if (name == "auto") {
-                for (const lamina::core::GpuInfo& gi : gpus)
-                    if (gi.ordinal != dev && lamina::core::gpu_unusable(gi.ordinal).empty())
-                        list += (list.empty() ? "" : ",") + std::to_string(gi.ordinal);
-                continue;
-            }
-            const int d = lamina::core::find_gpu(gpus, name, why);
-            if (d < 0 || d == dev) {
-                std::fprintf(stderr, "lamina: --second-gpu %s left out: %s\n", name.c_str(),
-                             d < 0 ? why.c_str() : "it is the main GPU");
-                continue;
-            }
-            if (const std::string no = lamina::core::gpu_unusable(d); !no.empty()) {
-                std::fprintf(stderr, "lamina: GPU %d, %s, left out: %s\n", d, gpus[(size_t) d].name.c_str(), no.c_str());
-                continue;
-            }
-            list += (list.empty() ? "" : ",") + std::to_string(d);
-        }
-    }
+    std::string list = ordinals(other_cards(q, gpus, dev));
     cudaSetDevice(dev);
     std::vector<char*>& rest = q.rest;
     std::string flag = "--tier-gpus";
@@ -1885,7 +1905,8 @@ int hy4_switch(int argc, char** argv) {
 
 #if defined(LAMINA_HAVE_INKLING2)
 /// Inkling 2's switch: kNotQwen35 for another family, else the exit code of src/inkling2's path, run on --main-gpu (the
-/// first --gpu card's), made current before its first CUDA call.
+/// first --gpu card's), made current before its first CUDA call; the other cards hold the cells the main one has no
+/// room for: --cell-gpus (their order), their clocks= as --cell-gpu-clocks.
 int inkling2_switch(int argc, char** argv) {
     Qwen35Line q = qwen35_line(argc, argv);
     if (!q.inkling2()) return kNotQwen35;
@@ -1905,8 +1926,27 @@ int inkling2_switch(int argc, char** argv) {
                      gpus[(size_t) dev].name.c_str(), no.c_str());
         return 2;
     }
-    std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s\n", lamina::model_family_title(q.family),
-                 lamina::model_family_arch(q.family), dev, gpus[(size_t) dev].name.c_str());
+    std::vector<int> which;
+    std::string list = ordinals(other_cards(q, gpus, dev, &which)), locks;
+    bool any = false;
+    for (const int w : which) {
+        const std::string c = w >= 0 && (size_t) w < q.clocks.size() && !q.clocks[(size_t) w].empty() ? q.clocks[(size_t) w] : "0";
+        any = any || c != "0";
+        locks += (locks.empty() ? "" : ",") + c;
+    }
+    cudaSetDevice(dev);
+    std::string f_gpus = "--cell-gpus", f_locks = "--cell-gpu-clocks";
+    if (!list.empty()) {
+        q.rest.push_back(f_gpus.data());
+        q.rest.push_back(list.data());
+        if (any) {
+            q.rest.push_back(f_locks.data());
+            q.rest.push_back(locks.data());
+        }
+    }
+    std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s%s%s\n", lamina::model_family_title(q.family),
+                 lamina::model_family_arch(q.family), dev, gpus[(size_t) dev].name.c_str(),
+                 list.empty() ? "" : "; cells also on GPUs ", list.c_str());
     return lamina::inkling2::run((int) q.rest.size(), q.rest.data());
 }
 #endif

@@ -65,6 +65,17 @@ const Api& api() {
     return a;
 }
 
+/// The device a chunk is made on and a range is opened to: the current one (the first one's where it cannot be
+/// asked), so a range reserved and mapped with another card current is that card's
+int current_device(const Api& a) {
+    int d = a.dev;
+    if (cudaGetDevice(&d) != cudaSuccess) {
+        (void) cudaGetLastError();
+        d = a.dev;
+    }
+    return d;
+}
+
 }  // namespace
 
 bool vmm_available() { return api().ok; }
@@ -76,7 +87,7 @@ VmmChunk vmm_chunk_new() {
     CUmemAllocationProp prop{};
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    prop.location.id = a.dev;
+    prop.location.id = current_device(a);
     CUmemGenericAllocationHandle h = 0;
     if (a.create(&h, (size_t) a.gran, &prop, 0) != CUDA_SUCCESS) return 0;
     return (VmmChunk) h;
@@ -127,7 +138,7 @@ bool VmmRange::set_access(int64_t lo, int64_t hi) {
     const Api& a = api();
     CUmemAccessDesc d{};
     d.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    d.location.id = a.dev;
+    d.location.id = current_device(a);
     d.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     return a.access((CUdeviceptr) (base_ + (uint64_t) lo * a.gran), (size_t) ((uint64_t) (hi - lo) * a.gran), &d, 1) ==
            CUDA_SUCCESS;
