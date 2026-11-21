@@ -7,7 +7,7 @@ Supported models:
 - [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (unsloth)
 - [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) (unsloth)
 - [Hy4-flash](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (AngelSlim)
-- [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (unsloth's quants, both layouts of the files; on a GPU that holds the file, the context also over other GPUs; text only)
+- [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (unsloth's quants, both layouts of the files; on a GPU that holds the file, the context also over other GPUs; its drafter; text only)
 
 Speeds against llama.cpp and Strata on one PC are in [docs/COMPARISON.md](docs/COMPARISON.md).
 

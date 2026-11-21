@@ -407,6 +407,19 @@ between its scans answers late; the lock needs administrator rights). Its option
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
 mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
 
+Drafts: a generated token is a window of rows through the model, the last token and up to 7 drafts after it; a
+draft stays while it is the token the request's sampler picks (the sampler runs on the GPU, a row's draw by its
+token's position), and a window's rows leave what a row at a time leaves, to the bit, so a greedy text is the same
+with drafts and without. The drafts are the tokens that followed the text's last 16 tokens or more where they
+occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the model's block drafter, DSpark:
+`lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
+`dspark-Inkling-2-Mini-Q8_0.gguf`), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a
+window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.7).
+It takes 0.40 GiB of VRAM for its weights and ~0.35 GiB for its context cells (made from the model's own states of
+every position; `--dspark-reach N`, 32,768: those its layer without a window keeps) and buffers, and is left out
+where the card alone holds the context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX 3090: 108
+tok/s without drafts, 120 after a short prompt, 140 thinking, 248 where the answer quotes its prompt.
+
 A prompt is read in chunks of `--prefill N` rows (1,024; their buffers take ~0.8 GiB of VRAM; 0: 8 rows at a time
 through the generation's kernels). Where the card alone holds the context and would hold under 32,768 tokens (or
 under `--max-context`) beside those buffers, the rows are halved until it does, down to 128 (a line says so: the

@@ -36,8 +36,9 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
 - [Hy4-flash](#hy4-flash) (Tencent's model, its Q4_K_M with 83 GiB of experts over the three GPUs and the RAM):
   Lamina writes 4.7-6.1x as fast as llama.cpp's PR #32517 and reads prompts 17-31x as fast (its 64K prompt in 35 s
   against 18 minutes).
-- [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): Lamina
-  writes 1.7-1.8x as fast as unsloth's llama.cpp fork (105 tok/s against 57) and reads prompts 2.3x as fast.
+- [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): with the
+  model's drafter in both, Lamina writes 1.7-2.5x as fast as unsloth's llama.cpp fork (120-248 tok/s against 62-98)
+  and reads prompts 2.2x as fast.
 
 ## The PC and the engines
 
@@ -375,29 +376,35 @@ thinking task, the edit, after the 16K prompt; 200 / 400 / 400 / 200 positions),
 
 The engine's inkling2 path (`src/inkling2`) on unsloth's UD-IQ4_XS (24 layers of which 12 run three times a token,
 128 experts a layer with 8 used; the experts NVFP4 in layers 0-19, the attention's matrices Q8_0), measured on
-2026-11-21, the whole model on the main RTX 3090 in both engines, K and V in FP16. Lamina with its config (the context
-what the card's VRAM holds: 212,992 tokens; prompts in chunks of 1,024 rows; no drafter yet). llama.cpp: unsloth's fork
-as released (b12572-mix-8eebad4, the only build that reads the files' layout), `-ub 512`, a context of 32,768; for the
-86K prompt 98,304 with K and V in q8_0, which still passes the card's VRAM, so its numbers there are not clean. The
-same requests through each server's API, greedy, Lamina's conversation cache off (`bench/lamina_bench.py`,
-`scratch/inkling/llama/speed.py`).
+2026-11-21, the whole model on the main RTX 3090 in both engines, K and V in FP16. Lamina with its config on that card
+alone (the context what its VRAM holds: 196,608 tokens beside the drafter; prompts in chunks of 1,024 rows; the
+model's drafter, DSpark, found beside the model, and the prompt lookup). llama.cpp: unsloth's fork as released
+(b12572-mix-8eebad4, the only build that reads the files' layout), `-ub 512`, a context of 32,768; for the 86K prompt
+98,304 with K and V in q8_0, which still passes the card's VRAM, so its numbers there are not clean; with the drafter
+(`--spec-type draft-dspark`) its drafts of up to 3 / up to 7 tokens. The same requests through each server's API,
+greedy, Lamina's conversation cache off (`bench/lamina_bench.py`, `scratch/inkling/llama/speed.py`).
 
-| | llama.cpp | Lamina |
-|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 57.2 | 104.8 |
-| Generation: thinking (3,000 tokens) | 57.1 | 102.5 |
-| Edit: prompt / generation (t/s) | 985 / 55.2 | 2,222 / 99.9 |
-| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | 2,113 / 90.3 |
-| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | 1,760 / 69.6 |
+| | llama.cpp | llama.cpp, drafter (3 / 7) | Lamina, no drafts | Lamina |
+|---|---|---|---|---|
+| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 107.7 | 120.0 |
+| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 107.1 | 140.2 |
+| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 2,184 / 104.8 | 2,180 / 247.8 |
+| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 2,072 / 97.0 | 2,067 / 173.1 |
+| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 1,703 / 75.1 | 1,709 / 117.1 |
 
-To the API in 6.3 s (the model loaded in 4.9; llama.cpp 9.3); 16,230 MiB of VRAM at a short context (llama.cpp 19,410
-with its 32,768 cells allocated); the server ~1.1 GB of RAM. llama.cpp with the model's drafter (DSpark, drafts of up
-to 3 / up to 7 tokens): 61.6 / 69.5 after the short prompt, 62.2 / 50.7 thinking, 85.9 / 98.3 on the edit. Lamina's
-prompt cache: a 21K-token prompt's follow-up in 0.2 s, a parked 22K-token conversation back in 0.4 s.
+Lamina's greedy text is the same with drafts and without (a window's rows leave what a row at a time leaves, to the
+bit); sampled at temperature 0.7 the speeds are the greedy ones within 3% (the sampler runs on the GPU). Its drafter
+keeps as many of its drafts as llama.cpp's (three a window: 46% and 47% after the short prompt and thinking, 92% on
+the edit; llama.cpp 51%, 51% and 91%), and goes on only while their joint probability stays at 0.7.
+
+To the API in 7.1 s with the drafter (6.3 without; the model loaded in 4.9; llama.cpp 9.3); 16,230 MiB of VRAM at a
+short context, ~0.75 GiB more with the drafter (llama.cpp 19,410 with its 32,768 cells allocated, 20,778 with the
+drafter); the server ~1.1 GB of RAM. Lamina's prompt cache: a 21K-token prompt's follow-up in 0.2 s, a parked
+22K-token conversation back in 0.4 s.
 
 Agreement with llama.cpp (`scratch/inkling/parity.sh`): Lamina forced along llama.cpp's own greedy text, the argmax
-agreeing at 99.0% / 98.5% / 99.25% of the positions (the short prompt, thinking, the edit; 200 / 400 / 400), mean KL
-1.7e-3 / 2.7e-3 / 1.3e-3; after the 21K prompt 96.9% and 5.4e-3 (64 positions), where llama.cpp at another batch size
+agreeing at 97.5% / 98.75% / 99.25% of the positions (the short prompt, thinking, the edit; 200 / 400 / 400), mean KL
+2.3e-3 / 2.3e-3 / 1.2e-3; after the 21K prompt 96.9% and 5.4e-3 (64 positions), where llama.cpp at another batch size
 agrees with itself at 96.9-98.4% and 3.7e-3 to 1.5e-2.
 
 ## Features
