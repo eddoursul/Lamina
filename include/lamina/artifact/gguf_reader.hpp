@@ -972,6 +972,29 @@ inline std::string check_architecture_hy4(const GgufFile& g) {
     return {};
 }
 
+/// Inkling 2's keys in either layout (inkling2: unsloth's files; inkling2_loop: mainline llama.cpp's), present and
+/// numbers; the shapes, the loop and the rest are lamina/inkling2/geometry.hpp's (inkling2::read_geometry).
+inline std::string check_architecture_inkling2(const GgufFile& f) {
+    const MetaValue* arch = f.get("general.architecture");
+    if (!arch || (arch->s != "inkling2" && arch->s != "inkling2_loop")) return "not an Inkling 2 model";
+    const std::string a = arch->s + ".";
+    static const char* const nums[] = {
+        "block_count", "embedding_length", "expert_count", "expert_used_count", "expert_feed_forward_length",
+        "attention.key_length", "attention.value_length", "attention.layer_norm_rms_epsilon", "attention.sliding_window",
+        "attention.relative_length", "attention.relative_extent", "attention.qk_clip", "attention.relative_clip",
+        "attention.log_scale_floor", "attention.log_scale_alpha", "shortconv.l_cache", "attn_res.block_size",
+        "activation.situ_beta", "activation.situ_linear_beta", "vocab_size", "vocab_size_unpadded",
+    };
+    for (const char* k : nums) {
+        const MetaValue* v = f.get(a + k);
+        if (!v) return "missing " + a + k;
+        if (!v->is_num()) return a + k + " is not a number";
+    }
+    const MetaValue* p = f.get(a + "attention.sliding_window_pattern");
+    if (!p || p->type != MetaType::ARRAY) return "missing " + a + "attention.sliding_window_pattern";
+    return {};
+}
+
 inline std::string check_architecture(const GgufFile& f) {
     const MetaValue* arch = f.get("general.architecture");
     if (!arch) return "missing general.architecture";
@@ -979,6 +1002,7 @@ inline std::string check_architecture(const GgufFile& f) {
     if (family == ModelFamily::Qwen35Moe) return check_architecture_qwen35(f, "qwen35moe", true);
     if (family == ModelFamily::Qwen35) return check_architecture_qwen35(f, "qwen35", false);
     if (family == ModelFamily::HyV4Flash) return check_architecture_hy4(f);
+    if (family == ModelFamily::Inkling2) return check_architecture_inkling2(f);
     core::ModelGeometry g;   // anything else is refused by name by read_geometry
     std::string err = read_geometry(f, g);
     if (err.empty()) err = geometry_unsupported(g);

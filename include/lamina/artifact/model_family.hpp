@@ -3,7 +3,8 @@
 // This engine was written for one model (Qwen3.8-Flash-Next, `qwen4exp`).  Qwen3.6-35B-A3B (`qwen35moe`) is a close
 // cousin (same tokenizer, the same Gated-DeltaNet + gated-attention 3:1 layer pattern, the same head dims), so the
 // reader, the geometry and the layout tables know both.  Hy4-flash (`hy_v4_flash`) shares no layer with them: its
-// geometry and layout are lamina/hy4/geometry.hpp's.  The ENGINE runs only the families `model_family_runs` names; a
+// geometry and layout are lamina/hy4/geometry.hpp's; nor does Inkling 2 (`inkling2`, `inkling2_loop`:
+// lamina/inkling2/geometry.hpp).  The ENGINE runs only the families `model_family_runs` names; a
 // recognised family it does not run yet is refused with `model_family_not_supported`, not mis-run.
 //
 // No dependencies: the GGUF reader (the architecture guard) and the core geometry both include this.
@@ -19,6 +20,7 @@ enum class ModelFamily {
     Qwen35Moe,   ///< Qwen3.6-35B-A3B (Unsloth's MTP GGUFs): plain pre-norm residual, dense attention, nextn MTP block
     Qwen35,      ///< Qwen3.8-27B: Qwen3.6's layers with a dense FFN in place of the experts (Unsloth's GGUFs)
     HyV4Flash,   ///< Tencent's Hy4-flash: gated MLA, sparse and window layers, iHC, Engram, latent experts (AngelSlim's GGUFs)
+    Inkling2,    ///< Thinking Machines Lab's Inkling 2 Mini: looped layers, a distance bias, NVFP4 experts (unsloth's GGUFs)
 };
 
 inline ModelFamily model_family_from_arch(const std::string& arch) {
@@ -26,6 +28,8 @@ inline ModelFamily model_family_from_arch(const std::string& arch) {
     if (arch == "qwen35moe") return ModelFamily::Qwen35Moe;
     if (arch == "qwen35") return ModelFamily::Qwen35;
     if (arch == "hy_v4_flash") return ModelFamily::HyV4Flash;
+    // two layouts of the same tensors: unsloth's files and mainline llama.cpp's (lamina/inkling2/geometry.hpp)
+    if (arch == "inkling2" || arch == "inkling2_loop") return ModelFamily::Inkling2;
     return ModelFamily::Unknown;
 }
 
@@ -40,6 +44,8 @@ inline const char* model_family_arch(ModelFamily f) {
         return "qwen35";
     case ModelFamily::HyV4Flash:
         return "hy_v4_flash";
+    case ModelFamily::Inkling2:
+        return "inkling2";   // unsloth's files; mainline's layout says inkling2_loop
     default:
         return "";
     }
@@ -56,13 +62,16 @@ inline const char* model_family_title(ModelFamily f) {
         return "Qwen3.8-27B";
     case ModelFamily::HyV4Flash:
         return "Hy4-flash";
+    case ModelFamily::Inkling2:
+        return "Inkling 2 Mini";
     default:
         return "an unknown model";
     }
 }
 
-/// Whether Flash-Next's engine path runs the family.  Qwen3.6 and Hy4-flash have engine paths of their own (src/qwen35,
-/// src/hy4), which `lamina` switches to at the top of main (a build with CUDA and native experts); without them the
+/// Whether Flash-Next's engine path runs the family.  Qwen3.6, Hy4-flash and Inkling 2 have engine paths of their own
+/// (src/qwen35, src/hy4, src/inkling2), which `lamina` switches to at the top of main (a build with CUDA and native
+/// experts); without them the
 /// family is refused with `model_family_not_supported`.
 inline bool model_family_runs(ModelFamily f) { return f == ModelFamily::Qwen4Exp; }
 

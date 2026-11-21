@@ -12,6 +12,9 @@
 #if defined(LAMINA_HAVE_HY4)
 #include "lamina/hy4/engine.hpp"
 #endif
+#if defined(LAMINA_HAVE_INKLING2)
+#include "lamina/inkling2/engine.hpp"
+#endif
 #include "lamina/program/engine.hpp"
 #include "lamina/program/gpu_cards.hpp"
 #include "lamina/program/serve_io.hpp"
@@ -1707,6 +1710,7 @@ struct Qwen35Line {
     std::vector<char*> rest;
     bool qwen35() const { return family == lamina::ModelFamily::Qwen35Moe || family == lamina::ModelFamily::Qwen35; }
     bool hy4() const { return family == lamina::ModelFamily::HyV4Flash; }
+    bool inkling2() const { return family == lamina::ModelFamily::Inkling2; }
 };
 Qwen35Line qwen35_line(int argc, char** argv) {
     Qwen35Line q;
@@ -1878,11 +1882,48 @@ int hy4_switch(int argc, char** argv) {
     return lamina::hy4::run((int) rest.size(), rest.data());
 }
 #endif
+
+#if defined(LAMINA_HAVE_INKLING2)
+/// Inkling 2's switch: kNotQwen35 for another family, else the exit code of src/inkling2's path, run on --main-gpu (the
+/// first --gpu card's), made current before its first CUDA call.
+int inkling2_switch(int argc, char** argv) {
+    Qwen35Line q = qwen35_line(argc, argv);
+    if (!q.inkling2()) return kNotQwen35;
+    if (!q.bad.empty()) {
+        std::fprintf(stderr, "lamina: %s\n", q.bad.c_str());
+        return 2;
+    }
+    const std::vector<lamina::core::GpuInfo> gpus = lamina::core::list_gpus();
+    std::string why;
+    const int dev = lamina::core::find_gpu(gpus, q.main_gpu, why);
+    if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
+        std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", q.main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
+        return 2;
+    }
+    if (const std::string no = lamina::core::gpu_unusable(dev); !no.empty()) {
+        std::fprintf(stderr, "lamina: --main-gpu %s: GPU %d, %s: %s\n", q.main_gpu.c_str(), dev,
+                     gpus[(size_t) dev].name.c_str(), no.c_str());
+        return 2;
+    }
+    std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s\n", lamina::model_family_title(q.family),
+                 lamina::model_family_arch(q.family), dev, gpus[(size_t) dev].name.c_str());
+    return lamina::inkling2::run((int) q.rest.size(), q.rest.data());
+}
+#endif
 #endif
 
 }  // namespace
 
 int lamina::program::check_args(int argc, char** argv) {
+#if defined(LAMINA_HAVE_INKLING2) && defined(LAMINA_HAVE_QWEN35)
+    if (Qwen35Line q = qwen35_line(argc, argv); q.inkling2()) {
+        if (!q.bad.empty()) {
+            std::fprintf(stderr, "lamina: %s\n", q.bad.c_str());
+            return 2;
+        }
+        return lamina::inkling2::check_args((int) q.rest.size(), q.rest.data());
+    }
+#endif
 #if defined(LAMINA_HAVE_HY4)
     if (Qwen35Line q = qwen35_line(argc, argv); q.hy4()) {
         if (!q.bad.empty()) {
@@ -1965,6 +2006,9 @@ int lamina::program::run(int argc, char** argv) {
     }
 #if defined(LAMINA_HAVE_HY4)
     if (const int rc = hy4_switch(argc, argv); rc != kNotQwen35) return rc;
+#endif
+#if defined(LAMINA_HAVE_INKLING2) && defined(LAMINA_HAVE_QWEN35)
+    if (const int rc = inkling2_switch(argc, argv); rc != kNotQwen35) return rc;
 #endif
 #if defined(LAMINA_HAVE_QWEN35)
     if (const int rc = qwen35_switch(argc, argv); rc != kNotQwen35) return rc;

@@ -771,6 +771,19 @@ if(LAMINA_NATIVE_EXPERTS)
     target_link_libraries(lamina-hy4 PRIVATE lamina_hy4 CUDA::cudart)
     target_link_libraries(lamina_program PUBLIC lamina_hy4)
     target_compile_definitions(lamina_program PRIVATE LAMINA_HAVE_HY4=1)
+
+    # Inkling 2 (GGUF architectures inkling2 and inkling2_loop): its own engine path, a library `lamina` switches to for
+    # such a model, and lamina-inkling2 wraps on its own.  Fast math as ggml-cuda (llama.cpp, the reference).
+    add_library(lamina_inkling2 STATIC src/inkling2/inkling2_engine.cu)
+    target_include_directories(lamina_inkling2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                               PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(lamina_inkling2 PRIVATE lamina_core lamina_engine lamina_kernels lamina_kernels_cpu
+                          lamina_warnings lamina_serve_io lamina_cards CUDA::cudart)
+    target_compile_options(lamina_inkling2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
+    add_executable(lamina-inkling2 src/inkling2/inkling2_main.cpp)
+    target_link_libraries(lamina-inkling2 PRIVATE lamina_inkling2 CUDA::cudart)
+    target_link_libraries(lamina_program PUBLIC lamina_inkling2)
+    target_compile_definitions(lamina_program PRIVATE LAMINA_HAVE_INKLING2=1)
   endif()
 endif()
 
