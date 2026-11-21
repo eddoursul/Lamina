@@ -28,6 +28,7 @@
 #include "lamina/kernels/cpu/pool.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/nvfp4_gemm.hpp"
 #include "lamina/kernels/sampler.hpp"
 #include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/cpu_arch.hpp"
@@ -963,6 +964,9 @@ struct Rows {
     int32_t *ent_row = nullptr, *ent_exp = nullptr, *bounds = nullptr, *ident = nullptr;
     int64_t ids_rows = 0;
     int32_t *ids_h = nullptr, *ent_row_h = nullptr, *ent_dst_h = nullptr, *ent_exp_h = nullptr, *bounds_h = nullptr;
+    // the experts on the FP16 tensor cores (nvfp4_gemm): each place's blob, the tiles of 64 entries
+    unsigned long long *pptr = nullptr, *pptr_h = nullptr;
+    int32_t *tiles = nullptr, *tiles_h = nullptr;
     int n_part = 0;   // stretches `part` holds a row and head
     int head_rows() const { return batch ? 1 : cap; }
 };
@@ -980,6 +984,10 @@ struct Engine {
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
     int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
+    // A chunk's NVFP4 experts on the FP16 tensor cores (nvfp4_gemm) instead of MMQ: where the card has no FP4 tensor
+    // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC: 0 never, 1 on any card; LAMINA_INK_TC_MIN: tests')
+    bool tc_on = false;
+    int tc_min = 48;
     int feed_rows = kMaxT;                  // rows a decode forward of a prompt part takes (LAMINA_INK_ROWS: fewer, a test's)
 
     // a visit: one application of a layer
@@ -1327,6 +1335,11 @@ struct Engine {
         R.ent_dst_h = halloc<int32_t>(n_ent);
         R.ent_exp_h = halloc<int32_t>(n_ent);
         R.bounds_h = halloc<int32_t>(E + 1);
+        const size_t n_tiles = n_ent / (size_t) K::kNvfp4GemmEntries + E;
+        R.pptr = dzero<unsigned long long>(E);
+        R.pptr_h = halloc<unsigned long long>(E);
+        R.tiles = dzero<int32_t>(n_tiles);
+        R.tiles_h = halloc<int32_t>(n_tiles);
     }
 
     /// Whether a prompt chunk's products have their MMQ kernels on this GPU: "" or why not
@@ -1368,6 +1381,9 @@ struct Engine {
         xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
+        tc_on = MMQ::built() && !MMQ::native_fp4(40);
+        if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
         if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
@@ -2843,6 +2859,39 @@ struct Engine {
             p.max_rows = max_x;
             mmq->run(p, st);
         };
+        // An NVFP4 matrix on the FP16 tensor cores: the card's places in tiles of 64 entries, the entries' rows as
+        // halves (x: their floats, map: an entry's row of them, xh: room for the halves)
+        const bool tc = tc_on && T >= tc_min;
+        const bool tc_gu = tc && L.gl.gu_type == 40 && K::nvfp4_gemm_fits(2 * F, N);
+        const bool tc_d = tc && L.gl.d_type == 40 && K::nvfp4_gemm_fits(N, F);
+        int n_tiles = 0;
+        if (tc_gu || tc_d) {
+            for (int i = 0; i < n_gpu; ++i) {
+                R.pptr_h[i] = (unsigned long long) (uintptr_t) blob_at(i);
+                const int n = R.bounds_h[i + 1] - R.bounds_h[i];
+                for (int k = 0; k * K::kNvfp4GemmEntries < n; ++k) R.tiles_h[n_tiles++] = i << 16 | k;
+            }
+            CK(cudaMemcpyAsync(R.pptr, R.pptr_h, (size_t) n_gpu * 8, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(R.tiles, R.tiles_h, (size_t) std::max(n_tiles, 1) * 4, cudaMemcpyHostToDevice, st));
+        }
+        auto tc_product = [&](size_t off, size_t row_bytes, int w_rows, int w_cols, const float* x, const int32_t* map,
+                              void* xh, const int32_t* ids, float* y) {
+            K::nvfp4_gemm_halves(x, map, xh, n_ent, w_cols, st);
+            K::Nvfp4Gemm q;
+            q.ptr = R.pptr;
+            q.off = off;
+            q.row_bytes = row_bytes;
+            q.w_rows = w_rows;
+            q.w_cols = w_cols;
+            q.bounds = R.bounds;
+            q.tiles = R.tiles;
+            q.n_tiles = n_tiles;
+            q.x = xh;
+            q.ids = ids;
+            q.y = y;
+            q.ld = w_rows;
+            K::nvfp4_gemm(q, st);
+        };
         // a BF16 matrix (MMQ has none): an expert's rows widened to floats, a GEMM over the rows routed to it
         auto bf16_product = [&](size_t off, int w_rows, int w_cols, const float* x, float* y) {
             for (int i = 0; i < n_gpu; ++i) {
@@ -2857,6 +2906,8 @@ struct Engine {
             const long long cnt = (long long) n_ent * N;
             ik::rows_index_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.nrm, R.ent_row, R.rows, n_ent, N, 0);
             bf16_product(0, 2 * F, N, R.rows, R.gu);
+        } else if (tc_gu) {   // (the halves in the rows' buffer, which the down product fills after)
+            tc_product(0, L.gl.gu_row, 2 * F, N, R.nrm, R.ent_row, R.rows, nullptr, R.gu);
         } else {
             MMQ::quantize(R.nrm, R.ent_row, R.tq, L.gl.gu_type, N, N, n_ent, st, R.tqs);
             p.type = L.gl.gu_type;
@@ -2876,6 +2927,8 @@ struct Engine {
             bf16_product(L.gl.down_off, N, F, R.h, R.gu);
             const long long all = (long long) n_ent * N;
             ik::rows_index_kernel<<<(unsigned) ((all + 255) / 256), 256, 0, st>>>(R.gu, R.ent_dst, R.rows, n_ent, N, 1);
+        } else if (tc_d) {   // (h's halves in the gate/up product's MMQ image, free by now)
+            tc_product(L.gl.down_off, L.gl.d_row, N, F, R.h, nullptr, R.tq, R.ent_dst, R.rows);
         } else {
             MMQ::quantize(R.h, nullptr, R.hq, L.gl.d_type, F, F, n_ent, st, R.hqs);
             p.type = L.gl.d_type;

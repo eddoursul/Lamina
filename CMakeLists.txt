@@ -266,6 +266,7 @@ if(LAMINA_ENABLE_CUDA)
                           src/kernels/cuda/verify_kernels.cu
                           src/kernels/cuda/draft_proxy.cu
                           src/kernels/cuda/iq_kernels.cu
+                          src/kernels/cuda/nvfp4_gemm.cu
                           src/kernels/ngram.cpp
                           src/ngram/ple_reader.cpp
                           src/platform/direct_file.cpp)
@@ -757,6 +758,10 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(expert_grouped_parity PRIVATE third_party/ggml third_party/ggml-tq src/kernels/cuda)
     target_link_libraries(expert_grouped_parity PRIVATE lamina_kernels lamina_kernels_cpu CUDA::cudart)
     add_test(NAME expert_grouped_parity COMMAND expert_grouped_parity)
+    # NVFP4 matrices against halves on the FP16 tensor cores (a prompt chunk's experts), against the host's sums.
+    add_executable(nvfp4_gemm_parity src/kernels/nvfp4_gemm_parity.cu)
+    target_link_libraries(nvfp4_gemm_parity PRIVATE lamina_kernels CUDA::cudart)
+    add_test(NAME nvfp4_gemm_parity COMMAND nvfp4_gemm_parity)
 
     # Qwen3.6-35B-A3B (GGUF architecture qwen35moe): its own engine path, a library `lamina` switches to for such a
     # model (the family switch at the top of its main) and lamina-q36 wraps on its own; the experts that do not fit

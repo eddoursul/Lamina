@@ -16,6 +16,7 @@
 #include "tq_lut_i8.cuh"
 #include "tq_states8.cuh"
 #include "lamina/kernels/dp4a.hpp"
+#include "lamina/kernels/fp4_bits.cuh"
 #include "lamina/kernels/warp.cuh"
 #include <type_traits>
 
@@ -911,12 +912,7 @@ template<> struct Split<149> : SplitTqp<7> {};
 // E2M1 codes (ggml-common.h's kvalues_fp4: the values doubled) against q8_1.  NVFP4: a block of 64 values is four
 // sub-blocks of 16, a UE4M3 scale each; a sub-block's 8 bytes hold its first 8 values in the low nibbles and its last
 // 8 in the high ones.  MXFP4: a block of 32, one E8M0 scale, the low nibbles its first 16 values.
-/// ggml_ue4m3_to_fp32: the scale halved, for the doubled codes (0 and 0x7F: zero)
-__device__ __forceinline__ float ue4m3_half(uint8_t x) {
-    const uint32_t e = (x >> 3) & 0xF, m = x & 7;
-    const float v = e ? __uint_as_float(((e + 119u) << 23) | (m << 20)) : (float) m * 0.0009765625f;
-    return x == 0x7F ? 0.0f : v;
-}
+// (ue4m3_half, a sub-block's scale: fp4_bits.cuh)
 /// GGML_E8M0_TO_FP32_HALF
 __device__ __forceinline__ float e8m0_half(uint8_t x) {
     return __uint_as_float(x < 2 ? 0x00200000u << x : (uint32_t) (x - 1) << 23);
@@ -952,11 +948,6 @@ __device__ __forceinline__ float vec_dot_nvfp4_q8_1(const void* __restrict__ vbq
 // sign-replicate bit is the value's sign bit and leaves a negative value's byte 0; the same with the sign bits
 // flipped gives the negative values' magnitudes, summed apart and subtracted: vec_dot_nvfp4_q8_1's integers, and its
 // floats in its order, in two thirds of its instructions.
-__device__ __forceinline__ uint32_t prmt_sel(uint32_t a, uint32_t b, uint32_t sel) {
-    uint32_t d;
-    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(sel));
-    return d;
-}
 template<> struct Split<40> : SplitNoGrid {
     using A = SplitAct<8>;
     struct W { uint32_t p[8], n[8]; float d[2]; };
