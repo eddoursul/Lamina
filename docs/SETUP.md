@@ -437,7 +437,9 @@ where the card alone holds the context and would hold under 32,768 tokens beside
 tok/s without drafts, 120 after a short prompt, 140 thinking, 248 where the answer quotes its prompt.
 
 A prompt is read in chunks of `--prefill N` rows (1,024; their buffers take ~0.8 GiB of VRAM; 0: 8 rows at a time
-through the generation's kernels). Where the card alone holds the context and would hold under 32,768 tokens (or
+through the generation's kernels), which grow to `--prefill-max N` rows (4,096: 2.3 GiB more, 14% faster at 21K
+tokens) for a long prompt while the card's free VRAM holds the larger buffers beside the context's cells, and are
+back after the request. Where the card alone holds the context and would hold under 32,768 tokens (or
 under `--max-context`) beside those buffers, the rows are halved until it does, down to 128 (a line says so: the
 21.3 GiB UD-Q8_K_XL on a 24 GB card). On an RTX 50 a chunk's expert products run on the card's FP4 tensor cores, as
 llama.cpp's do. The prompt cache keeps conversations as on the other paths (`--prompt-cache`, `--prompt-cache-every`,

@@ -135,9 +135,10 @@ template <class T> T* dzero(size_t n) {
     CK(cudaMemset(p, 0, std::max<size_t>(n * sizeof(T), 256)));
     return p;
 }
-template <class T> T* halloc(size_t n) {   // pinned
+template <class T> T* halloc(size_t n) {   // pinned, zeroed (pages given back and taken again are not)
     void* p = nullptr;
     CK(cudaHostAlloc(&p, std::max<size_t>(n * sizeof(T), 256), cudaHostAllocPortable));
+    std::memset(p, 0, std::max<size_t>(n * sizeof(T), 256));
     own(&Owned::pinned, p);
     return (T*) p;
 }
@@ -982,7 +983,13 @@ struct Engine {
     int prof_level = 0;
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
-    int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
+    int prefill = 1024;     // rows a prompt chunk takes (0: prompts through the decode's forwards)
+    // A chunk grows to prefill_max rows for a part that long while the VRAM free above the reserve holds its larger
+    // buffers beside the cells it will write (~0.75 MiB a row), and is back at prefill's when it does not, and after
+    // a request: the VRAM a request leaves is what it was.  Not with experts in RAM, which take free VRAM first.
+    int prefill_max = 4096;
+    int chunk_cap = 0;      // the rows the chunk's buffers hold now
+    std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     // A chunk's NVFP4 experts on the FP16 tensor cores (nvfp4_gemm) instead of MMQ: where the card has no FP4 tensor
     // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC: 0 never, 1 on any card; LAMINA_INK_TC_MIN: tests')
@@ -1324,6 +1331,7 @@ struct Engine {
         R.ids_rows = MMQ::ids_table_rows((int64_t) n_ent);
         R.ent_dst = dzero<int32_t>((size_t) R.ids_rows);
         R.ident = dzero<int32_t>((size_t) R.ids_rows);
+        CK(cudaDeviceSynchronize());   // (the zeroing is not the stream's: it would land on the map)
         MMQ::iota(R.ident, R.ids_rows, st);
         R.ent_row = dzero<int32_t>(n_ent);
         R.ent_exp = dzero<int32_t>(n_ent);
@@ -1340,6 +1348,97 @@ struct Engine {
         R.pptr_h = halloc<unsigned long long>(E);
         R.tiles = dzero<int32_t>(n_tiles);
         R.tiles_h = halloc<int32_t>(n_tiles);
+    }
+
+    bool elastic() const { return prefill > 0 && prefill_max > prefill && !m->in_ram; }
+    int chunk_most() const { return elastic() ? prefill_max : prefill; }
+    /// VRAM a chunk's buffers take a row, as measured (896 MiB at 1,024 rows with cuBLAS's and MMQ's 125 beside
+    /// them; with the drafter the rows' mixes of the target's states and their context projections too)
+    uint64_t chunk_bytes(int rows) const { return (uint64_t) rows * ((753ull + (sp ? 52 : 0)) << 10); }
+    /// A chunk's partial sums of the cells on cards (the cards are known by then)
+    void chunk_parts() {
+        const size_t d0 = g_owned ? g_owned->dev.size() : 0;
+        const size_t prow = (size_t) chunk_cap * (size_t) m->g.n_head, D_ = (size_t) m->g.head_dim;
+        P.rpart = dzero<float>(cards.size() * prow * (D_ + 2));
+        P.tpart = dzero<float>(prow * (D_ + 2));
+        if (g_owned) ck_dev.insert(ck_dev.end(), g_owned->dev.begin() + (long) d0, g_owned->dev.end());
+    }
+    /// The chunk's buffers for `rows` rows
+    void chunk_alloc(int rows) {
+        const size_t d0 = g_owned ? g_owned->dev.size() : 0, h0 = g_owned ? g_owned->pinned.size() : 0;
+        P = Rows{};
+        make_rows(P, rows, true);
+        if (g_owned) {
+            ck_dev.assign(g_owned->dev.begin() + (long) d0, g_owned->dev.end());
+            ck_pin.assign(g_owned->pinned.begin() + (long) h0, g_owned->pinned.end());
+        }
+        chunk_cap = rows;
+        if (!cards.empty()) chunk_parts();
+        CK(cudaDeviceSynchronize());   // (the buffers' zeroing has run: the stream does not wait for it)
+    }
+    /// They are freed (the stream idle); a prompt's logits they held move to the decode rows' first
+    void chunk_free() {
+        CK(cudaStreamSynchronize(st));
+        if (lg_rows == &P) {
+            CK(cudaMemcpy(D.logits, P.logits, (size_t) m->g.n_vocab * 4, cudaMemcpyDeviceToDevice));
+            CK(cudaDeviceSynchronize());   // (a copy on the device may return before it ran)
+            lg_rows = &D;
+        }
+        if (g_owned) {
+            std::lock_guard<std::mutex> lk(g_owned->mu);
+            auto drop = [](std::vector<void*>& all, const std::vector<void*>& gone) {
+                all.erase(std::remove_if(all.begin(), all.end(), [&](void* q) {
+                    return std::find(gone.begin(), gone.end(), q) != gone.end();
+                }), all.end());
+            };
+            drop(g_owned->dev, ck_dev);
+            drop(g_owned->pinned, ck_pin);
+        }
+        for (void* q : ck_dev) CK(cudaFree(q));
+        for (void* q : ck_pin) CK(cudaFreeHost(q));
+        ck_dev.clear();
+        ck_pin.clear();
+        P = Rows{};
+        chunk_cap = 0;
+    }
+    void chunk_set(int rows) {
+        if (rows == chunk_cap) return;
+        chunk_free();
+        chunk_alloc(rows);
+    }
+    /// ensure(n) would find its VRAM on this card with `extra` more bytes of it taken (fewer: freed)
+    bool cells_fit(int64_t n, int64_t extra) {
+        const int64_t G = (int64_t) lamina::core::vmm_granularity();
+        auto chunks = [&](int64_t cells) { return ((int64_t) ((uint64_t) cells * cell_bytes) + G - 1) / G; };
+        int64_t need = 0;
+        if (n > mapped) {
+            int64_t ranges = 0;
+            for (const Visit& V : visits) ranges += V.k_vm ? 2 : 0;
+            need = (chunks(std::min<int64_t>(ctx, (n + kGrow - 1) / kGrow * kGrow)) - chunks(mapped)) * ranges;
+        }
+        size_t fr = 0, tot = 0;
+        CK(cudaMemGetInfo(&fr, &tot));
+        const int64_t above = (int64_t) fr - (int64_t) reserve - extra;
+        return above >= 0 && need <= (int64_t) spare.size() + above / G;
+    }
+    /// Before a chunk of a part with `left` tokens to read: the rows its buffers hold (chunk_cap)
+    void chunk_fit(int64_t left) {
+        if (!elastic()) return;
+        const int64_t p0 = pos();
+        auto fits = [&](int rows) {   // the buffers of `rows` rows beside the cells of a chunk that long
+            const int64_t more = (int64_t) chunk_bytes(rows) - (int64_t) chunk_bytes(chunk_cap);
+            return cells_fit(std::min<int64_t>(ctx, p0 + std::min<int64_t>(rows, left)), more > 0 ? more + (256ll << 20) : more);
+        };
+        for (int rows = prefill_max; rows > chunk_cap; rows /= 2)
+            if (rows > prefill && left > rows / 2 && fits(rows)) {
+                chunk_set(rows);
+                return;
+            }
+        if (chunk_cap > prefill && !fits(chunk_cap)) chunk_set(prefill);
+    }
+    /// After a request: the chunk's buffers are prefill's again
+    void chunk_base() {
+        if (chunk_cap > prefill) chunk_set(prefill);
     }
 
     /// Whether a prompt chunk's products have their MMQ kernels on this GPU: "" or why not
@@ -1459,7 +1558,7 @@ struct Engine {
                                           (uint64_t) ((g.n_swa + kMaxT + kRingSub - 1) / kRingSub * kRingSub);
                     const uint64_t rest = ring * (cache_on ? 2 : 1) + (32ull << 20);
                     // (with the drafter: the rows' mixes of the target's states and their context projections)
-                    auto rows_bytes = [&](int rows) { return (uint64_t) rows * ((753ull + (sp ? 52 : 0)) << 10) + (125ull << 20); };
+                    auto rows_bytes = [&](int rows) { return chunk_bytes(rows) + (125ull << 20); };
                     size_t fr = 0, tot = 0;
                     CK(cudaMemGetInfo(&fr, &tot));
                     const int asked = prefill;
@@ -1478,7 +1577,7 @@ struct Engine {
                     std::fprintf(stderr, "lamina: cuBLAS could not start\n");
                     throw Fatal{1};
                 }
-                make_rows(P, prefill, true);
+                chunk_alloc(prefill);
                 gemm(m->layers[0].router, (int) g.n_expert, (int) g.n_embd, P.nrm, 1, P.probs);   // cuBLAS's start, not a first prompt's
                 if (m->in_ram) {
                     nrm_p = halloc<float>((size_t) prefill * N);
@@ -1615,14 +1714,13 @@ struct Engine {
             own(&Owned::pinned, xq_h);
             own(&Owned::pinned, xs_h);
             D.rpart = dzero<float>(cards.size() * rows * (D_ + 2));
-            if (prefill > 0) {   // a chunk's rows
-                const size_t prow = (size_t) prefill * (size_t) g.n_head;
+            if (prefill > 0) {   // a chunk's rows (the cards' and the pinned ones for the most a chunk grows to)
+                const size_t prow = (size_t) chunk_most() * (size_t) g.n_head;
                 CK(cudaHostAlloc((void**) &pq_h, prow * D_ * 4, cudaHostAllocPortable));
                 CK(cudaHostAlloc((void**) &ps_h, prow * 4, cudaHostAllocPortable));
                 own(&Owned::pinned, pq_h);
                 own(&Owned::pinned, ps_h);
-                P.rpart = dzero<float>(cards.size() * prow * (D_ + 2));
-                P.tpart = dzero<float>(prow * (D_ + 2));
+                chunk_parts();
                 for (Card& c : cards) {
                     CK(cudaSetDevice(c.dev));
                     auto dev_alloc = [&](size_t bytes) {
@@ -1635,8 +1733,8 @@ struct Engine {
                     c.cq = (float*) dev_alloc(prow * D_ * 4);
                     c.cns = (float*) dev_alloc(prow * 4);
                     c.csum = (float*) dev_alloc(prow * (D_ + 2) * 4);
-                    c.cpos = (int32_t*) dev_alloc((size_t) prefill * 4);
-                    const std::vector<int32_t> away((size_t) prefill, kFar);
+                    c.cpos = (int32_t*) dev_alloc((size_t) chunk_most() * 4);
+                    const std::vector<int32_t> away((size_t) chunk_most(), kFar);
                     CK(cudaMemcpy(c.cpos, away.data(), away.size() * 4, cudaMemcpyHostToDevice));
                     void* h = nullptr;
                     CK(cudaHostAlloc(&h, prow * (D_ + 2) * 4, cudaHostAllocPortable));
@@ -1667,11 +1765,12 @@ struct Engine {
         for (const Card& c : cards)
             with += ", " + std::to_string(c.cap) + " on GPU " + std::to_string(c.dev) + " (" + c.name + ")";
         std::fprintf(stderr, "lamina: a context of %lld tokens (%s cells: %.1f KiB a token over %lld full-attention "
-                     "applications, %.0f MiB of window cells), %s%s%s; prompts %d rows a chunk\n", (long long) ctx,
+                     "applications, %.0f MiB of window cells), %s%s%s; prompts %d rows a chunk%s\n", (long long) ctx,
                      kv_q8 ? "q8_0" : "FP16", (double) per_pos / 1024.0, (long long) g.n_full_visits(),
                      (double) ring_bytes / 1048576.0, grow ? "mapped as it grows" : "allocated whole",
                      cards.empty() ? "" : (": " + std::to_string(fits) + " on this GPU").c_str(), with.c_str(),
-                     prefill > 0 ? prefill : kMaxT);
+                     prefill > 0 ? prefill : kMaxT,
+                     elastic() ? (", " + std::to_string(prefill_max) + " while this GPU's free VRAM holds their buffers").c_str() : "");
     }
 
     /// A cell card: its stream, the address ranges of the cells it has room for, a decode forward's buffers.  Left out
@@ -1694,7 +1793,7 @@ struct Engine {
         const uint64_t keep = (uint64_t) (known && !desktop ? 700 : 1536) << 20;
         // (its own buffers: a decode forward's rows and stretches, a chunk's rows, and room to spare)
         const uint64_t own_bytes = rows * (D_ + 1 + (size_t) stretches(1 << 20) * (D_ + 2) + (D_ + 2)) * 4 +
-                                   (uint64_t) std::max(prefill, 0) * (uint64_t) g.n_head * (2 * D_ + 4) * 4 + (64ull << 20);
+                                   (uint64_t) std::max(chunk_most(), 0) * (uint64_t) g.n_head * (2 * D_ + 4) * 4 + (64ull << 20);
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
         c.cap = fr > keep + own_bytes ? (int64_t) ((fr - keep - own_bytes) / per_pos) / unit * unit : 0;
@@ -3935,7 +4034,7 @@ struct Engine {
         spark_wrote(p0, T, false);
         return true;
     }
-    /// T tokens of a prompt as one chunk (T <= prefill); the last one's logits with `logits`.  False: no cells left.
+    /// T tokens of a prompt as one chunk (T <= chunk_cap); the last one's logits with `logits`.  False: no cells left.
     bool chunk(const int32_t* tok, int T, bool logits) {
         const int64_t p0 = pos();
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
@@ -3965,7 +4064,8 @@ struct Engine {
             int T;
             bool ok;
             if (prefill > 0 && left >= chunk_min) {
-                T = (int) std::min<int64_t>(prefill, left);
+                chunk_fit(left);
+                T = (int) std::min<int64_t>(chunk_cap, left);
                 ok = chunk(tok + at, T, at + T == n);
             } else {
                 T = (int) std::min<int64_t>(feed_rows, left);
@@ -4737,6 +4837,7 @@ struct Serve {
             std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
             cache->spare();
         }
+        E.chunk_base();
         E.relax();
     }
 
@@ -4805,7 +4906,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     int64_t max_ctx = 0;
     int n_gen = 64, threads = 8;
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
-    int prefill = 1024;
+    int prefill = 1024, prefill_max = -1;
     std::optional<uint64_t> reserve;
     std::string cell_gpus, cell_clocks;
     double clocks_hold = 1.0;
@@ -4831,6 +4932,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         if (a == "--native" || a == "--model") model = next();
         else if (a == "--no-graph") graphs = false;   // every launch issued each forward
         else if (a == "--prefill") prefill = std::max(0, std::atoi(next()));   // rows a prompt chunk (0: the decode's forwards)
+        else if (a == "--prefill-max") prefill_max = std::max(0, std::atoi(next()));   // rows it grows to while VRAM is free
         else if (a == "--max-context") max_ctx = std::atoll(next());
         else if (a == "--tokens") tokens = next();
         else if (a == "--tokens-file") {
@@ -4989,6 +5091,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         at = comma + 1;
     }
     E.prefill = prefill;
+    if (prefill_max >= 0) E.prefill_max = prefill_max;
     if (loan > 0 && !m.in_ram)
         std::fprintf(stderr, "lamina: %llu MiB of this GPU stay free of cells for the image encoder's loan\n",
                      (unsigned long long) (loan >> 20));
