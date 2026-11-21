@@ -151,7 +151,9 @@ A request continues from the longest start of its prompt that the engine still h
   output) reads about d to 2d of it again.
 - **Conversations parked in RAM**: one that another request replaces moves to RAM with its K/V and its checkpoints
   (`--conversation-cache-mib`, 16 GiB by default, and never below `--ram-reserve-mib` of RAM available to the
-  system, 6 GiB by default), and a request that continues it later takes it back. One that
+  system, 6 GiB by default), and a request that continues it later takes it back - also where a client or a
+  template renders its last turn another way than the engine wrote it (an answer without its reasoning): it comes
+  back cut at the checkpoint before that turn. A request that
   shares only its start with it (subagents of one agent, sessions with one system prompt) borrows that start. A
   parked conversation leaves only whole, the least recently used first and never while it lends its start, so no
   other conversation can take its checkpoints.

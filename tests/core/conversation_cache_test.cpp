@@ -10,7 +10,9 @@
 //   4. the RAM: a conversation parks only into the RAM the system can spare above the reserve, evicting the least
 //      recently used to make that room, and shed() gives back what the park holds once the system runs below it
 //      (a 16 GiB park beside a 101 GiB pinned arena on a 125 GiB PC swapped the system to a halt); ram_bound(),
-//      whether the RAM or the budget limits the park.
+//      whether the RAM or the budget limits the park;
+//   5. superseded(): a parked conversation's own next request (few cells after the checkpoint, the same request
+//      again, its last answer sent back in another rendering) against another conversation with the same start.
 #include "lamina/core/conversation_cache.hpp"
 
 #include <cstdint>
@@ -22,6 +24,7 @@ using lamina::core::ConversationCache;
 using lamina::core::ImgKey;
 using lamina::core::reusable;
 using lamina::core::Seq;
+using lamina::core::superseded;
 
 namespace {
 
@@ -177,6 +180,37 @@ int main() {
         bound.park(conv(2000, {2000}));
         check(!bound.ram_bound(ConversationCache::kNoRamLimit) && bound.ram_bound(5000) && !bound.ram_bound(9800),
               "the RAM holds the park below its budget only where held + spare is less (a refusal is logged then)");
+    }
+    {   // 5. a parked conversation's own next request, or another conversation with its start
+        // a 20,000-cell conversation: a shared start (tokens 7), a checkpoint at 16,000, then 4,000 cells of its own:
+        // a prompt's tail (3) and an answer the engine wrote (reasoning 5, then the answer's 100 .. 1,999)
+        Seq own = conv(16000, {4000, 16000, 20000});
+        for (int i = 0; i < 100; ++i) own.tokens.push_back(3);
+        for (int i = 0; i < 1900; ++i) own.tokens.push_back(5);
+        for (int i = 0; i < 2000; ++i) own.tokens.push_back(100 + i);
+        own.kv_cells = (int64_t) own.tokens.size();
+        // its next request: the same start and tail, the answer without its reasoning, a new turn
+        std::vector<int64_t> next(own.tokens.begin(), own.tokens.begin() + 16100);
+        for (int i = 0; i < 2000; ++i) next.push_back(100 + i);
+        for (int i = 0; i < 300; ++i) next.push_back(9);
+        check(superseded(own, next, 16000), "the answer sent back without its reasoning: the conversation's own request");
+        std::vector<int64_t> cut = next;   // ... its last two tokens not sent back (a draft or two past the client's text)
+        cut.erase(cut.begin() + 16100 + 1998, cut.begin() + 16100 + 2000);
+        check(superseded(own, cut, 16000), "... with the answer's last tokens missing");
+        std::vector<int64_t> again(own.tokens.begin(), own.tokens.begin() + 16100);
+        check(superseded(own, again, 16000), "the same request again: its own");
+        std::vector<int64_t> sibling(own.tokens.begin(), own.tokens.begin() + 16000);
+        for (int i = 0; i < 6000; ++i) sibling.push_back(50000 + i);
+        check(!superseded(own, sibling, 16000), "another conversation with the same 16,000 cells: not its own");
+        check(!superseded(own, sibling, 4000), "... nor from the earlier checkpoint");
+        std::vector<int64_t> quote = sibling;   // 12 of the answer's last tokens stand in it: under the run
+        for (int i = 0; i < 12; ++i) quote[(size_t) (17000 + i)] = 100 + 1988 + i;
+        check(!superseded(own, quote, 16000), "a run shorter than the rule's does not make it its own");
+        Seq brief = conv(16000, {4000, 16000, 16900});   // 900 cells after the checkpoint: fewer than kParkDropped
+        for (int i = 0; i < 900; ++i) brief.tokens.push_back(100 + i);
+        check(superseded(brief, sibling, 16000), "few cells after the checkpoint: taken back whoever asks");
+        check(!superseded(brief, sibling, 4000), "... but not from a checkpoint far before its end");
+        check(!superseded(own, sibling, 30000) && !superseded(own, sibling, -1), "a place outside either is none");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;

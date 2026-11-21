@@ -11,7 +11,9 @@
 //     subagents) does not start over on every switch.  A prompt that continues a parked conversation from its
 //     newest checkpoint takes it out of the park; one that matches it only up to an earlier checkpoint (another
 //     conversation with the same start: sibling subagents, sessions with one system prompt) borrows the cells up to
-//     there, and the parked conversation stays whole.
+//     there, and the parked conversation stays whole - unless the prompt is that conversation's own next request,
+//     which a client or a template renders another way than the engine wrote it (superseded, conversation_cache.hpp):
+//     then the conversation comes out of the park cut at that checkpoint, with its chain up to there.
 //
 // Each conversation owns its checkpoints, at most `chain_cap` of them, which thin out geometrically back from its
 // newest (chain_victim); a parked conversation leaves only whole (ConversationCache, conversation_cache.hpp).  One

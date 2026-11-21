@@ -4,7 +4,9 @@
 // kept in host memory with its K/V cells) hold chains of their own, so no conversation's new checkpoints can take
 // another's.  A chain over its cap gives up the point chain_victim picks; a parked conversation leaves only whole, the
 // least recently used first, when the park's bytes (its K/V copies and its chains) or its slots run out, or the RAM
-// the system can spare above a reserve, and never while it lends its start to the live one.
+// the system can spare above a reserve, and never while it lends its start to the live one.  A request that parts
+// from a parked conversation before its end borrows its start when it is another conversation, and takes the
+// conversation back, cut where they part, when it is that conversation's own next request (superseded).
 //
 // The checkpoint buffers and the K/V copies are opaque here: `SequenceCache` allocates and frees them, this header only
 // moves them and counts their bytes, so the policy is testable without a device.
@@ -106,6 +108,32 @@ inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const s
     for (const Ckpt& c : seq.ckpts)
         if (c.pos <= lcp && (c.pos <= most || c.end) && c.pos > best) best = c.pos;
     return best;
+}
+
+/// A prompt that leaves the live conversation this many cells before its end, and more than it keeps, parks the rest;
+/// one that leaves a parked conversation fewer cells before its end takes it back, cut there.
+inline constexpr int64_t kParkDropped = 1024;
+
+/// Whether a prompt that parts from the parked conversation `seq` at its checkpoint `at`, below its newest, is that
+/// conversation's own next request - so that it continues live from `at`, the cells after given up - and not another
+/// conversation with the same start, which borrows the start and leaves it whole.  A conversation that lent its start
+/// to its own next request stayed parked beside the one that request grew into, a copy more at every return to it.
+/// It is the conversation's own when
+///   * the cells after `at` are few (under kParkDropped): reading them again costs less than keeping that copy;
+///   * the prompt is a start of the conversation: the same request again, whose answer is asked for anew;
+///   * the prompt holds the end of what the conversation wrote last, in another rendering (a client sends an answer
+///     back without its reasoning, a template leaves a block out of the history): a run of kRun of the conversation's
+///     last kTail tokens stands in the prompt after `at`, no further on than the conversation is long (and kTail).
+inline bool superseded(const Seq& seq, const std::vector<int64_t>& ids, int64_t at) {
+    constexpr int64_t kRun = 16, kTail = 64;
+    const int64_t L = (int64_t) seq.tokens.size(), n = (int64_t) ids.size();
+    if (at < 0 || at > L || at > n) return false;
+    if (L - at < kParkDropped) return true;
+    if (n <= L && std::equal(ids.begin(), ids.end(), seq.tokens.begin())) return true;
+    const auto from = ids.begin() + at, to = ids.begin() + std::min(n, L + kTail);
+    for (int64_t s = L - kRun; s >= std::max(at, L - kTail); --s)
+        if (std::search(from, to, seq.tokens.begin() + s, seq.tokens.begin() + s + kRun) != to) return true;
+    return false;
 }
 
 /// The parked conversations: their K/V copies and chains within `budget` bytes, at most `slots` of them (0: no limit),

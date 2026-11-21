@@ -12,13 +12,6 @@
 
 namespace lamina::core {
 
-namespace {
-
-/// A prompt that leaves the live sequence this many cells before its end, and more than it keeps, parks the rest.
-constexpr int64_t kParkDropped = 1024;
-
-}  // namespace
-
 SequenceCache::SequenceCache(int chain_cap, uint64_t ckpt_bytes, uint64_t park_budget, size_t park_slots,
                              int64_t min_tokens)
     : chain_cap_(chain_cap), ckpt_bytes_(ckpt_bytes), parked_(park_budget, park_slots, min_tokens, ckpt_bytes) {}
@@ -316,7 +309,8 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         live_.imgs = imgs;
         return best;
     }
-    if (best < parked_.entries()[(size_t) from].ckpts.back().pos) {
+    const bool whole = best >= parked_.entries()[(size_t) from].ckpts.back().pos;
+    if (!whole && !superseded(parked_.entries()[(size_t) from], ids, best)) {
         // Another conversation that shares the parked one's start: it borrows the cells before `best`, and the
         // parked conversation stays whole (pinned while the live one is parked beside it).
         parked_.entries()[(size_t) from].pin = best;
@@ -335,12 +329,13 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         live_.tag = tag;
         return best;
     }
-    // That conversation continues: the live one is parked and the chosen one becomes live.
+    // That conversation continues: the live one is parked and the chosen one becomes live - from its end, or cut at
+    // `best` where its own next request parts from it there (the cells after, and their checkpoints, go).
     Seq chosen = parked_.take((size_t) from);
     stash_live(0);
     release(live_, 0);
     live_.tokens.clear();
-    if (!restore(chosen, best)) {
+    if (!restore(chosen, best, !whole)) {
         release(chosen, -1);
         return zero();
     }
