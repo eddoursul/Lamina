@@ -30,6 +30,11 @@ void lift_reasoning_effort_arg(json& cfg);
 /// the args name a file or a folder of the earlier layout that is there, or the model is another (Qwen3.6-35B-A3B and
 /// Qwen3.8-27B draft with their files' own MTP block)
 std::string resolve_draft_layer(json& cfg, const std::string& arch);
+/// Inkling 2's block drafter (`arch` "inkling2" or "inkling2_loop"), a file of its own beside the model: args that
+/// name none (--dspark FILE) and do not turn the drafts off (--drafts-per-step 0) take the smallest dspark-*.gguf in
+/// the model's folder, else in its dspark/ folder (unsloth's layout); a named file that is not there is taken out of
+/// them.  The line for the server's window: the file found, or the warning; empty where none is found or one is named.
+std::string resolve_drafter(json& cfg, const std::string& arch);
 /// the config's "args" as the engine's words: a list as it is, an object's flags in its order (true a switch, false
 /// its --no- form, null left out, a list the flag's values; a value that is no text as JSON writes it)
 json args_as_list(const json& args);

@@ -514,9 +514,10 @@ int run(int argc, char** argv) {
         }
         try {
             const std::vector<std::string> kept = write_config(cl.write_config, out, preset_keys);
-            json probe = cfg;   // the draft layer as a start would find it
+            json probe = cfg;   // the draft layer, or the drafter, as a start would find it
             if (const std::string w = resolve_draft_layer(probe, model_arch.empty() ? "qwen4exp" : model_arch); !w.empty())
                 say(w);
+            if (const std::string w = resolve_drafter(probe, model_arch); !w.empty()) say(w);
             say("[lamina] wrote " + cl.write_config + (kept.empty() ? "" : " (kept from the earlier file, now " +
                 cl.write_config + ".bak: " + join(kept, ", ") + ")") + "; start it with  lamina-server --config " +
                 cl.write_config);
@@ -632,8 +633,10 @@ int run(int argc, char** argv) {
         say_err(std::string("[lamina] the model's tokenizer could not be read from ") + gguf + ": " + e.what());
         return 1;
     }
-    if (!mock)   // Flash-Next's draft layer, found beside the model or warned about in this window
+    if (!mock) {   // Flash-Next's draft layer and Inkling 2's drafter, found beside the model or warned about in this window
         if (const std::string w = resolve_draft_layer(cfg, tok->architecture); !w.empty()) say(w);
+        if (const std::string w = resolve_drafter(cfg, tok->architecture); !w.empty()) say(w);
+    }
     std::shared_ptr<McpHub> hub;
     try {
         hub = hub_from_config(cfg, jstr(cfg, "mcp_config"));   // before the minutes of loading: a bad entry stops here

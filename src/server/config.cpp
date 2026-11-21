@@ -265,6 +265,42 @@ std::string resolve_draft_layer(json& cfg, const std::string& arch) {
            "  (or from\n         " + kDraftLayerUrl + ")" + then;
 }
 
+std::string resolve_drafter(json& cfg, const std::string& arch) {
+    if ((arch != "inkling2" && arch != "inkling2_loop") || !jget(cfg, "args").is_array()) return "";
+    namespace fs = std::filesystem;
+    json& args = cfg["args"];
+    std::error_code ec;
+    for (size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] == "--drafts-per-step" && arg_str(args[i + 1]) == "0") return "";
+        if (args[i] != "--dspark") continue;
+        const std::string name = arg_str(args[i + 1]);
+        if (fs::is_regular_file(fs::absolute(u8_path(here_path(cfg, name)), ec), ec)) return "";
+        args.erase(i);   // the engine stops at a file it cannot read
+        args.erase(i);
+        return "[lamina] WARNING: no drafter (--dspark " + name + " is not there): generation runs without its drafts";
+    }
+    const fs::path model_dir = fs::absolute(u8_path(model_file(cfg)), ec).parent_path().lexically_normal();
+    fs::path best;
+    std::uintmax_t best_size = 0;
+    for (const fs::path& dir : {model_dir, model_dir / "dspark"}) {
+        if (!fs::is_directory(dir, ec)) continue;
+        for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+            const std::string n = u8_str(e.path().filename());
+            if (!e.is_regular_file(ec) || !starts_with(n, "dspark-") || !ends_with(n, ".gguf")) continue;
+            const std::uintmax_t size = e.file_size(ec);
+            if (best.empty() || size < best_size) {
+                best = e.path();
+                best_size = size;
+            }
+        }
+        if (!best.empty()) break;
+    }
+    if (best.empty()) return "";
+    args.push_back("--dspark");
+    args.push_back(u8_str(best.lexically_normal()));
+    return "[lamina] drafter: " + u8_str(best.lexically_normal());
+}
+
 namespace {
 
 /// the "gpu" value's items: numbers, cards' texts (a comma inside one is its settings') or objects; a text of numbers

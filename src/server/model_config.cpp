@@ -454,13 +454,25 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 // The whole file and ~1.5 GiB beside it (the window layers' cells, a prompt chunk's buffers, the
                 // graphs) on the first card; K and V of the 8 full-attention layer applications in what is left of it
                 // and on the other cards (which keep ~1 GiB for their own buffers and the reserve).
-                const std::vector<std::string> pa = engine_args(c);
+                json probe = c;   // the drafter as the start finds it: its file and ~0.3 GiB of cells and buffers
+                const std::string line = resolve_drafter(probe, m.arch);
+                const std::vector<std::string> pa = engine_args(probe);
                 const auto kv = std::find(pa.begin(), pa.end(), "--kv");
                 const bool q8 = kv != pa.end() && kv + 1 != pa.end() && *(kv + 1) == "q8_0";
                 const double per = (q8 ? 17.0 : 32.0) * 1024.0, gibi = 1073741824.0;
+                double drafter = 0;
+                if (const auto ds = std::find(pa.begin(), pa.end(), "--dspark"); ds != pa.end() && ds + 1 != pa.end()) {
+                    std::error_code ec;
+                    const auto size = std::filesystem::file_size(u8_path(*(ds + 1)), ec);
+                    drafter = ec ? 0.0 : (double) size + 0.3 * gibi;
+                    say(!line.empty() ? "  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line)
+                                      : "  drafter: " + *(ds + 1));
+                } else if (!line.empty()) {
+                    say("  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line));
+                }
                 double room = 0, others = 0;
                 if (main != nullptr)
-                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - (main->display ? 3.0 : 2.2) * gibi;
+                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - (main->display ? 3.0 : 2.2) * gibi;
                 for (size_t i = 1; i < on.size(); ++i)
                     if (const GpuInfo* g = gpu_by_index(gpus, on[i]))
                         others += std::max(0.0, (double) g->memory_mib * 1048576.0 - (g->display ? 2.5 : 1.7) * gibi);
