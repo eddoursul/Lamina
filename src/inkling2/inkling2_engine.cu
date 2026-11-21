@@ -715,8 +715,9 @@ struct Engine {
         reserve = reserve_bytes;
         prof = std::getenv("LAMINA_INK_PROF") != nullptr;
         nan_probe = std::getenv("LAMINA_INK_NAN") != nullptr;
+        xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
-        if (prof || nan_probe) use_graphs = false;
+        if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
         const size_t N = (size_t) g.n_embd, D_ = (size_t) g.head_dim, KV = (size_t) g.kv_width(), C = (size_t) g.n_conv;
@@ -857,6 +858,44 @@ struct Engine {
         std::fprintf(stderr, "lamina: a non-finite value: visit %d (layer %d, pass %d), %s, row %lld, value %lld of %zu\n",
                      nan_visit, visits[(size_t) nan_visit].layer, visits[(size_t) nan_visit].pass, what,
                      at / (long long) width, at % (long long) width, width);
+    }
+    // LAMINA_INK_XROW: each visit's values under llama-eval-callback's names, for a comparison with llama.cpp's dump
+    // of the same forward: the stream after the attention (ffn_inp) and after the MoE (l_out), its last row's first and
+    // last three values and the rows' sum; q, K, V and (in a chunk) r, the first and last three of each dimension
+    bool xrow_on = false;
+    std::vector<float> xrow_h;
+    void xrow(const char* what, int v, const float* x, int T) {
+        if (!xrow_on) return;
+        const size_t N = (size_t) m->g.n_embd, n = (size_t) T * N;
+        xrow_h.resize(n);
+        CK(cudaMemcpyAsync(xrow_h.data(), x, n * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        double sum = 0;
+        for (const float f : xrow_h) sum += (double) f;
+        const float* r = xrow_h.data() + (size_t) (T - 1) * N;
+        std::fprintf(stderr, "xrow %s-%d rows %d: %.4f %.4f %.4f ... %.4f %.4f %.4f sum %.6f\n", what, v, T, r[0], r[1], r[2],
+                     r[N - 3], r[N - 2], r[N - 1], sum);
+    }
+    void xten(const char* what, int v, const float* x, int T, int H, int D) {
+        if (!xrow_on) return;
+        const size_t n = (size_t) T * H * D;
+        xrow_h.resize(n);
+        CK(cudaMemcpyAsync(xrow_h.data(), x, n * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        auto edge = [](int n_, std::vector<int>& out) {
+            out.clear();
+            for (int i = 0; i < n_; ++i)
+                if (n_ <= 6 || i < 3 || i >= n_ - 3) out.push_back(i);
+        };
+        std::vector<int> ts, hs, ds;
+        edge(T, ts);
+        edge(H, hs);
+        edge(D, ds);
+        std::fprintf(stderr, "xten %s-%d %d %d %d:", what, v, T, H, D);
+        for (const int t : ts)
+            for (const int h : hs)
+                for (const int d : ds) std::fprintf(stderr, " %.4f", xrow_h[((size_t) t * H + h) * D + d]);
+        std::fprintf(stderr, "\n");
     }
     void tick(const char* what) {
         if (!prof) return;
@@ -1151,6 +1190,10 @@ struct Engine {
         }
         ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), 128, 0, st>>>(cells, R.kc, R.vc, R.pos_d, HK, D_);
         tick("q, k, v, bias");
+        xten("Qcur", v, R.q, T, H, D_);
+        xten("Kcur", v, R.kc, T, HK, D_);
+        xten("Vcur", v, R.vc, T, HK, D_);
+        if (batch) xten("Rcur", v, R.rraw, T, H, Rr);
         probe("q", R.q, (size_t) T, (size_t) H * D_);
         probe("the bias", R.bias, (size_t) T, (size_t) H * (L.ext + 1));
         probe("k", R.kc, (size_t) T, (size_t) KV);
@@ -1200,6 +1243,7 @@ struct Engine {
         tick("attention output");
         probe("the output projection", R.oraw, (size_t) T, (size_t) N);
         probe("x after the attention", R.x, (size_t) T, (size_t) N);
+        xrow("ffn_inp", v, R.x, T);
 
         // ---- the MoE
         const int nb2 = l / res + 1;
@@ -1267,6 +1311,7 @@ struct Engine {
         tick("MoE output");
         probe("the MoE's output", R.fraw, (size_t) T, (size_t) N);
         probe("x after the MoE", R.x, (size_t) T, (size_t) N);
+        xrow("l_out", v, R.x, T);
     }
 
     /// The logits of rows [r0, r0 + n) of R's last forward, into its logits rows [0, n)
