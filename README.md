@@ -24,7 +24,7 @@ Support for other quants may be added upon request.
   | Qwen3.8-Flash-Next, [unsloth's UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | ~81 GB |
   | Qwen3.6-35B-A3B, [unsloth's UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) | ~22 GB on one GPU, ~2 GB split over GPUs that hold it |
   | Qwen3.8-27B, [unsloth's UD-Q6_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | ~2 GB |
-  | Inkling 2 Mini, [unsloth's UD-IQ4_XS](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | ~1 GB (the model in ~15 GB of VRAM) |
+  | Inkling 2 Mini, [unsloth's UD-IQ4_XS](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | ~1 GB (the model in ~16 GB of VRAM) |
 
 - **An SSD**.
 - **A 64-bit x86 CPU with AVX2**. 64-bit Arm support is built but not tested with a GPU. The CPU computes the experts no GPU holds, so its cores and the RAM's bandwidth set much of the speed.

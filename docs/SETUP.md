@@ -401,6 +401,14 @@ unsloth's quants) beside the K and V; the embedding table stays in RAM (~0.5 GB)
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
 mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
 
+A prompt is read in chunks of `--prefill N` rows (1,024; their buffers take ~0.8 GiB of VRAM; 0: 8 rows at a time
+through the generation's kernels, as on a card that runs the file's FP4 experts on its own tensor cores, an RTX 50,
+for now). The prompt cache keeps conversations as on the other paths (`--prompt-cache`, `--prompt-cache-every`,
+`--conversation-cache-mib`, `--conversation-cache-slots`, `--conversation-cache-min-tokens`, `--ram-reserve-mib`):
+a checkpoint holds the window layers' last cells and the convolutions' state (169 MiB in FP16, 92 in q8_0) and
+leaves through an image of that size in VRAM; a conversation another request replaces is parked in RAM with its K
+and V.
+
 Its chat form is its own: a reply is blocks of thinking, text and tool calls between special tokens, a call's
 arguments JSON. The server reads them as such (a call's arguments are streamed as the model writes them) and writes
 the server's own forms for it (a forced call's opening, the close of thinking at a budget). `reasoning_effort`

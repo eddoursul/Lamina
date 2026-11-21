@@ -17,6 +17,7 @@
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/core/prompt_cache.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/inkling2/engine.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -24,6 +25,7 @@
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/platform/console_quit.hpp"
+#include "lamina/platform/memory.hpp"
 #include "lamina/platform/slice_read.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
 #include "lamina/program/host_sampling.hpp"
@@ -77,6 +79,13 @@ using Clock = std::chrono::steady_clock;
         }                                                                                                              \
     } while (0)
 
+/// A CUDA call that may fail without ending the run (a checkpoint's copy): false then, the error cleared
+inline bool soft(cudaError_t e) {
+    if (e == cudaSuccess) return true;
+    (void) cudaGetLastError();
+    return false;
+}
+
 /// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina-server's
 /// process, which an exit would end).
 struct Fatal {
@@ -126,7 +135,9 @@ constexpr size_t kWeightPad = 4096;       // zero bytes after each weight: a ker
 constexpr int kChunks = 256;              // stretches of cells an attention launch splits a full visit's cells into at most
 constexpr int64_t kGrow = 4096;           // cells a full visit's storage grows by
 constexpr int64_t kContextFloor = 32768;  // a context not set is what fits, not under this
-constexpr int kSnaps = 3;                 // prompt ends whose window state is kept
+// the vocabulary's message tokens: where a prompt's read places the cache's checkpoints
+constexpr int32_t kMsgFirst = 200000, kMsgLast = 200003;   // <|message_user|> .. <|message_tool|>
+constexpr int32_t kEndMessage = 200010;                    // <|end_message|>
 constexpr int kRingSub = ik::kSub / 4;    // cells a step of a window visit's attention (many short blocks: 1,024 cells)
 
 // ------------------------------------------------------------------------------------------------ the model
@@ -560,9 +571,9 @@ struct Engine {
     size_t cell_bytes = 0;           // a cell's K (and its V)
     int64_t mapped = 0;              // cells the full visits have memory for
 
-    // the sequence
-    std::vector<int32_t> seq;
-    int64_t pos() const { return (int64_t) seq.size(); }
+    // the sequence: the positions whose cells the state holds
+    int64_t n_pos = 0;
+    int64_t pos() const { return n_pos; }
 
     Rows D, P;                       // the decode's rows, a prompt chunk's
     Rows* lg_rows = nullptr;         // whose logits the last head wrote
@@ -574,16 +585,21 @@ struct Engine {
         if (blas != nullptr) cublasDestroy(blas);
     }
 
-    // the prompt ends kept: the window visits' cells and every visit's convolution state there
-    struct Snap {
-        int64_t pos = -1;
-        uint8_t* rings = nullptr;   // pinned
-        float* conv = nullptr;
-        std::vector<float> logits;  // of its last token
-        uint64_t stamp = 0;
-    };
-    Snap snaps[kSnaps];
-    uint64_t stamp = 0;
+    // ---- what a checkpoint of the prompt cache keeps (lamina/core/prompt_cache.hpp), the full visits' cells apart,
+    // which stay where they are: [the window visits' rings | every visit's convolution state | the logits a prompt's
+    // read left | int32 1 where they are held, int32 0].  A checkpoint the run takes as it goes leaves through an image
+    // on the device: copied there behind the queued work, sent to the cache's buffer on a stream of its own, so neither
+    // a prompt's next chunk nor the first decode step waits for the bus.  A buffer that is not pinned takes the image
+    // through `snap_via`.
+    bool cache_on = false;             // the image is made (init)
+    uint8_t* snap = nullptr;           // the image
+    uint8_t* snap_via = nullptr;       // pinned
+    uint8_t* snap_to = nullptr;        // the buffer snap_via's contents belong in (null: none waits)
+    cudaStream_t st_snap = nullptr;
+    cudaEvent_t ev_snap = nullptr, ev_landed = nullptr;
+    bool logits_held = false;          // the state came from a prompt's end: its logits are the decode rows' row 0
+    size_t conv_bytes() const { return visits.size() * conv_floats * 4; }
+    size_t state_bytes() const { return ring_bytes + conv_bytes() + (size_t) m->g.n_vocab * 4 + 8; }
 
     // timing
     std::map<std::string, double> prof_ms;
@@ -767,6 +783,15 @@ struct Engine {
                 ++wi;
             }
         }
+        if (cache_on) {   // (before the context is sized: the image is VRAM the cells do not get)
+            snap = dalloc<uint8_t>(state_bytes());
+            snap_via = halloc<uint8_t>(state_bytes());
+            CK(cudaStreamCreateWithFlags(&st_snap, cudaStreamNonBlocking));
+            own(&Owned::streams, st_snap);
+            CK(cudaEventCreateWithFlags(&ev_snap, cudaEventDisableTiming));
+            CK(cudaEventCreateWithFlags(&ev_landed, cudaEventDisableTiming));
+            CK(cudaEventRecord(ev_landed, st_snap));
+        }
 
         // the context: what was asked, else what the free VRAM holds of the trained one (the full visits' cells)
         const uint64_t per_pos = (uint64_t) g.n_full_visits() * 2 * cell_bytes;
@@ -876,9 +901,9 @@ struct Engine {
         std::fprintf(stderr, "xrow %s-%d rows %d: %.4f %.4f %.4f ... %.4f %.4f %.4f sum %.6f\n", what, v, T, r[0], r[1], r[2],
                      r[N - 3], r[N - 2], r[N - 1], sum);
     }
-    void xten(const char* what, int v, const float* x, int T, int H, int D) {
+    void xten(const char* what, int v, const float* x, int T, int H, int W) {
         if (!xrow_on) return;
-        const size_t n = (size_t) T * H * D;
+        const size_t n = (size_t) T * H * W;
         xrow_h.resize(n);
         CK(cudaMemcpyAsync(xrow_h.data(), x, n * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
@@ -890,11 +915,11 @@ struct Engine {
         std::vector<int> ts, hs, ds;
         edge(T, ts);
         edge(H, hs);
-        edge(D, ds);
-        std::fprintf(stderr, "xten %s-%d %d %d %d:", what, v, T, H, D);
+        edge(W, ds);
+        std::fprintf(stderr, "xten %s-%d %d %d %d:", what, v, T, H, W);
         for (const int t : ts)
             for (const int h : hs)
-                for (const int d : ds) std::fprintf(stderr, " %.4f", xrow_h[((size_t) t * H + h) * D + d]);
+                for (const int d : ds) std::fprintf(stderr, " %.4f", xrow_h[((size_t) t * H + h) * W + d]);
         std::fprintf(stderr, "\n");
     }
     void tick(const char* what) {
@@ -1399,7 +1424,8 @@ struct Engine {
             CK(cudaGraphLaunch(exec, st));
             if (n_head > 0) lg_rows = &D;
         }
-        seq.insert(seq.end(), tok, tok + T);
+        n_pos += T;
+        logits_held = false;
         return true;
     }
     /// T tokens of a prompt as one chunk (T <= prefill); the last one's logits with `logits`.  False: no cells left.
@@ -1411,14 +1437,19 @@ struct Engine {
         embed(P, tok, T);
         steps(P, p0, T);
         launches(P, T, logits ? 1 : 0, p0);
-        seq.insert(seq.end(), tok, tok + T);
+        n_pos += T;
+        logits_held = false;
         return true;
     }
 
-    /// `n` prompt tokens; the last one's logits are row 0.  0, -1 when `progress` said stop, -2 without cells.
-    int feed(const int32_t* tok, int64_t n, const std::function<bool(int64_t)>& progress) {
+    /// `n` prompt tokens; the last one's logits are row 0.  A chunk (or a decode forward) ends at each of `cuts`
+    /// (ascending, counted in this part's tokens).  0, -1 when `progress` said stop, -2 without cells.
+    int feed(const int32_t* tok, int64_t n, const std::function<bool(int64_t)>& progress,
+             const std::vector<int64_t>* cuts = nullptr) {
+        size_t ci = 0;
         for (int64_t at = 0; at < n;) {
-            const int64_t left = n - at;
+            while (cuts != nullptr && ci < cuts->size() && (*cuts)[ci] <= at) ++ci;
+            const int64_t left = (cuts != nullptr && ci < cuts->size() ? std::min(n, (*cuts)[ci]) : n) - at;
             int T;
             bool ok;
             if (prefill > 0 && left >= kChunkMin) {
@@ -1445,63 +1476,82 @@ struct Engine {
         lg.assign(logits_h, logits_h + V);
     }
 
-    // ---- the sequence's start, and the prompt ends kept
+    // ---- the sequence's start, and the state to and from the prompt cache's buffers
     void reset() {
         CK(cudaStreamSynchronize(st));
-        CK(cudaMemsetAsync(conv_all, 0, visits.size() * conv_floats * 4, st));
-        seq.clear();
+        CK(cudaMemsetAsync(conv_all, 0, conv_bytes(), st));
+        n_pos = 0;
+        logits_held = false;
     }
-    /// The state at the sequence's end kept (the last token's logits with it)
-    void snapshot(const std::vector<float>& lg) {
-        Snap* s = &snaps[0];
-        for (Snap& c : snaps) {
-            if (c.pos == pos()) { s = &c; break; }
-            if (c.stamp < s->stamp) s = &c;
+    /// A checkpoint of the state the queued work leaves (a chunk's end; `end`: the prompt's, with the logits its read
+    /// left): into the image behind that work, then to `host` (state_bytes()) on the snapshot stream.  Nothing is
+    /// waited for but an image still on its way, by the stream.  A `host` that is not pinned gets the image through
+    /// snap_via (snap_wait).
+    bool snap_state(uint8_t* host, bool pinned, bool end) {
+        const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
+        if (!pinned) {
+            if (snap_to != nullptr) snap_wait();   // (the one before is in its buffer first)
+            snap_to = host;
+            host = snap_via;
         }
-        if (s->rings == nullptr) {
-            if (cudaHostAlloc((void**) &s->rings, ring_bytes, cudaHostAllocDefault) != cudaSuccess ||
-                cudaHostAlloc((void**) &s->conv, visits.size() * conv_floats * 4, cudaHostAllocDefault) != cudaSuccess) {
-                (void) cudaGetLastError();
-                if (s->rings) cudaFreeHost(s->rings);
-                s->rings = nullptr;
-                s->pos = -1;
-                return;   // no memory to keep it: the next prompt reads from the start
+        bool ok = soft(cudaStreamWaitEvent(st, ev_landed, 0)) &&
+                  soft(cudaMemcpyAsync(snap, rings, ring_bytes, cudaMemcpyDeviceToDevice, st)) &&
+                  soft(cudaMemcpyAsync(snap + ring_bytes, conv_all, conv_bytes(), cudaMemcpyDeviceToDevice, st));
+        if (end) ok = ok && soft(cudaMemcpyAsync(snap + body, lg_rows->logits, V4, cudaMemcpyDeviceToDevice, st));
+        const int32_t held[2] = {end ? 1 : 0, 0};
+        std::memcpy(host + body + V4, held, 8);   // (past what the copy below writes)
+        return ok && soft(cudaEventRecord(ev_snap, st)) && soft(cudaStreamWaitEvent(st_snap, ev_snap, 0)) &&
+               soft(cudaMemcpyAsync(host, snap, body + (end ? V4 : 0), cudaMemcpyDeviceToHost, st_snap)) &&
+               soft(cudaEventRecord(ev_landed, st_snap));
+    }
+    /// The images' copies have landed, a pageable buffer's contents are in it (before the cache reads, reuses or
+    /// frees a buffer).
+    void snap_wait() {
+        if (snap == nullptr) return;
+        (void) cudaStreamSynchronize(st_snap);
+        (void) cudaGetLastError();
+        if (snap_to != nullptr) std::memcpy(snap_to, snap_via, state_bytes());
+        snap_to = nullptr;
+    }
+    /// The state into `host` (state_bytes(), no logits with it) or from it, now.  One loaded from a prompt's end brings
+    /// its logits back (logits_held).
+    bool state_copy(uint8_t* host, bool to_host) {
+        const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
+        if (to_host) {
+            const bool ok = soft(cudaMemcpyAsync(host, rings, ring_bytes, cudaMemcpyDeviceToHost, st)) &&
+                            soft(cudaMemcpyAsync(host + ring_bytes, conv_all, conv_bytes(), cudaMemcpyDeviceToHost, st));
+            std::memset(host + body + V4, 0, 8);
+            return soft(cudaStreamSynchronize(st)) && ok;
+        }
+        int32_t held = 0;
+        std::memcpy(&held, host + body + V4, 4);
+        bool ok = soft(cudaMemcpyAsync(rings, host, ring_bytes, cudaMemcpyHostToDevice, st)) &&
+                  soft(cudaMemcpyAsync(conv_all, host + ring_bytes, conv_bytes(), cudaMemcpyHostToDevice, st));
+        if (held == 1) ok = ok && soft(cudaMemcpyAsync(D.logits, host + body, V4, cudaMemcpyHostToDevice, st));
+        ok = soft(cudaStreamSynchronize(st)) && ok;
+        logits_held = ok && held == 1;
+        if (logits_held) lg_rows = &D;
+        return ok;
+    }
+    /// A parked conversation's bytes for `cells` positions: the full visits' K and V
+    uint64_t kv_bytes(int64_t cells) const {
+        return (uint64_t) m->g.n_full_visits() * 2 * (uint64_t) cells * (uint64_t) cell_bytes;
+    }
+    /// The full visits' first `cells` cells between the device and `host`, a copy of `held` >= cells cells (a visit's
+    /// K, then its V, each `held` cells long)
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
+        const size_t w = (size_t) cells * cell_bytes, mine = (size_t) held * cell_bytes;
+        bool ok = true;
+        for (Visit& V : visits) {
+            if (V.cells.ring) continue;
+            for (uint8_t* d : {V.cells.k, V.cells.v}) {
+                if (w > 0)
+                    ok = ok && soft(to_host ? cudaMemcpyAsync(host, d, w, cudaMemcpyDeviceToHost, st)
+                                            : cudaMemcpyAsync(d, host, w, cudaMemcpyHostToDevice, st));
+                host += mine;
             }
-            own(&Owned::pinned, s->rings);
-            own(&Owned::pinned, s->conv);
         }
-        CK(cudaMemcpyAsync(s->rings, rings, ring_bytes, cudaMemcpyDeviceToHost, st));
-        CK(cudaMemcpyAsync(s->conv, conv_all, visits.size() * conv_floats * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaStreamSynchronize(st));
-        s->pos = pos();
-        s->logits = lg;
-        s->stamp = ++stamp;
-    }
-    const Snap* snap_at(int64_t p) const {
-        for (const Snap& c : snaps)
-            if (c.pos == p) return &c;
-        return nullptr;
-    }
-    /// The state back to `common` tokens or fewer: as it is when the sequence ends there, else the latest kept prompt
-    /// end at or before it, else the start.  The tokens it holds then.
-    int64_t rewind(int64_t common) {
-        if (common == pos()) return common;
-        Snap* best = nullptr;
-        for (Snap& c : snaps)
-            if (c.pos >= 0 && c.pos <= common && (best == nullptr || c.pos > best->pos)) best = &c;
-        // a kept end past the new one will not come back: the sequence's cells there are written again
-        for (Snap& c : snaps)
-            if (c.pos > common) c.pos = -1;
-        if (best == nullptr || best->pos == 0) {
-            reset();
-            return 0;
-        }
-        CK(cudaStreamSynchronize(st));
-        CK(cudaMemcpyAsync(rings, best->rings, ring_bytes, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(conv_all, best->conv, visits.size() * conv_floats * 4, cudaMemcpyHostToDevice, st));
-        seq.resize((size_t) best->pos);
-        best->stamp = ++stamp;
-        return best->pos;
+        return soft(cudaStreamSynchronize(st)) && ok;
     }
 
     void prof_print(const char* what) {
@@ -1531,9 +1581,49 @@ int argmax(const std::vector<float>& lg) {
 }
 
 // ------------------------------------------------------------------------------------------------ serve
+/// --serve's prompt cache (lamina/core/prompt_cache.hpp, the other paths' options): a request continues from the
+/// longest start of its prompt the engine holds - the conversation's end, one of its checkpoints, or a conversation
+/// another request replaced, parked in RAM with the full visits' cells.
+struct CacheOpts {
+    int chain = 16;                  // --prompt-cache: checkpoints a conversation keeps (0: off)
+    int64_t every = 16384;           // --prompt-cache-every: a long prompt's checkpoints, in cells
+    int64_t park_mib = 16384;        // --conversation-cache-mib: the parked conversations' RAM
+    int64_t park_slots = 0;          // --conversation-cache-slots: their number at most (0: no limit)
+    int64_t min_tokens = 1024;       // --conversation-cache-min-tokens: shorter ones are not parked
+    int64_t ram_reserve_mib = 6144;  // --ram-reserve-mib: they take no RAM below this much available to the system
+};
+
+/// The engine's state behind the cache's policy
+struct Cache final : lamina::core::SequenceCache {
+    Engine& E;
+    Cache(Engine& e, const CacheOpts& o)
+        : SequenceCache(o.chain, e.state_bytes(), (uint64_t) std::max<int64_t>(0, o.park_mib) << 20,
+                        (size_t) std::max<int64_t>(0, o.park_slots), o.min_tokens),
+          E(e) {}
+    ~Cache() override { E.snap_wait(); }   // (no copy still on its way to a buffer the cache frees)
+
+protected:
+    bool state_save(int64_t, void* host, bool filled) override {
+        if (filled) return true;   // the engine's image is on its way (Engine::snap_state)
+        E.snap_wait();             // (the buffer may be one an image's copy is still landing in)
+        return E.state_copy(static_cast<uint8_t*>(host), true);
+    }
+    bool state_load(int64_t pos, const void* host) override {
+        E.snap_wait();
+        if (!E.state_copy(const_cast<uint8_t*>(static_cast<const uint8_t*>(host)), false)) return false;
+        E.n_pos = pos;
+        return true;
+    }
+    void state_zero() override { E.reset(); }
+    uint64_t kv_bytes(int64_t cells) const override { return E.kv_bytes(cells); }
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override {
+        return E.kv_copy(cells, held, host, to_host);
+    }
+};
+
 /// lamina-server's engine protocol, one request at a time: GEN <max_new> [key=value ...] <ids> -> RESUME (the tokens the
-/// state already held), PP lines while the prompt is read, a T line a token, DONE; STOP ends a request at its next step,
-/// QUIT the loop.
+/// state already held), PP lines while the prompt is read, a T line a token, CACHE (the cache's state), DONE; STOP ends
+/// a request at its next step, QUIT the loop.
 struct Serve {
     Engine& E;
     int32_t eos = -1;
@@ -1542,8 +1632,76 @@ struct Serve {
     std::deque<std::string> lines;
     bool eof = false;
     std::atomic<bool> stop{false};
+    CacheOpts copt;
+    std::unique_ptr<Cache> cache;      // null: off
+    std::vector<int32_t> live;         // the tokens the state holds
+    std::vector<int32_t> prev_prompt;  // the last request's prompt: where the next one leaves it
+    bool poisoned = false;             // non-finite logits: whatever the cache holds may be bad
 
-    Serve(Engine& e, int32_t eos_id) : E(e), eos(eos_id) {}
+    Serve(Engine& e, int32_t eos_id, const CacheOpts& co) : E(e), eos(eos_id), copt(co) {
+        if (E.snap == nullptr) {
+            std::fprintf(stderr, "lamina serve: prompt cache: off (the held conversation continues when a request extends "
+                         "it)\n");
+            return;
+        }
+        cache = std::make_unique<Cache>(E, copt);
+        cache->whole_prompt = true;   // (a prompt's end is a checkpoint with its logits)
+        cache->keep_ends = true;      // (and a turn's end: it stays when the next prompt's comes)
+        cache->ensure_kv = [this](int64_t cells) { return E.ensure(cells); };
+        uint64_t ram_now = 0;
+        const bool ram_known = copt.ram_reserve_mib > 0 && lamina::platform::available_ram(ram_now);
+        if (ram_known)
+            cache->ram_spare = [reserve = copt.ram_reserve_mib << 20]() -> int64_t {
+                uint64_t avail = 0;
+                if (!lamina::platform::available_ram(avail)) return lamina::core::ConversationCache::kNoRamLimit;
+                return (int64_t) avail - reserve;
+            };
+        std::fprintf(stderr, "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation, %lld MiB "
+                     "for the conversations requests replace (%.1f KiB a token)%s%s\n", copt.chain,
+                     (double) cache->ckpt_bytes() / 1048576.0, (long long) copt.park_mib,
+                     (double) E.kv_bytes(1) / 1024.0,
+                     copt.park_slots > 0 ? (", at most " + std::to_string(copt.park_slots) + " of them").c_str() : "",
+                     ram_known ? (", above a RAM reserve of " + std::to_string(copt.ram_reserve_mib) + " MiB (" +
+                                  std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
+    }
+
+    /// The CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE.
+    void print_cache() {
+        if (!cache) return;
+        const auto cs = cache->state();
+        serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
+                    "evictions=%zu held=%zu sessions=1\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
+                    (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots, cs.evictions,
+                    cs.held);
+    }
+
+    /// Where a prompt's read takes a checkpoint besides a long prompt's periodic ones and its end (which stays in the
+    /// chain: a prompt ends where a turn does, so a request that edits the next message continues from there),
+    /// ascending, each in (reuse, n) with two cells or more to its neighbours and the ends: where this prompt leaves
+    /// the one before (agents send one long start again with another tail: the next such request continues from
+    /// there), and a few cells before the end of a last message that grows between requests.
+    std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse) {
+        const int64_t n = (int64_t) ids.size();
+        int64_t fork = 0, msg_end = 0;
+        const int64_t lim = std::min<int64_t>((int64_t) prev_prompt.size(), n - 1);
+        int64_t d = 0;
+        while (d < lim && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
+        if (d > reuse + 256 && d < n - 1) fork = d;
+        for (int64_t i = n - 1; i > reuse; --i)
+            if (ids[(size_t) i] == kEndMessage) {
+                int64_t start = i;   // the message's first token
+                while (start > 0 && (ids[(size_t) start] < kMsgFirst || ids[(size_t) start] > kMsgLast)) --start;
+                if (d > start + 3 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                break;
+            }
+        prev_prompt = ids;
+        std::vector<int64_t> want{fork, msg_end};
+        std::sort(want.begin(), want.end());
+        std::vector<int64_t> marks;
+        for (const int64_t p : want)
+            if (p >= reuse + 2 && p <= n - 2 && (marks.empty() || p >= marks.back() + 2)) marks.push_back(p);
+        return marks;
+    }
 
     void request(const std::string& line) {
         const Geometry& g = E.m->g;
@@ -1574,42 +1732,99 @@ struct Serve {
             return;
         }
         stop.store(false);
-        // what the state holds of this prompt: its common start, less one token when that is all of it (the last
-        // prompt token's logits are the first pick)
-        size_t common = 0;
-        while (common < E.seq.size() && common < ids.size() && E.seq[common] == ids[common]) ++common;
+        // ---- what the state continues from: with the cache the longest start of the prompt it holds (the
+        // conversation's end, a checkpoint of it, a conversation parked in RAM), the engine's state set there; without
+        // it the held sequence where the prompt extends it (the windows' state cannot step back)
         std::vector<float> lg;
-        const Engine::Snap* whole = common == ids.size() ? E.snap_at((int64_t) common) : nullptr;
-        if (whole != nullptr && whole->logits.empty()) whole = nullptr;
-        if (whole) lg = whole->logits;   // the held prompt again: its kept end has the first pick's logits
-        else if (common == ids.size()) --common;
-        const size_t reuse = (size_t) E.rewind((int64_t) common);
+        size_t reuse = 0;
+        double begin_ms = 0.0;   // the cache's own work: a conversation parked or taken back (the prompt's time has it)
+        if (cache) {
+            const auto tb = Clock::now();
+            E.snap_wait();   // (the last request's checkpoints are in their buffers before the cache moves or frees any)
+            if (poisoned) {
+                cache->clear();
+                poisoned = false;
+            }
+            const int64_t held = cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), {});
+            reuse = (size_t) std::max<int64_t>(0, held);
+            if (reuse == ids.size() && !E.logits_held) {   // (a whole prompt without its logits: read again)
+                cache->set(0, static_cast<const int32_t*>(nullptr), 0);
+                E.reset();
+                reuse = 0;
+            }
+            begin_ms = ms_since(tb);
+        } else {
+            size_t common = 0;
+            while (common < live.size() && common < ids.size() && live[common] == ids[common]) ++common;
+            if (common > 0 && common == live.size() && common < ids.size()) reuse = common;
+            else E.reset();
+        }
+        live.assign(ids.begin(), ids.begin() + (long) reuse);
         if (reuse > 0) serve_print("RESUME %zu\n", reuse);
         const auto t0 = Clock::now();
         const int64_t fresh = (int64_t) (ids.size() - reuse);
+        // The cache's checkpoints are taken as the read passes them: at its marks (a chunk ends there), and in a long
+        // prompt at a chunk's end once --prompt-cache-every cells came since the last; the prompt's end is one with the
+        // logits its read left.  Each is an image on the device, sent to the cache's buffer behind the run.
+        std::vector<int64_t> marks, cuts;
+        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse);
+        for (const int64_t at : marks) cuts.push_back(at - (int64_t) reuse);
+        const int64_t rows = E.prefill > 0 ? E.prefill : kMaxT;
+        const int64_t every = std::max<int64_t>(1, copt.every / rows) * rows;
+        int64_t noted = (int64_t) reuse, saved = (int64_t) reuse;   // the cache has the tokens up to `noted`
+        auto note = [&](int64_t upto) {
+            if (!cache || upto <= noted) return;
+            cache->set(noted, ids.data() + noted, upto - noted);
+            noted = upto;
+        };
+        auto checkpoint = [&](int64_t here, bool end) {   // of the state the queued work leaves
+            note(here);
+            saved = here;
+            bool pageable = false;
+            void* const h = cache->prepare(&pageable, end);
+            if (h == nullptr) {
+                if (!end) cache->checkpoint(here);   // (copied now; an end without a buffer keeps no logits: none)
+            } else if (E.snap_state(static_cast<uint8_t*>(h), !pageable, end)) {
+                cache->checkpoint(here, h, end);
+            }
+        };
         int64_t done = 0;
         auto last_pp = Clock::now();
         const int fed = E.feed(ids.data() + reuse, fresh, [&](int64_t d) {
             done = d;
+            if (cache && done < fresh) {
+                const int64_t here = (int64_t) reuse + done;
+                const auto next = std::lower_bound(marks.begin(), marks.end(), here);
+                const bool mark = next != marks.end() && *next == here;
+                if (mark || (here - saved >= every && (next != marks.end() ? *next : (int64_t) ids.size()) - here >= rows))
+                    checkpoint(here, false);
+            }
             if (done == fresh || ms_since(last_pp) > 250) {
                 serve_print("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) fresh, ms_since(t0),
                             (double) done / std::max(1e-9, ms_since(t0) / 1000.0));
                 last_pp = Clock::now();
             }
             return !stop.load();
-        });
+        }, &cuts);
         E.prof_print("the prompt");
-        const double prompt_ms = ms_since(t0);
+        note((int64_t) reuse + done);
+        live.insert(live.end(), ids.begin() + (long) reuse, ids.begin() + (long) reuse + (long) done);
+        const double prompt_ms = begin_ms + ms_since(t0);
         if (fed < 0) {
             if (fed == -2) std::fprintf(stderr, "lamina: no VRAM for the prompt's cells past %lld tokens\n", (long long) E.pos());
+            if (cache) {
+                E.snap_wait();
+                cache->shed();
+            }
+            print_cache();
             serve_print("DONE 0 %zu %.1f 0.0 %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms,
                         fed == -1 ? "cancel" : "length", reuse, (long long) done);
             return;
         }
-        if (fresh > 0) {
-            E.host_logits(0, lg);
-            E.snapshot(lg);
-        }
+        E.host_logits(0, lg);   // the read's, or the ones a prompt's end brought back
+        // the prompt's end, before the first decode step moves the state (not after a read of one token - a stopped
+        // answer going on: the conversation keeps the end of the prompt it was asked with)
+        if (cache && fresh > 1) checkpoint((int64_t) ids.size(), true);
         std::mt19937_64 rng(smp.seed);
         std::vector<int32_t> hist(ids.begin(), ids.end());   // the penalties' history: the prompt's text
         const auto d0 = Clock::now();
@@ -1626,19 +1841,40 @@ struct Serve {
             if (produced >= max_new) break;
             const int32_t one = nx;
             if (!E.forward(&one, 1, 1)) break;   // the context's end, or no VRAM for more cells
+            live.push_back(nx);
+            if (cache) cache->append(0, nx);
             E.host_logits(0, lg);
+        }
+        if (std::strcmp(finish, "nonfinite") == 0) {   // the state holds the non-finite rows: not continued
+            live.clear();
+            poisoned = cache != nullptr;   // (nor is anything the cache holds: forgotten at the next request)
+            if (cache) cache->set(0, static_cast<const int32_t*>(nullptr), 0);
+            std::fprintf(stderr, "lamina serve: non-finite logits: the request ends, and the next one reads its prompt from "
+                         "the start\n");
         }
         const double decode_ms = ms_since(d0);
         E.prof_print("generation");
+        if (cache) {
+            cache->touch(0);
+            E.snap_wait();   // (shed may free a buffer)
+            cache->shed();
+        }
+        print_cache();
         serve_print("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms, decode_ms,
                     finish, reuse, (long long) fresh);
-        std::fprintf(stderr, "lamina: %zu prompt tokens (%zu reused) in %.1f ms, %lld generated in %.1f ms (%.2f tok/s), "
-                     "%s; MiB of VRAM free: %s\n", ids.size(), reuse, prompt_ms, produced, decode_ms,
+        std::fprintf(stderr, "lamina serve: prompt %zu tokens = %zu reused + %lld read in %.1f ms (%.1f tok/s), %lld "
+                     "generated in %.1f ms (%.2f tok/s), %s; MiB of VRAM free: %s\n", ids.size(), reuse, (long long) fresh,
+                     prompt_ms, prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced, decode_ms,
                      decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, finish, E.vram_free().c_str());
+        if (cache) {
+            std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
+            cache->spare();
+        }
     }
 
     int run() {
         serve_print("READY %lld stop\n", (long long) E.ctx);
+        print_cache();
         const lamina::program::ServeIo& io = lamina::program::serve_io();
         std::thread reader([&] {
             std::string l;
@@ -1698,6 +1934,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
     int prefill = 1024;
     std::optional<uint64_t> reserve;
+    CacheOpts copt;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -1731,6 +1968,12 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--no-file-cache") file_cache = false;   // the model file read past the OS file cache
         else if (a == "--load-threads") threads = std::max(1, std::atoi(next()));
         else if (a == "--vram-reserve-mib") reserve = (uint64_t) std::max(0, std::atoi(next())) << 20;
+        else if (a == "--prompt-cache") copt.chain = std::max(0, std::atoi(next()));
+        else if (a == "--prompt-cache-every") copt.every = std::max<int64_t>(1, std::atoll(next()));
+        else if (a == "--conversation-cache-mib") copt.park_mib = std::max<int64_t>(0, std::atoll(next()));
+        else if (a == "--conversation-cache-slots") copt.park_slots = std::max<int64_t>(0, std::atoll(next()));
+        else if (a == "--conversation-cache-min-tokens") copt.min_tokens = std::max<int64_t>(0, std::atoll(next()));
+        else if (a == "--ram-reserve-mib") copt.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next()));
         else {
             std::fprintf(stderr, "lamina: Inkling 2's path does not take %s\n", a.c_str());
             return 2;
@@ -1756,10 +1999,11 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     Engine E;
     E.use_graphs = graphs;
+    E.cache_on = serve && copt.chain > 0;
     E.prefill = prefill;
     E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) *reserve);
     if (serve) {
-        Serve sv(E, m.eos);
+        Serve sv(E, m.eos, copt);
         return sv.run();
     }
     std::vector<int32_t> prompt = lamina::program::parse_ids(tokens.c_str());

@@ -65,6 +65,11 @@ public:
     /// An engine whose checkpoint of a prompt's end (checkpoint()'s `end`) keeps its output there: begin() then
     /// continues the same prompt from it with nothing to read.  Unset, one token at least is always processed.
     bool whole_prompt = false;
+    /// An engine whose prompts end where a turn ends (no generation prompt after the last message): a prompt end's
+    /// checkpoint stays in the chain as any other when the next prompt's end comes, so a request that parts from the
+    /// conversation after it (an edited message, an answer in another rendering) continues from there.  Unset, a
+    /// conversation keeps its last prompt's end only.
+    bool keep_ends = false;
     /// Cells the live sequence holds (a later park reads all of them): the session's the last begin() chose.
     int64_t live_cells() const { return (int64_t) live().tokens.size(); }
     uint64_t ckpt_bytes() const { return ckpt_bytes_; }
@@ -185,7 +190,8 @@ private:
     int pinned_ = 0;
     void* prepared_ = nullptr;   // prepare()'s, until checkpoint() takes it
     void drop_prepared();
-    void drop_end();             // the live conversation's checkpoint of a prompt's end, if it has one
+    void drop_end();             // the live conversation's checkpoint of a prompt's end, if it has one (keep_ends:
+                                 // it stays, a checkpoint as the others)
 };
 
 /// Qwen3.8-Flash-Next's: the session state and the cells of `kv`.

@@ -171,6 +171,10 @@ void SequenceCache::drop_end() {
     Seq& live_ = live();
     for (size_t i = 0; i < live_.ckpts.size(); ++i)
         if (live_.ckpts[i].end) {
+            if (keep_ends) {
+                live_.ckpts[i].end = false;
+                continue;
+            }
             give_back(live_.ckpts[i].host);
             live_.ckpts.erase(live_.ckpts.begin() + (ptrdiff_t) i);
             return;
