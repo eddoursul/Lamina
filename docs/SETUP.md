@@ -407,6 +407,20 @@ between its scans answers late; the lock needs administrator rights). Its option
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
 mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
 
+A card smaller than the file, or than the file and the least context beside it (32,768 tokens; a set
+`--max-context` where no other card holds K and V), runs it with the experts in RAM (UD-IQ4_XS: 13.1 GiB, pinned;
+what the RAM has no room for above `--ram-reserve-mib` stays on the card alone, and a start that finds room in
+neither is refused with the numbers). The card has the experts used most, in the VRAM its K and V leave: filled at
+the start by a ranking (the one built into the programs; `--expert-profile FILE` another), they give way as a
+conversation grows and come back after it. The CPU computes the experts a token routes that the card lacks
+(`--cpu-threads N`: its pool's threads, a worker a core by default), so the speed follows their share: 2-5% of them
+on a 16 GB card with UD-IQ4_XS (an RTX 5070 Ti: 123-313 tok/s through the API, llama.cpp 21), 11-21% with 6 GiB of
+experts on the card (97 tok/s in an agent's session where the whole model on an RTX 3090 gives 154). Which experts
+are on the card follows the conversation, and `--expert-profile-save FILE` (the config's `expert_profile_save`,
+which `-m` sets; `--expert-profile-save-every MIN`, 1) keeps the ranking a run's routing makes for the next start.
+`--expert-cache SIZE` (the first card's `cache=SIZE`: `6G`) caps the experts' VRAM. With experts in RAM a request
+sent again may write another text: which experts the CPU computes follows the routing counted so far.
+
 Drafts: a generated token is a window of rows through the model, the last token and up to 7 drafts after it; a
 draft stays while it is the token the request's sampler picks (the sampler runs on the GPU, a row's draw by its
 token's position), and a window's rows leave what a row at a time leaves, to the bit, so a greedy text is the same

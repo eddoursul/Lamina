@@ -7,12 +7,14 @@
   "args": {},
   "cwd": ".",
   "model_name": "inkling-2-mini-ud-iq4_xs",
-  "port": 8087,
+  "port": 8082,
   "sampling": {
     "temperature": 1.0,
     "top_p": 1.0,
     "top_k": 64
   },
   "log": "./lamina-inkling2-mini-ud-iq4_xs.log",
-  "lib_dirs": []
+  "lib_dirs": [],
+  "expert_profile_save": "./inkling2-mini-ud-iq4_xs-learned.bin",
+  "expert_profile_save_every": 1
 }

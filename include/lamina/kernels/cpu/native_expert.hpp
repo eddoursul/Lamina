@@ -38,7 +38,8 @@ struct NativeFmt {
     int act = 0;
     float act_beta = 0.f, act_lbeta = 0.f;
     /// > 0: two floats there in the blob, the scales of its gate/up and of its down rows' products (NVFP4's
-    /// per-expert scales, as the GPU's NativeExpertLayout::scale_off)
+    /// per-expert scales, as the GPU's NativeExpertLayout::scale_off).  The gate/up rows take theirs before the
+    /// activation; the down rows' products are left without (the caller's, where it sums the experts' rows).
     size_t scale_off = 0;
 };
 

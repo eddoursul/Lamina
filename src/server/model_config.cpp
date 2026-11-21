@@ -476,15 +476,36 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 for (size_t i = 1; i < on.size(); ++i)
                     if (const GpuInfo* g = gpu_by_index(gpus, on[i]))
                         others += std::max(0.0, (double) g->memory_mib * 1048576.0 - (g->display ? 2.5 : 1.7) * gibi);
-                const double tokens = std::min(1048576.0, (std::max(0.0, room) + others) / per);
-                say("  VRAM: the whole model (" + gb((double) m.bytes) + ") and about 1.5 GiB beside it on its GPU; the "
-                    "context's K and V (" + (q8 ? "17" : "32") + " KiB a token, " + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" 17") +
-                    ") in the rest" + (on.size() > 1 ? " and on the other cards" : "") + ": room for about " +
-                    std::to_string((long long) (tokens / 1000.0)) + " thousand tokens of the model's 1,048,576");
-                if (main != nullptr && room < 32768.0 * per)
-                    stops.push_back(gpu_line(*main) + " does not hold the model's " + gb((double) m.bytes) +
-                                    " with a context of 32,768 tokens beside it: a smaller quant of the model, or a card "
-                                    "with more VRAM first in \"gpu\"");
+                const std::string cells = std::string(q8 ? "17" : "32") + " KiB a token, " + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" 17");
+                if (main != nullptr && room < (on.size() > 1 ? 16384.0 : 32768.0) * per) {
+                    // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
+                    // those used most (fewer as the context grows); the ones RAM has no room for stay on the card.
+                    const double experts = (double) m.expert_bytes, dense = (double) m.bytes - experts;
+                    const double beside = (double) main->memory_mib * 1048576.0 - dense - drafter - (main->display ? 3.0 : 2.2) * gibi;
+                    uint64_t avail = 0;
+                    const double ram = platform::available_ram(avail) ? std::max(0.0, (double) avail - 6.0 * gibi) : experts;
+                    const double alone = std::max(0.0, experts - ram);
+                    const double first = std::max(0.0, std::min(experts, beside - (on.size() > 1 ? 16384.0 : 32768.0) * per));
+                    const double tokens = std::min(1048576.0, (std::max(0.0, beside - alone) + others) / per);
+                    say("  VRAM: its GPU is smaller than the model (" + gb((double) m.bytes) + ") with a context beside it: it has the "
+                        "dense weights (" + gb(dense) + ") and the experts used most, about " + gib(first) + " of their " +
+                        gib(experts) + " while the context is short; the CPU computes the others where a token routes them. "
+                        "The context's K and V (" + cells + ") take the experts' VRAM as it grows" +
+                        (on.size() > 1 ? ", and the other cards'" : "") + ": room for about " +
+                        std::to_string((long long) (tokens / 1000.0)) + " thousand tokens of the model's 1,048,576");
+                    say("  RAM: " + gib(std::min(experts, ram)) + " of experts" +
+                        (alone > 0 ? ", the other " + gib(alone) + " on the GPU alone (no more RAM is free above the 6 GiB "
+                                     "left to the system: \"ram-reserve-mib\")" : ", pinned"));
+                    if (alone > first)
+                        stops.push_back("the model's " + gib(experts) + " of experts fit neither " + gpu_line(*main) +
+                                        " nor the RAM that is free: a smaller quant of the model");
+                } else {
+                    const double tokens = std::min(1048576.0, (std::max(0.0, room) + others) / per);
+                    say("  VRAM: the whole model (" + gb((double) m.bytes) + ") and about 1.5 GiB beside it on its GPU; the "
+                        "context's K and V (" + cells + ") in the rest" + (on.size() > 1 ? " and on the other cards" : "") +
+                        ": room for about " + std::to_string((long long) (tokens / 1000.0)) +
+                        " thousand tokens of the model's 1,048,576");
+                }
             } else {
                 double vram = 0;
                 for (const int i : on)

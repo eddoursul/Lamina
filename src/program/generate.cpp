@@ -1708,6 +1708,8 @@ struct Qwen35Line {
     std::string bad;       ///< a --gpu it cannot read
     std::string skipped;   ///< --gpu cards whose settings this path has no use for
     std::vector<std::string> clocks;   ///< each later --gpu card's clocks= ("" where it gives none), as `second` lists them
+    std::optional<uint64_t> main_cache, main_reserve;   ///< the first --gpu card's cache=SIZE and reserve=SIZE
+    bool main_slots = false;                             ///< its cache=N (a number of slots)
     std::vector<char*> rest;
     bool qwen35() const { return family == lamina::ModelFamily::Qwen35Moe || family == lamina::ModelFamily::Qwen35; }
     bool hy4() const { return family == lamina::ModelFamily::HyV4Flash; }
@@ -1737,6 +1739,11 @@ Qwen35Line qwen35_line(int argc, char** argv) {
             }
             if (lamina::program::gpu_card_text(c) != c.name)
                 q.skipped += (q.skipped.empty() ? "" : "; ") + lamina::program::gpu_card_text(c);
+            if (cards == 0) {
+                q.main_cache = c.cache_bytes;
+                q.main_reserve = c.reserve;
+                q.main_slots = c.cache_slots.has_value();
+            }
             if (cards++ == 0) q.main_gpu = c.name == "auto" ? "0" : c.name;
             if (c.name == "auto") q.second = "auto";
             else if (cards > 1) q.second += (q.second.empty() ? "" : ",") + c.name;
@@ -1906,7 +1913,8 @@ int hy4_switch(int argc, char** argv) {
 #if defined(LAMINA_HAVE_INKLING2)
 /// Inkling 2's switch: kNotQwen35 for another family, else the exit code of src/inkling2's path, run on --main-gpu (the
 /// first --gpu card's), made current before its first CUDA call; the other cards hold the cells the main one has no
-/// room for: --cell-gpus (their order), their clocks= as --cell-gpu-clocks.
+/// room for: --cell-gpus (their order), their clocks= as --cell-gpu-clocks.  The first card's cache=SIZE is the VRAM
+/// its experts take at most (--expert-cache), its reserve= what it leaves free (--vram-reserve-mib).
 int inkling2_switch(int argc, char** argv) {
     Qwen35Line q = qwen35_line(argc, argv);
     if (!q.inkling2()) return kNotQwen35;
@@ -1935,6 +1943,25 @@ int inkling2_switch(int argc, char** argv) {
         locks += (locks.empty() ? "" : ",") + c;
     }
     cudaSetDevice(dev);
+    auto given = [&](const char* flag) {
+        for (const char* a : q.rest)
+            if (std::strcmp(a, flag) == 0) return true;
+        return false;
+    };
+    std::string f_cache = "--expert-cache", v_cache, f_reserve = "--vram-reserve-mib", v_reserve;
+    if (q.main_cache && !given("--expert-cache")) {
+        v_cache = lamina::program::size_text(*q.main_cache);
+        q.rest.push_back(f_cache.data());
+        q.rest.push_back(v_cache.data());
+    }
+    if (q.main_reserve && !given("--vram-reserve-mib")) {
+        v_reserve = std::to_string(*q.main_reserve >> 20);
+        q.rest.push_back(f_reserve.data());
+        q.rest.push_back(v_reserve.data());
+    }
+    if (q.main_slots)
+        std::fprintf(stderr, "lamina: this model's path takes a card's cache= as a size (cache=6G), not a number of slots: "
+                             "left out\n");
     std::string f_gpus = "--cell-gpus", f_locks = "--cell-gpu-clocks";
     if (!list.empty()) {
         q.rest.push_back(f_gpus.data());

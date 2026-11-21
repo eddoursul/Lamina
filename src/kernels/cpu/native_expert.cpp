@@ -339,16 +339,6 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
 
 void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
                       int r0, int r1) {
-    if (f.scale_off) {   // the rows by whichever kernel takes them, times the blob's scale of its down rows' products
-        NativeFmt plain = f;
-        plain.scale_off = 0;
-        native_down_rows(plain, blob, hq, nt, out, r0, r1);
-        float sc = 1.f;
-        std::memcpy(&sc, blob + f.scale_off + 4, 4);
-        for (int t = 0; t < nt; ++t)
-            for (int r = r0; r < r1; ++r) out[t][r] *= sc;
-        return;
-    }
     if (tq_supported(f.d_type)) {
         tq_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;

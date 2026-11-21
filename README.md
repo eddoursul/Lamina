@@ -7,7 +7,7 @@ Supported models:
 - [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) (unsloth)
 - [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) (unsloth)
 - [Hy4-flash](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (AngelSlim)
-- [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (unsloth's quants, both layouts of the files; on a GPU that holds the file, the context also over other GPUs; its drafter; text only)
+- [Inkling 2 Mini](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) (unsloth's quants, both layouts of the files; on one GPU, a smaller one than the file with the experts in RAM and those used most on the card; the context also over other GPUs; its drafter; text only)
 
 Speeds against llama.cpp and Strata on one PC are in [docs/COMPARISON.md](docs/COMPARISON.md).
 
@@ -24,7 +24,7 @@ Support for other quants may be added upon request.
   | Qwen3.8-Flash-Next, [unsloth's UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | ~81 GB |
   | Qwen3.6-35B-A3B, [unsloth's UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) | ~22 GB on one GPU, ~2 GB split over GPUs that hold it |
   | Qwen3.8-27B, [unsloth's UD-Q6_K_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | ~2 GB |
-  | Inkling 2 Mini, [unsloth's UD-IQ4_XS](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | ~1 GB (the model in ~16 GB of VRAM) |
+  | Inkling 2 Mini, [unsloth's UD-IQ4_XS](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF) | ~1 GB (the model in ~16 GB of VRAM); ~14 GB on a smaller card |
 
 - **An SSD**.
 - **A 64-bit x86 CPU with AVX2**. 64-bit Arm support is built but not tested with a GPU. The CPU computes the experts no GPU holds, so its cores and the RAM's bandwidth set much of the speed.

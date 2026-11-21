@@ -46,6 +46,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -209,16 +210,16 @@ struct Model {
     int64_t trained_ctx = 0;
     double dense_gib = 0, expert_gib = 0, load_s = 0;
     // A card smaller than the model and the context asked of it: the experts are in RAM (`arena`, but the ranking's
-    // first `n_fixed`, which RAM had no room for: VRAM alone holds those), and the card has as many of the ranking's
-    // first as its VRAM holds beside the cells - fewer as the context grows.  The CPU computes the others where a
-    // token routes them.
+    // first `n_fixed`, which RAM had no room for: VRAM alone holds those), and the card has the ones used most, as
+    // many as its VRAM holds beside the cells - fewer as the context grows (Engine: experts in RAM).  The CPU
+    // computes the others where a token routes them.
     bool in_ram = false;
     std::vector<std::pair<int32_t, int32_t>> ranked;   // every (layer, expert), the most used first
     int64_t n_fixed = 0;
     uint8_t* arena = nullptr;
     std::unique_ptr<uint8_t[]> arena_heap;   // (where the driver did not pin it)
     uint64_t arena_bytes = 0, fixed_bytes = 0;
-    uint64_t expert_cap = 0;                 // --expert-vram: the experts' VRAM at most (0: no limit)
+    uint64_t expert_cap = 0;                 // --expert-cache: the experts' VRAM at most (0: no limit)
     std::string ranking;                     // what the ranking is, for the log
 };
 
@@ -227,7 +228,7 @@ struct LoadOpts {
     int threads = 8;
     bool file_cache = true;
     size_t reserve = 0;
-    uint64_t expert_vram = 0;    // --expert-vram
+    uint64_t expert_vram = 0;    // --expert-cache
     std::string profile;         // --expert-profile: the ranking (empty: the one built into the programs)
     int64_t max_ctx = 0;         // --max-context
     bool q8 = false, cache = false, cell_cards = false;
@@ -505,7 +506,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                               "free VRAM%s hold under the %.2f GiB of them that the RAM has no room for (%.1f GiB available, "
                               "%.1f GiB of it left free: --ram-reserve-mib).  A smaller quant of the model fits",
                               m.expert_gib, m.dense_gib, (long long) least, (double) reserve / gib, (double) fr / gib,
-                              o.expert_vram > 0 ? " (and --expert-vram)" : "", (double) m.fixed_bytes / gib,
+                              o.expert_vram > 0 ? " (and --expert-cache)" : "", (double) m.fixed_bytes / gib,
                               (double) avail / gib, (double) o.ram_reserve / gib);
                 err = b;
                 return false;
@@ -698,7 +699,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     if (m.in_ram)
         std::snprintf(where, sizeof where, "%.2f GiB of dense weights on the GPU, %.2f GiB of experts in RAM%s%s (%s)",
                       m.dense_gib, (double) m.arena_bytes / (double) (1ull << 30), m.arena_heap ? ", not pinned" : "",
-                      m.n_fixed > 0 ? (" and the " + std::to_string(m.n_fixed) + " it has no room for on the GPU").c_str() : "",
+                      m.n_fixed > 0 ? (", the " + std::to_string(m.n_fixed) + " that RAM has no room for on the GPU alone").c_str() : "",
                       m.ranking.c_str());
     else
         std::snprintf(where, sizeof where, "%.2f GiB of dense weights and %.2f GiB of experts on the GPU", m.dense_gib,
@@ -1030,28 +1031,31 @@ struct Engine {
     long long sp_blocks = 0;
     double sp_ms = 0;
 
-    // ---- experts in RAM (Model::in_ram).  The card has the ranking's first n_held experts, a layer's in its first
-    // held[] slots; they are mapped chunks of the layers' address ranges, taken while VRAM is free above the reserve
-    // and given up to the cells as the context grows (the ranking's last first).  A decode forward that may route an
-    // expert the card does not have is a graph segment a visit: behind the routing the host reads which experts it
-    // took and the MoE's input (a bell rings when both are in pinned memory), the CPU pool computes the entries
-    // without a slot while the card computes the others, and their rows go back before the experts' rows are
-    // summed.  A chunk sends the RAM experts it routes to a scratch on the card.
+    // ---- experts in RAM (Model::in_ram).  The card has n_held of them, a layer's in its first on_card[] slots: mapped
+    // chunks of the layers' address ranges, taken while VRAM is free above the reserve and given up to the cells as
+    // the context grows.  A decode forward that may route an expert the card does not have is a graph segment a
+    // visit: behind the routing the host reads which experts it took and the MoE's input (a bell rings when both
+    // are in pinned memory), the CPU pool computes the entries without a slot while the card computes the others,
+    // and their rows go back before the experts' rows are summed.  A chunk sends the RAM experts it routes to a
+    // scratch on the card.
     //
-    // Which of a layer's experts are on the card follows the decode forwards' routing: an entry adds to its expert's
-    // heat (a count that fades: a visit of the layer makes the next entries weigh 1 / kHeatKeep more), and between
-    // forwards a layer's hottest expert off the card changes places with its coldest one on it once it leads by
-    // kSwapLead - its blob sent into that slot, kSwaps a forward at most.  A replayed agent session at 6 GiB of
-    // experts on the card: 27.5% of the entries the CPU's by the built-in ranking's placement, 14.9% with the swaps
-    // (13.4% by a ranking of the session's own counts), ~1,000 copies in 8,700 tokens.
+    // Which experts are on the card follows the decode forwards' routing.  An entry adds to its expert's heat, a
+    // count that fades (a forward makes the next entries weigh 1 / kHeatKeep more) and starts from the ranking's
+    // order; a looped layer's expert collects three times a token.  The card has the hottest: it gives up the
+    // coldest and takes the hottest whatever their layers (give_way, place: when the cells grow, and after a request
+    // the slots move between layers), and between forwards a layer's hottest expert off the card changes places with
+    // its coldest one on it once it leads by kSwapLead (adapt: its blob sent into that slot, kSwaps a forward at
+    // most).  A replayed agent session at 6 GiB of experts on the card: 27.5% of the entries the CPU's as the
+    // built-in ranking places them, 15.1% with the swaps in a layer, 13.9% with slots moving between layers (13.4%
+    // by a ranking of the session's own counts); ~1,000 copies in 8,700 tokens.
     std::unique_ptr<C::ExpertPool> pool;
     int cpu_threads = 0;             // --cpu-threads (0: a worker a core)
-    std::vector<int> held;           // a layer's slots in use
-    int64_t n_held = 0;              // their sum: the layers take and give slots in the ranking's order of layers
+    std::vector<int> on_card;           // a layer's slots in use
+    int64_t n_held = 0;              // their sum
     std::vector<std::vector<int32_t>> slot_exp, slot_at;   // [layer]: the expert in a slot; an expert's slot or -1
     std::vector<std::vector<float>> heat;                  // [layer][expert]
-    std::vector<float> heat_w;                             // [layer]: what an entry adds now
-    static constexpr float kHeatKeep = 0.9995f, kSwapLead = 1.25f;
+    float heat_w = 1.f;                                    // what an entry adds now
+    static constexpr float kHeatKeep = 0.999f, kSwapLead = 1.25f;
     static constexpr int kSwaps = 2;
     int32_t* swap_h = nullptr;       // pinned: the slot numbers a forward's swaps send
     long long swaps = 0;
@@ -1068,6 +1072,19 @@ struct Engine {
     std::vector<C::ExpertJobMulti> jobs;
     std::unique_ptr<lamina::core::VmmRange> x_vm;   // a chunk's scratch: a layer's RAM experts
     int64_t x_chunks = 0;            // its chunks mapped
+    // A chunk's RAM experts with the fewest rows are the CPU's while the others' blobs are on their way to the card:
+    // as many as take the CPU no longer than the uploads left (the rates measured at the start)
+    static constexpr int kChunkCpu = 1024;   // entries a visit at most
+    float *nrm_p = nullptr, *crow_p = nullptr;   // pinned: a chunk visit's MoE input rows; the CPU's rows, packed
+    int32_t* cdst_p = nullptr;       // pinned: their entries
+    float* x_rows = nullptr;         // device: the packed rows
+    int32_t* x_dst = nullptr;        // device: their entries
+    std::vector<uint8_t> cacts;      // a chunk's rows' activations, made when a job first takes a row
+    std::vector<int32_t> cact_of;    // the visit that made a row's (a count of visits)
+    int32_t cvisit = 0;
+    double up_ms_mb = 0.12;          // an upload's ms a MB
+    std::vector<float> cpu_job_ms, cpu_row_ms;   // [layer]: a CPU job of one row, and each row more
+    long long ck_entries = 0, ck_cpu = 0, ck_sent = 0;   // a chunk's RAM entries, the CPU's of them, experts uploaded
     long long ex_entries = 0, ex_ram = 0;   // routed entries of the decode forwards, and those the CPU computed
     double ex_ms = 0;                // the CPU's part of them
     // LAMINA_INK_ROUTE=FILE: the routing the host sees (a chunk's, and a decode forward's with experts in RAM), for
@@ -1274,9 +1291,9 @@ struct Engine {
             if (L.gl.gu_type == 30 || L.gl.d_type == 30) bf16_chunks = true;   // (BF16 experts: a GEMM an expert)
             if ((L.gl.gu_type != 30 && !MMQ::fits(L.gl.gu_type, 2 * g.n_ff)) || (L.gl.d_type != 30 && !MMQ::fits(L.gl.d_type, g.n_embd)))
                 return "an expert format has no MMQ kernel here";
-            // gate/up's rows end on the kernels' step, so nothing is read past them into the down rows
-            if (L.gl.gu_type != 30 && MMQ::tab_overread(L.gl.gu_type, g.n_embd) != 0)
-                return "the experts' gate/up rows end inside an MMQ step";
+            // (a gate/up row that ends inside a kernel's step - FP4 rows on an RTX 50, whose step is 512 values - is
+            // read on into the next row, the last one into the blob's down rows, against the zeros that pad the
+            // activations: products of zero)
         }
         return {};
     }
@@ -1320,19 +1337,19 @@ struct Engine {
         }
         if (m->in_ram) {
             const size_t nl = m->layers.size(), ne = (size_t) g.n_expert;
-            held.resize(nl);
+            on_card.resize(nl);
             slot_exp.resize(nl);
             slot_at.assign(nl, std::vector<int32_t>(ne, -1));
             heat.assign(nl, std::vector<float>(ne, 0.f));
-            heat_w.assign(nl, 1.f);
             for (size_t l = 0; l < nl; ++l) {
                 const Layer& L = m->layers[l];
-                held[l] = L.n_slots;
+                on_card[l] = L.n_slots;
                 slot_exp[l].assign(L.order.begin(), L.order.begin() + L.n_slots);
                 for (int k = 0; k < L.n_slots; ++k) slot_at[l][(size_t) L.order[(size_t) k]] = k;
-                // (the start's heat: the ranking's order in the layer, a few entries' worth)
-                for (size_t k = 0; k < ne; ++k) heat[l][(size_t) L.order[k]] = 8.f * (1.f - (float) k / (float) ne);
             }
+            // (the start's heat: the ranking's order, a few entries' worth)
+            for (size_t r = 0; r < m->ranked.size(); ++r)
+                heat[(size_t) m->ranked[r].first][(size_t) m->ranked[r].second] = 8.f * (1.f - (float) r / (float) m->ranked.size());
             n_held = m->n_fixed;
             swap_h = halloc<int32_t>(2 * kSwaps);
             pool = std::make_unique<C::ExpertPool>(cpu_threads);
@@ -1349,6 +1366,7 @@ struct Engine {
                 std::fprintf(stderr, "lamina: the address range of a chunk's experts could not be reserved\n");
                 throw Fatal{1};
             }
+            rates();
         }
         if (prefill > 0) {
             if (const std::string why = batch_problem(); !why.empty()) {
@@ -1391,6 +1409,15 @@ struct Engine {
                 }
                 make_rows(P, prefill, true);
                 gemm(m->layers[0].router, (int) g.n_expert, (int) g.n_embd, P.nrm, 1, P.probs);   // cuBLAS's start, not a first prompt's
+                if (m->in_ram) {
+                    nrm_p = halloc<float>((size_t) prefill * N);
+                    crow_p = halloc<float>((size_t) kChunkCpu * N);
+                    cdst_p = halloc<int32_t>(kChunkCpu);
+                    x_rows = dzero<float>((size_t) kChunkCpu * N);
+                    x_dst = dzero<int32_t>(kChunkCpu);
+                    cacts.resize((size_t) prefill * C::kNativeActBytes);
+                    cact_of.assign((size_t) prefill, -1);
+                }
             }
         }
 
@@ -1559,7 +1586,7 @@ struct Engine {
         }
         if (m->in_ram) {
             if (std::getenv("LAMINA_INK_POOLBENCH")) pool_bench();
-            fill();
+            place();
             std::fprintf(stderr, "lamina: %lld of the %zu experts on the GPU (%.2f GiB), the others the CPU's (%d threads); "
                          "they give way to the cells as the context grows%s\n", (long long) n_held, m->ranked.size(),
                          (double) slot_bytes() / (double) (1ull << 30), pool->workers() + 1,
@@ -1977,132 +2004,180 @@ struct Engine {
     /// The slots' VRAM: the chunks mapped
     uint64_t slot_bytes() const {
         uint64_t n = 0;
-        for (size_t l = 0; l < held.size(); ++l) n += (uint64_t) slot_chunks(m->layers[l], held[l]);
+        for (size_t l = 0; l < on_card.size(); ++l) n += (uint64_t) slot_chunks(m->layers[l], on_card[l]);
         return n * lamina::core::vmm_granularity();
     }
     /// Layer l's slots of the card as the device reads them
     void slots_say(size_t l) { CK(cudaMemcpy(m->layers[l].slot_of, slot_at[l].data(), slot_at[l].size() * 4, cudaMemcpyHostToDevice)); }
-    /// Slots leave the card until `chunks` more chunks are spare: a layer at a time in the ranking's order from its
-    /// end, that layer's coldest expert the one that goes (an expert that stays moves out of a slot that is unmapped).
-    /// False, and nothing changes: the experts left are in VRAM alone.
+    /// Layer l keeps `to` of its slots: the coldest of its experts that RAM has leave, and one that stays moves out of
+    /// a slot past them.  The moves are queued: the chunks go once the stream has run them (layer_chunks).
+    void layer_shrink(size_t l, int to) {
+        const Layer& L = m->layers[l];
+        std::vector<int32_t> out;
+        for (const int32_t e : slot_exp[l])
+            if (L.blob_h[(size_t) e] != nullptr) out.push_back(e);
+        const size_t drop = (size_t) (on_card[l] - to);
+        std::partial_sort(out.begin(), out.begin() + (std::ptrdiff_t) drop, out.end(),
+                          [&](int32_t a, int32_t b) { return heat[l][(size_t) a] < heat[l][(size_t) b]; });
+        std::vector<int32_t> holes;   // the slots that stay which they leave
+        for (size_t i = 0; i < drop; ++i) {
+            const int32_t k = slot_at[l][(size_t) out[i]];
+            slot_at[l][(size_t) out[i]] = -1;
+            if (k < to) holes.push_back(k);
+        }
+        for (int k = to; k < on_card[l]; ++k) {
+            const int32_t e = slot_exp[l][(size_t) k];
+            if (slot_at[l][(size_t) e] < 0) continue;
+            const int32_t h = holes.back();
+            holes.pop_back();
+            CK(cudaMemcpyAsync(L.slots + (size_t) h * L.stride, L.slots + (size_t) k * L.stride, L.stride,
+                               cudaMemcpyDeviceToDevice, st));
+            slot_exp[l][(size_t) h] = e;
+            slot_at[l][(size_t) e] = h;
+        }
+        slot_exp[l].resize((size_t) to);
+    }
+    /// Layer l's range is mapped as far as `to` slots reach (the chunks past them spare), and the device reads its
+    /// slots as they are now.  The stream is idle.
+    void layer_chunks(size_t l, int to) {
+        const Layer& L = m->layers[l];
+        for (int64_t c = slot_chunks(L, to); c < L.slot_vm->chunks(); ++c)
+            if (L.slot_vm->mapped(c)) spare.push_back(L.slot_vm->unmap(c));
+        n_held += to - on_card[l];
+        on_card[l] = to;
+        slots_say(l);
+    }
+    /// Layer l takes slots up to `to` (its range is mapped that far): the hottest of its experts off the card, their
+    /// blobs from RAM, those in a row there in one copy
+    void layer_grow(size_t l, int to) {
+        const Layer& L = m->layers[l];
+        std::vector<int32_t> in;
+        for (const int32_t e : L.order)
+            if (slot_at[l][(size_t) e] < 0) in.push_back(e);
+        const size_t n = (size_t) (to - on_card[l]);
+        std::stable_sort(in.begin(), in.end(), [&](int32_t a, int32_t b) { return heat[l][(size_t) a] > heat[l][(size_t) b]; });
+        for (size_t i = 0; i < n;) {
+            size_t j = i + 1;
+            while (j < n && L.blob_h[(size_t) in[j]] == L.blob_h[(size_t) in[j - 1]] + L.stride) ++j;
+            CK(cudaMemcpyAsync(L.slots + ((size_t) on_card[l] + i) * L.stride, L.blob_h[(size_t) in[i]], (j - i) * L.stride,
+                               cudaMemcpyHostToDevice, st));
+            i = j;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            slot_at[l][(size_t) in[i]] = on_card[l] + (int32_t) i;
+            slot_exp[l].push_back(in[i]);
+        }
+        // (what is mapped past the slots: zeros, a kernel may read past a short last row)
+        CK(cudaMemsetAsync(L.slots + (size_t) to * L.stride, 0,
+                           (size_t) slot_chunks(L, to) * lamina::core::vmm_granularity() - (size_t) to * L.stride, st));
+    }
+    /// The experts RAM has, as (heat, layer * experts + expert): those on the card, or those off it
+    std::vector<std::pair<float, int32_t>> by_heat(bool there) const {
+        const int32_t E = (int32_t) m->g.n_expert;
+        std::vector<std::pair<float, int32_t>> v;
+        for (size_t l = 0; l < on_card.size(); ++l)
+            for (int32_t e = 0; e < E; ++e)
+                if (m->layers[l].blob_h[(size_t) e] != nullptr && (slot_at[l][(size_t) e] >= 0) == there)
+                    v.emplace_back(heat[l][(size_t) e], (int32_t) l * E + e);
+        return v;
+    }
+    /// The coldest experts on the card leave it, whatever their layers, until `chunks` more chunks are spare.  False,
+    /// and nothing changes: the ones left are in VRAM alone.
     bool give_way(int64_t chunks) {
-        std::vector<int> to = held;
-        int64_t v = n_held, got = 0;
-        while (got < chunks && v > m->n_fixed) {
-            const size_t l = (size_t) m->ranked[(size_t) --v].first;
+        const int32_t E = (int32_t) m->g.n_expert;
+        std::vector<std::pair<float, int32_t>> c = by_heat(true);
+        std::sort(c.begin(), c.end());
+        std::vector<int> to = on_card;
+        int64_t got = 0;
+        for (size_t i = 0; i < c.size() && got < chunks; ++i) {
+            const size_t l = (size_t) (c[i].second / E);
             got += slot_chunks(m->layers[l], to[l]) - slot_chunks(m->layers[l], to[l] - 1);
             --to[l];
         }
         if (got < chunks) return false;
-        CK(cudaStreamSynchronize(st));
-        for (size_t l = 0; l < held.size(); ++l) {
-            if (to[l] == held[l]) continue;
-            const Layer& L = m->layers[l];
-            std::vector<int32_t> out;   // its experts on the card that RAM has, the coldest first
-            for (const int32_t e : slot_exp[l])
-                if (L.blob_h[(size_t) e] != nullptr) out.push_back(e);
-            const size_t drop = (size_t) (held[l] - to[l]);
-            std::partial_sort(out.begin(), out.begin() + (std::ptrdiff_t) drop, out.end(),
-                              [&](int32_t a, int32_t b) { return heat[l][(size_t) a] < heat[l][(size_t) b]; });
-            std::vector<int32_t> holes;   // the slots that stay which they leave
-            for (size_t i = 0; i < drop; ++i) {
-                const int32_t k = slot_at[l][(size_t) out[i]];
-                slot_at[l][(size_t) out[i]] = -1;
-                if (k < to[l]) holes.push_back(k);
-            }
-            for (int k = to[l]; k < held[l]; ++k) {
-                const int32_t e = slot_exp[l][(size_t) k];
-                if (slot_at[l][(size_t) e] < 0) continue;
-                const int32_t h = holes.back();
-                holes.pop_back();
-                CK(cudaMemcpy(L.slots + (size_t) h * L.stride, L.slots + (size_t) k * L.stride, L.stride, cudaMemcpyDeviceToDevice));
-                slot_exp[l][(size_t) h] = e;
-                slot_at[l][(size_t) e] = h;
-            }
-            slot_exp[l].resize((size_t) to[l]);
-            for (int64_t c = slot_chunks(L, to[l]); c < slot_chunks(L, held[l]); ++c)
-                if (L.slot_vm->mapped(c)) spare.push_back(L.slot_vm->unmap(c));
-            held[l] = to[l];
-            slots_say(l);
-        }
-        n_held = v;
+        for (size_t l = 0; l < on_card.size(); ++l)
+            if (to[l] < on_card[l]) layer_shrink(l, to[l]);
+        CK(cudaStreamSynchronize(st));   // (the forwards before, and the moves: a chunk is unmapped once nothing reads it)
+        for (size_t l = 0; l < on_card.size(); ++l)
+            if (to[l] < on_card[l]) layer_chunks(l, to[l]);
         return true;
     }
-    /// Slots come to the card while chunks are spare or VRAM is free above the reserve: a layer at a time in the
-    /// ranking's order, that layer's hottest expert off the card the one that comes, its blob from RAM
-    void fill() {
-        if (!m->in_ram || n_held >= (int64_t) m->ranked.size()) return;
+    /// The card has the hottest experts its VRAM holds: those its ranges have mapped, the spare chunks and the VRAM
+    /// free above the reserve (--expert-cache at most).  At the start it fills the card; after a request the chunks
+    /// the cells gave back take experts again, and slots move from a layer's cold experts to another's hotter ones
+    /// (one on the card counts kSwapLead times its heat: it stays unless clearly colder).
+    void place() {
+        if (!m->in_ram) return;
         CK(cudaStreamSynchronize(st));
         const uint64_t G = lamina::core::vmm_granularity();
+        const int32_t E = (int32_t) m->g.n_expert;
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
-        int64_t budget = (int64_t) spare.size() + (fr > reserve ? (int64_t) ((fr - reserve) / G) : 0);
-        if (m->expert_cap > 0) budget = std::min(budget, (int64_t) (m->expert_cap / G) - (int64_t) (slot_bytes() / G));
-        std::vector<int> to = held;
-        int64_t v = n_held;
-        for (; v < (int64_t) m->ranked.size(); ++v) {
-            const size_t l = (size_t) m->ranked[(size_t) v].first;
+        int64_t budget = (int64_t) (slot_bytes() / G) + (int64_t) spare.size() + (fr > reserve ? (int64_t) ((fr - reserve) / G) : 0);
+        if (m->expert_cap > 0) budget = std::min(budget, (int64_t) (m->expert_cap / G));
+        // each layer's count: the ones in VRAM alone, then the hottest of the others while their chunks fit
+        std::vector<std::pair<float, int32_t>> c = by_heat(true);
+        for (auto& x : c) x.first *= kSwapLead;
+        {
+            const std::vector<std::pair<float, int32_t>> off = by_heat(false);
+            c.insert(c.end(), off.begin(), off.end());
+        }
+        std::stable_sort(c.begin(), c.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::vector<int> to(on_card.size());
+        for (size_t l = 0; l < on_card.size(); ++l) {
+            to[l] = m->layers[l].n_slots;
+            budget -= slot_chunks(m->layers[l], to[l]);
+        }
+        for (const auto& x : c) {
+            const size_t l = (size_t) (x.second / E);
             const int64_t more = slot_chunks(m->layers[l], to[l] + 1) - slot_chunks(m->layers[l], to[l]);
             if (more > budget) break;
             budget -= more;
             ++to[l];
         }
-        if (v == n_held) return;
-        // the chunks first: a layer that does not get its own (the VRAM went elsewhere meanwhile) ends the ranking's
-        // run before its first slot, and what the layers have mapped past that goes back
-        std::vector<int> got = held;
-        for (size_t l = 0; l < held.size(); ++l) {
-            if (to[l] == held[l]) continue;
-            if (!m->layers[l].slot_vm->map_range(0, slot_chunks(m->layers[l], to[l]), [&] { return take_spare(); })) break;
-            got[l] = to[l];
-        }
-        std::vector<int> upto = held;
-        int64_t kept = n_held;
-        for (; kept < v; ++kept) {
-            const size_t l = (size_t) m->ranked[(size_t) kept].first;
-            if (upto[l] >= got[l]) break;
-            ++upto[l];
-        }
-        for (size_t l = 0; l < held.size(); ++l) {
+        // the layers that give slots first; then the others' chunks (a layer that does not get its own - the VRAM
+        // went elsewhere meanwhile - keeps what it has) and their experts
+        bool any = false;
+        for (size_t l = 0; l < on_card.size(); ++l)
+            if (to[l] < on_card[l]) {
+                layer_shrink(l, to[l]);
+                any = true;
+            }
+        if (any) CK(cudaStreamSynchronize(st));
+        for (size_t l = 0; l < on_card.size(); ++l)
+            if (to[l] < on_card[l]) layer_chunks(l, to[l]);
+        for (size_t l = 0; l < on_card.size(); ++l) {
+            if (to[l] <= on_card[l]) continue;
             const Layer& L = m->layers[l];
-            for (int64_t c = slot_chunks(L, upto[l]); c < L.slot_vm->chunks(); ++c)
-                if (L.slot_vm->mapped(c)) spare.push_back(L.slot_vm->unmap(c));
-            if (upto[l] == held[l]) continue;
-            std::vector<int32_t> in;   // its experts off the card, the hottest first (the ranking's order between equals)
-            for (const int32_t e : L.order)
-                if (slot_at[l][(size_t) e] < 0) in.push_back(e);
-            const size_t n = (size_t) (upto[l] - held[l]);
-            std::stable_sort(in.begin(), in.end(), [&](int32_t a, int32_t b) { return heat[l][(size_t) a] > heat[l][(size_t) b]; });
-            for (size_t i = 0; i < n;) {   // (blobs in a row in RAM, as a start's are: one copy)
-                size_t j = i + 1;
-                while (j < n && L.blob_h[(size_t) in[j]] == L.blob_h[(size_t) in[j - 1]] + L.stride) ++j;
-                CK(cudaMemcpyAsync(L.slots + ((size_t) held[l] + i) * L.stride, L.blob_h[(size_t) in[i]], (j - i) * L.stride,
-                                   cudaMemcpyHostToDevice, st));
-                i = j;
+            if (!L.slot_vm->map_range(0, slot_chunks(L, to[l]), [&] { return take_spare(); })) {
+                layer_chunks(l, on_card[l]);
+                continue;
             }
-            for (size_t i = 0; i < n; ++i) {
-                slot_at[l][(size_t) in[i]] = held[l] + (int32_t) i;
-                slot_exp[l].push_back(in[i]);
-            }
-            CK(cudaMemsetAsync(L.slots + (size_t) upto[l] * L.stride, 0,
-                               (size_t) slot_chunks(L, upto[l]) * G - (size_t) upto[l] * L.stride, st));
-            held[l] = upto[l];
+            layer_grow(l, to[l]);
+            any = true;
         }
+        if (!any) return;
         CK(cudaStreamSynchronize(st));
-        for (size_t l = 0; l < held.size(); ++l) slots_say(l);
-        n_held = kept;
+        for (size_t l = 0; l < on_card.size(); ++l)
+            if (to[l] > on_card[l] && (int) slot_exp[l].size() == to[l]) layer_chunks(l, to[l]);
     }
     /// Between forwards: where a layer's hottest expert off the card leads its coldest one on it (of those RAM has), the
     /// two change places - the slot is no one's while the blob is on its way.  The layers with the largest leads first.
     void adapt() {
+        heat_w /= kHeatKeep;   // (a forward: the entries before it fade)
+        if (heat_w > 1e18f) {
+            for (std::vector<float>& h : heat)
+                for (float& x : h) x /= heat_w;
+            heat_w = 1.f;
+        }
         struct Swap {
             float lead;
             int l, out, in;
         } best[kSwaps];
         int n = 0;
         const int E = (int) m->g.n_expert;
-        for (size_t l = 0; l < held.size(); ++l) {
-            if (held[l] == 0 || held[l] == E) continue;
+        for (size_t l = 0; l < on_card.size(); ++l) {
+            if (on_card[l] == 0 || on_card[l] == E) continue;
             const Layer& L = m->layers[l];
             const float* const h = heat[l].data();
             int out = -1, in = -1;
@@ -2113,8 +2188,8 @@ struct Engine {
                     out = e;
                 }
             }
-            if (in < 0 || out < 0 || h[in] <= h[out] * kSwapLead + 0.5f * heat_w[l]) continue;
-            const Swap sw{(h[in] - h[out]) / heat_w[l], (int) l, out, in};
+            if (in < 0 || out < 0 || h[in] <= h[out] * kSwapLead + 0.5f * heat_w) continue;
+            const Swap sw{h[in] - h[out], (int) l, out, in};
             int at = n;
             if (n == kSwaps) {
                 if (best[n - 1].lead >= sw.lead) continue;
@@ -2140,21 +2215,86 @@ struct Engine {
             ++swaps;
         }
     }
-    /// The ranking the heat makes (each pair's share of its layer's routing, and the ranking the start had), written
-    /// to --expert-profile-save: at a request's end once the time has passed (`now`: whenever routing was counted)
+    /// The ranking the heat makes, written to --expert-profile-save: at a request's end once the time has passed (`now`:
+    /// whenever routing was counted).  A pair's score is its share of the heat plus its share by the ranking the start
+    /// had (1 / (its place + 1) over the places' sum: as Flash-Next's learned profile blends them, the experts routed
+    /// in general stay near the front after a run on one subject).
     void profile_write(bool now) {
         if (profile_save.empty() || !profile_new || !m->in_ram) return;
         if (!now && std::chrono::duration<double>(Clock::now() - profile_at).count() < profile_every) return;
-        const int64_t nl = (int64_t) m->layers.size(), E = m->g.n_expert;
-        std::vector<double> counts((size_t) (nl * E));
-        for (int64_t l = 0; l < nl; ++l)
-            for (int64_t e = 0; e < E; ++e)
-                counts[(size_t) (l * E + e)] = (double) heat[(size_t) l][(size_t) e] / (double) heat_w[(size_t) l];
+        const size_t nl = m->layers.size(), E = (size_t) m->g.n_expert, R = m->ranked.size();
+        double all = 0, harmonic = 0;
+        for (const std::vector<float>& h : heat)
+            for (const float x : h) all += x;
+        for (size_t r = 0; r < R; ++r) harmonic += 1.0 / (double) (r + 1);
+        std::vector<std::pair<double, int32_t>> score(R);   // (score, the start's place)
+        for (size_t r = 0; r < R; ++r) {
+            const auto [l, e] = m->ranked[r];
+            score[r] = {(all > 0 ? (double) heat[(size_t) l][(size_t) e] / all : 0.0) + 1.0 / (double) (r + 1) / harmonic, (int32_t) r};
+        }
+        std::stable_sort(score.begin(), score.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::vector<std::pair<int32_t, int32_t>> ranked;
+        for (const auto& x : score) ranked.push_back(m->ranked[(size_t) x.second]);
         std::string err;
-        if (!lamina::core::write_expert_profile(profile_save, nl, E, lamina::core::blend_learned_profile(nl, E, counts, m->ranked), err))
+        if (!lamina::core::write_expert_profile(profile_save, (int64_t) nl, (int64_t) E, ranked, err))
             std::fprintf(stderr, "lamina: the experts' ranking was not saved: %s\n", err.c_str());
         profile_at = Clock::now();
         profile_new = false;
+    }
+    /// The start's rates for a chunk's split: an upload's time a MB (64 MB of the RAM experts to the card), and each
+    /// layer's CPU job of one row and of kMaxT (a few jobs of experts in RAM, random rows)
+    void rates() {
+        const Geometry& g = m->g;
+        const int N = (int) g.n_embd;
+        cpu_job_ms.assign(m->layers.size(), 0.12f);
+        cpu_row_ms.assign(m->layers.size(), 0.035f);
+        if (m->arena_bytes >= ((size_t) 64 << 20)) {
+            void* d = nullptr;
+            if (cudaMalloc(&d, (size_t) 64 << 20) == cudaSuccess) {
+                up_ms_mb = 1e9;
+                for (int i = 0; i < 4; ++i) {   // (the first: the driver's own start)
+                    const auto t0 = Clock::now();
+                    CK(cudaMemcpy(d, m->arena, (size_t) 64 << 20, cudaMemcpyHostToDevice));
+                    if (i > 0) up_ms_mb = std::min(up_ms_mb, ms_since(t0) / 64.0);
+                }
+                cudaFree(d);
+            }
+            (void) cudaGetLastError();
+        }
+        std::vector<float> x((size_t) kMaxT * N), out((size_t) 8 * kMaxT * N);
+        std::mt19937 rng(1);
+        std::normal_distribution<float> nd(0.f, 1.f);
+        for (float& v : x) v = nd(rng);
+        for (size_t li = 0; li < m->layers.size(); ++li) {
+            const Layer& L = m->layers[li];
+            std::vector<const uint8_t*> blobs;
+            for (const uint8_t* b : L.blob_h)
+                if (b != nullptr) blobs.push_back(b);
+            if (blobs.size() < 32) continue;
+            for (int t = 0; t < kMaxT; ++t) C::native_quant_act(L.fmt, x.data() + (size_t) t * N, acts.data() + (size_t) t * C::kNativeActBytes);
+            double ms[2] = {1e9, 1e9};   // (the best of three sets of other experts each)
+            for (int pass = 0; pass < 6; ++pass) {
+                const int nt = pass & 1 ? kMaxT : 1;
+                jobs.clear();
+                for (int e = 0; e < 8; ++e) {
+                    C::ExpertJobMulti j;
+                    j.blob = blobs[(size_t) ((pass * 8 + e) * 7) % blobs.size()];
+                    for (int t = 0; t < nt; ++t) {
+                        j.nact[t] = acts.data() + (size_t) t * C::kNativeActBytes;
+                        j.out[t] = out.data() + ((size_t) e * kMaxT + (size_t) t) * N;
+                    }
+                    j.nt = nt;
+                    jobs.push_back(j);
+                }
+                const auto t0 = Clock::now();
+                pool->run_split_multi_native(L.fmt, jobs.data(), 8);
+                ms[pass & 1] = std::min(ms[pass & 1], ms_since(t0) / 8.0);
+            }
+            cpu_job_ms[li] = (float) ms[0];
+            cpu_row_ms[li] = (float) std::max(0.0, (ms[1] - ms[0]) / (kMaxT - 1));
+        }
+        std::fprintf(stderr, "lamina: a RAM expert's upload %.2f ms (%.1f GB/s), the CPU's job of it %.3f ms and %.3f ms a row "
+                     "more (layer 0)\n", up_ms_mb * (double) m->layers[0].stride / 1e6, 1.0 / up_ms_mb, cpu_job_ms[0], cpu_row_ms[0]);
     }
     /// LAMINA_INK_POOLBENCH=1: the CPU pool on a layer's experts in RAM, n experts of t rows each at a time (random
     /// rows): the time a set takes, an entry's share of it, the blobs' bytes a second
@@ -2224,8 +2364,8 @@ struct Engine {
     int64_t scratch_chunks() const {
         const uint64_t G = lamina::core::vmm_granularity();
         uint64_t most = 0;
-        for (size_t l = 0; l < held.size(); ++l)
-            most = std::max<uint64_t>(most, (uint64_t) (m->g.n_expert - held[l]) * m->layers[l].stride);
+        for (size_t l = 0; l < on_card.size(); ++l)
+            most = std::max<uint64_t>(most, (uint64_t) (m->g.n_expert - on_card[l]) * m->layers[l].stride);
         return most ? (int64_t) ((most + kWeightPad + G - 1) / G) : 0;
     }
     /// After a request: the cells' chunks past what the state needs (two steps of room) and the scratch's past a
@@ -2251,7 +2391,7 @@ struct Engine {
             }
         }
         for (int pass = 0; pass < 2; ++pass) {   // (the experts that come back leave the scratch less to hold)
-            fill();
+            place();
             for (const int64_t want = scratch_chunks(); x_chunks > want; --x_chunks)
                 if (x_vm->mapped(x_chunks - 1)) spare.push_back(x_vm->unmap(x_chunks - 1));
             if (spare.empty()) break;
@@ -2263,11 +2403,12 @@ struct Engine {
     /// What the CPU took of the decode forwards' routed entries since the last call, for a request's line
     std::string ram_summary() {
         if (!m->in_ram) return {};
-        char b[160];
-        std::snprintf(b, sizeof b, "; %lld of %zu experts on the GPU, the CPU's %.1f%% of %lld entries (%.1f ms), %lld swaps",
+        char b[320];
+        std::snprintf(b, sizeof b, "; %lld of %zu experts on the GPU, the CPU's %.1f%% of %lld entries (%.1f ms), %lld swaps; "
+                      "the chunks' %lld RAM entries: %.1f%% the CPU's, %lld experts sent",
                       (long long) n_held, m->ranked.size(), ex_entries ? 100.0 * (double) ex_ram / (double) ex_entries : 0.0,
-                      ex_entries, ex_ms, swaps);
-        ex_entries = ex_ram = swaps = 0;
+                      ex_entries, ex_ms, swaps, ck_entries, ck_entries ? 100.0 * (double) ck_cpu / (double) ck_entries : 0.0, ck_sent);
+        ex_entries = ex_ram = swaps = ck_entries = ck_cpu = ck_sent = 0;
         ex_ms = 0;
         return b;
     }
@@ -2289,13 +2430,8 @@ struct Engine {
         moe_host(v, T);
         if (capturing) CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
     }
-    /// Visit v's routed entries of T rows whose experts the card does not have: once the routing is in pinned memory
-    /// (the bell), their rows by the CPU pool - the card computes the others meanwhile - and to the card, packed
-    void moe_host(int v, int T) {
-        const Geometry& g = m->g;
-        const size_t li = (size_t) visits[(size_t) v].layer;
-        const Layer& L = m->layers[li];
-        const int N = (int) g.n_embd, top_k = (int) g.top_k, n_ent = T * top_k;
+    /// The bell's value once the copy behind a visit's routing has brought it (bell_h was -1 when that was queued)
+    int bell_wait() {
         (void) cudaStreamQuery(st);   // (submitted now, not at the next call into the driver)
         const volatile int32_t* const bell = bell_h;
         for (unsigned spins = 1; *bell < 0; ++spins) {
@@ -2312,20 +2448,20 @@ struct Engine {
                 throw Fatal{1};
             }
         }
+        return *bell;
+    }
+    /// Visit v's routed entries of T rows whose experts the card does not have: once the routing is in pinned memory
+    /// (the bell), their rows by the CPU pool - the card computes the others meanwhile - and to the card, packed
+    void moe_host(int v, int T) {
+        const Geometry& g = m->g;
+        const size_t li = (size_t) visits[(size_t) v].layer;
+        const Layer& L = m->layers[li];
+        const int N = (int) g.n_embd, top_k = (int) g.top_k, n_ent = T * top_k;
+        const int n_miss = bell_wait();
         ex_entries += n_ent;
         route_dump(1, (int) li, n_ent, moe_h);
-        {   // the heat: this visit's entries, the next ones' weight
-            float* const h = heat[li].data();
-            const float w = heat_w[li];
-            for (int e = 0; e < n_ent; ++e) h[moe_h[e]] += w;
-            heat_w[li] = w / kHeatKeep;
-            if (heat_w[li] > 1e18f) {
-                for (float& x : heat[li]) x /= heat_w[li];
-                heat_w[li] = 1.f;
-            }
-            profile_new = true;
-        }
-        const int n_miss = *bell;
+        for (int e = 0; e < n_ent; ++e) heat[li][(size_t) moe_h[e]] += heat_w;
+        profile_new = true;
         if (n_miss == 0) return;
         const auto t0 = Clock::now();
         const int32_t* const ids = moe_h;
@@ -2555,14 +2691,49 @@ struct Engine {
         // then, with experts in RAM, those of the others this chunk routes, their blobs sent to the scratch - slots in
         // a row in one copy (their blobs are in a row in RAM too).
         route_dump(0, L.il, n_ent, R.ids_h);
-        const int ns = m->in_ram ? held[(size_t) L.il] : E;
+        const int ns = m->in_ram ? on_card[(size_t) L.il] : E;
         const int32_t* const at_of = m->in_ram ? slot_at[(size_t) L.il].data() : L.slot_at.data();
         int rows_of[ik::kExpertMax] = {}, place[ik::kExpertMax];
         for (int i = 0; i < n_ent; ++i) ++rows_of[R.ids_h[i]];
         for (int e = 0; e < E; ++e) place[e] = at_of[e];
+        // The CPU's of the RAM experts this chunk routes: those with the fewest rows, while their jobs take it no
+        // longer than the uploads of the others take the card.  The MoE's input rows go to the host for them.
+        bool cpus[ik::kExpertMax] = {};
+        int n_cpu = 0;   // their entries
+        if (ns < E) {
+            int cand[ik::kExpertMax], nc = 0;
+            double t_up = 0;
+            const double up = up_ms_mb * (double) L.stride / 1e6;
+            for (int e = 0; e < E; ++e)
+                if (place[e] < 0 && rows_of[e] > 0) {
+                    cand[nc++] = e;
+                    t_up += up;
+                    ck_entries += rows_of[e];
+                }
+            std::sort(cand, cand + nc, [&](int a, int b) { return rows_of[a] < rows_of[b]; });
+            double t_cpu = 0;
+            for (int i = 0; i < nc; ++i) {
+                const int r = rows_of[cand[i]], nj = (r + kMaxT - 1) / kMaxT;
+                const double c = (double) cpu_job_ms[(size_t) L.il] * nj + (double) cpu_row_ms[(size_t) L.il] * (r - nj);
+                if (n_cpu + r > kChunkCpu || t_cpu + c > t_up - up) break;
+                t_cpu += c;
+                t_up -= up;
+                cpus[cand[i]] = true;
+                n_cpu += r;
+            }
+            ck_cpu += n_cpu;
+            if (n_cpu > 0) {
+                *bell_h = -1;
+                CK(cudaMemcpyAsync(nrm_p, R.nrm, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
+                CK(cudaMemcpyAsync(bell_h, R.ids, 4, cudaMemcpyDeviceToHost, st));
+            }
+        }
         int n_place = ns;
         uint8_t* const xs = x_vm ? x_vm->base() : nullptr;
-        auto sent = [&](int k) { return k < E && place[L.order[(size_t) k]] < 0 && rows_of[L.order[(size_t) k]] > 0; };
+        auto sent = [&](int k) {
+            const int e = k < E ? L.order[(size_t) k] : 0;
+            return k < E && place[e] < 0 && rows_of[e] > 0 && !cpus[e];
+        };
         for (int k = L.n_slots; ns < E && k < E;) {   // (the order's experts after those in VRAM alone: their blobs' order)
             if (!sent(k)) {
                 ++k;
@@ -2572,12 +2743,17 @@ struct Engine {
             for (; sent(k); ++k) place[L.order[(size_t) k]] = n_place++;
             CK(cudaMemcpyAsync(xs + (size_t) (p0 - ns) * L.stride, L.blob_h[(size_t) L.order[(size_t) k0]],
                                (size_t) (k - k0) * L.stride, cudaMemcpyHostToDevice, st));
+            ck_sent += k - k0;
         }
+        const int n_gpu = n_place;   // the places the card's products take; the CPU's experts after them (no launch reads those)
+        for (int e = 0; e < E; ++e)
+            if (cpus[e]) place[e] = n_place++;
         std::fill(R.bounds_h, R.bounds_h + E + 1, 0);
         int max_rows = 0, max_x = 0;
         for (int e = 0; e < E; ++e) {
             if (place[e] < 0) continue;   // (an expert in RAM that this chunk does not route)
             R.bounds_h[place[e] + 1] = rows_of[e];
+            if (cpus[e]) continue;
             int& most = place[e] < ns ? max_rows : max_x;
             most = std::max(most, rows_of[e]);
         }
@@ -2605,16 +2781,16 @@ struct Engine {
             p.bounds = R.bounds;
             p.max_rows = max_rows;
             mmq->run(p, st);
-            if (n_place == ns) return;
+            if (n_gpu == ns) return;
             p.w = xs + off;
-            p.n = n_place - ns;
+            p.n = n_gpu - ns;
             p.bounds = R.bounds + ns;
             p.max_rows = max_x;
             mmq->run(p, st);
         };
         // a BF16 matrix (MMQ has none): an expert's rows widened to floats, a GEMM over the rows routed to it
         auto bf16_product = [&](size_t off, int w_rows, int w_cols, const float* x, float* y) {
-            for (int i = 0; i < n_place; ++i) {
+            for (int i = 0; i < n_gpu; ++i) {
                 const int b0 = R.bounds_h[i], n = R.bounds_h[i + 1] - b0;
                 if (n == 0) continue;
                 const long long cnt = (long long) w_rows * w_cols;
@@ -2657,6 +2833,39 @@ struct Engine {
             p.ld_dst = N;
             launch(L.gl.down_off);
         }
+        if (n_cpu == 0) return;
+        // the CPU's experts, while the card works: jobs of up to kMaxT of an expert's rows, their rows packed in the
+        // jobs' order, then to their entries behind the card's own
+        (void) bell_wait();
+        ++cvisit;
+        jobs.clear();
+        int k = 0;
+        for (int e = 0; e < E; ++e) {
+            if (!cpus[e]) continue;
+            for (int i = R.bounds_h[place[e]]; i < R.bounds_h[place[e] + 1]; ++i) {
+                const int row = R.ent_row_h[i];
+                uint8_t* const act = cacts.data() + (size_t) row * C::kNativeActBytes;
+                if (cact_of[(size_t) row] != cvisit) {
+                    C::native_quant_act(L.fmt, nrm_p + (size_t) row * N, act);
+                    cact_of[(size_t) row] = cvisit;
+                }
+                if (jobs.empty() || jobs.back().blob != L.blob_h[(size_t) e] || jobs.back().nt == kMaxT) {
+                    C::ExpertJobMulti j;
+                    j.blob = L.blob_h[(size_t) e];
+                    jobs.push_back(j);
+                }
+                C::ExpertJobMulti& j = jobs.back();
+                j.nact[j.nt] = act;
+                j.out[j.nt] = crow_p + (size_t) k * N;
+                ++j.nt;
+                cdst_p[k++] = R.ent_dst_h[i];
+            }
+        }
+        pool->run_split_multi_native(L.fmt, jobs.data(), (int) jobs.size());
+        CK(cudaMemcpyAsync(x_rows, crow_p, (size_t) k * N * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(x_dst, cdst_p, (size_t) k * 4, cudaMemcpyHostToDevice, st));
+        const long long all = (long long) k * N;
+        ik::rows_index_kernel<<<(unsigned) ((all + 255) / 256), 256, 0, st>>>(x_rows, x_dst, R.rows, k, N, 1);
     }
 
     /// Visit v over T rows of R at positions p0 ..: x in, x out
@@ -3048,7 +3257,7 @@ struct Engine {
             if (moe_cuts) {
                 moe_cut(v, T);
                 run("f: the CPU's rows", [&] {
-                    ik::cpu_rows_kernel<<<(unsigned) n_ent, ik::kTB, 0, st>>>(R.crows, R.ids, L.slot_of, R.rows, N);
+                    ik::cpu_rows_kernel<<<(unsigned) n_ent, ik::kTB, 0, st>>>(R.crows, R.ids, L.slot_of, L.d_scale, R.rows, N);
                 });
             }
             tick("experts");
@@ -4428,7 +4637,20 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
         else if (a == "--dspark") dspark = next();   // the model's block drafter (dspark-*.gguf)
-        else if (a == "--expert-vram") expert_vram = (uint64_t) (std::max(0.0, std::atof(next())) * (double) (1ull << 30));   // GiB
+        else if (a == "--expert-cache") {   // the experts' VRAM at most: auto (what the card has), or a size (6G, 9500M)
+            const std::string v = next();
+            if (v != "auto") {
+                char* end = nullptr;
+                const double x = std::strtod(v.c_str(), &end);
+                const char u = end != nullptr ? (char) std::toupper((unsigned char) *end) : 0;
+                const double unit = u == 'G' ? 1073741824.0 : u == 'M' ? 1048576.0 : u == 'K' ? 1024.0 : u == 'B' ? 1.0 : 0.0;
+                if (end == v.c_str() || x <= 0 || unit == 0) {
+                    std::fprintf(stderr, "lamina: --expert-cache takes auto or a size (6G, 9500M) on this path\n");
+                    return 2;
+                }
+                expert_vram = (uint64_t) (x * unit);
+            }
+        }
         else if (a == "--expert-profile") expert_profile = next();   // the ranking the experts are placed by
         else if (a == "--expert-profile-save") expert_save = next();   // what the routing made of it, written there
         else if (a == "--expert-profile-save-every") expert_save_every = std::max(0.0, std::atof(next()));   // minutes (0: at the end)

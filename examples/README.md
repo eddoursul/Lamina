@@ -20,7 +20,9 @@ which takes the model file, the GPU, the draft layer, the projector and the file
   inkling2 path: the whole model on the main GPU (UD-IQ4_XS: ~16 GiB of VRAM at a short context, ~1 GB of RAM), the context what the VRAM left holds
   K and V for (32.0 KiB a token in FP16, 17.0 with `"kv": "q8_0"` in `"args"`; ~197,000 tokens on a 24 GB card in
   FP16 beside the drafter, ~217,000 without it; more with other cards after the first in `"gpu"`, which take the K
-  and V it has no room for), `"max-context"` in `"args"` to set one. Drafts from the prompt lookup and from the
+  and V it has no room for), `"max-context"` in `"args"` to set one. A card smaller than the file keeps the experts
+  in RAM (~14 GB) and the ones used most on the card; `expert_profile_save` is where it writes the ranking its runs
+  learn (a card that holds every expert writes none). Drafts from the prompt lookup and from the
   model's drafter, a `dspark-*.gguf` beside the model (`"drafts-per-step": 0` in `"args"`: without it). No pictures
   yet.
 

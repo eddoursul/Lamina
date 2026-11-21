@@ -1591,9 +1591,10 @@ __global__ void rows_index_kernel(const float* __restrict__ src, const int32_t* 
 }
 
 /// With experts in RAM: the entries whose expert has no slot take the CPU's rows, which come packed in the entries'
-/// order.  A block an entry.
+/// order and without the down rows' scale (`scale` [experts], or null).  A block an entry.
 __global__ void __launch_bounds__(kTB) cpu_rows_kernel(const float* __restrict__ src, const int32_t* __restrict__ ids,
-                                                       const int32_t* __restrict__ slot_of, float* __restrict__ rows, int N) {
+                                                       const int32_t* __restrict__ slot_of, const float* __restrict__ scale,
+                                                       float* __restrict__ rows, int N) {
     const int e = blockIdx.x;
     if (slot_of[ids[e]] >= 0) return;
     __shared__ int at;
@@ -1605,7 +1606,8 @@ __global__ void __launch_bounds__(kTB) cpu_rows_kernel(const float* __restrict__
     __syncthreads();
     const float* s = src + (size_t) at * N;
     float* d = rows + (size_t) e * N;
-    for (int i = threadIdx.x; i < N; i += kTB) d[i] = s[i];
+    const float sc = scale != nullptr ? scale[ids[e]] : 1.0f;
+    for (int i = threadIdx.x; i < N; i += kTB) d[i] = s[i] * sc;
 }
 
 // ---------------------------------------------------------------------------------------------- checks

@@ -557,12 +557,6 @@ void ExpertPool::native_down_part(int e, int r0, int r1) {
         for (int t = 0; t < mjobs_[e].nt; ++t) a2[t] = &sb.a2[t];
         q2_rows_any(mjobs_[e].blob + nfmt_->down_off, nfmt_->d_row, (int) (nfmt_->n_ff / 64), a2,
                     mjobs_[e].nt, mjobs_[e].out, r0, r1);
-        if (nfmt_->scale_off) {   // the blob's scale of its down rows' products
-            float sc = 1.f;
-            std::memcpy(&sc, mjobs_[e].blob + nfmt_->scale_off + 4, 4);
-            for (int t = 0; t < mjobs_[e].nt; ++t)
-                for (int r = r0; r < r1; ++r) mjobs_[e].out[t][r] *= sc;
-        }
     } else {
         const void* hq[MAXT];
         for (int t = 0; t < mjobs_[e].nt; ++t) hq[t] = sb.hq[t];
