@@ -131,18 +131,53 @@ uint64_t PromptCache::kv_bytes(int64_t cells) const {
     return bytes;
 }
 
-void* SequenceCache::prepare() {
+void* SequenceCache::prepare(bool* pageable, bool end) {
     drop_prepared();
     if (!enabled()) return nullptr;
+    if (end) drop_end();
+    auto pinned = [&](void* b) {
+        const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& x) { return x.first == b; });
+        return o != owned_.end() && o->second;
+    };
+    if (pageable != nullptr) {   // an idle pinned buffer goes first (take_buffer takes the list's last)
+        const auto f = std::find_if(free_.begin(), free_.end(), pinned);
+        if (f != free_.end()) std::iter_swap(f, free_.end() - 1);
+    }
     void* h = take_buffer();
     if (h == nullptr) return nullptr;
-    const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& b) { return b.first == h; });
-    if (o == owned_.end() || !o->second) {   // pageable: a copy into it waits for the run (checkpoint copies then)
+    const bool pin = pinned(h);
+    if (!pin && pageable == nullptr) {   // pageable: a copy into it waits for the run (checkpoint copies then)
         give_back(h);
         return nullptr;
     }
+    if (pageable != nullptr) *pageable = !pin;
     prepared_ = h;
     return h;
+}
+
+void SequenceCache::spare() {
+    if (!enabled() || pinned_ > chain_cap_) return;
+    for (void* b : free_) {
+        const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& x) { return x.first == b; });
+        if (o != owned_.end() && o->second) return;
+    }
+    void* h = nullptr;
+    if (cudaMallocHost(&h, (size_t) ckpt_bytes_) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return;
+    }
+    ++pinned_;
+    owned_.emplace_back(h, true);
+    free_.push_back(h);
+}
+
+void SequenceCache::drop_end() {
+    for (size_t i = 0; i < live_.ckpts.size(); ++i)
+        if (live_.ckpts[i].end) {
+            give_back(live_.ckpts[i].host);
+            live_.ckpts.erase(live_.ckpts.begin() + (ptrdiff_t) i);
+            return;
+        }
 }
 
 void SequenceCache::drop_prepared() {
@@ -254,10 +289,10 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
     };
     if (!enabled()) return zero();
     // (a conversation of another tag holds another state for the same tokens: it is not continued)
-    int64_t best = live_.tag == tag ? reusable(live_, ids, imgs, true) : -1;
+    int64_t best = live_.tag == tag ? reusable(live_, ids, imgs, true, whole_prompt) : -1;
     int from = -1;   // -1: the live sequence, else a parked one
     for (size_t i = 0; i < parked_.size(); ++i) {
-        const int64_t r = parked_.entries()[i].tag == tag ? reusable(parked_.entries()[i], ids, imgs, false) : -1;
+        const int64_t r = parked_.entries()[i].tag == tag ? reusable(parked_.entries()[i], ids, imgs, false, whole_prompt) : -1;
         if (r > best) {
             best = r;
             from = (int) i;
@@ -274,7 +309,8 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         // prefix), the rest is parked; an edit near the end just overwrites it.
         const int64_t dropped = L - best;
         if (dropped >= kParkDropped && dropped > best) stash_live(best);
-        if (best < L && !restore(live_, best)) return zero();
+        // (the whole prompt: its end's checkpoint brings the engine's output back, also where the state stands there)
+        if ((best < L || best == (int64_t) ids.size()) && !restore(live_, best)) return zero();
         release(live_, best);
         live_.tokens.resize((size_t) best);
         live_.imgs = imgs;
@@ -330,16 +366,17 @@ void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
     for (int64_t i = 0; i < n; ++i) live_.tokens.push_back(tokens[i]);
 }
 
-void SequenceCache::checkpoint(int64_t pos, void* filled) {
+void SequenceCache::checkpoint(int64_t pos, void* filled, bool end) {
     if (filled != nullptr && filled == prepared_) prepared_ = nullptr;   // this call takes it, or gives it back
     else filled = nullptr;
     if (!enabled() || pos <= 0 || pos != (int64_t) live_.tokens.size() || live_.find(pos) != nullptr) {
         if (filled != nullptr) give_back(filled);
         return;
     }
+    if (end) drop_end();   // a conversation keeps its last prompt's end: the one before goes
     void* h = save(pos, filled);
     if (h == nullptr) return;
-    live_.ckpts.push_back({pos, h});   // the newest: positions stay ascending
+    live_.ckpts.push_back({pos, h, end});   // the newest: positions stay ascending
     enforce_cap(live_);
 }
 

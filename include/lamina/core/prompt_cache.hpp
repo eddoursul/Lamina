@@ -53,6 +53,9 @@ public:
     /// the park's budget limits them.  The pinned expert arena is not swappable, so with the park's budget beside it
     /// over the RAM the rest of the system swaps instead, and while swap is left the OOM killer does not step in.
     std::function<int64_t()> ram_spare;
+    /// An engine whose checkpoint of a prompt's end (checkpoint()'s `end`) keeps its output there: begin() then
+    /// continues the same prompt from it with nothing to read.  Unset, one token at least is always processed.
+    bool whole_prompt = false;
     /// Cells the live sequence holds (a later park reads all of them).
     int64_t live_cells() const { return (int64_t) live_.tokens.size(); }
     uint64_t ckpt_bytes() const { return ckpt_bytes_; }
@@ -69,11 +72,18 @@ public:
     void set(int64_t pos, const int32_t* tokens, int64_t n);
     /// A buffer for the checkpoint a prompt run fills as it goes (prefill::Prefill::set_checkpoint), where the cache
     /// has a pinned one to give (else null: checkpoint() copies at the end).  checkpoint() takes it; one it does not
-    /// goes back at the next prepare(), begin() or clear().
-    void* prepare();
+    /// goes back at the next prepare(), begin() or clear().  With `pageable` (an engine that brings a checkpoint into
+    /// any buffer itself): a pinned one where one is idle or can still be pinned, else a pageable one, and which.
+    /// `end`: for a prompt's end (checkpoint()'s `end`) - the conversation's last one goes first, and its buffer is
+    /// the one to take.
+    void* prepare(bool* pageable = nullptr, bool end = false);
+    /// Between requests: a pinned buffer made ready for the next checkpoint, where none is idle and the cache may
+    /// still pin one (pinning takes about 0.1 ms a MiB, which is then no request's time).
+    void spare();
     /// Checkpoints the state, which is at `pos` == the live length: from `filled`, prepare()'s buffer whose device
-    /// state the run has copied in (null: copied now).
-    void checkpoint(int64_t pos, void* filled = nullptr);
+    /// state the run has copied in (null: copied now).  `end`: a prompt's end, with the engine's output there
+    /// (whole_prompt); a conversation keeps its last one.
+    void checkpoint(int64_t pos, void* filled = nullptr, bool end = false);
     /// Forgets the live sequence, every checkpoint and every parked conversation (after non-finite logits: whatever
     /// the state holds may be poisoned).
     void clear();
@@ -135,6 +145,7 @@ private:
     int pinned_ = 0;
     void* prepared_ = nullptr;   // prepare()'s, until checkpoint() takes it
     void drop_prepared();
+    void drop_end();             // the live conversation's checkpoint of a prompt's end, if it has one
 };
 
 /// Qwen3.8-Flash-Next's: the session state and the cells of `kv`.

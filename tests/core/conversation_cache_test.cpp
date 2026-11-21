@@ -117,6 +117,17 @@ int main() {
         pics.imgs = {{2000, 11}};
         check(reusable(pics, prompt(6000), {{2000, 12}}, false) == 1000, "a changed image clamps the match before it");
         check(reusable(pics, prompt(6000), {{2000, 11}}, false) == 4000, "the same image does not");
+        // a prompt's end: its checkpoint serves the same prompt whole where the engine keeps its output there
+        Seq ended = conv(5200, {4000, 5000, 5200});
+        ended.ckpts[1].end = true;
+        check(reusable(ended, prompt(5000), {}, false) == 4000 && reusable(ended, prompt(5000), {}, true) == 4000,
+              "the same prompt again: a token is left to process without `ends`");
+        check(reusable(ended, prompt(5000), {}, false, true) == 5000 && reusable(ended, prompt(5000), {}, true, true) == 5000,
+              "... and none with it: the checkpoint of its end");
+        check(reusable(ended, prompt(5200), {}, false, true) == 5000 && reusable(ended, prompt(5200), {}, true, true) == 5000,
+              "a checkpoint that is no prompt's end does not serve a whole prompt");
+        check(reusable(ended, prompt(6000), {}, false, true) == 5200 && reusable(ended, prompt(6000), {}, true, true) == 5200,
+              "a longer prompt continues past it as before");
     }
     {   // 4. the RAM
         std::vector<Seq> evicted;

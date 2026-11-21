@@ -31,6 +31,9 @@ struct ImgKey {
 struct Ckpt {
     int64_t pos = 0;
     void* host = nullptr;   ///< the state's buffer (opaque here: `SequenceCache` owns the allocator)
+    /// The state at a prompt's end with the engine's output there: a prompt that ends at `pos` continues from it with
+    /// nothing to read (an engine that keeps that output: SequenceCache::whole_prompt).
+    bool end = false;
 };
 
 /// One conversation: its tokens, its checkpoints (positions ascending) and, when parked, a copy of its K/V cells.
@@ -76,9 +79,12 @@ inline size_t chain_victim(const int64_t* pos, size_t n) {
 
 /// Cells of `seq` a prompt can continue from: the whole sequence when it is a prefix of the prompt (live only: the
 /// state is there), else its best checkpoint within the common prefix (its position; -1: none).  Image identity is
-/// required besides the tokens: a changed image clamps the match to before that image's first pad token.
-inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, bool live) {
-    const int64_t m = std::min<int64_t>((int64_t) seq.tokens.size(), (int64_t) ids.size() - 1);
+/// required besides the tokens: a changed image clamps the match to before that image's first pad token.  One token
+/// at least is left to process - but with `ends` a checkpoint of a prompt's end (Ckpt::end) serves the whole prompt.
+inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, bool live,
+                        bool ends = false) {
+    const int64_t most = (int64_t) ids.size() - 1;
+    const int64_t m = std::min<int64_t>((int64_t) seq.tokens.size(), most + (ends ? 1 : 0));
     int64_t lcp = 0;
     while (lcp < m && seq.tokens[(size_t) lcp] == ids[(size_t) lcp]) ++lcp;
 
@@ -95,10 +101,10 @@ inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const s
     for (const ImgKey& image : imgs)
         if (image.start < lcp && !matching_image(seq.imgs, image)) lcp = image.start;
 
-    if (live && lcp > 0 && lcp == (int64_t) seq.tokens.size()) return lcp;
+    if (live && lcp > 0 && lcp == (int64_t) seq.tokens.size() && lcp <= most) return lcp;
     int64_t best = -1;
     for (const Ckpt& c : seq.ckpts)
-        if (c.pos <= lcp && c.pos > best) best = c.pos;
+        if (c.pos <= lcp && (c.pos <= most || c.end) && c.pos > best) best = c.pos;
     return best;
 }
 
