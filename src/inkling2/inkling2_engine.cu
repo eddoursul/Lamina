@@ -541,6 +541,7 @@ struct Rows {
     bool have[4][3] = {};
     float *gu = nullptr, *h = nullptr;
     float* wf = nullptr;   // a BF16 matrix widened to floats for a GEMM
+    float *tqs = nullptr, *hqs = nullptr;   // the entries' row scales where the experts run on FP4 tensor cores
     float *cz = nullptr, *cs1 = nullptr, *cs2 = nullptr;   // the loop gates' normed pair [T][2 N] and their two products
     int32_t *ent_row = nullptr, *ent_exp = nullptr, *bounds = nullptr, *ident = nullptr;
     int64_t ids_rows = 0;
@@ -754,6 +755,8 @@ struct Engine {
             R.aq[lay] = dzero<uint8_t>(MMQ::q8_bytes((int64_t) T, (int64_t) Q));
         }
         R.tq = dzero<uint8_t>(MMQ::q8_bytes((int64_t) n_ent, (int64_t) N));
+        R.tqs = dzero<float>(n_ent);
+        R.hqs = dzero<float>(n_ent);
         R.hq = dzero<uint8_t>(MMQ::q8_bytes((int64_t) n_ent, (int64_t) F));
         R.gu = dzero<float>(n_ent * 2 * F);
         R.h = dzero<float>(n_ent * F);
@@ -790,8 +793,6 @@ struct Engine {
                 if (!MMQ::fits(W->type, W->n_out)) return "a dense matrix's format has no MMQ kernel here";
                 lay_used[MMQ::ds_layout(W->type)] = true;
             }
-            for (const int t : {L.gl.gu_type, L.gl.d_type})
-                if (MMQ::native_fp4(t)) return "this GPU runs NVFP4 on its FP4 tensor cores, which the prompt kernels do not feed yet";
             if (L.gl.gu_type == 30 || L.gl.d_type == 30) bf16_chunks = true;   // (BF16 experts: a GEMM an expert)
             if ((L.gl.gu_type != 30 && !MMQ::fits(L.gl.gu_type, 2 * g.n_ff)) || (L.gl.d_type != 30 && !MMQ::fits(L.gl.d_type, g.n_embd)))
                 return "an expert format has no MMQ kernel here";
@@ -1630,12 +1631,13 @@ struct Engine {
             ik::rows_index_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.nrm, R.ent_row, R.rows, n_ent, N, 0);
             bf16_product(0, 2 * F, N, R.rows, R.gu);
         } else {
-            MMQ::quantize(R.nrm, R.ent_row, R.tq, L.gl.gu_type, N, N, n_ent, st);
+            MMQ::quantize(R.nrm, R.ent_row, R.tq, L.gl.gu_type, N, N, n_ent, st, R.tqs);
             p.w = L.slots;
             p.type = L.gl.gu_type;
             p.w_rows = 2 * F;
             p.w_cols = N;
             p.xq = R.tq;
+            p.scale = R.tqs;
             p.ids = R.ident;
             p.dst = R.gu;
             p.ld_dst = 2 * F;
@@ -1649,12 +1651,13 @@ struct Engine {
             const long long all = (long long) n_ent * N;
             ik::rows_index_kernel<<<(unsigned) ((all + 255) / 256), 256, 0, st>>>(R.gu, R.ent_dst, R.rows, n_ent, N, 1);
         } else {
-            MMQ::quantize(R.h, nullptr, R.hq, L.gl.d_type, F, F, n_ent, st);
+            MMQ::quantize(R.h, nullptr, R.hq, L.gl.d_type, F, F, n_ent, st, R.hqs);
             p.w = L.slots + L.gl.down_off;
             p.type = L.gl.d_type;
             p.w_rows = N;
             p.w_cols = F;
             p.xq = R.hq;
+            p.scale = R.hqs;
             p.ids = R.ent_dst;
             p.dst = R.rows;
             p.ld_dst = N;

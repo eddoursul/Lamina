@@ -279,10 +279,17 @@ size_t q8_bytes(int64_t rows, int64_t cols) {
     return (size_t) rows * (size_t) pad512(cols) * sizeof(block_q8_1_mmq) / (4 * QK8_1) + 128 * sizeof(block_q8_1_mmq);
 }
 
-void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows, void* stream) {
+void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows, void* stream,
+              float* scale) {
     if (rows <= 0) return;
-    quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
-                           (cudaStream_t) stream);
+    if (native_fp4(t)) {   // llama.cpp's choice on the FP4 tensor cores: FP4 activations, a scale a row
+        const bool aligned = (uintptr_t) x % 32 == 0 && (ld * 4) % 32 == 0;
+        quantize_mmq_fp4_cuda(x, ids, xq, scale, (ggml_type) t, aligned, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1,
+                              1, (cudaStream_t) stream);
+    } else {
+        quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
+                               (cudaStream_t) stream);
+    }
     ck(cudaGetLastError(), "quantize");
 }
 
@@ -403,7 +410,8 @@ void Context::run(const Product& p, void* stream) {
     }
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = type_blck(t), bpr = p.w_cols / qk;
-    const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, nullptr,
+    const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst,
+                        t == GGML_TYPE_NVFP4 && native_fp4(p.type) ? p.scale : nullptr,
                         p.w_cols, p.w_rows, p.total_rows, bpr, p.total_rows, p.ld_dst,
                         p.n, p.n, p.tab ? 0 : (int64_t) (p.expert_bytes / type_bytes(t)), 0, 0,
                         1, 1, 0, 0, 0,
@@ -458,6 +466,10 @@ void Context::run_dense(const void* w, int type, int64_t rows, int64_t cols, con
                         int64_t ld_dst, void* stream) {
     if (T <= 0) return;
     const ggml_type t = (ggml_type) type;
+    if (native_fp4(type)) {
+        std::fprintf(stderr, "prefill mmq: a dense product of a type the FP4 tensor cores take is not built\n");
+        std::exit(1);
+    }
     const int64_t bpr = cols / ggml_blck_size(t);
     const int64_t s12 = T * pad512(cols) * (int64_t) sizeof(block_q8_1) / (QK8_1 * (int64_t) sizeof(int));
     const mmq_args a = {(const char*) w, t, (const int*) xq, nullptr, nullptr, dst, nullptr,

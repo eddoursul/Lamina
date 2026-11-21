@@ -23,7 +23,9 @@ bool fits(int ggml_type, int64_t w_rows);
 /// layout share an image of the same rows.  -1 for a format MMQ does not cover.
 int ds_layout(int ggml_type);
 /// NVFP4 and MXFP4 on the current device run on its FP4 tensor cores (RTX 50 series), which read activations rounded
-/// to FP4 with a scale a row, not quantize()'s q8_1: such a product is not this wrapper's.
+/// to FP4 with a scale a row, not q8_1: quantize() writes that image for such a type (half a q8_1 image's bytes) and,
+/// for NVFP4, the rows' scales, which the experts' product takes (Product::scale).  Dense products of such a type
+/// are not this wrapper's.
 bool native_fp4(int ggml_type);
 /// Bytes of one expert's gate+up ([2*n_ff, n_embd]) or down ([n_embd, n_ff]) weights in `ggml_type`.
 size_t matrix_bytes(int ggml_type, int64_t rows, int64_t cols);
@@ -32,8 +34,9 @@ size_t q8_bytes(int64_t rows, int64_t cols);
 
 /// q8_1 activations for MMQ against weights of `ggml_type`: row i of the output is row ids[i] of x (or row i when
 /// ids is null); `x` has `ld` floats per row.
+/// `scale`: `rows` floats on this device, written where native_fp4(ggml_type) (NVFP4's rows' scales).
 void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
-              void* stream);
+              void* stream, float* scale = nullptr);
 /// The same from FP16 rows (`ld` halves apart, cols a multiple of 4): llama.cpp's quantizer reading FP16, the bytes
 /// of quantize() over those rows in FP32.
 /// `signs` (`cols` floats on this device, Hadamard-folded experts: hadamard.hpp): each 128 values rotated first, signs and all.
@@ -72,6 +75,7 @@ struct Product {
     int64_t total_rows = 0, max_rows = 0;
     float* dst = nullptr;
     int64_t ld_dst = 0;
+    const float* scale = nullptr;   ///< quantize()'s row scales, where native_fp4(type)
 };
 
 /// Product::tab can read [w_rows, w_cols] matrices of `ggml_type` in place: this build has its pointer-table MMQ
