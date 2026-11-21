@@ -484,7 +484,8 @@ json LaminaEngine::cache_view() {
     const std::lock_guard<std::mutex> g(cache_mu_);
     if (cache_.empty()) return nullptr;   // no CACHE line: the cache is off
     json v = cache_;
-    v["active"] = v.value("live", (int64_t) 0) > 0 ? 1 : 0;   // a conversation in the session
+    // the conversations in the engine's sessions (`held`: an engine with batch slots says how many; else one session)
+    v["active"] = v.contains("held") ? v["held"].get<int64_t>() : (v.value("live", (int64_t) 0) > 0 ? 1 : 0);
     return v;
 }
 

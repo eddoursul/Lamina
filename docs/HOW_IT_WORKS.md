@@ -210,5 +210,8 @@ the CPU. The prompt cache is the same one over this path's state: a checkpoint i
 for Qwen3.6, 151 MiB for the 27B), taken as a prompt's read passes it without ending a chunk there, a parked
 conversation its attention layers' K and V besides; a prompt's end is kept with the logits, so the same request again
 reads nothing. With the config's
-`parallel` it runs several requests at once on one GPU, each slot keeping its own conversation
+`parallel` it runs several requests at once on one GPU, each in a session of its own: a session holds a conversation
+with its checkpoints, a request runs in the session that holds its conversation (a new one in the session that
+holds nothing, else the one with the smallest conversation, which is parked), and a conversation that shares its
+start with one in another session copies that start's K and V from there on the GPU
 ([SETUP.md](SETUP.md#qwen36-35b-a3b-and-qwen38-27b)).

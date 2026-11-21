@@ -13,8 +13,9 @@
 namespace lamina::core {
 
 SequenceCache::SequenceCache(int chain_cap, uint64_t ckpt_bytes, uint64_t park_budget, size_t park_slots,
-                             int64_t min_tokens)
-    : chain_cap_(chain_cap), ckpt_bytes_(ckpt_bytes), parked_(park_budget, park_slots, min_tokens, ckpt_bytes) {}
+                             int64_t min_tokens, int sessions)
+    : chain_cap_(chain_cap), ckpt_bytes_(ckpt_bytes), lives_((size_t) std::max(1, sessions)),
+      parked_(park_budget, park_slots, min_tokens, ckpt_bytes) {}
 
 PromptCache::PromptCache(const ModelGeometry& g, SessionState& ss, std::vector<QsaState*> kv, void* stream,
                          int chain_cap, uint64_t park_budget, size_t park_slots, int64_t min_tokens)
@@ -49,9 +50,11 @@ void* SequenceCache::take_buffer() {
 }
 
 void SequenceCache::give_back(void* h) {
-    if (h == nullptr) return;
-    free_.push_back(h);
-    // idle, a buffer is outside the park's budget: no more are kept than the live chain can take at once (its chain
+    if (h != nullptr) free_.push_back(h);
+}
+
+void SequenceCache::trim() {
+    // idle, a buffer is outside the park's budget: no more are kept than a live chain can take at once (its chain
     // and its end, the pinned ones), the pageable rest goes back to the system
     for (size_t i = 0; free_.size() > (size_t) chain_cap_ + 1 && i < free_.size();) {
         const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& b) { return b.first == free_[i]; });
@@ -165,6 +168,7 @@ void SequenceCache::spare() {
 }
 
 void SequenceCache::drop_end() {
+    Seq& live_ = live();
     for (size_t i = 0; i < live_.ckpts.size(); ++i)
         if (live_.ckpts[i].end) {
             give_back(live_.ckpts[i].host);
@@ -209,6 +213,7 @@ bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_ho
 }
 
 void SequenceCache::stash_live(int64_t keep_upto) {
+    Seq& live_ = live();
     const int64_t L = (int64_t) live_.tokens.size();
     if (!parked_.wants(L)) return;
     if (ensure_kv && !ensure_kv(L)) return;
@@ -269,54 +274,80 @@ bool SequenceCache::restore(const Seq& seq, int64_t pos, bool prefix) {
     return state_load(pos, ck->host);
 }
 
-int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag) {
+int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag,
+                             uint64_t busy, int* session) {
     drop_prepared();
-    const int64_t L = (int64_t) live_.tokens.size();
+    trim();
     auto zero = [&]() -> int64_t {
-        release(live_, 0);
-        live_.tokens.clear();
-        live_.imgs.clear();
-        live_.tag = tag;
+        Seq& c = live();
+        release(c, 0);
+        c.tokens.clear();
+        c.imgs.clear();
+        c.tag = tag;
         state_zero();
         return 0;
     };
-    if (!enabled()) return zero();
     // (a conversation of another tag holds another state for the same tokens: it is not continued)
-    int64_t best = live_.tag == tag ? reusable(live_, ids, imgs, true, whole_prompt) : -1;
-    int from = -1;   // -1: the live sequence, else a parked one
-    for (size_t i = 0; i < parked_.size(); ++i) {
-        const int64_t r = parked_.entries()[i].tag == tag ? reusable(parked_.entries()[i], ids, imgs, false, whole_prompt) : -1;
-        if (r > best) {
-            best = r;
-            from = (int) i;
-        }
-    }
-    if (best <= 0) {
+    Start st;
+    if (enabled()) st = choose_start(lives_, busy, parked_.entries(), ids, imgs, tag, whole_prompt);
+    else st.session = cur_;
+    if (st.session < 0) return -1;
+    if (session != nullptr) *session = st.session;
+    if (!enabled()) return zero();
+    const int64_t best = st.cells;
+    // the session's own conversation gives way to another one: parked whole where the park takes it, then empty
+    auto vacate = [&] {
+        stash_live(0);
+        release(live(), 0);
+        live().tokens.clear();
+    };
+    auto started = [&](const Seq& lender) -> int64_t {   // the session holds the lender's first `best` cells
+        Seq& c = live();
+        c.tokens.assign(lender.tokens.begin(), lender.tokens.begin() + best);
+        c.imgs = imgs;
+        c.tag = tag;
+        return best;
+    };
+    switch (st.kind) {
+    case Start::kFresh: {
+        use(st.session);
         stash_live(0);
         const int64_t result = zero();
-        live_.imgs = imgs;
+        live().imgs = imgs;
         return result;
     }
-    if (from < 0) {
-        // The live sequence continues.  When the prompt drops most of it (another conversation that shares a
-        // prefix), the rest is parked; an edit near the end just overwrites it.
-        const int64_t dropped = L - best;
-        if (dropped >= kParkDropped && dropped > best) stash_live(best);
+    case Start::kContinue: {
+        // The session's conversation continues: from its end, or from a checkpoint with what came after given up.
+        // Another conversation that shares its start and has no other session to take continues in place too, the
+        // session's own parked first when the prompt drops more of it than it keeps.
+        use(st.session);
+        Seq& c = live();
+        const int64_t L = (int64_t) c.tokens.size();
+        if (st.park_rest) stash_live(best);
         // (the whole prompt: its end's checkpoint brings the engine's output back, also where the state stands there)
-        if ((best < L || best == (int64_t) ids.size()) && !restore(live_, best)) return zero();
-        release(live_, best);
-        live_.tokens.resize((size_t) best);
-        live_.imgs = imgs;
+        if ((best < L || best == (int64_t) ids.size()) && !restore(c, best)) return zero();
+        release(c, best);
+        c.tokens.resize((size_t) best);
+        c.imgs = imgs;
         return best;
     }
-    const bool whole = best >= parked_.entries()[(size_t) from].ckpts.back().pos;
-    if (!whole && !superseded(parked_.entries()[(size_t) from], ids, best)) {
+    case Start::kBorrowSession: {
+        // Another conversation that shares the start of one a session holds: it takes a session of its own, the
+        // cells before `best` copied from the lender's, which stays as it is (it may be decoding).
+        Seq& lender = lives_[(size_t) st.from];
+        const Ckpt* const ck = lender.find(best);
+        touch(st.from);
+        use(st.session);
+        vacate();
+        if (ck == nullptr || !kv_from(st.from, best) || !state_load(best, ck->host)) return zero();
+        return started(lender);
+    }
+    case Start::kBorrowParked: {
         // Another conversation that shares the parked one's start: it borrows the cells before `best`, and the
-        // parked conversation stays whole (pinned while the live one is parked beside it).
-        parked_.entries()[(size_t) from].pin = best;
-        stash_live(0);
-        release(live_, 0);
-        live_.tokens.clear();
+        // parked conversation stays whole (pinned while the session's own is parked beside it).
+        parked_.entries()[(size_t) st.from].pin = best;
+        use(st.session);
+        vacate();
         auto donor = std::find_if(parked_.entries().begin(), parked_.entries().end(),
                                   [](const Seq& s) { return s.pin >= 0; });
         if (donor == parked_.entries().end()) return zero();
@@ -324,38 +355,57 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         donor->pin = -1;
         if (!ok) return zero();
         donor->stamp = parked_.tick();
-        live_.tokens.assign(donor->tokens.begin(), donor->tokens.begin() + best);
-        live_.imgs = imgs;
-        live_.tag = tag;
-        return best;
+        return started(*donor);
     }
-    // That conversation continues: the live one is parked and the chosen one becomes live - from its end, or cut at
-    // `best` where its own next request parts from it there (the cells after, and their checkpoints, go).
-    Seq chosen = parked_.take((size_t) from);
-    stash_live(0);
-    release(live_, 0);
-    live_.tokens.clear();
+    case Start::kTake:
+        break;
+    }
+    // The parked conversation continues: the session's own is parked and the chosen one becomes live - from its end,
+    // or cut at `best` where its own next request parts from it there (the cells after, and their checkpoints, go).
+    const bool whole = best >= parked_.entries()[(size_t) st.from].ckpts.back().pos;
+    Seq chosen = parked_.take((size_t) st.from);
+    use(st.session);
+    vacate();
     if (!restore(chosen, best, !whole)) {
         release(chosen, -1);
         return zero();
     }
-    live_.tokens.assign(chosen.tokens.begin(), chosen.tokens.begin() + best);
-    live_.ckpts = std::move(chosen.ckpts);
-    release(live_, best);
-    live_.imgs = imgs;
-    live_.tag = tag;
+    started(chosen);
+    live().ckpts = std::move(chosen.ckpts);
+    release(live(), best);
     return best;
 }
 
 void SequenceCache::set(int64_t pos, const int64_t* tokens, int64_t n) {
     if (!enabled()) return;
+    Seq& live_ = live();
     release(live_, pos);
     live_.tokens.resize((size_t) pos);
     live_.tokens.insert(live_.tokens.end(), tokens, tokens + n);
 }
 
+void SequenceCache::append(int s, int64_t token) {
+    if (enabled()) lives_[(size_t) s].tokens.push_back(token);
+}
+
+void SequenceCache::drop(int s) {
+    Seq& c = lives_[(size_t) s];
+    release(c, -1);
+    c.tokens.clear();
+    c.imgs.clear();
+}
+
+void SequenceCache::touch(int s) { lives_[(size_t) s].stamp = parked_.tick(); }
+
+void SequenceCache::use(int s) {
+    cur_ = s;
+    session_select(s);
+    touch(s);
+}
+
 void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
     if (!enabled()) return;
+    Seq& live_ = live();
     release(live_, pos);
     live_.tokens.resize((size_t) pos);
     for (int64_t i = 0; i < n; ++i) live_.tokens.push_back(tokens[i]);
@@ -364,6 +414,7 @@ void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
 void SequenceCache::checkpoint(int64_t pos, void* filled, bool end) {
     if (filled != nullptr && filled == prepared_) prepared_ = nullptr;   // this call takes it, or gives it back
     else filled = nullptr;
+    Seq& live_ = live();
     if (!enabled() || pos <= 0 || pos != (int64_t) live_.tokens.size() || live_.find(pos) != nullptr) {
         if (filled != nullptr) give_back(filled);
         return;
@@ -377,9 +428,7 @@ void SequenceCache::checkpoint(int64_t pos, void* filled, bool end) {
 
 void SequenceCache::clear() {
     drop_prepared();
-    release(live_, -1);
-    live_.tokens.clear();
-    live_.imgs.clear();
+    for (size_t s = 0; s < lives_.size(); ++s) drop((int) s);
     for (Seq& s : parked_.drain()) release(s, -1);
 }
 
@@ -414,8 +463,11 @@ size_t SequenceCache::shed() {
 
 SequenceCache::State SequenceCache::state() const {
     State s;
-    s.live_cells = (int64_t) live_.tokens.size();
-    s.checkpoints = live_.ckpts.size();
+    for (const Seq& c : lives_) {
+        s.live_cells += (int64_t) c.tokens.size();
+        s.checkpoints += c.ckpts.size();
+        s.held += !c.tokens.empty();
+    }
     s.parked = parked_.size();
     s.parked_bytes = parked_.bytes();
     s.parked_budget = parked_.budget();
@@ -425,13 +477,15 @@ SequenceCache::State SequenceCache::state() const {
 }
 
 std::string SequenceCache::summary() const {
-    char buf[256];
+    const State s = state();
+    char in[64] = "";
+    if (lives_.size() > 1) std::snprintf(in, sizeof in, " in %zu of %zu sessions", s.held, lives_.size());
+    char buf[320];
     std::snprintf(buf, sizeof buf,
-                  "live %lld cells, %zu checkpoints (%.0f MiB); %zu parked conversations (%.0f MiB, %zu evicted); "
+                  "live %lld cells%s, %zu checkpoints (%.0f MiB); %zu parked conversations (%.0f MiB, %zu evicted); "
                   "%zu idle checkpoint buffers",
-                  (long long) live_.tokens.size(), live_.ckpts.size(),
-                  (double) live_.ckpts.size() * (double) ckpt_bytes_ / 1048576.0, parked_.size(),
-                  (double) parked_.bytes() / 1048576.0, parked_.evictions(), free_.size());
+                  (long long) s.live_cells, in, s.checkpoints, (double) s.checkpoints * (double) ckpt_bytes_ / 1048576.0,
+                  parked_.size(), (double) parked_.bytes() / 1048576.0, parked_.evictions(), free_.size());
     return buf;
 }
 

@@ -379,8 +379,10 @@ VRAM (on the development PC the 5070 Ti first with 26 layers, then the 3090 with
 The prompt cache is Flash-Next's, with its options ([USING.md](USING.md#behaviour)): checkpoints of the recurrent
 state (64 MiB each for Qwen3.6, 151 MiB for the 27B) and conversations parked in RAM with their K and V; the same
 request again reads nothing. Not on this
-path yet: `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU, without the prompt
-cache: each slot keeps its conversation, and continues it only when the request extends it.
+path yet: `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU: each of its sessions
+holds a conversation with checkpoints of its own, a request runs in the session that holds its conversation, and
+the conversations the sessions do not hold are parked in RAM (`--prompt-cache 0`: each slot keeps its conversation
+and continues it only when the request extends it).
 
 ## Updating
 

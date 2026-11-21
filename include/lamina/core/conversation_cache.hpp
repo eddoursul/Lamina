@@ -1,12 +1,13 @@
 // include/lamina/core/conversation_cache.hpp - the prompt cache's conversations and their checkpoints, CPU-only.
 //
-// Every conversation owns its checkpoints: the live one and each parked one (a conversation another request replaced,
-// kept in host memory with its K/V cells) hold chains of their own, so no conversation's new checkpoints can take
-// another's.  A chain over its cap gives up the point chain_victim picks; a parked conversation leaves only whole, the
-// least recently used first, when the park's bytes (its K/V copies and its chains) or its slots run out, or the RAM
-// the system can spare above a reserve, and never while it lends its start to the live one.  A request that parts
-// from a parked conversation before its end borrows its start when it is another conversation, and takes the
-// conversation back, cut where they part, when it is that conversation's own next request (superseded).
+// Every conversation owns its checkpoints: the live one of each session of the engine and each parked one (a
+// conversation another request replaced, kept in host memory with its K/V cells) hold chains of their own, so no
+// conversation's new checkpoints can take another's.  A chain over its cap gives up the point chain_victim picks; a
+// parked conversation leaves only whole, the least recently used first, when the park's bytes (its K/V copies and
+// its chains) or its slots run out, or the RAM the system can spare above a reserve, and never while it lends its
+// start to a live one.  A request that parts from a conversation before its end is that conversation's own next
+// request (superseded), which continues it cut where they part, or another conversation, which borrows its start
+// and leaves it whole; choose_start says where a request starts and in which session it runs.
 //
 // The checkpoint buffers and the K/V copies are opaque here: `SequenceCache` allocates and frees them, this header only
 // moves them and counts their bytes, so the policy is testable without a device.
@@ -46,7 +47,7 @@ struct Seq {
     std::unique_ptr<uint8_t[]> kv;   ///< cells [0, kv_cells) of every K/V state (parked conversations only)
     int64_t kv_cells = 0;
     uint64_t kv_bytes = 0;
-    uint64_t stamp = 0;   ///< the park's clock at its last use
+    uint64_t stamp = 0;   ///< the park's clock at its last use (a session's conversation: at its last request)
     /// What its state depends on besides its tokens and images (SequenceCache::begin): requests of another tag do
     /// not continue it.
     uint64_t tag = 0;
@@ -114,11 +115,11 @@ inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const s
 /// one that leaves a parked conversation fewer cells before its end takes it back, cut there.
 inline constexpr int64_t kParkDropped = 1024;
 
-/// Whether a prompt that parts from the parked conversation `seq` at its checkpoint `at`, below its newest, is that
-/// conversation's own next request - so that it continues live from `at`, the cells after given up - and not another
-/// conversation with the same start, which borrows the start and leaves it whole.  A conversation that lent its start
-/// to its own next request stayed parked beside the one that request grew into, a copy more at every return to it.
-/// It is the conversation's own when
+/// Whether a prompt that parts from the conversation `seq` (a parked one, or one a session holds) at `at`, its end or
+/// a checkpoint of it, is that conversation's own next request - so that it continues live from `at`, the cells after
+/// given up - and not another conversation with the same start, which borrows the start and leaves it whole.  A
+/// conversation that lent its start to its own next request stayed parked beside the one that request grew into, a
+/// copy more at every return to it.  It is the conversation's own when
 ///   * the cells after `at` are few (under kParkDropped): reading them again costs less than keeping that copy;
 ///   * the prompt is a start of the conversation: the same request again, whose answer is asked for anew;
 ///   * the prompt holds the end of what the conversation wrote last, in another rendering (a client sends an answer
@@ -134,6 +135,89 @@ inline bool superseded(const Seq& seq, const std::vector<int64_t>& ids, int64_t 
     for (int64_t s = L - kRun; s >= std::max(at, L - kTail); --s)
         if (std::search(from, to, seq.tokens.begin() + s, seq.tokens.begin() + s + kRun) != to) return true;
     return false;
+}
+
+/// Where a request starts (SequenceCache::begin).  An engine holds one conversation in each of its sessions (one
+/// session, or as many as requests decode together); a request runs in a session that decodes for no other, and
+/// continues from the longest start of its prompt that a session or the park holds.
+struct Start {
+    enum Kind {
+        kFresh,          ///< nothing held is a start of the prompt: an empty sequence
+        kContinue,       ///< the conversation `session` holds, from `cells`: its end, or a checkpoint of it
+        kBorrowSession,  ///< the first `cells` of the conversation session `from` holds, copied into `session`
+        kTake,           ///< the parked conversation `from` comes back into `session`: whole, or cut at `cells`
+        kBorrowParked,   ///< the first `cells` of the parked conversation `from`, which stays whole
+    };
+    Kind kind = kFresh;
+    int session = -1;         ///< where the request runs (-1: every session decodes)
+    int from = -1;            ///< kBorrowSession: the lending session; kTake, kBorrowParked: the parked entry
+    int64_t cells = 0;        ///< the cells the request continues from
+    bool park_rest = false;   ///< kContinue: another conversation's request - the session's own is parked first
+};
+
+/// The start of a prompt of `ids` among the sessions' conversations `lives` (bit s of `busy`: session s decodes, so
+/// it only lends) and the parked ones, of the request's `tag`; `ends` as reusable()'s.  The longest start wins; of
+/// equal ones a session that does not decode, then the park, then a decoding session.
+///   * A conversation's own next request (superseded: its end, few cells before it, the same request again, its last
+///     answer in another rendering) continues it where it is: in its session, or back from the park.
+///   * Any other request is a new conversation, which takes the session whose conversation is the smallest (one that
+///     holds nothing first; of equal ones the one used longest ago) - a session's conversation that gives way is
+///     parked (SequenceCache::begin), which costs by its cells, as bringing it back does, and where the park cannot
+///     take it, reading it again does - and starts there from what it shares with another: cells copied from that
+///     one's session or from the park.  Where the session it takes is the lender's own, it continues in place, and
+///     the lender is parked first when more of it is dropped than kept.
+inline Start choose_start(const std::vector<Seq>& lives, uint64_t busy, const std::vector<Seq>& parked,
+                          const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag, bool ends) {
+    const int n = (int) lives.size();
+    auto decodes = [&](int s) { return ((busy >> s) & 1) != 0; };
+    Start st;
+    for (int s = 0; s < n; ++s) {   // a new conversation's session
+        if (decodes(s)) continue;
+        const Seq& c = lives[(size_t) s];
+        const Seq* const now = st.session < 0 ? nullptr : &lives[(size_t) st.session];
+        if (now == nullptr || c.tokens.size() < now->tokens.size() ||
+            (c.tokens.size() == now->tokens.size() && c.stamp < now->stamp))
+            st.session = s;
+    }
+    if (st.session < 0) return st;
+    enum { kNone, kIdle, kParked, kBusy } where = kNone;
+    int64_t best = 0;
+    int at = -1;
+    auto offer = [&](const Seq& c, bool live, int kind, int i) {
+        const int64_t r = c.tag == tag ? reusable(c, ids, imgs, live, ends) : -1;
+        if (r > best) {
+            best = r;
+            where = static_cast<decltype(where)>(kind);
+            at = i;
+        }
+    };
+    for (int s = 0; s < n; ++s)
+        if (!decodes(s)) offer(lives[(size_t) s], true, kIdle, s);
+    for (size_t i = 0; i < parked.size(); ++i) offer(parked[i], false, kParked, (int) i);
+    for (int s = 0; s < n; ++s)
+        if (decodes(s)) offer(lives[(size_t) s], false, kBusy, s);
+    if (where == kNone) return st;
+    st.cells = best;
+    st.from = at;
+    if (where == kIdle) {
+        const Seq& c = lives[(size_t) at];
+        const int64_t dropped = (int64_t) c.tokens.size() - best;
+        if (superseded(c, ids, best)) {
+            st.kind = Start::kContinue;
+            st.session = at;
+        } else if (st.session == at) {
+            st.kind = Start::kContinue;
+            st.park_rest = dropped > best;
+        } else {
+            st.kind = Start::kBorrowSession;
+        }
+    } else if (where == kBusy) {
+        st.kind = Start::kBorrowSession;
+    } else {
+        const Seq& c = parked[(size_t) at];
+        st.kind = best >= c.ckpts.back().pos || superseded(c, ids, best) ? Start::kTake : Start::kBorrowParked;
+    }
+    return st;
 }
 
 /// The parked conversations: their K/V copies and chains within `budget` bytes, at most `slots` of them (0: no limit),

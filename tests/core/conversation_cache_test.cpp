@@ -12,11 +12,18 @@
 //      (a 16 GiB park beside a 101 GiB pinned arena on a 125 GiB PC swapped the system to a halt); ram_bound(),
 //      whether the RAM or the budget limits the park;
 //   5. superseded(): a parked conversation's own next request (few cells after the checkpoint, the same request
-//      again, its last answer sent back in another rendering) against another conversation with the same start.
+//      again, its last answer sent back in another rendering) against another conversation with the same start;
+//   6. choose_start(): where a request starts and in which session it runs - on one session (its conversation
+//      continued, parked first only for another conversation that drops more of it than it keeps, a parked one
+//      taken back or lending) and on several (the session that holds the conversation; a new one in the session
+//      that holds nothing, else the one with the smallest conversation, of equal ones the one used longest ago; a
+//      sibling's start copied from a session, also one that decodes; never a session that decodes; the same request
+//      again beside the first).
 #include "lamina/core/conversation_cache.hpp"
 
 #include <cstdint>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 using lamina::core::chain_victim;
@@ -211,6 +218,118 @@ int main() {
         check(superseded(brief, sibling, 16000), "few cells after the checkpoint: taken back whoever asks");
         check(!superseded(brief, sibling, 4000), "... but not from a checkpoint far before its end");
         check(!superseded(own, sibling, 30000) && !superseded(own, sibling, -1), "a place outside either is none");
+    }
+    {   // 6. where a request starts: one session, then several
+        using lamina::core::choose_start;
+        using lamina::core::Start;
+        // a 20,000-cell conversation with 16,000 cells of start (tokens 7) and 4,000 of its own (its number)
+        auto talk = [](int64_t own, uint64_t stamp) {
+            Seq s = conv(16000, {4000, 16000, 20000});
+            for (int i = 0; i < 4000; ++i) s.tokens.push_back(own + i);
+            s.stamp = stamp;
+            return s;
+        };
+        auto next_of = [](const Seq& s, int64_t more) {   // the conversation's next request: all of it and a turn
+            std::vector<int64_t> ids = s.tokens;
+            for (int i = 0; i < more; ++i) ids.push_back(9);
+            return ids;
+        };
+        std::vector<int64_t> sibling = prompt(16000);   // another conversation with the same 16,000 cells
+        for (int i = 0; i < 6000; ++i) sibling.push_back(50000 + i);
+        std::vector<int64_t> stranger(5000, 8);
+        const std::vector<Seq> none;
+        auto seqs = [](Seq a, Seq b = Seq{}, bool two = false) {   // (a Seq holds its K/V copy: moved, not copied)
+            std::vector<Seq> v;
+            v.push_back(std::move(a));
+            if (two) v.push_back(std::move(b));
+            return v;
+        };
+
+        std::vector<Seq> one = seqs(talk(1000, 1));
+        Start st = choose_start(one, 0, none, next_of(one[0], 300), {}, 0, false);
+        check(st.kind == Start::kContinue && st.session == 0 && st.cells == 20000 && !st.park_rest,
+              "one session: its conversation's next request continues it from its end");
+        st = choose_start(one, 0, none, sibling, {}, 0, false);
+        check(st.kind == Start::kContinue && st.session == 0 && st.cells == 16000 && !st.park_rest,
+              "one session: a sibling continues in place, the 4,000 cells it drops fewer than it keeps");
+        std::vector<int64_t> early = prompt(4000);   // ... one that shares 4,000 cells only
+        for (int i = 0; i < 9000; ++i) early.push_back(60000 + i);
+        st = choose_start(one, 0, none, early, {}, 0, false);
+        check(st.kind == Start::kContinue && st.cells == 4000 && st.park_rest,
+              "one session: one that drops more than it keeps has the conversation parked first");
+        Seq written = conv(4000, {4000});   // 6,000 cells written after a start of 4,000: the last 5,000 an answer
+        for (int i = 0; i < 6000; ++i) written.tokens.push_back(100 + i);
+        std::vector<int64_t> rendered = prompt(4000);   // its next request: the answer without the 1,000 before it
+        for (int i = 1000; i < 6000; ++i) rendered.push_back(100 + i);
+        for (int i = 0; i < 200; ++i) rendered.push_back(9);
+        std::vector<Seq> wrote = seqs(std::move(written));
+        st = choose_start(wrote, 0, none, rendered, {}, 0, false);
+        check(st.kind == Start::kContinue && st.cells == 4000 && !st.park_rest,
+              "one session: its own next request in another rendering parks no copy of what it drops");
+        st = choose_start(one, 0, none, stranger, {}, 0, false);
+        check(st.kind == Start::kFresh && st.session == 0, "one session: a conversation that shares nothing starts empty");
+        st = choose_start(one, 1, none, stranger, {}, 0, false);
+        check(st.session < 0, "one session that decodes: no place for a request");
+        std::vector<Seq> parked = seqs(talk(2000, 1));
+        st = choose_start(one, 0, parked, next_of(parked[0], 300), {}, 0, false);
+        check(st.kind == Start::kTake && st.from == 0 && st.session == 0 && st.cells == 20000,
+              "a parked conversation's next request takes it back");
+        std::vector<Seq> blank = seqs(Seq{});
+        st = choose_start(blank, 0, parked, sibling, {}, 0, false);
+        check(st.kind == Start::kBorrowParked && st.from == 0 && st.cells == 16000,
+              "a sibling of a parked conversation borrows its start");
+
+        // two sessions: conversation A (used first) and conversation B
+        std::vector<Seq> two = seqs(talk(1000, 1), talk(2000, 2), true);
+        st = choose_start(two, 0, none, next_of(two[1], 300), {}, 0, false);
+        check(st.kind == Start::kContinue && st.session == 1 && st.cells == 20000,
+              "several sessions: a request runs in the session that holds its conversation");
+        st = choose_start(two, 0, none, stranger, {}, 0, false);
+        check(st.kind == Start::kFresh && st.session == 0,
+              "a new conversation takes the session used longest ago where they hold as much");
+        std::vector<Seq> sizes = seqs(talk(1000, 1), conv(6000, {6000}), true);   // 20,000 cells used first, 6,000 last
+        sizes[1].stamp = 2;
+        st = choose_start(sizes, 0, none, stranger, {}, 0, false);
+        check(st.kind == Start::kFresh && st.session == 1,
+              "... and the one whose conversation is the smaller, whichever was used last");
+        std::vector<Seq> gap = seqs(talk(1000, 1), Seq{}, true);
+        st = choose_start(gap, 0, none, stranger, {}, 0, false);
+        check(st.kind == Start::kFresh && st.session == 1, "... or the one that holds nothing");
+        st = choose_start(gap, 0, none, sibling, {}, 0, false);
+        check(st.kind == Start::kBorrowSession && st.from == 0 && st.session == 1 && st.cells == 16000,
+              "a sibling takes a session of its own with the start copied: the lender stays");
+        st = choose_start(two, 0, none, sibling, {}, 0, false);
+        check(st.kind == Start::kContinue && st.session == 0 && st.cells == 16000 && !st.park_rest,
+              "where the session it takes is the lender's (used longest ago), it continues in place");
+        two[0].stamp = 3;   // A used last: B's session is the one to take
+        st = choose_start(two, 0, none, sibling, {}, 0, false);
+        check(st.kind == Start::kBorrowSession && st.from == 0 && st.session == 1,
+              "... and from the other session, copied, where that one is");
+        st = choose_start(two, 1, none, sibling, {}, 0, false);
+        check(st.kind == Start::kContinue && st.session == 1 && st.cells == 16000,
+              "a session that decodes is never the one a request takes: the sibling goes into the other, in place");
+        st = choose_start(two, 2, none, next_of(two[1], 300), {}, 0, false);
+        check(st.kind == Start::kBorrowSession && st.from == 1 && st.session == 0 && st.cells == 20000,
+              "a decoding session's conversation lends its checkpoints, never its state");
+        st = choose_start(two, 3, none, stranger, {}, 0, false);
+        check(st.session < 0, "every session decoding: no place for a request");
+        std::vector<Seq> tagged = seqs(talk(1000, 1), Seq{}, true);
+        tagged[0].tag = 5;
+        st = choose_start(tagged, 0, none, next_of(tagged[0], 300), {}, 0, false);
+        check(st.kind == Start::kFresh && st.session == 1, "a conversation of another tag is not continued");
+        Seq ended = conv(20000, {4000, 16000});   // a prompt of 20,000 cells whose end is kept with the engine's output
+        ended.ckpts.push_back({20000, nullptr, true});
+        for (int i = 0; i < 3000; ++i) ended.tokens.push_back(100 + i);
+        std::vector<Seq> again = seqs(std::move(ended), Seq{}, true);
+        st = choose_start(again, 0, none, prompt(20000), {}, 0, true);
+        check(st.kind == Start::kContinue && st.session == 0 && st.cells == 20000 && !st.park_rest,
+              "the same request again continues its conversation from the prompt's end, nothing parked");
+        st = choose_start(again, 1, none, prompt(20000), {}, 0, true);
+        check(st.kind == Start::kBorrowSession && st.from == 0 && st.session == 1 && st.cells == 20000,
+              "... and beside the first one still decoding, from that end in a session of its own");
+        // a session's conversation against a parked one with the same start: the session's goes first
+        st = choose_start(gap, 0, parked, sibling, {}, 0, false);
+        check(st.kind == Start::kBorrowSession && st.from == 0, "of equal starts a session's lends before the park's");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;

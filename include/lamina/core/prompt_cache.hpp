@@ -5,7 +5,11 @@
 //
 //   * the LIVE conversation: the tokens whose cells the session state holds right now, and its CHECKPOINTS: the
 //     fixed-size state at one position.  The K/V cells are indexed by position, so restoring a checkpoint at `pos`
-//     and overwriting the cells from `pos` on continues the sequence from there;
+//     and overwriting the cells from `pos` on continues the sequence from there.  An engine that decodes several
+//     requests together has a session for each, and every session holds a live conversation: a request runs in the
+//     session that holds its conversation, a new conversation in the one whose conversation is the smallest (one
+//     that holds nothing first), and one that shares its start with a conversation another session holds copies
+//     that start from there;
 //   * PARKED conversations: a conversation the live one replaced, kept in host memory with its K/V cells and its own
 //     checkpoints, so a client that alternates between conversations (a chat and its title request, an agent and its
 //     subagents) does not start over on every switch.  A prompt that continues a parked conversation from its
@@ -21,9 +25,10 @@
 // allows (the live chain and its end), the rest pageable.
 //
 // SequenceCache is that policy over an engine's own state, which it reaches through five hooks (the fixed-size state
-// to and from a buffer, an empty sequence, the K/V cells to and from a parked copy); PromptCache is Flash-Next's:
-// its session state (session_ckpt_*) and the cells of its QSA layers.  The qwen35 path has its own
-// (src/qwen35/q36_engine.cu).
+// to and from a buffer, an empty sequence, the K/V cells to and from a parked copy) and, where the engine has
+// several sessions, two more (the session the others act on, K/V cells from one session to another); PromptCache is
+// Flash-Next's: its session state (session_ckpt_*) and the cells of its QSA layers.  The qwen35 path has its own
+// (src/qwen35/q36_engine.cu), over its batch slots' sessions.
 #pragma once
 
 #include "lamina/core/conversation_cache.hpp"
@@ -40,8 +45,10 @@ namespace lamina::core {
 class SequenceCache {
 public:
     /// `chain_cap`: checkpoints a conversation keeps (0: the cache is off); `ckpt_bytes`: one checkpoint's buffer;
-    /// `park_budget`, `park_slots`, `min_tokens`: the park's (ConversationCache).
-    SequenceCache(int chain_cap, uint64_t ckpt_bytes, uint64_t park_budget, size_t park_slots, int64_t min_tokens);
+    /// `park_budget`, `park_slots`, `min_tokens`: the park's (ConversationCache); `sessions`: the engine's sessions,
+    /// each holding one live conversation (one, or as many as requests decode together).
+    SequenceCache(int chain_cap, uint64_t ckpt_bytes, uint64_t park_budget, size_t park_slots, int64_t min_tokens,
+                  int sessions = 1);
     virtual ~SequenceCache();
     SequenceCache(const SequenceCache&) = delete;
     SequenceCache& operator=(const SequenceCache&) = delete;
@@ -58,8 +65,8 @@ public:
     /// An engine whose checkpoint of a prompt's end (checkpoint()'s `end`) keeps its output there: begin() then
     /// continues the same prompt from it with nothing to read.  Unset, one token at least is always processed.
     bool whole_prompt = false;
-    /// Cells the live sequence holds (a later park reads all of them).
-    int64_t live_cells() const { return (int64_t) live_.tokens.size(); }
+    /// Cells the live sequence holds (a later park reads all of them): the session's the last begin() chose.
+    int64_t live_cells() const { return (int64_t) live().tokens.size(); }
     uint64_t ckpt_bytes() const { return ckpt_bytes_; }
 
     /// Sets the engine's state up for a prompt of `ids`: continues from the longest prefix (at most ids.size() - 1
@@ -68,10 +75,22 @@ public:
     /// position is returned; a changed image clamps reuse to before that image.  Text-only requests pass an empty
     /// image-key vector.  `tag`: what else the state depends on (the scales of a request's adapters): a conversation
     /// is continued by requests of its own tag only, and one of another tag starts its own.
-    int64_t begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag = 0);
+    /// With several sessions (choose_start, conversation_cache.hpp): bit s of `busy` says session s decodes, so its
+    /// conversation only lends its start; the request runs in `*session`, which the engine has selected on return
+    /// (session_select), and the calls below are that session's until the next begin().  -1: every session decodes.
+    int64_t begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag = 0, uint64_t busy = 0,
+                  int* session = nullptr);
     /// The cells [pos, pos + n) now hold `tokens`; pos <= live length, and anything after pos is gone.
     void set(int64_t pos, const int64_t* tokens, int64_t n);
     void set(int64_t pos, const int32_t* tokens, int64_t n);
+    /// Session `s` took `token` after its conversation's end (a decode step of any session, one that decodes beside
+    /// a prompt's read too).
+    void append(int s, int64_t token);
+    /// Session `s`'s conversation is not continued: its state is no longer what its tokens say.
+    void drop(int s);
+    /// Session `s` was used now (a request that decoded in it ended): of sessions that hold as much, a new
+    /// conversation takes the one used longest ago.
+    void touch(int s);
     /// A buffer for the checkpoint a prompt run fills as it goes (prefill::Prefill::set_checkpoint), where the cache
     /// has a pinned one to give (else null: checkpoint() copies at the end).  checkpoint() takes it; one it does not
     /// goes back at the next prepare(), begin() or clear().  With `pageable` (an engine that brings a checkpoint into
@@ -97,8 +116,9 @@ public:
     /// The cache's state: the live conversation, the park's contents, its budgets and its evictions (the CACHE line,
     /// which the Monitor shows).
     struct State {
-        int64_t live_cells = 0;
-        size_t checkpoints = 0;
+        int64_t live_cells = 0;     ///< in every session
+        size_t checkpoints = 0;     ///< of the sessions' conversations
+        size_t held = 0;            ///< sessions that hold a conversation
         size_t parked = 0;
         uint64_t parked_bytes = 0, parked_budget = 0;
         size_t slots = 0, evictions = 0;
@@ -120,11 +140,23 @@ protected:
     virtual uint64_t kv_bytes(int64_t cells) const = 0;
     /// The first `cells` K/V cells between the device and `host`, a parked copy of `held` >= cells cells.
     virtual bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) = 0;
+    /// An engine with several sessions: the hooks above act on session `s` from here.
+    virtual void session_select(int s) { (void) s; }
+    /// The first `cells` K/V cells of session `from` into the selected one's (a start lent by a conversation that
+    /// stays in its session).
+    virtual bool kv_from(int from, int64_t cells) {
+        (void) from;
+        (void) cells;
+        return false;
+    }
 
 private:
-    /// A checkpoint buffer (the header's allocator) and its return to the free list.
+    /// A checkpoint buffer (the header's allocator) and its return to the free list.  An idle buffer past what a
+    /// live chain takes goes back to the system at the next begin() (trim) and not when it is given back: an engine
+    /// that fills its buffers behind the run (prepare()'s `pageable`) may still owe one its contents until then.
     void* take_buffer();
     void give_back(void* h);
+    void trim();
     void release(Seq& seq, int64_t keep_upto);   // frees the checkpoints after `keep_upto`
     /// Thins `seq`'s chain to the cap (chain_victim).
     void enforce_cap(Seq& seq);
@@ -138,9 +170,15 @@ private:
     /// before `pos` (a borrowed prefix).
     bool restore(const Seq& seq, int64_t pos, bool prefix = false);
 
+    /// Session `s` is the one the request runs in: selected in the engine, and used now.
+    void use(int s);
+    Seq& live() { return lives_[(size_t) cur_]; }
+    const Seq& live() const { return lives_[(size_t) cur_]; }
+
     int chain_cap_;
     uint64_t ckpt_bytes_;
-    Seq live_;
+    std::vector<Seq> lives_;   // each session's conversation
+    int cur_ = 0;              // the session of the last begin()
     ConversationCache parked_;
     std::vector<void*> free_;
     std::vector<std::pair<void*, bool>> owned_;   // every buffer, and whether it is pinned

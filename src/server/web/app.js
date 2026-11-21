@@ -348,7 +348,8 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
     $("cache-text").textContent = `${fmt(c.parked)}${c.slots ? `/${fmt(c.slots)}` : ""} parked · ${fmt(c.active)} active · ` +
       `${gb(c.parked_bytes)} GB` + (c.evictions > 0 ? ` · ${fmt(c.evictions)} eviction${c.evictions === 1 ? "" : "s"}` : "");
     $("cache-text").title = `parked: conversations kept in RAM, each continuing where it was at its next request; ` +
-      `active: the one in the engine's session (${fmt(c.live)} cells, ${fmt(c.checkpoints)} checkpoints). ` +
+      (c.sessions > 1 ? `active: the ones in the engine's ${fmt(c.sessions)} sessions, one for each request running at once `
+                      : `active: the one in the engine's session `) + `(${fmt(c.live)} cells, ${fmt(c.checkpoints)} checkpoints). ` +
       `The parked ones take ${gb(c.parked_bytes)} of ${gb(c.parked_budget, 0)} GB` +
       (c.slots ? `, at most ${fmt(c.slots)} of them` : "") + `; ${fmt(c.evictions)} evicted to make room`;
     $("cache-bar").style.width = c.parked_budget ? `${Math.min(100, (100 * c.parked_bytes) / c.parked_budget)}%` : "0%";

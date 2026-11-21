@@ -2319,7 +2319,7 @@ struct Engine {
         }
         cur = 0;
         load_cur();
-        if (snapshots) {   // the conversation cache's image of a checkpoint (a single-session engine's)
+        if (snapshots) {   // the conversation cache's image of a checkpoint (the session's that reads a prompt)
             size_t at = 0;
             for (size_t l = 0; l < conv.size(); ++l) {
                 snap_at.push_back(at);
@@ -4069,6 +4069,26 @@ struct Engine {
         on();
         return ok;
     }
+    /// The current session's first `cells` K / V cells from session `src`'s, which keeps them: the start a
+    /// conversation lends another one in a session of its own (the cells below a position do not change while the
+    /// lender decodes on).
+    bool kv_from(int src, int64_t cells) {
+        const size_t H = (size_t) m->g.n_head_kv, w = (size_t) cells * m->kv_row();
+        bool ok = true;
+        for (Engine* e = this; e != nullptr; e = e->nxt) {
+            e->on();
+            const Sess& a = e->sess[(size_t) src];
+            const size_t row = (size_t) e->ctx * m->kv_row();
+            for (size_t l = 0; l < e->kc.size() && src != e->cur && w > 0; ++l) {
+                if (!e->kc[l]) continue;
+                ok = ok && soft(cudaMemcpy2DAsync(e->kc[l], row, a.kc[l], row, w, H, cudaMemcpyDeviceToDevice, e->st)) &&
+                     soft(cudaMemcpy2DAsync(e->vc[l], row, a.vc[l], row, w, H, cudaMemcpyDeviceToDevice, e->st));
+            }
+            ok = soft(cudaStreamSynchronize(e->st)) && ok;
+        }
+        on();
+        return ok;
+    }
     int hybrid_swaps_after_prompt = 2048;
     /// the MTP seed rows of a prompt chunk: a buffer the block's own forward does not use (`moe_out`, [tmax][N])
     float* mtp_seed() { return moe_out; }
@@ -4458,9 +4478,9 @@ bool is_eos(int t) { return t == 248044 || t == 248046; }
 constexpr int32_t kImStart = 248045, kImEnd = 248046;   // <|im_start|>, <|im_end|>: a turn's first and last token
 
 /// --serve's prompt cache (lamina/core/prompt_cache.hpp, Flash-Next's options): a request continues from the longest
-/// start of its prompt the engine holds - the live conversation, one of its checkpoints, or a conversation another
-/// request replaced, parked in RAM with its K / V cells.  A single-session engine's: with batch slots every slot keeps
-/// its own conversation in VRAM instead.
+/// start of its prompt the engine holds - a session's conversation, one of its checkpoints, or a conversation another
+/// request replaced, parked in RAM with its K / V cells.  With batch slots every session holds a conversation, each
+/// with checkpoints of its own, and the park takes the ones the sessions do not hold.
 struct CacheOpts {
     int chain = 16;                  // --prompt-cache: checkpoints a conversation keeps (0: off)
     int64_t every = 16384;           // --prompt-cache-every: a long prompt's checkpoints, in cells
@@ -4471,12 +4491,13 @@ struct CacheOpts {
     int64_t tail_role = -1;          // --tail-role-token: a trailing turn of this role stays after the turn's checkpoint
 };
 
-/// The engine's state behind the cache's policy: the current session's (Engine::state_copy, kv_copy).
+/// The engine's state behind the cache's policy: the current session's (Engine::state_copy, kv_copy), which the
+/// policy selects for each request (session_select).
 struct Cache final : lamina::core::SequenceCache {
     Engine& E;
     Cache(Engine& e, const CacheOpts& o)
         : SequenceCache(o.chain, e.state_bytes(), (uint64_t) std::max<int64_t>(0, o.park_mib) << 20,
-                        (size_t) std::max<int64_t>(0, o.park_slots), o.min_tokens),
+                        (size_t) std::max<int64_t>(0, o.park_slots), o.min_tokens, e.n_sess),
           E(e) {}
     ~Cache() override {   // (no copy still on its way to a buffer the cache frees)
         for (Engine* e = &E; e != nullptr; e = e->nxt) {
@@ -4505,6 +4526,14 @@ protected:
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override {
         E.sync_all();
         return E.kv_copy(cells, held, host, to_host);
+    }
+    void session_select(int s) override {
+        E.sync_all();
+        E.select(s);
+    }
+    bool kv_from(int from, int64_t cells) override {
+        E.sync_all();
+        return E.kv_from(from, cells);
     }
 };
 
@@ -4585,6 +4614,7 @@ std::string json_escape(const std::string& s) {
 
 struct Slot {
     bool active = false, stop = false;
+    int sess = 0;                 // the session it decodes in (the prompt cache's choice; without the cache its own number)
     int32_t x = 0;
     int64_t produced = 0, max_new = 0;
     Sampling smp;
@@ -4597,10 +4627,12 @@ struct Slot {
 };
 
 /// The engine protocol (lamina-server's).  One request at a time on the control lines: GEN / GENI (alone: speculative
-/// steps with the MTP block), or with --batch N BGEN / BGENI <slot> (the request's prompt is read into that slot's
-/// session - the decode windows of the other slots go on between its chunks - then its tokens come as BT lines, one
-/// window for every slot decoding, until BDONE).  BSTOP <slot> ends a slot at its next window; STOP the request on the
-/// control lines.
+/// steps with the MTP block), or with --batch N BGEN / BGENI <slot> (the request's prompt is read into a session -
+/// the decode windows of the other slots go on between its chunks - then its tokens come as BT lines, one window for
+/// every slot decoding, until BDONE).  BSTOP <slot> ends a slot at its next window; STOP the request on the control
+/// lines.  A slot is the server's name for a request's stream.  Its session is the prompt cache's choice: the one
+/// that holds the request's conversation, else one for a new conversation (Serve::request); without the cache
+/// (--prompt-cache 0) slot b decodes in session b.
 struct Serve {
     Engine& E;
     std::mutex mu;
@@ -4614,7 +4646,7 @@ struct Serve {
     // decode windows of the other slots between two chunks of a prompt read: LAMINA_Q36_READ_WINDOWS (default 1; a chunk
     // takes ~0.15 s at 512 tokens, a window ~0.012 s: more windows give the decoding slots more of the time a read takes)
     int read_windows = 1;
-    // the conversation cache (a single-session engine's; null: off, or batch slots)
+    // the conversation cache (null: off)
     CacheOpts copt;
     std::unique_ptr<Cache> cache;
     std::vector<int32_t> prev_prompt;               // the last text request's prompt: where the next one leaves it
@@ -4643,13 +4675,12 @@ struct Serve {
 
     Serve(Engine& e, const CacheOpts& co) : E(e), slots((size_t) e.n_sess), copt(co) {
         if (const char* v = std::getenv("LAMINA_Q36_READ_WINDOWS")) read_windows = std::max(0, std::min(64, std::atoi(v)));
-        if (E.n_sess > 1) {
-            if (copt.chain > 0)
-                std::fprintf(stderr, "lamina serve: prompt cache: off with batch slots (each slot keeps its conversation, "
-                             "which a request continues when it extends it)\n");
+        if (copt.chain <= 0) {
+            if (E.n_sess > 1)
+                std::fprintf(stderr, "lamina serve: prompt cache: off (each slot keeps its conversation, which a request "
+                             "continues when it extends it)\n");
             return;
         }
-        if (copt.chain <= 0) return;
         cache = std::make_unique<Cache>(E, copt);
         for (int i = 0; i < 2 && E.snap != nullptr; ++i) CK(hmalloc(&E.snap_via[i], (size_t) E.state_bytes(), cudaHostAllocDefault));
         cache->whole_prompt = E.snap != nullptr && !ckpt_cut;   // (a prompt's end is a checkpoint with its output)
@@ -4661,9 +4692,11 @@ struct Serve {
                 if (!lamina::platform::available_ram(avail)) return lamina::core::ConversationCache::kNoRamLimit;
                 return (int64_t) avail - reserve;
             };
-        std::fprintf(stderr, "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation, %lld MiB "
+        std::fprintf(stderr, "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation%s, %lld MiB "
                      "for the conversations requests replace%s%s\n", copt.chain,
-                     (double) cache->ckpt_bytes() / 1048576.0, (long long) copt.park_mib,
+                     (double) cache->ckpt_bytes() / 1048576.0,
+                     E.n_sess > 1 ? (", one in each of the " + std::to_string(E.n_sess) + " sessions").c_str() : "",
+                     (long long) copt.park_mib,
                      copt.park_slots > 0 ? (", at most " + std::to_string(copt.park_slots) + " of them").c_str() : "",
                      ram_known ? (", above a RAM reserve of " + std::to_string(copt.ram_reserve_mib) + " MiB (" +
                                   std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
@@ -4674,17 +4707,47 @@ struct Serve {
         if (!cache) return;
         const auto cs = cache->state();
         serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                    "evictions=%zu\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
-                    (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots, cs.evictions);
+                    "evictions=%zu held=%zu sessions=%d\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
+                    (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots, cs.evictions,
+                    cs.held, E.n_sess);
+    }
+    /// Session `s` took token `t` (a decode step): its tokens, and the cache's record of them.
+    void fed(int s, int32_t t) {
+        E.sess[(size_t) s].live.push_back(t);
+        if (cache) cache->append(s, t);
+    }
+    /// The slot decoding in session `s` ended.  `bad`: with non-finite logits - its state is not continued, nor is
+    /// anything the cache holds (forgotten at the next request).
+    void slot_ended(int s, bool bad) {
+        Engine::Sess& ss = E.sess[(size_t) s];
+        ss.active = false;
+        --n_active;
+        if (bad) {
+            ss.live.clear();
+            ss.imgs.clear();
+            poisoned = poisoned || cache != nullptr;
+        }
+        if (!cache) return;
+        if (bad) cache->drop(s);
+        else cache->touch(s);
     }
 
-    /// The cells a request's prompt continues from, the engine's state set there: the live conversation's end, a
-    /// checkpoint of it, or a parked conversation taken back (or its start borrowed); 0: an empty sequence.  A
-    /// conversation is continued by requests with its adapters' scales only.
-    size_t cache_begin(const std::vector<int32_t>& ids, const std::vector<ImgKey>& imgs, const std::vector<float>& lora) {
+    /// The cells a request's prompt continues from and the session it runs in, the engine's state set there: the end
+    /// of the conversation a session holds, a checkpoint of it, a parked conversation taken back, or a start borrowed
+    /// from another conversation (a session's, also one that decodes: copied from its K / V; or a parked one's); 0: an
+    /// empty sequence.  A new conversation takes the session that holds nothing, else the one whose conversation is
+    /// the smallest, which is parked.  -1: every session decodes.  A conversation is continued by requests with its
+    /// adapters' scales only.
+    int64_t cache_begin(const std::vector<int32_t>& ids, const std::vector<ImgKey>& imgs, const std::vector<float>& lora,
+                        int& session) {
         E.snap_wait();   // (the last request's checkpoints are in their buffers before the cache moves or frees any)
+        uint64_t busy = 0;
+        for (int i = 0; i < E.n_sess; ++i) busy |= (uint64_t) (E.sess[(size_t) i].active ? 1 : 0) << i;
         if (poisoned) {
             cache->clear();
+            for (int i = 0; i < E.n_sess; ++i)   // (the sessions that decode go on: their tokens stay known)
+                if (E.sess[(size_t) i].active)
+                    for (const int32_t t : E.sess[(size_t) i].live) cache->append(i, t);
             poisoned = false;
         }
         size_t tag = 0;
@@ -4693,7 +4756,7 @@ struct Serve {
         std::vector<lamina::core::ImgKey> keys;
         for (const ImgKey& k : imgs)   // (a picture is its rows' hash and their count)
             keys.push_back({k.cell, k.hash ^ (0x9e3779b97f4a7c15ull * (uint64_t) (k.n + 1))});
-        return (size_t) cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), keys, (uint64_t) tag);
+        return cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), keys, (uint64_t) tag, busy, &session);
     }
 
     /// Where a prompt's read takes a checkpoint besides its chunks' ends, ascending, each in (reuse, n) with two cells or
@@ -4791,8 +4854,8 @@ struct Serve {
         for (int i = 0; i < S; ++i) {
             Slot& sl = slots[(size_t) act[(size_t) i]];
             if (cand[(size_t) i] && !sl.draft_ready) {
-                Engine::Sess& ss = E.sess[(size_t) act[(size_t) i]];
-                first.push_back({act[(size_t) i], sl.x, ss.pos, ss.hlast});
+                Engine::Sess& ss = E.sess[(size_t) sl.sess];
+                first.push_back({sl.sess, sl.x, ss.pos, ss.hlast});
                 first_of.push_back(i);
             }
         }
@@ -4809,7 +4872,7 @@ struct Serve {
         int T = 0;
         for (int i = 0; i < S; ++i) {
             const Slot& sl = slots[(size_t) act[(size_t) i]];
-            gr[(size_t) i] = {act[(size_t) i], cand[(size_t) i] ? 2 : 1, {sl.x, sl.draft}};
+            gr[(size_t) i] = {sl.sess, cand[(size_t) i] ? 2 : 1, {sl.x, sl.draft}};
             row0[(size_t) i] = T;
             T += gr[(size_t) i].n;
         }
@@ -4821,7 +4884,7 @@ struct Serve {
         for (int i = 0; i < S; ++i) {
             const int b = act[(size_t) i];
             Slot& sl = slots[(size_t) b];
-            Engine::Sess& ss = E.sess[(size_t) b];
+            Engine::Sess& ss = E.sess[(size_t) sl.sess];
             const int n = gr[(size_t) i].n, r0 = row0[(size_t) i];
             int y0 = E.rows_pick[r0];
             if (sl.smp.needs_logits()) {
@@ -4833,23 +4896,20 @@ struct Serve {
             if (n == 2) { ++sl.offered; if (two) ++sl.accepted; }
             const int rows_kept = two ? 2 : 1;
             keep[(size_t) i] = rows_kept;
-            const int32_t fed[2] = {sl.x, sl.draft};
+            const int32_t row_tok[2] = {sl.x, sl.draft};
             bool done = false;
             int y = y0;
             for (int j = 0; j < rows_kept; ++j) {
                 if (j == 1) y = E.rows_pick[r0 + 1];
                 if (y < 0) {   // no finite logit: the slot ends, and its state is not continued
-                    ss.live.clear();
-                    ss.imgs.clear();
                     serve_print("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms_since(sl.t0));
                     std::fprintf(stderr, "lamina batch: slot %d: non-finite logits: the request ends\n", b);
                     sl.active = false;
-                    ss.active = false;
-                    --n_active;
+                    slot_ended(sl.sess, true);
                     done = true;
                     break;
                 }
-                ss.live.push_back(fed[j]);
+                fed(sl.sess, row_tok[j]);
                 serve_print("BT %d %d\n", b, y);
                 ++sl.produced;
                 sl.hist.push_back(y);
@@ -4861,8 +4921,7 @@ struct Serve {
                         std::fprintf(stderr, "lamina batch: slot %d: %lld of %lld MTP proposals accepted\n", b, sl.accepted,
                                      sl.offered);
                     sl.active = false;
-                    ss.active = false;
-                    --n_active;
+                    slot_ended(sl.sess, false);
                     done = true;
                     break;
                 }
@@ -4876,12 +4935,12 @@ struct Serve {
         std::vector<Engine::MtpRow> nx;
         std::vector<int> nx_of, nx_last;
         for (int i = 0; i < S; ++i) {
-            const int b = act[(size_t) i];
+            Slot& sl = slots[(size_t) act[(size_t) i]];
+            const int b = sl.sess;   // (the rows are the session's)
             Engine::Sess& ss = E.sess[(size_t) b];
             const int r0 = row0[(size_t) i];
             CK(cudaMemcpyAsync(ss.hlast, E.hmain + (size_t) (r0 + keep[(size_t) i] - 1) * N, (size_t) N * 4,
                                cudaMemcpyDeviceToDevice, E.st));
-            Slot& sl = slots[(size_t) b];
             sl.draft_ready = false;
             if (!alive[(size_t) i] || !cand[(size_t) i]) continue;
             const int64_t p_new = ss.pos;   // commit_rows moved it: the cell of the token the next window feeds
@@ -4926,19 +4985,23 @@ struct Serve {
     /// One token of every active slot, no proposals.
     void window_plain() {
         std::vector<Engine::Row> rows;
+        std::vector<int> who;   // each row's slot
         for (int b = 0; b < E.n_sess; ++b)
-            if (slots[(size_t) b].active) rows.push_back({b, slots[(size_t) b].x});
+            if (slots[(size_t) b].active) {
+                rows.push_back({slots[(size_t) b].sess, slots[(size_t) b].x});
+                who.push_back(b);
+            }
         if (rows.empty()) return;
         E.step_rows(rows.data(), (int) rows.size());
         const size_t Nb = (size_t) E.m->g.n_embd * 4;
         for (size_t r = 0; r < rows.size(); ++r) {
-            const int b = rows[r].slot;
+            const int b = who[r];
             Slot& sl = slots[(size_t) b];
-            Engine::Sess& ss = E.sess[(size_t) b];
+            Engine::Sess& ss = E.sess[(size_t) sl.sess];
             if (E.bmtp)   // (the hidden state a later first proposal starts from)
                 CK(cudaMemcpyAsync(ss.hlast, E.hmain + r * (size_t) E.m->g.n_embd, Nb, cudaMemcpyDeviceToDevice, E.st));
             sl.draft_ready = false;
-            ss.live.push_back(sl.x);
+            fed(sl.sess, sl.x);
             int y;
             if (sl.smp.needs_logits()) {
                 E.host_logits_row((int) r, lg);
@@ -4954,8 +5017,7 @@ struct Serve {
             if (fin) {
                 serve_print("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                 sl.active = false;
-                ss.active = false;
-                --n_active;
+                slot_ended(sl.sess, false);
             } else {
                 sl.x = y;
             }
@@ -5237,25 +5299,32 @@ struct Serve {
             if (!ve.empty()) { serve_print("ERR %s\n", ve.c_str()); return; }
         }
         // ---- the session: the held state continues when the request extends it (the recurrent state cannot step back);
-        // with the conversation cache also from a checkpoint of it, or from a conversation parked in RAM
-        const int s = adm ? slot : pick_session(ids, ir.imgs, lsc);
+        // with the conversation cache also from a checkpoint of it, or from a conversation parked in RAM - and the
+        // session is then the cache's choice, whichever slot the server named: the one that holds the conversation
+        int s = adm ? slot : -1;
+        size_t reuse = 0;
+        double begin_ms = 0.0;   // the cache's own work: a conversation parked or taken back (the prompt's time has it)
+        if (cache) {
+            const auto tb = Clock::now();
+            const int64_t held = cache_begin(ids, ir.imgs, lsc, s);
+            begin_ms = ms_since(tb);
+            if (held < 0) s = -1;
+            else reuse = (size_t) held;
+        } else if (!adm) {
+            s = pick_session(ids, ir.imgs, lsc);
+        }
         if (s < 0) {   // every session decodes in a slot: a request alone has none to run in
             serve_print("ERR every session is busy (batch slots decoding)\n");
             return;
         }
         Engine::Sess& ss = E.sess[(size_t) s];
-        size_t reuse = 0;
-        double begin_ms = 0.0;   // the cache's own work: a conversation parked or taken back (the prompt's time has it)
-        if (cache) {   // (one session: the current one)
-            const auto tb = Clock::now();
-            reuse = cache_begin(ids, ir.imgs, lsc);
-            begin_ms = ms_since(tb);
+        if (cache) {
             ss.live.assign(ids.begin(), ids.begin() + (long) reuse);
             ss.imgs.clear();
         } else {
             reuse = match_len(ss, ids, ir.imgs, lsc);
         }
-        if (adm) {   // another session holding more of this prompt (the conversation was read alone): copy its state
+        if (adm && !cache) {   // another session holding more of this prompt (the conversation was read alone): copy its state
             int src = -1;
             size_t best = reuse;
             for (int i = 0; i < E.n_sess; ++i) {
@@ -5349,8 +5418,10 @@ struct Serve {
             return true;
         }, cache ? &plan : nullptr);
         note((int64_t) reuse + got);
-        if (cache && cache->whole_prompt && fresh > 0 && got == fresh && !cancelled) {
-            // the prompt's end: its state and the logits the read left, before the first decode step moves them
+        if (cache && cache->whole_prompt && fresh > 1 && got == fresh && !cancelled) {
+            // the prompt's end: its state and the logits the read left, before the first decode step moves them (not
+            // after a read of one token - a stopped answer going on, as the server hands a request to a slot and
+            // back: the conversation keeps the end of the prompt it was asked with)
             bool pinned = true;
             void* const h = checkpoint_buffer(pinned, true);
             if (h != nullptr && E.snap_state(static_cast<uint8_t*>(h), pinned, true)) cache->checkpoint((int64_t) ids.size(), h, true);
@@ -5399,6 +5470,10 @@ struct Serve {
             if (nx < 0) {   // no finite logit: the slot is not taken, and its state is not continued
                 ss.live.clear();
                 ss.imgs.clear();
+                if (cache) {   // (nor is anything the cache holds: forgotten at the next request)
+                    cache->drop(s);
+                    poisoned = true;
+                }
                 std::fprintf(stderr, "lamina batch: slot %d: non-finite logits after the prompt: the request ends\n", slot);
                 serve_print("DONE 0 %zu %.1f %.1f nonfinite 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms,
                             ms_since(d0), reuse, (long long) fresh);
@@ -5411,12 +5486,14 @@ struct Serve {
             const char* fin = is_eos(nx) ? "stop" : stop.load() ? "cancel" : max_new <= 1 ? "length"
                               : E.pos + 1 > E.ctx ? "length" : nullptr;
             const bool cont = fin == nullptr;
+            print_cache();
             serve_print("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
                         ms_since(d0), cont ? "length" : fin, reuse, (long long) fresh);
             if (cont) {
                 Slot& sl = slots[(size_t) slot];
                 sl = Slot{};
                 sl.active = true;
+                sl.sess = s;
                 sl.x = nx;
                 sl.produced = 1;
                 sl.max_new = max_new;
@@ -5428,9 +5505,11 @@ struct Serve {
                 ++n_active;
             }
             serve_print("BADM %d %d\n", slot, cont ? 1 : 0);
-            std::fprintf(stderr, "lamina batch: slot %d takes a prompt of %zu tokens = %zu reused + %lld read in %.0f ms (%.1f "
-                         "tok/s)%s\n", slot, ids.size(), reuse, (long long) fresh, prompt_ms,
+            std::fprintf(stderr, "lamina batch: slot %d (session %d) takes a prompt of %zu tokens = %zu reused + %lld read in "
+                         "%.0f ms (%.1f tok/s)%s\n", slot, s, ids.size(), reuse, (long long) fresh, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, cont ? "" : ", done at once");
+            if (cache) std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
+            cache_idle();
             return;
         }
         for (;;) {
@@ -5489,6 +5568,7 @@ struct Serve {
         E.sess[(size_t) E.cur].pos = E.pos;
         const double decode_ms = ms_since(d0);
         if (cache) {
+            cache->touch(s);
             E.snap_wait();   // (shed may free a buffer)
             cache->shed();
         }
@@ -5828,7 +5908,7 @@ static int run_engine(int argc, char** argv, bool check_only) {
                          fr / 1073741824.0, experts / 1073741824.0, chunk);
     }
     for (auto& S : stages) {
-        S->init(m, ctx, chunk, batch, vision, serve_mode && batch <= 1 && cache_opts.chain > 0);
+        S->init(m, ctx, chunk, batch, vision, serve_mode && cache_opts.chain > 0);
         if (!place_experts(m, *S, expert_vram, cpu_threads, hybrid_rows, expert_slots, serve_mode, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
