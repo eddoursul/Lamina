@@ -422,8 +422,11 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
             for (size_t i = 1; i < on.size(); ++i)
                 if (const GpuInfo* g = gpu_by_index(gpus, on[i])) more += (more.empty() ? "" : "; ") + gpu_line(*g);
             const bool flash = m.arch == "qwen4exp";
+            const bool inkling = m.arch == "inkling2" || m.arch == "inkling2_loop";
             if (main != nullptr)
-                say("  runs on " + gpu_line(*main) + (more.empty() ? "" : (flash ? ", expert tiers: " : ", a layer split may add: ") + more));
+                say("  runs on " + gpu_line(*main) +
+                    (more.empty() ? "" : (flash ? ", expert tiers: " : inkling ? ", the context's K and V also on: "
+                                                                               : ", a layer split may add: ") + more));
             // each card's own settings (--gpu NAME,key=value)
             for (const std::string& card : engine_cards(c)) {
                 const size_t comma = card.find(',');
@@ -432,7 +435,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 const int i = name == "auto" ? -1 : find_gpu(name, gpus);
                 const GpuInfo* g = i < 0 ? nullptr : gpu_by_index(gpus, i);
                 say("  " + (g != nullptr ? gpu_line(*g) : name) + ": " + replace_all(card.substr(comma + 1), ",", ", ") +
-                    (flash ? "" : " (this model's path takes the cards' order alone)"));
+                    (flash ? "" : inkling ? " (this model's path takes the cards' order and a later card's clocks)"
+                                          : " (this model's path takes the cards' order alone)"));
             }
             // what it takes
             if (flash) {
@@ -446,6 +450,29 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 const auto mtp = std::find(pa.begin(), pa.end(), "--mtp");
                 if (!line.empty()) say("  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line));
                 else if (mtp != pa.end() && mtp + 1 != pa.end()) say("  draft layer: " + *(mtp + 1));
+            } else if (inkling) {
+                // The whole file and ~1.5 GiB beside it (the window layers' cells, a prompt chunk's buffers, the
+                // graphs) on the first card; K and V of the 8 full-attention layer applications in what is left of it
+                // and on the other cards (which keep ~1 GiB for their own buffers and the reserve).
+                const std::vector<std::string> pa = engine_args(c);
+                const auto kv = std::find(pa.begin(), pa.end(), "--kv");
+                const bool q8 = kv != pa.end() && kv + 1 != pa.end() && *(kv + 1) == "q8_0";
+                const double per = (q8 ? 17.0 : 32.0) * 1024.0, gibi = 1073741824.0;
+                double room = 0, others = 0;
+                if (main != nullptr)
+                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - (main->display ? 3.0 : 2.2) * gibi;
+                for (size_t i = 1; i < on.size(); ++i)
+                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]))
+                        others += std::max(0.0, (double) g->memory_mib * 1048576.0 - (g->display ? 2.5 : 1.7) * gibi);
+                const double tokens = std::min(1048576.0, (std::max(0.0, room) + others) / per);
+                say("  VRAM: the whole model (" + gb((double) m.bytes) + ") and about 1.5 GiB beside it on its GPU; the "
+                    "context's K and V (" + (q8 ? "17" : "32") + " KiB a token, " + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" 17") +
+                    ") in the rest" + (on.size() > 1 ? " and on the other cards" : "") + ": room for about " +
+                    std::to_string((long long) (tokens / 1000.0)) + " thousand tokens of the model's 1,048,576");
+                if (main != nullptr && room < 32768.0 * per)
+                    stops.push_back(gpu_line(*main) + " does not hold the model's " + gb((double) m.bytes) +
+                                    " with a context of 32,768 tokens beside it: a smaller quant of the model, or a card "
+                                    "with more VRAM first in \"gpu\"");
             } else {
                 double vram = 0;
                 for (const int i : on)
@@ -477,12 +504,13 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                                                                                               : str_of(v["threads"])) +
                                                   " threads)"));
             }
-            std::string ctx = flash ? "262144" : "32768";   // the engine's default under --serve, each path's
+            // the engine's default under --serve, each path's (Inkling 2's: what the VRAM holds, said above)
+            std::string ctx = flash ? "262144 tokens" : inkling ? "what the VRAM holds" : "32768 tokens";
             const std::vector<std::string> args = engine_args(c);
             for (size_t i = 0; i + 1 < args.size(); ++i)
-                if (args[i] == "--max-context") ctx = args[i + 1];
+                if (args[i] == "--max-context") ctx = args[i + 1] + " tokens";
             say("  port " + (jget(c, "port").is_null() ? std::string("8095") : str_of(c["port"])) + ", context " + ctx +
-                " tokens" + (jget(c, "log").is_null() ? "" : ", the engine's log " + str_of(c["log"])));
+                (jget(c, "log").is_null() ? "" : ", the engine's log " + str_of(c["log"])));
             std::string line = "lamina --serve";
             for (const std::string& a : args) line += " " + (a.find(' ') == std::string::npos ? a : "\"" + a + "\"");
             say("  engine: " + line);

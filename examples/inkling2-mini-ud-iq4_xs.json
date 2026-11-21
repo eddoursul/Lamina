@@ -1,7 +1,8 @@
 {
   "model": "../Lamina-data/models/Inkling-2-Mini-UD-IQ4_XS/Inkling-2-Mini-UD-IQ4_XS.gguf",
   "gpu": [
-    "RTX 3090"
+    "RTX 3090",
+    "auto"
   ],
   "args": {},
   "cwd": ".",
