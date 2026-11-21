@@ -794,7 +794,7 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_inkling2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_inkling2 PRIVATE lamina_core lamina_engine lamina_kernels lamina_kernels_cpu
-                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq CUDA::cublas CUDA::cudart)
+                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq lamina_spec CUDA::cublas CUDA::cudart)
     target_compile_options(lamina_inkling2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-inkling2 src/inkling2/inkling2_main.cpp)
     target_link_libraries(lamina-inkling2 PRIVATE lamina_inkling2 CUDA::cudart)

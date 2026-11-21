@@ -24,6 +24,7 @@
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/sampler.hpp"
 #include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 #include "lamina/platform/memory.hpp"
@@ -31,6 +32,7 @@
 #include "lamina/prefill/moe_mmq.hpp"
 #include "lamina/program/host_sampling.hpp"
 #include "lamina/program/serve_io.hpp"
+#include "lamina/spec/suffix_drafter.hpp"
 
 #include "ggml.h"
 
@@ -532,9 +534,11 @@ struct Rows {
             *ent_tok = nullptr;
     unsigned long long* grp_ptr = nullptr;
     void* scratch = nullptr;
+    // the head rows' tokens by the request's sampler, and 1 where a row's logits hold a non-finite one
+    int32_t *pick = nullptr, *bad = nullptr;
     // pinned host rows
     float* emb_h = nullptr;
-    int32_t* step_h = nullptr;
+    int32_t *step_h = nullptr, *pick_h = nullptr;
     // a chunk's: the inputs' and the attention output's MMQ images a layout, the routed entries by expert (their
     // token rows, their experts, each expert's bounds), their gate/up rows and hidden rows, a window visit's cells
     uint8_t *xq[3][3] = {}, *aq[3] = {}, *tq = nullptr, *hq = nullptr, *wk = nullptr, *wv = nullptr;
@@ -574,6 +578,9 @@ struct Engine {
     std::vector<Visit> visits;
     float* conv_all = nullptr;       // every visit's convolution state
     size_t conv_floats = 0;          // a visit's
+    float* win_raw = nullptr;        // a decode forward of several rows: every visit's convolution inputs [kMaxT] rows
+    int64_t win_p0 = -1;             // a window's first position while its rows wait for keep() (-1: none)
+    int win_T = 0;
     // ---- the full visits' cells over other cards (--cell-gpus).  The main card keeps the newest [lo, pos); the
     // positions before `lo` are on the cards, in units of `unit` positions in the order they left the main card
     // (unit_card: each unit's card).  A card's cells are all older than any row by more than the bias table reaches,
@@ -731,6 +738,9 @@ struct Engine {
         R.probs = dzero<float>(T * E);
         R.ctl_h = dzero<float>(3 * T * (size_t) std::max<int64_t>(g.gate_rank, 1));
         R.logits = dzero<float>(Th * (size_t) g.n_vocab);
+        R.pick = dzero<int32_t>(2 * Th);
+        R.bad = R.pick + Th;
+        R.pick_h = halloc<int32_t>(2 * Th);
         R.step_d = dzero<int32_t>(T + 5);
         R.pos_d = R.step_d;
         R.live_d = R.step_d + T;
@@ -872,6 +882,7 @@ struct Engine {
         conv_floats = (C - 1) * (2 * KV + 2 * N);
         const int64_t nv = g.n_visits();
         conv_all = dzero<float>((size_t) nv * conv_floats);
+        win_raw = dzero<float>((size_t) nv * kMaxT * (size_t) (2 * KV + 2 * N));
         ring_cap = (g.n_swa + kMaxT + kRingSub - 1) / kRingSub * kRingSub;
         int n_win = 0;
         for (int64_t v = 0; v < nv; ++v) n_win += !g.full(g.visit_layer(v));
@@ -1677,6 +1688,13 @@ struct Engine {
         const size_t TN = (size_t) T * (size_t) N, TB = (size_t) T * (size_t) (N / 32);
         const bool msgs = pass > 0;
         float *ck = V.conv, *cv = ck + (size_t) (C - 1) * KV, *ca = cv + (size_t) (C - 1) * KV, *cf = ca + (size_t) (C - 1) * N;
+        // the convolutions' inputs: a decode forward of several rows leaves them a visit, and the states are taken
+        // from them once it is known how many rows stay (conv_commit)
+        float* const wr = !batch && T > 1 ? win_raw + (size_t) v * kMaxT * (size_t) (2 * KV + 2 * N) : nullptr;
+        float* const kraw = wr ? wr : R.kraw;
+        float* const vraw = wr ? wr + (size_t) kMaxT * KV : R.vraw;
+        float* const oraw = wr ? wr + (size_t) kMaxT * 2 * KV : R.oraw;
+        float* const fraw = wr ? oraw + (size_t) kMaxT * N : R.fraw;
 
         // a pass of the loop starts from the state before the loop; the pass before it speaks through messages
         if (L.looped && l == g.loop_start) {
@@ -1760,15 +1778,15 @@ struct Engine {
             mmb(R, L.wq, 0, fq, R.qraw, T);
             mmb(R, L.wgate, 0, fq, R.graw, T);
             mmb(R, L.wrel, 0, fq, R.rraw, T);
-            mmb(R, L.wk, ki, fk, R.kraw, T);
-            mmb(R, L.wv, vi, fv, R.vraw, T);
+            mmb(R, L.wk, ki, fk, kraw, T);
+            mmb(R, L.wv, vi, fv, vraw, T);
         } else {
             const ik::Q81 *iq = R.img, *ikk = R.img + (size_t) ki * TB, *iv = R.img + (size_t) vi * TB;
             run("a: q's product", [&] { mm(L.wq, iq, fq, R.qraw, T); });
             run("a: the gate's product", [&] { mm(L.wgate, iq, fq, R.graw, T); });
             run("a: r's product", [&] { mm(L.wrel, iq, fq, R.rraw, T); });
-            run("a: k's product", [&] { mm(L.wk, ikk, fk, R.kraw, T); });
-            run("a: v's product", [&] { mm(L.wv, iv, fv, R.vraw, T); });
+            run("a: k's product", [&] { mm(L.wk, ikk, fk, kraw, T); });
+            run("a: v's product", [&] { mm(L.wv, iv, fv, vraw, T); });
         }
         // a decode forward takes the sink's product, tau, q's clip and the bias in one launch (q_bias_kernel)
         if (batch)
@@ -1788,8 +1806,8 @@ struct Engine {
         probe("q's projection", R.qraw, (size_t) T, (size_t) H * D_);
         probe("the gate's projection", R.graw, (size_t) T, (size_t) H * D_);
         probe("the distance projection", R.rraw, (size_t) T, (size_t) H * Rr);
-        probe("k's projection", R.kraw, (size_t) T, (size_t) KV);
-        probe("v's projection", R.vraw, (size_t) T, (size_t) KV);
+        probe("k's projection", kraw, (size_t) T, (size_t) KV);
+        probe("v's projection", vraw, (size_t) T, (size_t) KV);
         if (batch) {   // the table's products as one GEMM: r clipped in place, the sink taken off after
             run("a: q's clip", [&] {
                 ik::q_clip_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(
@@ -1811,8 +1829,8 @@ struct Engine {
         const bool slide = batch && V.cells.ring;
         {
             ik::KvIn a{};
-            a.raw[0] = R.kraw;
-            a.raw[1] = R.vraw;
+            a.raw[0] = kraw;
+            a.raw[1] = vraw;
             a.state[0] = ck;
             a.state[1] = cv;
             a.w[0] = L.k_conv;
@@ -1837,10 +1855,10 @@ struct Engine {
                 });
             }
         }
-        if (batch || T > 1)
+        if (batch)
             run("a: k, v states kept", [&] {
-                conv_keep(ck, R.kraw, KV, T);
-                conv_keep(cv, R.vraw, KV, T);
+                conv_keep(ck, kraw, KV, T);
+                conv_keep(cv, vraw, KV, T);
             });
         if (slide) {
             ik::ring_to_range_kernel<<<dim3((unsigned) (win - 1), 2), 256, 0, st>>>(V.cells, R.wk, R.wv, (long long) p0, win,
@@ -1954,23 +1972,23 @@ struct Engine {
                 V.cells, R.wk, R.wv, (long long) p0, T, win, (int) cell_bytes);
         tick(L.full ? "attention, full" : "attention, window");
         if (batch || L.wo.type == 30) probe("the attention's output", R.aout, (size_t) T, (size_t) H * D_);
-        if (batch) mmb(R, L.wo, 3, R.aout, R.oraw, T);
-        else run("a: the output's product", [&] { mm(L.wo, R.aimg, R.aout, R.oraw, T); });
+        if (batch) mmb(R, L.wo, 3, R.aout, oraw, T);
+        else run("a: the output's product", [&] { mm(L.wo, R.aimg, R.aout, oraw, T); });
         const dim3 gN((unsigned) ((N + ik::kTB - 1) / ik::kTB), (unsigned) T);
         const bool one = !batch && T == 1;   // a forward of one row: a sublayer's end is one launch (post_one_kernel)
         if (one) {
             run("a: convolved into the stream", [&] {
-                ik::post_one_kernel<<<gN.x, ik::kTB, 0, st>>>(nullptr, nullptr, R.oraw, ca, L.a_conv, R.x, N, C, top_k,
+                ik::post_one_kernel<<<gN.x, ik::kTB, 0, st>>>(nullptr, nullptr, oraw, ca, L.a_conv, R.x, N, C, top_k,
                                                              L.first ? 1 : 0);
             });
         } else {
             run("a: convolved into the stream", [&] {
-                ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.oraw, ca, L.a_conv, R.x, N, C, L.first ? 1 : 0);
+                ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(oraw, ca, L.a_conv, R.x, N, C, L.first ? 1 : 0);
             });
-            run("a: output's state kept", [&] { conv_keep(ca, R.oraw, N, T); });
+            if (batch) run("a: output's state kept", [&] { conv_keep(ca, oraw, N, T); });
         }
         tick("attention output");
-        probe("the output projection", R.oraw, (size_t) T, (size_t) N);
+        probe("the output projection", oraw, (size_t) T, (size_t) N);
         probe("x after the attention", R.x, (size_t) T, (size_t) N);
         xrow("ffn_inp", v, R.x, T);
 
@@ -2025,7 +2043,7 @@ struct Engine {
             probe("the experts' gate/up rows", R.gu, (size_t) n_ent, (size_t) 2 * g.n_ff);
             probe("the experts' hidden rows", R.h, (size_t) n_ent, (size_t) g.n_ff);
             probe("the experts' rows", R.rows, (size_t) n_ent, (size_t) N);
-            ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, L.d_scale, R.ids);
+            ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, fraw, N, top_k, L.d_scale, R.ids);
         } else {
             run("f: router's products", [&] {
                 ik::route_dot_kernel<<<dim3((unsigned) E, (unsigned) T), ik::kTB, 0, st>>>(L.router, R.nrm, R.probs, E, N);
@@ -2044,21 +2062,21 @@ struct Engine {
             tick("experts");
             if (!one)
                 run("f: experts' rows summed", [&] {
-                    ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, nullptr, nullptr);
+                    ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, fraw, N, top_k, nullptr, nullptr);
                 });
         }
         if (one) {
             run("f: summed, convolved into the stream", [&] {
-                ik::post_one_kernel<<<gN.x, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, cf, L.f_conv, R.x, N, C, top_k, 0);
+                ik::post_one_kernel<<<gN.x, ik::kTB, 0, st>>>(R.rows, R.w, fraw, cf, L.f_conv, R.x, N, C, top_k, 0);
             });
         } else {
             run("f: convolved into the stream", [&] {
-                ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.fraw, cf, L.f_conv, R.x, N, C, 0);
+                ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(fraw, cf, L.f_conv, R.x, N, C, 0);
             });
-            run("f: output's state kept", [&] { conv_keep(cf, R.fraw, N, T); });
+            if (batch) run("f: output's state kept", [&] { conv_keep(cf, fraw, N, T); });
         }
         tick("MoE output");
-        probe("the MoE's output", R.fraw, (size_t) T, (size_t) N);
+        probe("the MoE's output", fraw, (size_t) T, (size_t) N);
         probe("x after the MoE", R.x, (size_t) T, (size_t) N);
         xrow("l_out", v, R.x, T);
     }
@@ -2080,10 +2098,9 @@ struct Engine {
         a.eps = g.eps;
         ik::norm_kernel<<<dim3((unsigned) n, 1), row4(), 0, st>>>(a);
         mm(m->head, R.img, R.nrm, R.logits, n);
-        if (g.softcap > 0) {
-            const long long cnt = (long long) n * g.n_vocab;
-            ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap);
-        }
+        CK(cudaMemsetAsync(R.bad, 0, (size_t) n * 4, st));
+        const long long cnt = (long long) n * g.n_vocab;
+        ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap, (int) g.n_vocab, R.bad);
         lg_rows = &R;
         tick("head");
     }
@@ -2117,33 +2134,52 @@ struct Engine {
         R.step_h[R.cap + 3] = (int32_t) lo;
         R.step_h[R.cap + 4] = (int32_t) (T + m->g.n_swa - 1);
     }
-    /// A forward's launches: the rows and the step record from their pinned copies, every visit, the head's rows
-    void launches(Rows& R, int T, int n_head, int64_t p0) {
+    /// A forward's launches: the rows and the step record from their pinned copies, every visit, the head's rows; with
+    /// `commit` the convolutions' states after a decode forward of several rows (without: keep() takes them)
+    void launches(Rows& R, int T, int n_head, int64_t p0, bool commit) {
         CK(cudaMemcpyAsync(R.x, R.emb_h, (size_t) T * (size_t) m->g.n_embd * 4, cudaMemcpyHostToDevice, st));
         CK(cudaMemcpyAsync(R.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
         tick("embedding");
         for (int v = 0; v < (int) visits.size(); ++v) visit(v, T, R, p0);
         if (n_head > 0) head(R, T - n_head, n_head);
+        if (commit && !R.batch && T > 1) run("states kept", [&] { conv_commit(T); });
+    }
+    /// Every visit's convolution states after the first `rows` rows of the last decode forward of several
+    void conv_commit(int rows) {
+        const Geometry& g = m->g;
+        const int KV = (int) g.kv_width(), N = (int) g.n_embd, per = 2 * KV + 2 * N;
+        ik::conv_commit_kernel<<<dim3((unsigned) ((per + 255) / 256), (unsigned) visits.size()), 256, 0, st>>>(
+            conv_all, win_raw, KV, N, (int) g.n_conv, rows, kMaxT);
+    }
+    /// The window's first `a` rows stay: the sequence ends after them
+    void keep(int a) {
+        if (win_p0 < 0) return;
+        if (win_T > 1) conv_commit(a);
+        n_pos = win_p0 + a;
+        win_p0 = -1;
     }
     /// T tokens at the sequence's end through every visit; the logits of the last n_head rows.  False: no cells left.
-    bool forward(const int32_t* tok, int T, int n_head) {
+    /// `window`: the rows stay as far as keep() says (a token and its drafts).
+    bool forward(const int32_t* tok, int T, int n_head, bool window = false) {
         const int64_t p0 = pos();
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
+        const bool waits = window && T > 1;   // (a window of one row: its states as any forward's)
+        const int key = T * 16 + n_head + (waits ? 256 : 0);
         CK(cudaStreamSynchronize(st));   // the last forward has read the pinned rows
         prof_start();
         embed(D, tok, T);
         steps(D, p0, T);
         far_mode = lo > 0;
         if (!use_graphs) {
-            launches(D, T, n_head, p0);
+            launches(D, T, n_head, p0, !waits);
             prof_collect();
         } else if (far_mode) {   // cells on cards: the graph in segments around their scans
-            std::vector<Seg>& segs = seg_graphs[T * 16 + n_head];
+            std::vector<Seg>& segs = seg_graphs[key];
             if (segs.empty()) {
                 cur_segs = &segs;
                 capturing = true;
                 CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
-                launches(D, T, n_head, p0);
+                launches(D, T, n_head, p0, !waits);
                 cudaGraph_t graph = nullptr;
                 Seg last;
                 CK(cudaStreamEndCapture(st, &graph));
@@ -2168,11 +2204,11 @@ struct Engine {
             }
             if (n_head > 0) lg_rows = &D;
         } else {
-            cudaGraphExec_t& exec = graphs[T * 16 + n_head];
+            cudaGraphExec_t& exec = graphs[key];
             if (exec == nullptr) {
                 cudaGraph_t graph = nullptr;
                 CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
-                launches(D, T, n_head, p0);
+                launches(D, T, n_head, p0, !waits);
                 CK(cudaStreamEndCapture(st, &graph));
                 CK(cudaGraphInstantiate(&exec, graph, 0));
                 CK(cudaGraphDestroy(graph));
@@ -2183,6 +2219,8 @@ struct Engine {
         }
         n_pos += T;
         logits_held = false;
+        win_p0 = window ? p0 : -1;
+        win_T = T;
         return true;
     }
     /// T tokens of a prompt as one chunk (T <= prefill); the last one's logits with `logits`.  False: no cells left.
@@ -2194,7 +2232,7 @@ struct Engine {
         embed(P, tok, T);
         steps(P, p0, T);
         far_mode = false;
-        launches(P, T, logits ? 1 : 0, p0);
+        launches(P, T, logits ? 1 : 0, p0, true);
         prof_collect();
         n_pos += T;
         logits_held = false;
@@ -2233,6 +2271,53 @@ struct Engine {
         CK(cudaMemcpyAsync(logits_h, lg_rows->logits + (size_t) row * V, V * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
         lg.assign(logits_h, logits_h + V);
+    }
+
+    // ---- the request's sampler: Flash-Next's chain on the device (lamina/kernels/sampler.hpp), a token from each
+    // head row.  A row's draw is Philox(seed, the position its token takes), so a window's rows draw what a row at a
+    // time would.
+    lamina::kernels::SamplerParams sp;
+    static constexpr int kHistCap = 4096;   // the penalties' window at most
+    int hist_n = 0;                         // its tokens (0: no penalties)
+    int32_t* hist_d = nullptr;              // [kMaxT][kHistCap], made by the first request with penalties
+    std::vector<int32_t> hist_stage;
+    void sampling(const lamina::program::Sampling& q) {
+        sp = {};
+        sp.top_k = q.top_k;
+        sp.top_p = q.top_p;
+        sp.min_p = q.min_p;
+        sp.temperature = q.temperature;
+        sp.greedy = q.temperature <= 0.f;
+        sp.penalty_repeat = q.repeat;
+        sp.penalty_freq = q.freq;
+        sp.penalty_present = q.present;
+        const bool pen = q.repeat != 1.f || q.freq != 0.f || q.present != 0.f;
+        hist_n = !pen || q.last_n == 0 ? 0 : q.last_n < 0 ? kHistCap : std::min(q.last_n, kHistCap);
+        sp.penalty_last_n = hist_n;
+        sp.seed = q.seed ? q.seed : (unsigned long long) Clock::now().time_since_epoch().count();
+        if (hist_n > 0 && hist_d == nullptr) {
+            hist_d = dzero<int32_t>((size_t) kMaxT * kHistCap);
+            hist_stage.assign((size_t) kMaxT * kHistCap, -1);
+        }
+    }
+    /// A token from each of the last head's first `rows` rows, into out: row t's is the one at position `at + t` (its
+    /// draw's number) and follows tail[0..n_tail), then win[0..t] (the penalties' history; `win` null: the tail alone,
+    /// one row).  -1 where a row's logits hold a non-finite one.
+    void pick(int rows, int64_t at, const int32_t* tail, int64_t n_tail, const int32_t* win, int32_t* out) {
+        Rows& R = *lg_rows;
+        const int32_t* hist = nullptr;
+        if (hist_n > 0) {
+            if (win != nullptr) lamina::kernels::penalty_rows(tail, n_tail, win, rows, hist_n, hist_stage.data());
+            else lamina::kernels::penalty_rows(tail, n_tail - 1, tail + n_tail - 1, 1, hist_n, hist_stage.data());
+            CK(cudaMemcpyAsync(hist_d, hist_stage.data(), (size_t) rows * (size_t) hist_n * 4, cudaMemcpyHostToDevice, st));
+            hist = hist_d;
+        }
+        sp.counter = (uint64_t) at;
+        lamina::kernels::sample_tokens(R.logits, rows, (int) m->g.n_vocab, hist, hist_n, sp, R.pick, st);
+        const int Th = R.head_rows();
+        CK(cudaMemcpyAsync(R.pick_h, R.pick, (size_t) 2 * Th * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        for (int t = 0; t < rows; ++t) out[t] = R.pick_h[Th + t] != 0 ? -1 : R.pick_h[t];
     }
 
     // ---- the sequence's start, and the state to and from the prompt cache's buffers
@@ -2287,7 +2372,9 @@ struct Engine {
         std::memcpy(&held, host + body + V4, 4);
         bool ok = soft(cudaMemcpyAsync(rings, host, ring_bytes, cudaMemcpyHostToDevice, st)) &&
                   soft(cudaMemcpyAsync(conv_all, host + ring_bytes, conv_bytes(), cudaMemcpyHostToDevice, st));
-        if (held == 1) ok = ok && soft(cudaMemcpyAsync(D.logits, host + body, V4, cudaMemcpyHostToDevice, st));
+        if (held == 1)
+            ok = ok && soft(cudaMemcpyAsync(D.logits, host + body, V4, cudaMemcpyHostToDevice, st)) &&
+                 soft(cudaMemsetAsync(D.bad, 0, 4, st));
         ok = soft(cudaStreamSynchronize(st)) && ok;
         logits_held = ok && held == 1;
         if (logits_held) lg_rows = &D;
@@ -2387,6 +2474,108 @@ int argmax(const std::vector<float>& lg) {
     return best;
 }
 
+// ------------------------------------------------------------------------------------------------ drafts
+/// A window's drafts: the tokens that may follow x, the token the state does not hold yet.  Prompt lookup
+/// (--spec-lookup N, lamina/spec/suffix_drafter.hpp): where the text's last N tokens or more occurred before, the
+/// tokens that followed them there.
+struct Drafts {
+    int lookup = 0;   // prompt lookup's shortest match (0: none)
+    std::unique_ptr<lamina::spec::SuffixDrafter> sfx;
+    size_t sfx_ok = 0;   // the lookup's history is the state's tokens, its first sfx_ok of them right
+    // a run's count: windows, those with drafts, those from the lookup, the drafts offered and kept
+    long long windows = 0, drafted = 0, looked = 0, offered = 0, kept = 0;
+    bool on() const { return lookup > 0; }
+    void init(int lookup_min, int64_t ctx) {
+        lookup = lookup_min;
+        if (lookup > 0) sfx = std::make_unique<lamina::spec::SuffixDrafter>(lookup, 32, (size_t) std::max<int64_t>(4096, ctx));
+    }
+    void begin() { windows = drafted = looked = offered = kept = 0; }
+    /// Up to `n` drafts after x, which follows `seq` (the state's tokens)
+    std::vector<int32_t> propose(const std::vector<int32_t>& seq, int32_t x, int n) {
+        std::vector<int32_t> out;
+        ++windows;
+        if (n <= 0 || !sfx) return out;
+        // the history up to where it and seq agree: seq's tokens before sfx_ok are the ones it was given
+        sfx_ok = std::min(sfx_ok, seq.size());
+        if (sfx->size() > sfx_ok) sfx->truncate(sfx_ok);
+        if (seq.size() > sfx_ok) {
+            sfx->append(seq.data() + sfx_ok, seq.size() - sfx_ok);
+            sfx_ok = seq.size();
+        }
+        sfx->append(x);   // not in the state yet: the next call takes it out
+        out.resize((size_t) n);
+        out.resize((size_t) std::max(0, sfx->propose(n, out.data())));
+        if (!out.empty()) {
+            ++drafted;
+            ++looked;
+            offered += (long long) out.size();
+        }
+        return out;
+    }
+    /// The state's tokens are another text from `from` on (a request's start)
+    void rewound(size_t from) { sfx_ok = std::min(sfx_ok, from); }
+    std::string summary() const {
+        if (!on() || windows == 0) return {};
+        char b[200];
+        std::snprintf(b, sizeof b, "; %lld windows, %lld with drafts (%lld from the prompt lookup), %lld of %lld drafts kept",
+                      windows, drafted, looked, kept, offered);
+        return b;
+    }
+};
+
+/// A run of windows after a prompt's read: the first token from the logits the read left, then each window the last
+/// token and its drafts, every row's token picked by the request's sampler and a draft kept while it is the token
+/// picked.  `emit(token)` takes each token in order: false, and the token ends the run (it stays out of the state).
+/// `seq`: the state's tokens, appended to as rows stay (`stays` is told each); `hist`: the penalties' history, the
+/// prompt's text and every token emitted.  Returns "" where emit ended it, else why it ended: "nonfinite" (the state
+/// holds the row), "length" (no cells left).
+template <class Emit>
+const char* run_windows(Engine& E, Drafts& dr, std::vector<int32_t>& seq, std::vector<int32_t>& hist, long long max_new,
+                        Emit&& emit, const std::function<void(int32_t)>& stays) {
+    int32_t picks[kMaxT];
+    E.pick(1, E.pos(), hist.data(), (int64_t) hist.size(), nullptr, picks);
+    int32_t x = picks[0];
+    long long produced = 0;
+    for (;;) {
+        if (x < 0) return "nonfinite";
+        ++produced;
+        hist.push_back(x);
+        if (!emit(x)) return "";
+        // the window: x and the drafts the run has room for
+        const int room = (int) std::min<long long>({(long long) kMaxT - 1, max_new - produced, (long long) (E.ctx - E.pos() - 1)});
+        std::vector<int32_t> win{x};
+        const std::vector<int32_t> drafts = dr.on() ? dr.propose(seq, x, room) : std::vector<int32_t>();
+        win.insert(win.end(), drafts.begin(), drafts.end());
+        const int T = (int) win.size();
+        const int64_t p0 = E.pos();
+        if (!E.forward(win.data(), T, T, true)) return "length";
+        E.pick(T, p0 + 1, hist.data(), (int64_t) hist.size() - 1, win.data(), picks);   // (the tail: the text before x)
+        seq.push_back(x);
+        if (stays) stays(x);
+        int rows = 1;   // the window's rows that stay
+        bool ended = false;
+        int32_t next = picks[0];
+        for (int k = 0; k < (int) drafts.size(); ++k) {
+            if (picks[k] != drafts[(size_t) k]) break;   // (a non-finite row's -1 is no draft: the run ends on it)
+            // draft k is the token picked: emitted, and its row gives the next one
+            ++dr.kept;
+            ++produced;
+            hist.push_back(drafts[(size_t) k]);
+            if (!emit(drafts[(size_t) k])) {
+                ended = true;
+                break;
+            }
+            seq.push_back(drafts[(size_t) k]);
+            if (stays) stays(drafts[(size_t) k]);
+            ++rows;
+            next = picks[k + 1];
+        }
+        E.keep(rows);
+        if (ended) return "";
+        x = next;
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ serve
 /// --serve's prompt cache (lamina/core/prompt_cache.hpp, the other paths' options): a request continues from the
 /// longest start of its prompt the engine holds - the conversation's end, one of its checkpoints, or a conversation
@@ -2446,7 +2635,9 @@ struct Serve {
     std::vector<int32_t> prev_prompt;  // the last request's prompt: where the next one leaves it
     bool poisoned = false;             // non-finite logits: whatever the cache holds may be bad
 
-    Serve(Engine& e, int32_t eos_id, const CacheOpts& co) : E(e), eos(eos_id), copt(co) {
+    Drafts& dr;
+
+    Serve(Engine& e, int32_t eos_id, const CacheOpts& co, Drafts& d) : E(e), eos(eos_id), copt(co), dr(d) {
         if (E.snap == nullptr) {
             std::fprintf(stderr, "lamina serve: prompt cache: off (the held conversation continues when a request extends "
                          "it)\n");
@@ -2551,7 +2742,6 @@ struct Serve {
         // ---- what the state continues from: with the cache the longest start of the prompt it holds (the
         // conversation's end, a checkpoint of it, a conversation parked in RAM), the engine's state set there; without
         // it the held sequence where the prompt extends it (the windows' state cannot step back)
-        std::vector<float> lg;
         size_t reuse = 0;
         double begin_ms = 0.0;   // the cache's own work: a conversation parked or taken back (the prompt's time has it)
         if (cache) {
@@ -2574,6 +2764,11 @@ struct Serve {
             while (common < live.size() && common < ids.size() && live[common] == ids[common]) ++common;
             if (common > 0 && common == live.size() && common < ids.size()) reuse = common;
             else E.reset();
+        }
+        {   // (the lookup's history follows the state's tokens: right as far as the last ones go on in these)
+            size_t same = 0;
+            while (same < live.size() && same < reuse && live[same] == ids[same]) ++same;
+            dr.rewound(same);
         }
         live.assign(ids.begin(), ids.begin() + (long) reuse);
         if (reuse > 0) serve_print("RESUME %zu\n", reuse);
@@ -2637,30 +2832,27 @@ struct Serve {
                         fed == -1 ? "cancel" : "length", reuse, (long long) done);
             return;
         }
-        E.host_logits(0, lg);   // the read's, or the ones a prompt's end brought back
         // the prompt's end, before the first decode step moves the state (not after a read of one token - a stopped
-        // answer going on: the conversation keeps the end of the prompt it was asked with)
+        // answer going on: the conversation keeps the end of the prompt it was asked with); its logits are the read's,
+        // or the ones a prompt's end brought back
         if (cache && fresh > 1) checkpoint((int64_t) ids.size(), true);
-        std::mt19937_64 rng(smp.seed);
+        E.sampling(smp);
+        dr.begin();
         std::vector<int32_t> hist(ids.begin(), ids.end());   // the penalties' history: the prompt's text
         const auto d0 = Clock::now();
         long long produced = 0;
         const char* finish = "length";
-        while (true) {
-            const int nx = lamina::program::sample(lg, smp, hist, rng);
-            if (nx < 0) { finish = "nonfinite"; break; }
-            serve_print("T %d\n", nx);
+        const char* const why = run_windows(E, dr, live, hist, max_new, [&](int32_t t) {
+            serve_print("T %d\n", t);
             ++produced;
-            hist.push_back(nx);
-            if (nx == eos) { finish = "stop"; break; }
-            if (stop.load()) { finish = "cancel"; break; }
-            if (produced >= max_new) break;
-            const int32_t one = nx;
-            if (!E.forward(&one, 1, 1)) break;   // the context's end, or no VRAM for more cells
-            live.push_back(nx);
-            if (cache) cache->append(0, nx);
-            E.host_logits(0, lg);
-        }
+            if (t == eos) finish = "stop";
+            else if (stop.load()) finish = "cancel";
+            else return produced < max_new;
+            return false;
+        }, [&](int32_t t) {
+            if (cache) cache->append(0, t);
+        });
+        if (*why) finish = why;   // "nonfinite", or "length": the context's end, or no VRAM for more cells
         if (std::strcmp(finish, "nonfinite") == 0) {   // the state holds the non-finite rows: not continued
             live.clear();
             poisoned = cache != nullptr;   // (nor is anything the cache holds: forgotten at the next request)
@@ -2676,12 +2868,13 @@ struct Serve {
             cache->shed();
         }
         print_cache();
-        serve_print("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms, decode_ms,
-                    finish, reuse, (long long) fresh);
+        serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
+                    decode_ms, finish, dr.kept, dr.offered, reuse, (long long) fresh);
         std::fprintf(stderr, "lamina serve: %zu prompt tokens (%zu reused) in %.1f ms (%.1f tok/s), %lld generated in %.1f "
-                     "ms (%.2f tok/s), %s; MiB of VRAM free: %s\n", ids.size(), reuse, prompt_ms,
+                     "ms (%.2f tok/s), %s%s; MiB of VRAM free: %s\n", ids.size(), reuse, prompt_ms,
                      prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced, decode_ms,
-                     decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, finish, E.vram_free().c_str());
+                     decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, finish, dr.summary().c_str(),
+                     E.vram_free().c_str());
         if (cache) {
             std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
             cache->spare();
@@ -2753,6 +2946,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     std::string cell_gpus, cell_clocks;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
+    int lookup = 0;
+    lamina::program::Sampling gen_smp;   // generate mode's sampling (greedy)
     CacheOpts copt;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -2792,6 +2987,12 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--clocks-hold") clocks_hold = std::max(0.0, std::atof(next()));
         else if (a == "--main-cells") main_cells = std::max<int64_t>(0, std::atoll(next()));   // (tests: fewer on this card)
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
+        else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
+        else if (a == "--temperature") gen_smp.temperature = (float) std::atof(next());
+        else if (a == "--top-p") gen_smp.top_p = (float) std::atof(next());
+        else if (a == "--top-k") gen_smp.top_k = std::atoi(next());
+        else if (a == "--min-p") gen_smp.min_p = (float) std::atof(next());
+        else if (a == "--seed") gen_smp.seed = std::strtoull(next(), nullptr, 10);
         else if (a == "--prompt-cache") copt.chain = std::max(0, std::atoi(next()));
         else if (a == "--prompt-cache-every") copt.every = std::max<int64_t>(1, std::atoll(next()));
         else if (a == "--conversation-cache-mib") copt.park_mib = std::max<int64_t>(0, std::atoll(next()));
@@ -2835,8 +3036,10 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     E.prefill = prefill;
     E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) *reserve);
+    Drafts dr;
+    dr.init(lookup, E.ctx);
     if (serve) {
-        Serve sv(E, m.eos, copt);
+        Serve sv(E, m.eos, copt, dr);
         return sv.run();
     }
     std::vector<int32_t> prompt = lamina::program::parse_ids(tokens.c_str());
@@ -2860,20 +3063,31 @@ int run_engine(int argc, char** argv, bool check_only) {
         std::fprintf(stderr, "lamina: no VRAM for the prompt's cells\n");
         return 1;
     }
-    std::vector<float> lg;
-    E.host_logits(0, lg);
+    CK(cudaStreamSynchronize(E.st));
     const double pp_ms = ms_since(t0);
     E.prof_print("the prompt");
     const auto t1 = Clock::now();
     std::vector<int32_t> gen;
-    for (int i = 0; i < n_gen; ++i) {
-        const int a = argmax(lg);
-        gen.push_back(a);
-        if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
-        if (i + 1 == n_gen) break;
-        const int32_t nx = i < (int) forced.size() ? forced[(size_t) i] : a;
-        if (nx < 0 || !E.forward(&nx, 1, 1)) break;
+    if (ff != nullptr || !forced.empty()) {   // a reference's run: its tokens a row at a time, each row's logits kept
+        std::vector<float> lg;
         E.host_logits(0, lg);
+        for (int i = 0; i < n_gen; ++i) {
+            const int a = argmax(lg);
+            gen.push_back(a);
+            if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
+            if (i + 1 == n_gen) break;
+            const int32_t nx = i < (int) forced.size() ? forced[(size_t) i] : a;
+            if (nx < 0 || !E.forward(&nx, 1, 1)) break;
+            E.host_logits(0, lg);
+        }
+    } else {   // as a request's: the sampler's tokens (greedy unless --temperature), windows of a token and its drafts
+        E.sampling(gen_smp);
+        dr.begin();
+        std::vector<int32_t> seq = prompt, hist = prompt;
+        run_windows(E, dr, seq, hist, n_gen, [&](int32_t t) {
+            gen.push_back(t);
+            return (int) gen.size() < n_gen;
+        }, nullptr);
     }
     const double tg_ms = ms_since(t1);
     E.prof_print("generation");
@@ -2881,9 +3095,9 @@ int run_engine(int argc, char** argv, bool check_only) {
     serve_print("gen:");
     for (int t : gen) serve_print(" %d", t);
     serve_print("\n");
-    std::fprintf(stderr, "lamina: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.2f tok/s); MiB of "
+    std::fprintf(stderr, "lamina: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.2f tok/s)%s; MiB of "
                  "VRAM free: %s\n", prompt.size(), pp_ms, prompt.size() / (pp_ms / 1000.0), gen.size(), tg_ms,
-                 gen.size() / (tg_ms / 1000.0), E.vram_free().c_str());
+                 gen.size() / (tg_ms / 1000.0), dr.summary().c_str(), E.vram_free().c_str());
     return 0;
 }
 

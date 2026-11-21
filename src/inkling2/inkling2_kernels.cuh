@@ -314,6 +314,29 @@ __global__ void conv_state_kernel(float* __restrict__ state, const float* __rest
     for (int j = 0; j < C - 1; ++j) state[(size_t) j * n + i] = keep[j];
 }
 
+/// Every visit's states after the first `rows` rows of a decode forward of several: conv_state_kernel's for each of
+/// a visit's four convolutions, from the rows the forward left the visit (`raw`: [visits][K's | V's | the attention's
+/// output | the MoE's], `cap` rows each; `state` as Engine::Visit::conv).  A block 256 of a visit's 2 KV + 2 N channels.
+__global__ void __launch_bounds__(256) conv_commit_kernel(float* __restrict__ state, const float* __restrict__ raw, int KV,
+                                                          int N, int C, int rows, int cap) {
+    const int v = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x, per = 2 * KV + 2 * N;
+    if (c >= per) return;
+    int n, i, before;   // the convolution's width, the channel in it, the channels of the convolutions before it
+    if (c < 2 * KV) {
+        n = KV;
+        before = c < KV ? 0 : KV;
+    } else {
+        n = N;
+        before = c < 2 * KV + N ? 2 * KV : 2 * KV + N;
+    }
+    i = c - before;
+    float* st = state + (size_t) v * (C - 1) * per + (size_t) (C - 1) * before;
+    const float* rw = raw + (size_t) v * cap * per + (size_t) cap * before;
+    float keep[8];
+    for (int j = 0; j < C - 1; ++j) keep[j] = conv_in(rw, st, rows, C - 1 - j, n, i, C);
+    for (int j = 0; j < C - 1; ++j) st[(size_t) j * n + i] = keep[j];
+}
+
 /// K and V of T rows from their projections: y = (x + sum over lags of w[C - 1 - lag] x(t - lag) [+ the row's own taps
 /// d[lag] x(t - lag), a full layer's]) / sqrt(C + 1 or 2 C + 1); then K's rows clipped to an L2 norm of `clip` a head, V's
 /// RMS-normed a head.  Taps `w`: [n][C] (a channel's C values); `dyn`: [T][HK][C] or null.  A block a row, a side and a
@@ -1692,10 +1715,14 @@ __global__ void nonfinite_kernel(const float* __restrict__ x, long long n, long 
 }
 
 // ---------------------------------------------------------------------------------------------- the head
-/// cap tanh(x / cap) over T rows of logits
-__global__ void softcap_kernel(float* __restrict__ lg, long long n, float cap) {
+/// cap tanh(x / cap) over rows of V logits (cap 0: as they are); bad[row] = 1 where a row holds a non-finite one
+/// (zeroed before the launch)
+__global__ void softcap_kernel(float* __restrict__ lg, long long n, float cap, int V, int32_t* __restrict__ bad) {
     const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) lg[i] = cap * tanhf(lg[i] / cap);
+    if (i >= n) return;
+    const float v = cap > 0.f ? cap * tanhf(lg[i] / cap) : lg[i];
+    if (cap > 0.f) lg[i] = v;
+    if (!(fabsf(v) <= FLT_MAX)) bad[i / V] = 1;
 }
 
 }  // namespace ik
