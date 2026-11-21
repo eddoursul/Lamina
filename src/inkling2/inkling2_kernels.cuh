@@ -1590,6 +1590,24 @@ __global__ void rows_index_kernel(const float* __restrict__ src, const int32_t* 
     else dst[i] = src[(size_t) idx[r] * n + c];
 }
 
+/// With experts in RAM: the entries whose expert has no slot take the CPU's rows, which come packed in the entries'
+/// order.  A block an entry.
+__global__ void __launch_bounds__(kTB) cpu_rows_kernel(const float* __restrict__ src, const int32_t* __restrict__ ids,
+                                                       const int32_t* __restrict__ slot_of, float* __restrict__ rows, int N) {
+    const int e = blockIdx.x;
+    if (slot_of[ids[e]] >= 0) return;
+    __shared__ int at;
+    if (threadIdx.x == 0) {
+        int k = 0;   // the CPU's entries before it
+        for (int i = 0; i < e; ++i) k += slot_of[ids[i]] < 0 ? 1 : 0;
+        at = k;
+    }
+    __syncthreads();
+    const float* s = src + (size_t) at * N;
+    float* d = rows + (size_t) e * N;
+    for (int i = threadIdx.x; i < N; i += kTB) d[i] = s[i];
+}
+
 // ---------------------------------------------------------------------------------------------- checks
 /// The first non-finite value's index among n floats into *at (a device int64, -1 before), for LAMINA_INK_NAN
 __global__ void nonfinite_kernel(const float* __restrict__ x, long long n, long long* __restrict__ at) {

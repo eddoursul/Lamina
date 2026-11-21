@@ -523,7 +523,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
 
 void ExpertPool::native_gu_part(int e, int r0, int r1) {
     SplitBufMulti& sb = split_multi_[(size_t) e];
-    if (q2_native_kernels(nfmt_->gu_type)) {
+    if (q2_native_kernels(nfmt_->gu_type) && nfmt_->act == 0) {
         // a native Q2_0 pack: gate and up rows on the Q2_0 kernels, then SwiGLU
         thread_local float gbuf[MAXT][FF], ubuf[MAXT][FF];
         float* gp[MAXT];
@@ -557,6 +557,12 @@ void ExpertPool::native_down_part(int e, int r0, int r1) {
         for (int t = 0; t < mjobs_[e].nt; ++t) a2[t] = &sb.a2[t];
         q2_rows_any(mjobs_[e].blob + nfmt_->down_off, nfmt_->d_row, (int) (nfmt_->n_ff / 64), a2,
                     mjobs_[e].nt, mjobs_[e].out, r0, r1);
+        if (nfmt_->scale_off) {   // the blob's scale of its down rows' products
+            float sc = 1.f;
+            std::memcpy(&sc, mjobs_[e].blob + nfmt_->scale_off + 4, 4);
+            for (int t = 0; t < mjobs_[e].nt; ++t)
+                for (int r = r0; r < r1; ++r) mjobs_[e].out[t][r] *= sc;
+        }
     } else {
         const void* hq[MAXT];
         for (int t = 0; t < mjobs_[e].nt; ++t) hq[t] = sb.hq[t];

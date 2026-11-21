@@ -230,6 +230,26 @@ int native_gu_mt_min(int gu_type) {
 
 void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt, float* const* ff,
                     int r0, int r1) {
+    if (f.act == 1) {   // Inkling 2: ggml-cpu's dots times the blob's gate/up scale, then its activation
+        const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
+        const int n = (int) f.n_embd;
+        float sc = 1.f;
+        if (f.scale_off) std::memcpy(&sc, blob + f.scale_off, 4);
+        const float beta = f.act_beta, lbeta = f.act_lbeta;
+        for (int r = r0; r < r1; ++r) {
+            const uint8_t* gr = blob + (size_t) r * f.gu_row;
+            const uint8_t* ur = blob + f.up_off + (size_t) r * f.gu_row;
+            for (int t = 0; t < nt; ++t) {
+                float g = 0.f, u = 0.f;
+                dot(n, &g, 0, gr, 0, act[t], 0, 1);
+                dot(n, &u, 0, ur, 0, act[t], 0, 1);
+                g *= sc;
+                u *= sc;
+                ff[t][r] = beta * std::tanh(g / beta) / (1.f + std::exp(-g)) * (lbeta * std::tanh(u / lbeta));
+            }
+        }
+        return;
+    }
     if (f.swiglu_limit > 0.f) {   // the clamped SwiGLU (Hy4-flash): ggml-cpu's dots, then ggml_swiglu_clamp's arithmetic
         const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
         const int n = (int) f.n_embd;
@@ -319,6 +339,16 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
 
 void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
                       int r0, int r1) {
+    if (f.scale_off) {   // the rows by whichever kernel takes them, times the blob's scale of its down rows' products
+        NativeFmt plain = f;
+        plain.scale_off = 0;
+        native_down_rows(plain, blob, hq, nt, out, r0, r1);
+        float sc = 1.f;
+        std::memcpy(&sc, blob + f.scale_off + 4, 4);
+        for (int t = 0; t < nt; ++t)
+            for (int r = r0; r < r1; ++r) out[t][r] *= sc;
+        return;
+    }
     if (tq_supported(f.d_type)) {
         tq_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;

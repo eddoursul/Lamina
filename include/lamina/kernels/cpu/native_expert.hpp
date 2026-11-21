@@ -14,7 +14,7 @@
 namespace lamina::kernels::cpu {
 
 /// Bytes of the largest quantized activation any native layer uses (2560 values as Q8_K: 10 x 292).
-inline constexpr size_t kNativeActBytes = 4096;
+inline constexpr size_t kNativeActBytes = 5120;
 /// The widest native expert's hidden (n_ff): the pool's per-token rows (Hy4-flash's 1,536; Flash-Next's 640).
 inline constexpr int kNativeFF = 2048;
 /// Bytes of the largest quantized down activation (2,048 values as Q8_K: 8 x 292).
@@ -34,6 +34,12 @@ struct NativeFmt {
     const float* gu_signs = nullptr, *d_signs = nullptr;   ///< their sign vectors (null: identity)
     /// SwiGLU's clamp (Hy4-flash's routed experts: silu(min(g, L)) * clamp(u, -L, L), ggml_swiglu_clamp); 0: none
     float swiglu_limit = 0.f;
+    /// 1: Inkling 2's activation in SwiGLU's place, beta tanh(g / beta) sigmoid(g) * lbeta tanh(u / lbeta)
+    int act = 0;
+    float act_beta = 0.f, act_lbeta = 0.f;
+    /// > 0: two floats there in the blob, the scales of its gate/up and of its down rows' products (NVFP4's
+    /// per-expert scales, as the GPU's NativeExpertLayout::scale_off)
+    size_t scale_off = 0;
 };
 
 /// Whether this build has the ggml-cpu path.
