@@ -947,6 +947,52 @@ __device__ __forceinline__ float vec_dot_nvfp4_q8_1(const void* __restrict__ vbq
     }
     return sum;
 }
+// NVFP4 decoded once (rows_sub), against activations interleaved within each 16 values (q8_1_il16.hpp): the order a
+// weight word's nibbles have, so a word's half is the selector of one prmt over the eight magnitudes.  The selector's
+// sign-replicate bit is the value's sign bit and leaves a negative value's byte 0; the same with the sign bits
+// flipped gives the negative values' magnitudes, summed apart and subtracted: vec_dot_nvfp4_q8_1's integers, and its
+// floats in its order, in two thirds of its instructions.
+__device__ __forceinline__ uint32_t prmt_sel(uint32_t a, uint32_t b, uint32_t sel) {
+    uint32_t d;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(sel));
+    return d;
+}
+template<> struct Split<40> : SplitNoGrid {
+    using A = SplitAct<8>;
+    struct W { uint32_t p[8], n[8]; float d[2]; };
+    __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void*) {
+        constexpr uint32_t m0 = 0x03020100u, m1 = 0x0C080604u;   // kvalues_mxfp4's magnitudes
+        const block_nvfp4* bq4 = (const block_nvfp4*) vbq + kbx;
+        W w;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t q = (uint32_t) get_int_b4(bq4->qs, iqs + l), qn = q ^ 0x88888888u;
+            w.p[2 * l] = prmt_sel(m0, m1, q);
+            w.p[2 * l + 1] = prmt_sel(m0, m1, q >> 16);
+            w.n[2 * l] = prmt_sel(m0, m1, qn);
+            w.n[2 * l + 1] = prmt_sel(m0, m1, qn >> 16);
+        }
+#pragma unroll
+        for (int i = 0; i < 2; ++i) w.d[i] = ue4m3_half(bq4->d[(iqs >> 1) + i]);
+        return w;
+    }
+    __device__ static A fetch(const block_q8_1* __restrict__ bq8_1, int iqs) { return fetch8(bq8_1 + (iqs >> 2)); }
+    __device__ static float apply(const W& w, const A& a) {
+        float sum = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int sp = 0, sn = 0;
+#pragma unroll
+            for (int h = 0; h < 4; ++h) {
+                sp = ggml_cuda_dp4a((int) w.p[4 * i + h], a.u[4 * i + h], sp);
+                sn = ggml_cuda_dp4a((int) w.n[4 * i + h], a.u[4 * i + h], sn);
+            }
+            const float d = w.d[i] * a.d8;
+            sum += d * (float) (sp - sn);
+        }
+        return sum;
+    }
+};
 // one call: half a block (iqs 0 or 2)
 __device__ __forceinline__ float vec_dot_mxfp4_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
                                                     const int& kbx, const int& iqs) {

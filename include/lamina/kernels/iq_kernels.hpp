@@ -58,7 +58,13 @@ struct NativeExpertLayout {
     float act_beta = 0.f, act_lbeta = 0.f;
     size_t scale_off = 0;               // > 0: two floats there in the blob, the scales of its gate/up and down rows'
                                         // products (NVFP4's per-expert scales); the q8_1 kernels alone read them
+    bool x_il = false;                  // the caller's q8_1 activations are interleaved (q8_1_il16.hpp): the kernels
+                                        // that decode an NVFP4 word once take them, where native_expert_il says so
 };
+/// `native_expert_grouped` has kernels for this layout that read interleaved activations (NVFP4 gate/up and down rows
+/// at Inkling 2 Mini's shape): a caller sets `x_il` and writes its q8_1 blocks in that order; the rows are the same
+/// to the bit as with plain blocks.
+bool native_expert_il(const NativeExpertLayout& L);
 NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd, int64_t n_ff,
                                         int gu_act = -1, int d_act = -1);
 

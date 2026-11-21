@@ -9,6 +9,7 @@
 #pragma once
 
 #include "lamina/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/q8_1_il16.hpp"
 #include "lamina/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
@@ -226,7 +227,7 @@ __global__ void __launch_bounds__(kTB) ctrl_apply_kernel(CtrlIn a) {
 
 // ---------------------------------------------------------------------------------------------- norms
 /// y = x rsqrt(mean(x^2) + eps) w, and its q8_1 image (N / 32 blocks) where q is not null; n inputs a launch.  w null:
-/// no weight.
+/// no weight.  il: the image's blocks interleaved (q8_1_il16.hpp), as the experts' NVFP4 kernels read them.
 struct NormIn {
     const float* x[3];
     const float* w[3];
@@ -234,6 +235,7 @@ struct NormIn {
     Q81* q[3];
     int n, N;
     float eps;
+    bool il;
 };
 /// A block a row and an input; a thread four values, eight threads a q8_1 block.
 __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
@@ -261,10 +263,18 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
     if (!on) return;
     const float d = q8_1_finite(amax / 127.0f);
     Q81* q = a.q[c] + (size_t) t * (a.N / 32) + i4 / 8;
-    const uint32_t codes = (uint32_t) (uint8_t) q8_1_quant(y.x, d, amax) | (uint32_t) (uint8_t) q8_1_quant(y.y, d, amax) << 8 |
-                           (uint32_t) (uint8_t) q8_1_quant(y.z, d, amax) << 16 |
-                           (uint32_t) (uint8_t) q8_1_quant(y.w, d, amax) << 24;
-    *reinterpret_cast<uint32_t*>(q->qs + (i4 & 7) * 4) = codes;
+    if (a.il) {   // (a thread's four values stand two bytes apart there)
+        const int l = (i4 & 7) * 4;
+        q->qs[lamina::kernels::q8_1_il16(l)] = q8_1_quant(y.x, d, amax);
+        q->qs[lamina::kernels::q8_1_il16(l + 1)] = q8_1_quant(y.y, d, amax);
+        q->qs[lamina::kernels::q8_1_il16(l + 2)] = q8_1_quant(y.z, d, amax);
+        q->qs[lamina::kernels::q8_1_il16(l + 3)] = q8_1_quant(y.w, d, amax);
+    } else {
+        const uint32_t codes = (uint32_t) (uint8_t) q8_1_quant(y.x, d, amax) | (uint32_t) (uint8_t) q8_1_quant(y.y, d, amax) << 8 |
+                               (uint32_t) (uint8_t) q8_1_quant(y.z, d, amax) << 16 |
+                               (uint32_t) (uint8_t) q8_1_quant(y.w, d, amax) << 24;
+        *reinterpret_cast<uint32_t*>(q->qs + (i4 & 7) * 4) = codes;
+    }
     if ((i4 & 7) == 0) q->ds = q8_1_ds(d, sum);
 }
 

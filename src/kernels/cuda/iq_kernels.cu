@@ -8,6 +8,7 @@
 #include "iq_dot.cuh"
 #include "fwht.cuh"
 #include "q8_1_il.cuh"
+#include "lamina/kernels/q8_1_il16.hpp"
 #include "lamina/kernels/expf_contract.hpp"
 #include "lamina/kernels/f16_bits.hpp"
 
@@ -400,6 +401,108 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_sub_kernel(const 
     }
 }
 
+// ---------------------------------------------------------------- NVFP4 experts, interleaved activations
+// native_gus_kernel<40> and native_down_kernel<40> with the weights decoded once (Split<40>) against activations whose
+// q8_1 blocks are interleaved (NativeExpertLayout::x_il), the values bitwise theirs: G lanes take a column of h (its
+// gate and up rows of NS calls), a block of G warps one q8_1 block of it, which it writes interleaved for the down
+// rows; two entries a pass.  At Inkling 2 Mini's shape (72 and 36 calls) 8 lanes a column and 4 a down row: a token's
+// 8 experts in 54 us where the kernels above take 63, a window's 49 experts in 350 against 430 (RTX 3090; with the
+// loads alone the layout takes 53; 16 lanes a column or 8 a row within 2% of it).
+template<int G, int NS, int NE>
+__device__ __forceinline__ void gus_il_pass(const uint8_t* wg, const uint8_t* wu, const block_q8_1* __restrict__ xq,
+                                            const int32_t* __restrict__ tok, int t, float (*sh)[32], int col, float sc,
+                                            const NativeExpertLayout& L) {
+    const uint8_t* const w[2] = {wg, wu};
+    const block_q8_1* x[NE];
+#pragma unroll
+    for (int c = 0; c < NE; ++c) x[c] = xq + (size_t) tok[c] * NS;
+    float v[2][NE];
+    rows_sub<40, G, NS, 2, NE>(w, x, t, nullptr, v);
+    if (t == 0)
+#pragma unroll
+        for (int c = 0; c < NE; ++c) sh[c][col] = expert_act(v[0][c] * sc, v[1][c] * sc, L);
+}
+
+template<int G, int NS>
+__global__ void __launch_bounds__(G * 32) native_gus_il_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                               const int32_t* __restrict__ grp_start,
+                                                               const int32_t* __restrict__ n_groups,
+                                                               const int32_t* __restrict__ ent_tok,
+                                                               const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                               block_q8_1* __restrict__ hq) {
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    __shared__ float sh[GUS_BATCH][32];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c = blockIdx.x;
+    const int col = (32 / G) * warp + lane / G, t = lane & (G - 1);
+    const uint8_t* wg = (const uint8_t*) grp_ptr[g] + (size_t) (32 * c + col) * L.gu_row;
+    __builtin_assume(__isGlobal(wg));
+    const uint8_t* wu = wg + L.up_off;
+    const int hb = (int) (L.n_ff / 32);
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const float sc = blob_scale(grp_ptr[g], L, 0);
+    for (int b0 = e0; b0 < e1; b0 += GUS_BATCH) {
+        const int b1 = min(e1, b0 + GUS_BATCH);
+        for (int e = b0; e < b1; e += 2) {
+            if (b1 - e == 1) gus_il_pass<G, NS, 1>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+            else gus_il_pass<G, NS, 2>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+        }
+        __syncthreads();
+        for (int e = b0 + warp; e < b1; e += G) {   // an entry's block of h, as native_gus_kernel, interleaved
+            const float xi = sh[e - b0][lane];
+            float amax = fabsf(xi), sum = xi;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+                sum += __shfl_xor_sync(0xffffffffu, sum, o);
+            }
+            const float d = q8_1_finite(amax / 127.0f);
+            const int8_t q = q8_1_quant(xi, d, amax);
+            block_q8_1* y = hq + (size_t) e * hb + c;
+            y->qs[q8_1_il16(lane)] = q;
+            if (lane == 0) y->ds = q8_1_ds(d, sum);
+        }
+        __syncthreads();
+    }
+}
+
+template<int G, int NS, int NE>
+__device__ __forceinline__ void down_il_pass(const uint8_t* wr, const block_q8_1* __restrict__ hq, int e, int t,
+                                             const int32_t* __restrict__ ent_dst, int64_t n_embd, int r, float sc,
+                                             float* __restrict__ out) {
+    const uint8_t* const w[1] = {wr};
+    const block_q8_1* x[NE];
+#pragma unroll
+    for (int c = 0; c < NE; ++c) x[c] = hq + (size_t) (e + c) * NS;
+    float v[1][NE];
+    rows_sub<40, G, NS, 1, NE>(w, x, t, nullptr, v);
+    if (t == 0)
+#pragma unroll
+        for (int c = 0; c < NE; ++c) out[(size_t) ent_dst[e + c] * n_embd + r] = v[0][c] * sc;
+}
+
+template<int G, int NS>
+__global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_il_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                                         const int32_t* __restrict__ grp_start,
+                                                                         const int32_t* __restrict__ n_groups,
+                                                                         const int32_t* __restrict__ ent_dst,
+                                                                         const block_q8_1* __restrict__ hq,
+                                                                         NativeExpertLayout L, float* __restrict__ out) {
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int lane = threadIdx.x & 31, t = lane & (G - 1);
+    const int r = (blockIdx.x * DOWN_WARPS + (threadIdx.x >> 5)) * (32 / G) + lane / G;
+    const uint8_t* wr = (const uint8_t*) grp_ptr[g] + L.down_off + (size_t) r * L.d_row;
+    __builtin_assume(__isGlobal(wr));
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const float sc = blob_scale(grp_ptr[g], L, 1);
+    for (int e = e0; e < e1; e += 2) {
+        if (e1 - e == 1) down_il_pass<G, NS, 1>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+        else down_il_pass<G, NS, 2>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+    }
+}
+constexpr int IL_GU_G = 8, IL_GU_NS = 72, IL_DOWN_G = 4, IL_DOWN_NS = 36;
+
 // ---------------------------------------------------------------- Hadamard-folded experts (hadamard.hpp)
 // h is rotated over 128 of its n_ff values at a time, more than a block of the kernels above holds, so a layer takes three
 // kernels: the gate and up rows of 160 calls (n_embd 2560), h's floats by column; h rotated and quantized, an entry's 128 values
@@ -515,6 +618,10 @@ bool gu80(const NativeExpertLayout& L) {
             return L.n_embd == 2560;
         default: return false;
     }
+}
+bool il_fits(const NativeExpertLayout& L) {
+    return L.gu_type == 40 && L.d_type == 40 && L.gu_act == 9 && L.d_act == 9 && L.had_block == 0 &&
+           L.n_embd == IL_GU_NS * 32 && L.n_ff == IL_DOWN_NS * 32;
 }
 constexpr int DOWN_G_IQ4_NL = 8, DOWN_G_Q2_0 = 4;
 int down_sub_g(const NativeExpertLayout& L) {
@@ -1313,6 +1420,8 @@ bool native_expert_exact_supported(int gu_type, int d_type, int gu_act, int d_ac
     return gu && dn;
 }
 
+bool native_expert_il(const NativeExpertLayout& L) { return il_fits(L); }
+
 NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, int gu_act, int d_act) {
     NativeExpertLayout L;
     L.gu_type = gu_type;
@@ -1395,6 +1504,19 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     auto* hq = (block_q8_1*) scratch;
     const auto* X = (const block_q8_1*) x_q8_1;
     const dim3 ggu((unsigned) (L.n_ff / 32), (unsigned) cap_groups);
+    if (L.x_il) {
+        if (!il_fits(L)) {
+            std::fprintf(stderr, "native_expert_grouped: interleaved activations for a layout without their kernels\n");
+            std::exit(1);
+        }
+        native_gus_il_kernel<IL_GU_G, IL_GU_NS><<<ggu, IL_GU_G * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+        check("native_expert_grouped/gu");
+        const dim3 gdi((unsigned) (L.n_embd / (DOWN_WARPS * 32 / IL_DOWN_G)), (unsigned) cap_groups);
+        native_down_il_kernel<IL_DOWN_G, IL_DOWN_NS><<<gdi, DOWN_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst,
+                                                                                   hq, L, out);
+        check("native_expert_grouped/down");
+        return;
+    }
     if (L.had_block > 0) {   // Hadamard-folded: the trellis formats, at the geometry their kernels take
         if (L.had_block != 128 || L.n_embd != 2560 || L.n_ff != 640) {
             std::fprintf(stderr, "native_expert_grouped: a rotation of %d over %lld x %lld\n", L.had_block, (long long) L.n_embd,

@@ -1,7 +1,8 @@
 // src/kernels/expert_grouped_parity.cu - `native_expert_grouped` (the verify window's and the second GPU's grouped
 // experts) against the kernels it replaced and the i-quant dot products as they were, kept here verbatim: bitwise
 // over every GPU gate/up and down format, on synthetic experts (random weights quantized by ggml) and plans of 1-8
-// tokens.
+// tokens.  And the NVFP4 kernels that read interleaved activations (Inkling 2 Mini's shape) against the plain ones,
+// bitwise, on random codes.
 //
 //     expert_grouped_parity [--bench]
 //
@@ -459,6 +460,96 @@ double time_graph(bool reference, const lamina::kernels::NativeExpertLayout& L, 
     return time_graph1(true, reference, L, d, cap, s) - time_graph1(false, reference, L, d, cap, s);
 }
 
+// NVFP4 at Inkling 2 Mini's shape (n_embd 2304, n_ff 1152, its activation, a blob's two scales): the kernels for
+// interleaved activations (x_il) against native_gus_kernel<40> / native_down_kernel<40>, on experts of random codes
+// and sub-block scales, over plans of 1-8 tokens.  The plans that differ.
+int nvfp4_il_parity(cudaStream_t s) {
+    using lamina::kernels::NativeExpertLayout;
+    constexpr int64_t N = 2304, F = 1152;
+    NativeExpertLayout L = lamina::kernels::native_expert_layout(40, 40, N, F);
+    L.act = 1;
+    L.act_beta = 4.0f;
+    L.act_lbeta = 3.0f;
+    L.scale_off = (L.bytes + 7) / 8 * 8;
+    NativeExpertLayout Li = L;
+    Li.x_il = true;
+    if (!lamina::kernels::native_expert_il(Li)) {
+        std::printf("NVFP4 interleaved: no kernels for Inkling 2 Mini's shape\n");
+        return 1;
+    }
+    const size_t stride = (L.scale_off + 8 + 255) & ~(size_t) 255;
+    std::mt19937_64 rng(40);
+    std::vector<uint8_t> blobs((size_t) SLOTS * stride);
+    for (size_t i = 0; i + 8 <= blobs.size(); i += 8) { const uint64_t v = rng(); std::memcpy(&blobs[i], &v, 8); }
+    for (int e = 0; e < SLOTS; ++e) {
+        uint8_t* b = blobs.data() + (size_t) e * stride;
+        for (size_t blk = 0; blk < L.bytes / 36; ++blk)   // a sub-block's scale: any exponent, the zero codes too
+            for (int i = 0; i < 4; ++i) b[blk * 36 + i] = rng() % 16 == 0 ? (uint8_t) (rng() & 7) : rng() % 64 == 0 ? 0x7F : (uint8_t) (((3 + rng() % 6) << 3) | (rng() & 7));
+        const float two[2] = {0.02f + 0.001f * (float) e, 0.03f};
+        std::memcpy(b + L.scale_off, two, 8);
+    }
+    uint8_t* arena = nullptr;
+    check(cudaMalloc(&arena, blobs.size()), "arena");
+    check(cudaMemcpy(arena, blobs.data(), blobs.size(), cudaMemcpyHostToDevice), "arena upload");
+    const int64_t cap = MAXT * K, xb = N / 32;
+    Dev d, di;
+    for (Dev* v : {&d, &di}) {
+        check(cudaMalloc(&v->xq, (size_t) MAXT * xb * sizeof(block_q8_1)), "dev");
+        check(cudaMalloc(&v->scratch_new, lamina::kernels::native_expert_scratch_bytes(cap, F, false)), "dev");
+        check(cudaMalloc(&v->out_new, (size_t) cap * N * 4), "dev");
+    }
+    check(cudaMalloc(&d.ptr, (size_t) cap * 8), "dev");
+    check(cudaMalloc(&d.start, (size_t) (cap + 1) * 4), "dev");
+    check(cudaMalloc(&d.n, 4), "dev");
+    check(cudaMalloc(&d.dst, (size_t) cap * 4), "dev");
+    check(cudaMalloc(&d.tok, (size_t) cap * 4), "dev");
+    {   // the tokens' activations, and their blocks interleaved
+        std::mt19937 r2(41);
+        std::normal_distribution<float> nd(0.f, 1.f);
+        std::vector<float> x((size_t) (MAXT * N));
+        for (auto& v : x) v = nd(r2);
+        float* dx = nullptr;
+        check(cudaMalloc(&dx, x.size() * 4), "dev");
+        check(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
+        lamina::kernels::quantize_q8_1_rows(dx, MAXT, N, d.xq, s);
+        check(cudaStreamSynchronize(s), "x");
+        cudaFree(dx);
+        std::vector<uint8_t> q((size_t) MAXT * xb * 36), qi(q.size());
+        check(cudaMemcpy(q.data(), d.xq, q.size(), cudaMemcpyDeviceToHost), "x");
+        for (size_t b = 0; b < q.size() / 36; ++b) {
+            std::memcpy(&qi[b * 36], &q[b * 36], 4);
+            for (int l = 0; l < 32; ++l) qi[b * 36 + 4 + ((l & 16) | ((l & 7) << 1) | ((l >> 3) & 1))] = q[b * 36 + 4 + l];
+        }
+        check(cudaMemcpy(di.xq, qi.data(), qi.size(), cudaMemcpyHostToDevice), "x");
+    }
+    std::mt19937 r3(42);
+    int cases = 0, diff = 0;
+    for (int n_tok : {1, 2, 3, 4, 8})
+        for (int rep = 0; rep < 4; ++rep) {
+            const Plan p = make_plan(r3, n_tok, rep == 0 ? 1.0 : 0.8, arena, stride);
+            upload(p, d);
+            const int64_t n = n_tok * K;
+            check(cudaMemset(d.out_new, 0xff, (size_t) cap * N * 4), "memset");
+            check(cudaMemset(di.out_new, 0xff, (size_t) cap * N * 4), "memset");
+            lamina::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, n, n, d.xq, xb * 36, d.scratch_new,
+                                                   d.out_new, s);
+            lamina::kernels::native_expert_grouped(Li, d.ptr, d.start, d.n, d.dst, d.tok, n, n, di.xq, xb * 36,
+                                                   di.scratch_new, di.out_new, s);
+            check(cudaStreamSynchronize(s), "run");
+            std::vector<uint32_t> a((size_t) cap * N), b((size_t) cap * N);
+            check(cudaMemcpy(a.data(), d.out_new, a.size() * 4, cudaMemcpyDeviceToHost), "down");
+            check(cudaMemcpy(b.data(), di.out_new, b.size() * 4, cudaMemcpyDeviceToHost), "down");
+            diff += a != b;
+            ++cases;
+        }
+    std::printf("%-8s/%-7s %d plans, interleaved activations against plain: %s\n", "NVFP4", "NVFP4", cases,
+                diff ? "MISMATCH" : "bitwise equal");
+    for (Dev* v : {&d, &di}) { cudaFree(v->xq); cudaFree(v->scratch_new); cudaFree(v->out_new); }
+    cudaFree(d.ptr); cudaFree(d.start); cudaFree(d.n); cudaFree(d.dst); cudaFree(d.tok);
+    cudaFree(arena);
+    return diff;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -549,6 +640,7 @@ int main(int argc, char** argv) {
         }
         cudaFree(arena);
     }
+    if (!bench) bad += nvfp4_il_parity(s);
     if (!bench) std::printf("expert_grouped_parity: %s\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;
 }

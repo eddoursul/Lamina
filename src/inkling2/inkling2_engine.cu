@@ -407,6 +407,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         // from one expert's matrix to the next in the format's blocks: a blob apart is whole blocks of both formats.
         const size_t over = MMQ::built() && MMQ::supported((int) td->type) ? MMQ::tab_overread((int) td->type, g.n_ff) : 0;
         y.gl.scale_off = scaled ? (y.gl.bytes + over + 7) / 8 * 8 : 0;
+        y.gl.x_il = K::native_expert_il(y.gl);   // (a decode forward's image of the MoE's input follows it)
         int eg = 0, bg = 0, ed = 0, bd = 0;
         lamina::block_geometry(tg->type, eg, bg);
         lamina::block_geometry(td->type, ed, bd);
@@ -978,7 +979,7 @@ struct Engine {
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
     int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
-    static constexpr int kChunkMin = 16;   // a shorter prompt part goes through the decode's forwards
+    int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     int feed_rows = kMaxT;                  // rows a decode forward of a prompt part takes (LAMINA_INK_ROWS: fewer, a test's)
 
     // a visit: one application of a layer
@@ -1366,6 +1367,7 @@ struct Engine {
         nan_probe = std::getenv("LAMINA_INK_NAN") != nullptr;
         xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
+        if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
@@ -3265,6 +3267,7 @@ struct Engine {
             a.w[0] = L.ffn_norm;
             a.y[0] = R.nrm;
             a.q[0] = batch ? nullptr : R.img;
+            a.il = L.gl.x_il;
             a.n = 1;
             a.N = N;
             a.eps = g.eps;
@@ -3908,7 +3911,7 @@ struct Engine {
             const int64_t left = (cuts != nullptr && ci < cuts->size() ? std::min(n, (*cuts)[ci]) : n) - at;
             int T;
             bool ok;
-            if (prefill > 0 && left >= kChunkMin) {
+            if (prefill > 0 && left >= chunk_min) {
                 T = (int) std::min<int64_t>(prefill, left);
                 ok = chunk(tok + at, T, at + T == n);
             } else {
