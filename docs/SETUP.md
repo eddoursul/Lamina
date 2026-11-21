@@ -389,8 +389,10 @@ and continues it only when the request extends it).
 ## Inkling 2 Mini
 
 The engine runs Thinking Machines Lab's Inkling 2 Mini (GGUF architectures `inkling2`, unsloth's files, and
-`inkling2_loop`, mainline llama.cpp's layout of the same tensors) on a path of its own (`src/inkling2`): `lamina`
-switches to it from the model file's header. The model is 24 layers of which 12 run three times a token, 128 experts
+`inkling2_loop`, mainline llama.cpp's layout of the same tensors: unsloth's `Mainline_Support/*.gguf_file`) on a
+path of its own (`src/inkling2`): `lamina` switches to it from the model file's header. Every quant of unsloth's
+repository runs, from UD-IQ1_S (7.2 GiB) to UD-Q8_K_XL (21.3 GiB); `lamina-server -m FILE --check` says whether a
+card holds one and how much context is left beside it. The model is 24 layers of which 12 run three times a token, 128 experts
 a layer with 8 used; five layers of six attend their last 1,024 tokens and the sixth every token, so K and V are kept
 whole for 8 of the 48 layer applications: 32.0 KiB a token in FP16, 17.0 with `--kv q8_0`.
 
@@ -406,8 +408,10 @@ card the desktop draws on); `--no-kv-grow` allocates the context's K and V at th
 mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
 
 A prompt is read in chunks of `--prefill N` rows (1,024; their buffers take ~0.8 GiB of VRAM; 0: 8 rows at a time
-through the generation's kernels, as on a card that runs the file's FP4 experts on its own tensor cores, an RTX 50,
-for now). The prompt cache keeps conversations as on the other paths (`--prompt-cache`, `--prompt-cache-every`,
+through the generation's kernels). Where the card alone holds the context and would hold under 32,768 tokens (or
+under `--max-context`) beside those buffers, the rows are halved until it does, down to 128 (a line says so: the
+21.3 GiB UD-Q8_K_XL on a 24 GB card). On an RTX 50 a chunk's expert products run on the card's FP4 tensor cores, as
+llama.cpp's do. The prompt cache keeps conversations as on the other paths (`--prompt-cache`, `--prompt-cache-every`,
 `--conversation-cache-mib`, `--conversation-cache-slots`, `--conversation-cache-min-tokens`, `--ram-reserve-mib`):
 a checkpoint holds the window layers' last cells and the convolutions' state (169 MiB in FP16, 92 in q8_0) and
 leaves through an image of that size in VRAM; a conversation another request replaces is parked in RAM with its K
