@@ -832,6 +832,31 @@ struct Engine {
                              why.c_str());
                 prefill = 0;
             } else {
+                // A chunk's buffers are VRAM the cells do not get (~0.75 MiB a row): where this card alone holds the
+                // context and would hold less than the one asked for (not set: the floor) with them, fewer rows.
+                if (cell_devs.empty()) {
+                    const uint64_t per_pos = (uint64_t) g.n_full_visits() * 2 * cell_bytes;
+                    const uint64_t want = (uint64_t) (max_ctx > 0 ? std::min<int64_t>(max_ctx, m->trained_ctx > 0 ? m->trained_ctx : 1048576)
+                                                                  : kContextFloor) * per_pos;
+                    // (still to come beside the cells: the window rings and the cache's image of them; a chunk's rows
+                    // with cuBLAS and MMQ beside them, as measured: 896 MiB at 1,024 rows)
+                    const uint64_t ring = (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell_bytes *
+                                          (uint64_t) ((g.n_swa + kMaxT + kRingSub - 1) / kRingSub * kRingSub);
+                    const uint64_t rest = ring * (cache_on ? 2 : 1) + (32ull << 20);
+                    auto rows_bytes = [&](int rows) { return (uint64_t) rows * (753ull << 10) + (125ull << 20); };
+                    size_t fr = 0, tot = 0;
+                    CK(cudaMemGetInfo(&fr, &tot));
+                    const int asked = prefill;
+                    while (prefill >= 128 && rows_bytes(prefill) + rest + want + reserve > fr) prefill /= 2;
+                    if (prefill < 128) prefill = 0;
+                    if (prefill != asked)
+                        std::fprintf(stderr, "lamina: prompts %s: this GPU's VRAM beside the model holds a context of %lld tokens "
+                                     "with no more\n", prefill > 0 ? ("in chunks of " + std::to_string(prefill) + " rows, not " +
+                                     std::to_string(asked)).c_str() : "through the decode's forwards, 8 rows at a time",
+                                     (long long) (want / per_pos));
+                }
+            }
+            if (prefill > 0) {
                 mmq = std::make_unique<MMQ::Context>();
                 if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
                     std::fprintf(stderr, "lamina: cuBLAS could not start\n");
