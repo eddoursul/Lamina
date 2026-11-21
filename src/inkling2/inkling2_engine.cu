@@ -292,9 +292,11 @@ std::string kernel_limits(const Geometry& g) {
     if (g.n_head / g.n_head_kv > ik::kQH) return no("more than 4 query heads a K/V head");
     if (g.n_rel > ik::kRelMax) return no("a distance bias of more than 32 values a head");
     if (g.n_expert > ik::kExpertMax || g.top_k * kMaxT > ik::kTB) return no("that many experts a layer or a token");
-    if (g.n_pass > 1 && (g.gate_rank > ik::kRankMax || ik::kTB % g.gate_rank != 0)) return no("a loop gate of that rank");
+    if (g.n_pass > 1 && (g.gate_rank > ik::kRankMax || ik::kTB % g.gate_rank != 0 || g.gate_rank % 16 != 0))
+        return no("a loop gate of that rank");
     if ((g.n_layers + g.res_block - 1) / g.res_block > ik::kBlk) return no("more than 4 blocks of layers");
     if (g.n_embd % 256 != 0 || g.q_width() % 256 != 0) return no("rows that are no multiple of 256 values");
+    if (g.n_embd > 4 * ik::kWide) return no("rows of more than 4,096 values");
     return {};
 }
 
@@ -548,7 +550,8 @@ struct Engine {
     bool kv_q8 = false;
     bool grow = true;       // the full visits' cells mapped as the context grows (CUDA virtual memory)
     size_t reserve = 0;     // VRAM left free
-    bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each)
+    bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each); 2: every launch, by events
+    int prof_level = 0;
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
     int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
@@ -730,6 +733,13 @@ struct Engine {
         kv_q8 = q8;
         reserve = reserve_bytes;
         prof = std::getenv("LAMINA_INK_PROF") != nullptr;
+        prof_level = prof ? std::max(1, std::atoi(std::getenv("LAMINA_INK_PROF"))) : 0;
+        if (const char* d = std::getenv("LAMINA_INK_DUP")) {
+            const std::string t = d;
+            const size_t c = t.rfind(':');
+            dup_name = t.substr(0, c);
+            dup_n = c == std::string::npos ? 1 : std::max(0, std::atoi(t.c_str() + c + 1));
+        }
         nan_probe = std::getenv("LAMINA_INK_NAN") != nullptr;
         xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
@@ -922,13 +932,63 @@ struct Engine {
                 for (const int d : ds) std::fprintf(stderr, " %.4f", xrow_h[((size_t) t * H + h) * W + d]);
         std::fprintf(stderr, "\n");
     }
+    // LAMINA_INK_PROF=2: an event behind each launch, read once the forward is through (prof_collect): the device's own
+    // times, nothing waited for in between
+    std::vector<cudaEvent_t> prof_ev;
+    std::vector<const char*> prof_name;
+    size_t prof_n = 0;
+    void prof_mark(const char* what) {
+        if (prof_n == prof_ev.size()) {
+            cudaEvent_t e = nullptr;
+            CK(cudaEventCreate(&e));
+            prof_ev.push_back(e);
+            prof_name.push_back(what);
+        }
+        prof_name[prof_n] = what;
+        CK(cudaEventRecord(prof_ev[prof_n++], st));
+    }
+    void prof_start() {
+        if (!prof) return;
+        prof_t = Clock::now();
+        if (prof_level >= 2) {
+            prof_n = 0;
+            prof_mark("");
+        }
+    }
+    void prof_collect() {
+        if (prof_level < 2 || prof_n == 0) return;
+        CK(cudaStreamSynchronize(st));
+        for (size_t i = 1; i < prof_n; ++i) {
+            float ms = 0.f;
+            CK(cudaEventElapsedTime(&ms, prof_ev[i - 1], prof_ev[i]));
+            prof_ms[prof_name[i]] += (double) ms;
+        }
+        prof_n = 0;
+    }
+    // LAMINA_INK_DUP="name:n": the launch of that name issued n more times (its cost in the graph, by difference)
+    std::string dup_name;
+    int dup_n = 0;
+    /// A named launch (LAMINA_INK_PROF=2 times it)
+    template <class F> void run(const char* what, F&& launch) {
+        launch();
+        if (dup_n > 0 && dup_name == what)
+            for (int i = 0; i < dup_n; ++i) launch();
+        if (prof_level >= 2) prof_mark(what);
+    }
+    /// A step's launches are queued
     void tick(const char* what) {
         if (!prof) return;
+        if (prof_level >= 2) {
+            prof_mark(what);
+            return;
+        }
         CK(cudaStreamSynchronize(st));
         const auto now = Clock::now();
         prof_ms[what] += std::chrono::duration<double, std::milli>(now - prof_t).count();
         prof_t = now;
     }
+    /// A row kernel's threads: one a four values of the stream's row
+    unsigned row4() const { return (unsigned) ((m->g.n_embd / 4 + 31) / 32 * 32); }
     void copy(float* dst, const float* src, size_t n) {
         CK(cudaMemcpyAsync(dst, src, n * 4, cudaMemcpyDeviceToDevice, st));
     }
@@ -967,7 +1027,7 @@ struct Engine {
         a.nq = nq;
         a.N = (int) m->g.n_embd;
         a.T = T;
-        ik::mix_kernel<<<dim3((unsigned) T, (unsigned) std::max(nq, 1)), ik::kTB, 0, st>>>(a);
+        ik::mix_kernel<<<dim3((unsigned) T, (unsigned) std::max(nq, 1)), row4(), 0, st>>>(a);
     }
     /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
     /// (`ld`: floats from one row of C to the next, m when not given)
@@ -1084,16 +1144,16 @@ struct Engine {
             int nbank = 0;
             for (int b = 0; b < nblocks(); ++b)
                 if (varying(b)) bank[nbank++] = blk_at(R, b, pass - 1);
-            mix(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T);
+            run("a: mix of the messages", [&] { mix(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T); });
         }
 
         // ---- attention: its inputs
         const float* u[3];
         if (L.nq == 0) {
-            mix(blks, nb, R.x, nullptr, 0, nullptr, newblk, T);
+            run("a: mix", [&] { mix(blks, nb, R.x, nullptr, 0, nullptr, newblk, T); });
             u[0] = u[1] = u[2] = R.x;
         } else {
-            mix(blks, nb, R.x, L.attn_query, L.nq, R.mixed, newblk, T);
+            run("a: mix", [&] { mix(blks, nb, R.x, L.attn_query, L.nq, R.mixed, newblk, T); });
             for (int c = 0; c < 3; ++c) u[c] = R.mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
         }
         const int n_in = msgs || L.full ? 3 : 1;
@@ -1118,8 +1178,10 @@ struct Engine {
             a.n = 3;
             a.N = N;
             a.R = (int) g.gate_rank;
-            ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 3), ik::kTB, 0, st>>>(a);
-            ik::ctrl_apply_kernel<<<dim3((unsigned) ((N + ik::kTB - 1) / ik::kTB), (unsigned) T, 3), ik::kTB, 0, st>>>(a);
+            run("a: gates' h", [&] { ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 3), row4(), 0, st>>>(a); });
+            run("a: gates applied", [&] {
+                ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 3), ik::kTB, 0, st>>>(a);
+            });
         }
         {
             ik::NormIn a{};
@@ -1132,7 +1194,7 @@ struct Engine {
             a.n = n_in;
             a.N = N;
             a.eps = g.eps;
-            ik::norm_kernel<<<dim3((unsigned) T, (unsigned) n_in), ik::kTB, 0, st>>>(a);
+            run("a: norm", [&] { ik::norm_kernel<<<dim3((unsigned) T, (unsigned) n_in), row4(), 0, st>>>(a); });
         }
         tick("attention inputs");
         nan_visit = v;
@@ -1149,17 +1211,25 @@ struct Engine {
             mmb(R, L.wv, vi, fv, R.vraw, T);
         } else {
             const ik::Q81 *iq = R.img, *ikk = R.img + (size_t) ki * TB, *iv = R.img + (size_t) vi * TB;
-            mm(L.wq, iq, fq, R.qraw, T);
-            mm(L.wgate, iq, fq, R.graw, T);
-            mm(L.wrel, iq, fq, R.rraw, T);
-            mm(L.wk, ikk, fk, R.kraw, T);
-            mm(L.wv, iv, fv, R.vraw, T);
+            run("a: q's product", [&] { mm(L.wq, iq, fq, R.qraw, T); });
+            run("a: the gate's product", [&] { mm(L.wgate, iq, fq, R.graw, T); });
+            run("a: r's product", [&] { mm(L.wrel, iq, fq, R.rraw, T); });
+            run("a: k's product", [&] { mm(L.wk, ikk, fk, R.kraw, T); });
+            run("a: v's product", [&] { mm(L.wv, iv, fv, R.vraw, T); });
         }
-        ik::sproj_kernel<<<dim3((unsigned) H, (unsigned) T), ik::kTB, 0, st>>>(L.sink, fq, R.sink, N, H);
+        // a decode forward takes the sink's product, tau, q's clip and the bias in one launch (q_bias_kernel)
+        if (batch)
+            run("a: sink", [&] { ik::sproj_kernel<<<dim3((unsigned) H, (unsigned) T), ik::kTB, 0, st>>>(L.sink, fq, R.sink, N, H); });
         if (L.full) {
-            ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.k_dyn, fk, R.dynk, N, HK * C);
-            ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.v_dyn, fv, R.dynv, N, HK * C);
-            ik::tau_kernel<<<(unsigned) ((T + 31) / 32), 32, 0, st>>>(R.pos_d, R.tau, T, g.log_alpha, (float) g.log_floor);
+            run("a: taps", [&] {
+                ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.k_dyn, fk, R.dynk, N, HK * C);
+                ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.v_dyn, fv, R.dynv, N, HK * C);
+            });
+            if (batch)
+                run("a: tau", [&] {
+                    ik::tau_kernel<<<(unsigned) ((T + 31) / 32), 32, 0, st>>>(R.pos_d, R.tau, T, g.log_alpha,
+                                                                             (float) g.log_floor);
+                });
         }
         tick("attention projections");
         probe("q's projection", R.qraw, (size_t) T, (size_t) H * D_);
@@ -1167,18 +1237,25 @@ struct Engine {
         probe("the distance projection", R.rraw, (size_t) T, (size_t) H * Rr);
         probe("k's projection", R.kraw, (size_t) T, (size_t) KV);
         probe("v's projection", R.vraw, (size_t) T, (size_t) KV);
-        ik::q_clip_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(R.qraw, L.q_scale, L.full ? R.tau : nullptr,
-                                                                                     R.q, H, D_, g.qk_clip);
         if (batch) {   // the table's products as one GEMM: r clipped in place, the sink taken off after
+            run("a: q's clip", [&] {
+                ik::q_clip_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(
+                    R.qraw, L.q_scale, L.full ? R.tau : nullptr, R.q, H, D_, g.qk_clip);
+            });
             ik::r_clip_kernel<<<dim3((unsigned) T, (unsigned) H), 32, 0, st>>>(R.rraw, L.rel_scale, L.full ? R.tau : nullptr,
                                                                               R.rraw, H, Rr, g.rel_clip);
             gemm(L.rel_table, L.ext, Rr, R.rraw, T * H, R.bias, L.ext + 1);
             const long long cnt = (long long) T * H * (L.ext + 1);
             ik::bias_fix_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.bias, R.sink, (long long) T * H, L.ext);
         } else {
-            ik::BiasIn a{R.rraw, L.rel_scale, L.rel_table, R.sink, L.full ? R.tau : nullptr, R.bias, H, Rr, L.ext, g.rel_clip};
-            ik::bias_kernel<<<dim3((unsigned) T, (unsigned) H), ik::kTB, 0, st>>>(a);
+            ik::QbIn a{R.qraw, L.q_scale, R.rraw, L.rel_scale, L.rel_table, L.sink, fq, R.pos_d, R.q, R.bias, H, D_, Rr, L.ext,
+                       N, L.full ? 1 : 0, g.qk_clip, g.rel_clip, g.log_alpha, (float) g.log_floor};
+            run("a: q, bias", [&] { ik::q_bias_kernel<<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a); });
         }
+        // the cells the rows attend: the visit's own, or for a chunk's window visit a range in position order (the
+        // win - 1 cells before the chunk out of the ring, then the chunk's)
+        ik::Cells cells = V.cells;
+        const bool slide = batch && V.cells.ring;
         {
             ik::KvIn a{};
             a.raw[0] = R.kraw;
@@ -1196,14 +1273,22 @@ struct Engine {
             a.C = C;
             a.clip = g.qk_clip;
             a.eps = g.eps;
-            ik::kv_conv_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(a);
+            if (batch) {
+                run("a: k, v convolved", [&] {
+                    ik::kv_conv_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(a);
+                });
+            } else {   // with the cells' store, and a forward of one row its states
+                ik::KvCellsIn b{a, {T == 1 ? ck : nullptr, T == 1 ? cv : nullptr}, cells, R.pos_d};
+                run("a: k, v convolved, stored", [&] {
+                    ik::kv_cells_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(b);
+                });
+            }
         }
-        conv_keep(ck, R.kraw, KV, T);
-        conv_keep(cv, R.vraw, KV, T);
-        // the cells the rows attend: the visit's own, or for a chunk's window visit a range in position order (the
-        // win - 1 cells before the chunk out of the ring, then the chunk's)
-        ik::Cells cells = V.cells;
-        const bool slide = batch && V.cells.ring;
+        if (batch || T > 1)
+            run("a: k, v states kept", [&] {
+                conv_keep(ck, R.kraw, KV, T);
+                conv_keep(cv, R.vraw, KV, T);
+            });
         if (slide) {
             ik::ring_to_range_kernel<<<dim3((unsigned) (win - 1), 2), 256, 0, st>>>(V.cells, R.wk, R.wv, (long long) p0, win,
                                                                                    (int) cell_bytes);
@@ -1213,7 +1298,10 @@ struct Engine {
             cells.cap = T + win - 1;
             cells.ring = 0;
         }
-        ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), 128, 0, st>>>(cells, R.kc, R.vc, R.pos_d, HK, D_);
+        if (batch)
+            run("a: cells stored", [&] {
+                ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), 128, 0, st>>>(cells, R.kc, R.vc, R.pos_d, HK, D_);
+            });
         tick("q, k, v, bias");
         xten("Qcur", v, R.q, T, H, D_);
         xten("Kcur", v, R.kc, T, HK, D_);
@@ -1251,9 +1339,15 @@ struct Engine {
                 at.sub = ik::kSub;
                 at.n_chunks = kChunks;
             }
-            ik::attn_part_kernel<<<dim3((unsigned) at.n_chunks, (unsigned) HK, (unsigned) T), ik::kSub, 0, st>>>(at);
+            run(L.full ? "a: attention's sums, full" : "a: attention's sums, window", [&] {
+                const dim3 grid((unsigned) at.n_chunks, (unsigned) HK, (unsigned) T);
+                if (L.full && !kv_q8) ik::attn_wide_kernel<<<grid, ik::kSub, 0, st>>>(at);
+                else ik::attn_part_kernel<<<grid, ik::kSub, 0, st>>>(at);
+            });
             ik::AttnOutIn a{R.part, R.graw, L.wo.type == 30 ? R.aout : nullptr, R.aimg, at.dyn, H, D_, at.n_chunks};
-            ik::attn_out_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(a);
+            run("a: attention's output", [&] {
+                ik::attn_out_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(a);
+            });
         }
         if (slide)
             ik::range_to_ring_kernel<<<dim3((unsigned) std::min<int64_t>(T, ring_cap), 2), 256, 0, st>>>(
@@ -1261,10 +1355,20 @@ struct Engine {
         tick(L.full ? "attention, full" : "attention, window");
         if (batch || L.wo.type == 30) probe("the attention's output", R.aout, (size_t) T, (size_t) H * D_);
         if (batch) mmb(R, L.wo, 3, R.aout, R.oraw, T);
-        else mm(L.wo, R.aimg, R.aout, R.oraw, T);
+        else run("a: the output's product", [&] { mm(L.wo, R.aimg, R.aout, R.oraw, T); });
         const dim3 gN((unsigned) ((N + ik::kTB - 1) / ik::kTB), (unsigned) T);
-        ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.oraw, ca, L.a_conv, R.x, N, C, L.first ? 1 : 0);
-        conv_keep(ca, R.oraw, N, T);
+        const bool one = !batch && T == 1;   // a forward of one row: a sublayer's end is one launch (post_one_kernel)
+        if (one) {
+            run("a: convolved into the stream", [&] {
+                ik::post_one_kernel<<<gN.x, ik::kTB, 0, st>>>(nullptr, nullptr, R.oraw, ca, L.a_conv, R.x, N, C, top_k,
+                                                             L.first ? 1 : 0);
+            });
+        } else {
+            run("a: convolved into the stream", [&] {
+                ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.oraw, ca, L.a_conv, R.x, N, C, L.first ? 1 : 0);
+            });
+            run("a: output's state kept", [&] { conv_keep(ca, R.oraw, N, T); });
+        }
         tick("attention output");
         probe("the output projection", R.oraw, (size_t) T, (size_t) N);
         probe("x after the attention", R.x, (size_t) T, (size_t) N);
@@ -1273,7 +1377,7 @@ struct Engine {
         // ---- the MoE
         const int nb2 = l / res + 1;
         if (L.first) blks[nb2 - 1] = newblk;
-        mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T);
+        run("f: mix", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T); });
         const float* fu = R.mixed;
         if (msgs && batch) {
             ctrl_batch(R, R.mixed, R.msg + (size_t) 3 * TN, L.cD[3], L.cG[3], L.cF[3], R.ctl, T);
@@ -1290,8 +1394,10 @@ struct Engine {
             a.n = 1;
             a.N = N;
             a.R = (int) g.gate_rank;
-            ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 1), ik::kTB, 0, st>>>(a);
-            ik::ctrl_apply_kernel<<<dim3((unsigned) ((N + ik::kTB - 1) / ik::kTB), (unsigned) T, 1), ik::kTB, 0, st>>>(a);
+            run("f: gate's h", [&] { ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 1), row4(), 0, st>>>(a); });
+            run("f: gate applied", [&] {
+                ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 1), ik::kTB, 0, st>>>(a);
+            });
             fu = R.ctl;
         }
         {
@@ -1303,7 +1409,7 @@ struct Engine {
             a.n = 1;
             a.N = N;
             a.eps = g.eps;
-            ik::norm_kernel<<<dim3((unsigned) T, 1), ik::kTB, 0, st>>>(a);
+            run("f: norm", [&] { ik::norm_kernel<<<dim3((unsigned) T, 1), row4(), 0, st>>>(a); });
         }
         const int n_ent = T * top_k;
         const float w_scale = g.w_scale != 0.f ? g.w_scale : 1.0f;
@@ -1321,18 +1427,36 @@ struct Engine {
             probe("the experts' rows", R.rows, (size_t) n_ent, (size_t) N);
             ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, L.d_scale, R.ids);
         } else {
-            ik::route_dot_kernel<<<dim3((unsigned) E, (unsigned) T), ik::kTB, 0, st>>>(L.router, R.nrm, R.probs, E, N);
+            run("f: router's products", [&] {
+                ik::route_dot_kernel<<<dim3((unsigned) E, (unsigned) T), ik::kTB, 0, st>>>(L.router, R.nrm, R.probs, E, N);
+            });
             ik::PlanIn a{R.probs, L.route_bias, L.slot_of, (unsigned long long) (uintptr_t) L.slots, L.stride, R.ids, R.w,
                          R.grp_ptr, R.grp_start, R.n_groups, R.ent_dst, R.ent_tok, R.n_miss, T, E, top_k, w_scale};
-            ik::pick_plan_kernel<<<1, ik::kTB, 0, st>>>(a);
+            run("f: experts picked", [&] {
+                if (T == 1) ik::pick_one_kernel<<<1, ik::kTB, 0, st>>>(a);
+                else ik::pick_plan_kernel<<<1, ik::kTB, 0, st>>>(a);
+            });
             tick("MoE input and router");
-            K::native_expert_grouped(L.gl, R.grp_ptr, R.grp_start, R.n_groups, R.ent_dst, R.ent_tok, n_ent, n_ent, R.img,
-                                     (int64_t) (N / 32) * 36, R.scratch, R.rows, st);
+            run("f: experts", [&] {
+                K::native_expert_grouped(L.gl, R.grp_ptr, R.grp_start, R.n_groups, R.ent_dst, R.ent_tok, n_ent, n_ent, R.img,
+                                         (int64_t) (N / 32) * 36, R.scratch, R.rows, st);
+            });
             tick("experts");
-            ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, nullptr, nullptr);
+            if (!one)
+                run("f: experts' rows summed", [&] {
+                    ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, nullptr, nullptr);
+                });
         }
-        ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.fraw, cf, L.f_conv, R.x, N, C, 0);
-        conv_keep(cf, R.fraw, N, T);
+        if (one) {
+            run("f: summed, convolved into the stream", [&] {
+                ik::post_one_kernel<<<gN.x, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, cf, L.f_conv, R.x, N, C, top_k, 0);
+            });
+        } else {
+            run("f: convolved into the stream", [&] {
+                ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.fraw, cf, L.f_conv, R.x, N, C, 0);
+            });
+            run("f: output's state kept", [&] { conv_keep(cf, R.fraw, N, T); });
+        }
         tick("MoE output");
         probe("the MoE's output", R.fraw, (size_t) T, (size_t) N);
         probe("x after the MoE", R.x, (size_t) T, (size_t) N);
@@ -1354,7 +1478,7 @@ struct Engine {
         a.n = 1;
         a.N = N;
         a.eps = g.eps;
-        ik::norm_kernel<<<dim3((unsigned) n, 1), ik::kTB, 0, st>>>(a);
+        ik::norm_kernel<<<dim3((unsigned) n, 1), row4(), 0, st>>>(a);
         mm(m->head, R.img, R.nrm, R.logits, n);
         if (g.softcap > 0) {
             const long long cnt = (long long) n * g.n_vocab;
@@ -1405,11 +1529,12 @@ struct Engine {
         const int64_t p0 = pos();
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
         CK(cudaStreamSynchronize(st));   // the last forward has read the pinned rows
-        if (prof) prof_t = Clock::now();
+        prof_start();
         embed(D, tok, T);
         steps(D, p0, T);
         if (!use_graphs) {
             launches(D, T, n_head, p0);
+            prof_collect();
         } else {
             cudaGraphExec_t& exec = graphs[T * 16 + n_head];
             if (exec == nullptr) {
@@ -1433,10 +1558,11 @@ struct Engine {
         const int64_t p0 = pos();
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
         CK(cudaStreamSynchronize(st));
-        if (prof) prof_t = Clock::now();
+        prof_start();
         embed(P, tok, T);
         steps(P, p0, T);
         launches(P, T, logits ? 1 : 0, p0);
+        prof_collect();
         n_pos += T;
         logits_held = false;
         return true;
@@ -1559,7 +1685,7 @@ struct Engine {
         double total = 0;
         for (const auto& [k, v] : prof_ms) total += v;
         std::fprintf(stderr, "lamina: %s, %.1f ms in the steps:\n", what, total);
-        for (const auto& [k, v] : prof_ms) std::fprintf(stderr, "lamina:   %-24s %9.1f ms %5.1f%%\n", k.c_str(), v, 100.0 * v / total);
+        for (const auto& [k, v] : prof_ms) std::fprintf(stderr, "lamina:   %-32s %9.1f ms %5.1f%%\n", k.c_str(), v, 100.0 * v / total);
         prof_ms.clear();
     }
     std::string vram_free() const {
@@ -1862,9 +1988,9 @@ struct Serve {
         print_cache();
         serve_print("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms, decode_ms,
                     finish, reuse, (long long) fresh);
-        std::fprintf(stderr, "lamina serve: prompt %zu tokens = %zu reused + %lld read in %.1f ms (%.1f tok/s), %lld "
-                     "generated in %.1f ms (%.2f tok/s), %s; MiB of VRAM free: %s\n", ids.size(), reuse, (long long) fresh,
-                     prompt_ms, prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced, decode_ms,
+        std::fprintf(stderr, "lamina serve: %zu prompt tokens (%zu reused) in %.1f ms (%.1f tok/s), %lld generated in %.1f "
+                     "ms (%.2f tok/s), %s; MiB of VRAM free: %s\n", ids.size(), reuse, prompt_ms,
+                     prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced, decode_ms,
                      decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, finish, E.vram_free().c_str());
         if (cache) {
             std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
