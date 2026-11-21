@@ -17,7 +17,7 @@ struct gguf_context;
 
 namespace lamina::vision {
 
-enum class ProjectorKind { qwen3vl, hy4 };
+enum class ProjectorKind { qwen3vl, hy4, inkling2v };
 
 /// What a projector's header says, and how its pictures are sized.
 struct ProjectorParams {
@@ -31,6 +31,11 @@ struct ProjectorParams {
     Filter filter = Filter::bicubic;
     bool letterbox = false;
     std::array<uint8_t, 3> pad = {0, 0, 0};
+    /// Inkling 2's processor: a picture is not resized (unless it passes the limit) but padded right and below to whole
+    /// merged patches (planes_padded)
+    bool pad_to_align = false;
+    /// its tower's rotary positions: the base of the two dimensions' angles
+    float rope_theta = 10000.0f;
 
     /// a head's values
     int d_head() const { return n_embd_head > 0 ? n_embd_head : n_embd / n_head; }
@@ -51,7 +56,7 @@ public:
     Projector(const Projector&) = delete;
     Projector& operator=(const Projector&) = delete;
 
-    /// The header read and checked: one of the two projector types, a tower this code computes (throws
+    /// The header read and checked: one of the projector types above, a tower this code computes (throws
     /// std::runtime_error with what is wrong otherwise).  The caller's token limits go into the sizing.
     void open(const EncoderParams& params);
 
@@ -76,8 +81,10 @@ private:
 
 /// Qwen's learned position table at a grid of width x height patches: bilinear between the table's cells with the
 /// corners aligned (ggml's upscale as mtmd asks for it), out[(y * width + x) * n_embd + c].  `table`: n_side x n_side
-/// rows of n_embd.
-std::vector<float> qwen_position_table(const std::vector<float>& table, int n_embd, int n_side, int width, int height);
+/// rows of n_embd.  `align_corners` false: Inkling 2's, ggml's upscale without that flag (a sample's place by its
+/// pixel centre).
+std::vector<float> qwen_position_table(const std::vector<float>& table, int n_embd, int n_side, int width, int height,
+                                       bool align_corners = true);
 
 /// Hy4's position table at out_w x out_h (mtmd's encode, HunyuanVL's): bilinear between the table's cells, a sample's
 /// place by the scale (target + 0.1) / n_grid, pixel centres.  dst[(y * out_w + x) * n_embd + c].

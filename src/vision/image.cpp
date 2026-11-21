@@ -396,4 +396,33 @@ std::vector<float> planes(const Rgb& img, const float mean[3], const float std[3
     return out;
 }
 
+std::vector<float> planes_padded(const Rgb& src, const SizeRule& rule, Filter filter, const float mean[3],
+                                 const float std[3], int& w, int& h) {
+    const int a = rule.align;
+    auto up = [a](int v) { return (v + a - 1) / a * a; };
+    int sw = src.w, sh = src.h;
+    Rgb resized;
+    const bool too_large = rule.max_pixels > 0 && (int64_t) up(sw) * up(sh) > rule.max_pixels;
+    if (too_large) {
+        target_size(src.w, src.h, rule, sw, sh);
+        resized = resample(src, sw, sh, filter);
+    }
+    const Rgb& img = too_large ? resized : src;
+    w = up(sw);
+    h = up(sh);
+    const size_t n = (size_t) w * (size_t) h;
+    std::vector<float> out(3 * n);
+    for (int c = 0; c < 3; ++c) {
+        // mtmd's: the bytes as floats, the padding -1, then one step of (v - mean) / std with both times 255
+        const float m = mean[c] * 255.0f, s = std[c] * 255.0f;
+        float* plane = out.data() + (size_t) c * n;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const float v = x < sw && y < sh ? (float) img.px[((size_t) y * (size_t) sw + (size_t) x) * 3 + (size_t) c] : -1.0f;
+                plane[(size_t) y * (size_t) w + (size_t) x] = (v - m) / s;
+            }
+    }
+    return out;
+}
+
 }  // namespace lamina::vision

@@ -207,6 +207,7 @@ struct Model {
     const float *out_norm = nullptr, *out_query = nullptr;
     Mat head;
     int32_t eos = -1;
+    int32_t image_pad = -1;   // the token the chat template writes for a picture's rows (after <|content_image|>), or -1
     int64_t trained_ctx = 0;
     double dense_gib = 0, expert_gib = 0, load_s = 0;
     // A card smaller than the model and the context asked of it: the experts are in RAM (`arena`, but the ranking's
@@ -362,6 +363,15 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     const Geometry& g = m.g;
     if (const lamina::MetaValue* v = gm.meta().get("tokenizer.ggml.eos_token_id"); v && v->is_num()) m.eos = (int32_t) v->u;
     if (const lamina::MetaValue* v = gm.meta().get(g.arch + ".context_length"); v && v->is_num()) m.trained_ctx = (int64_t) v->u;
+    if (const lamina::MetaValue* v = gm.meta().get("tokenizer.chat_template"); v != nullptr) {
+        // (the template's picture block: <|content_image|>, then the token that stands for the rows)
+        const std::string open = "<|content_image|><|";
+        if (const size_t at = v->s.find(open); at != std::string::npos) {
+            const size_t from = at + open.size() - 2, to = v->s.find("|>", from);
+            if (to != std::string::npos && to - from < 64)
+                m.image_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", v->s.substr(from, to + 2 - from));
+        }
+    }
     const int64_t N = g.n_embd, E = g.n_expert;
 
     // the experts' layouts, and whether the model fits the GPU: the dense weights, every expert, the window visits'
@@ -709,6 +719,49 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                  g.arch.c_str(), (long long) g.n_layers, (long long) g.n_visits(), (long long) g.loop_start,
                  (long long) g.loop_end - 1, (long long) g.n_pass, (long long) E, where, m.load_s);
     return true;
+}
+
+// ------------------------------------------------------------------------------------------------ pictures
+/// A request's pictures (--vision): the image encoder's rows in prompt order and each prompt cell's row (-1: text)
+struct ImgReq {
+    std::vector<float> rows;
+    std::vector<int32_t> cell_row;
+    int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
+};
+
+/// Reads the image encoder's file (records 'SVE1': n, nx, ny, n_embd, then n x n_embd floats, a picture each in prompt
+/// order) and lays the pictures over the prompt's runs of `pad`, a row a cell; each such cell's id becomes negative, from
+/// the picture's key (the server's, img_keys=, else the rows' hash) and its row.  "" or the error.
+std::string build_images(const std::string& path, std::vector<int32_t>& ids, int32_t pad, int64_t n_embd,
+                         const std::vector<uint64_t>& keys, ImgReq& r) {
+    std::vector<lamina::program::VisionImage> imgs;
+    if (std::string ve = lamina::program::read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
+    const int64_t n = (int64_t) ids.size();
+    r.cell_row.assign((size_t) n, -1);
+    size_t k = 0;
+    for (int64_t i = 0; i < n;) {
+        if (ids[(size_t) i] != pad) {
+            ++i;
+            continue;
+        }
+        if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
+        const lamina::program::VisionImage& im = imgs[k++];
+        const uint64_t key = lamina::program::vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr,
+                                                               r.rows.data(), n_embd);
+        for (int64_t j = 0; j < im.n; ++j) {
+            if (i + j >= n || ids[(size_t) (i + j)] != pad)
+                return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) + " rows but fewer image tokens";
+            uint64_t h = key + (uint64_t) j * 0x9E3779B97F4A7C15ull;   // splitmix64 of the key and the row
+            h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
+            h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
+            ids[(size_t) (i + j)] = -1 - (int32_t) ((h ^ (h >> 31)) & 0x3fffffff);
+            r.cell_row[(size_t) (i + j)] = (int32_t) (im.off / (size_t) n_embd + (size_t) j);
+        }
+        i += im.n;
+    }
+    if (k != imgs.size()) return "the embeddings file has more images than the prompt";
+    if (n > 0 && r.cell_row.back() >= 0) return "the prompt cannot end in an image";
+    return "";
 }
 
 // ------------------------------------------------------------------------------------------------ the engine
@@ -3355,10 +3408,19 @@ struct Engine {
         const float inv = 1.0f / std::sqrt((float) (ss / (double) N) + g.eps);
         for (size_t i = 0; i < N; ++i) row[i] = row[i] * inv * m->tok_norm[i];
     }
-    /// T tokens' rows, in R.emb_h
-    void embed(Rows& R, const int32_t* tok, int T) {
-        for (int t = 0; t < T; ++t) embed_row(tok[t], R.emb_h + (size_t) t * (size_t) m->g.n_embd);
+    /// T tokens' rows at positions p0 .., in R.emb_h: a token's embedding, normed; a picture's cell its row as the
+    /// image encoder gave it
+    void embed(Rows& R, const int32_t* tok, int T, int64_t p0) {
+        const size_t N = (size_t) m->g.n_embd;
+        for (int t = 0; t < T; ++t) {
+            const int32_t r = img != nullptr ? img->row(p0 + t) : -1;
+            if (r >= 0) std::memcpy(R.emb_h + (size_t) t * N, img->rows.data() + (size_t) r * N, N * 4);
+            else embed_row(tok[t], R.emb_h + (size_t) t * N);
+        }
     }
+    // pictures (--vision): the request's rows while its prompt is read
+    bool vision = false;
+    const ImgReq* img = nullptr;
 
     // ---- the drafter
     /// A pair's cosine and sine for rows at positions p0, p0 + 1, ..: cs_h [T][D / 2][2] (in doubles: a position past
@@ -3757,7 +3819,7 @@ struct Engine {
         const int key = T * 16 + n_head + (waits ? 256 : 0);
         CK(cudaStreamSynchronize(st));   // the last forward has read the pinned rows
         prof_start();
-        embed(D, tok, T);
+        embed(D, tok, T, p0);
         steps(D, p0, T);
         if (sp != nullptr) rope_rows(D.f_cs_h, p0, T);
         far_mode = lo > 0;
@@ -3824,7 +3886,7 @@ struct Engine {
         if (m->in_ram && !scratch_fit()) return false;
         CK(cudaStreamSynchronize(st));
         prof_start();
-        embed(P, tok, T);
+        embed(P, tok, T, p0);
         steps(P, p0, T);
         if (sp != nullptr) rope_rows(P.f_cs_h, p0, T);
         far_mode = false;
@@ -4305,6 +4367,61 @@ struct Serve {
                                   std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
     }
 
+    // The server's image encoder runs in this process and, where the server has it borrow (its "vision" section's
+    // "lend"), holds no VRAM of its own between pictures: for a new picture it asks for memory of the engine's card,
+    // mapped here from the spare chunks and the VRAM free above the reserve, else from the experts (those in RAM
+    // give way, as to the cells); given back, the experts take it again.
+    std::unique_ptr<lamina::core::VmmRange> enc_vm;
+    void enc_back() {
+        if (!enc_vm) return;
+        CK(cudaDeviceSynchronize());   // the encoder's last kernels
+        for (int64_t c = 0; c < enc_vm->chunks(); ++c)
+            if (enc_vm->mapped(c)) E.spare.push_back(enc_vm->unmap(c));
+        enc_vm.reset();
+        E.place();
+        for (const lamina::core::VmmChunk h : E.spare) lamina::core::vmm_chunk_free(h);
+        E.spare.clear();
+    }
+    void lend(const std::string& line, bool in_process) {
+        long long dev = -1;
+        unsigned long long bytes = 0;
+        std::string why;
+        const int64_t before = E.n_held;
+        if (std::sscanf(line.c_str() + 5, "%lld %llu", &dev, &bytes) != 2 || bytes == 0) {
+            why = "expected LEND <device> <bytes>";
+        } else if (!in_process) {
+            why = "a loan is memory of the engine's own process";
+        } else if (enc_vm) {
+            why = "a loan is out already";
+        } else if (dev != E.main_dev) {
+            why = "Inkling 2's engine lends on its own GPU alone (GPU " + std::to_string(E.main_dev) + ")";
+        } else if (!lamina::core::vmm_available()) {
+            why = "this driver has no CUDA virtual memory";
+        } else {
+            CK(cudaStreamSynchronize(E.st));
+            auto vm = std::make_unique<lamina::core::VmmRange>();
+            if (!vm->reserve(bytes)) {
+                why = "no address range of " + std::to_string(bytes >> 20) + " MiB";
+            } else if (!E.chunks_room(vm->chunks())) {
+                why = "the GPU cannot spare " + std::to_string(bytes >> 20) + " MiB";
+            } else if (vm->map_range(0, vm->chunks(), [&] { return E.take_spare(); })) {
+                enc_vm = std::move(vm);
+            } else {
+                for (int64_t c = 0; c < vm->chunks(); ++c)
+                    if (vm->mapped(c)) E.spare.push_back(vm->unmap(c));
+                E.place();
+                why = "the GPU has no " + std::to_string(bytes >> 20) + " MiB to map";
+            }
+        }
+        if (why.empty()) {
+            const long long out = (long long) (before - E.n_held);
+            serve_print("LENT %llu %llu %lld %lld\n", (unsigned long long) (uintptr_t) enc_vm->base(),
+                        (unsigned long long) enc_vm->chunks() * lamina::core::vmm_granularity(), out, out);
+        } else {
+            serve_print("ERR no loan: %s\n", why.c_str());
+        }
+    }
+
     /// The CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE.
     void print_cache() {
         if (!cache) return;
@@ -4319,7 +4436,8 @@ struct Serve {
     /// chain: a prompt ends where a turn does, so a request that edits the next message continues from there),
     /// ascending, each in (reuse, n) with two cells or more to its neighbours and the ends: where this prompt leaves
     /// the one before (agents send one long start again with another tail: the next such request continues from
-    /// there), and a few cells before the end of a last message that grows between requests.
+    /// there), a few cells before the end of a last message that grows between requests, and the end of the block of
+    /// the prompt's last picture.
     std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse) {
         const int64_t n = (int64_t) ids.size();
         int64_t fork = 0, msg_end = 0;
@@ -4335,7 +4453,13 @@ struct Serve {
                 break;
             }
         prev_prompt = ids;
-        std::vector<int64_t> want{fork, msg_end};
+        int64_t pic = 0;   // behind the prompt's last picture (its block's end): another question about it starts there
+        for (int64_t i = n - 1; i > reuse; --i)
+            if (ids[(size_t) i] < 0) {
+                pic = i + 2;
+                break;
+            }
+        std::vector<int64_t> want{fork, msg_end, pic};
         std::sort(want.begin(), want.end());
         std::vector<int64_t> marks;
         for (const int64_t p : want)
@@ -4343,13 +4467,18 @@ struct Serve {
         return marks;
     }
 
-    void request(const std::string& line) {
+    void request(const std::string& line, bool geni) {
         const Geometry& g = E.m->g;
-        const char* p = line.c_str() + 4;
+        if (enc_vm) {   // a request while a loan is out: the chunks come back first
+            std::fprintf(stderr, "lamina: a request came while the image encoder's loan was out: taken back\n");
+            enc_back();
+        }
+        const char* p = line.c_str() + (geni ? 5 : 4);
         char* e = nullptr;
         const long long max_new = std::strtoll(p, &e, 10);
         p = e;
         lamina::program::Sampling smp;
+        std::vector<uint64_t> img_keys;   // img_keys=<hex>,..: each picture's key from the server, in prompt order
         for (;;) {
             while (*p == ' ') ++p;
             const char* st0 = p;
@@ -4357,15 +4486,45 @@ struct Serve {
             const std::string tk(st0, (size_t) (p - st0));
             const size_t eq = tk.find('=');
             if (tk.empty() || eq == std::string::npos) { p = st0; break; }
-            smp.set(tk.substr(0, eq), tk.c_str() + eq + 1);   // keys of other paths are left
+            if (tk.compare(0, eq, "img_keys") == 0) {
+                for (const char* q = tk.c_str() + eq + 1; *q;) {
+                    char* qe = nullptr;
+                    const unsigned long long x = std::strtoull(q, &qe, 16);
+                    if (qe == q || (*qe != ',' && *qe != '\0')) { img_keys.clear(); break; }
+                    img_keys.push_back((uint64_t) x);
+                    q = *qe == ',' ? qe + 1 : qe;
+                }
+            } else {
+                smp.set(tk.substr(0, eq), tk.c_str() + eq + 1);   // keys of other paths are left
+            }
+        }
+        std::string emb;   // GENI: the request's file of picture rows before the ids
+        if (geni) {
+            while (*p == ' ') ++p;
+            const char* e0 = p;
+            while (*p && *p != ' ') ++p;
+            emb.assign(e0, (size_t) (p - e0));
         }
         std::vector<int32_t> ids = lamina::program::parse_ids(p);
-        if (max_new < 1 || ids.empty()) {
+        if (max_new < 1 || ids.empty() || (geni && emb.empty())) {
             serve_print("ERR bad request: max_new or the ids\n");
             return;
         }
         for (const int32_t t : ids)
             if (t < 0 || t >= g.n_vocab) { serve_print("ERR a token id is outside the vocabulary\n"); return; }
+        ImgReq ir;
+        if (geni) {
+            if (!E.vision) { serve_print("ERR this engine was started without --vision\n"); return; }
+            if (const std::string ve = build_images(emb, ids, E.m->image_pad, g.n_embd, img_keys, ir); !ve.empty()) {
+                serve_print("ERR %s\n", ve.c_str());
+                return;
+            }
+        }
+        struct Pictures {   // the engine reads this request's rows until it ends
+            Engine& e;
+            ~Pictures() { e.img = nullptr; }
+        } pictures{E};
+        E.img = geni ? &ir : nullptr;
         if ((int64_t) ids.size() + max_new > E.ctx) {
             serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%lld)\n", ids.size(), max_new,
                         (long long) E.ctx);
@@ -4479,7 +4638,9 @@ struct Serve {
         if (cache && fresh > 1) checkpoint((int64_t) ids.size(), true);
         E.sampling(smp);
         dr.begin();
-        std::vector<int32_t> hist(ids.begin(), ids.end());   // the penalties' history: the prompt's text
+        std::vector<int32_t> hist;   // the penalties' history: the prompt's text (not a picture's cells)
+        for (const int32_t t : ids)
+            if (t >= 0) hist.push_back(t);
         const auto d0 = Clock::now();
         long long produced = 0;
         const char* finish = "length";
@@ -4562,24 +4723,29 @@ struct Serve {
             }
             if (line.empty()) continue;
             if (line.rfind("GEN ", 0) == 0) {
-                request(line);
+                request(line, false);
+            } else if (line.rfind("GENI ", 0) == 0) {
+                request(line, true);
             } else if (line.rfind("LEND ", 0) == 0) {
-                serve_print("ERR no loan: Inkling 2's engine lends no VRAM\n");
+                lend(line, io.in_process);
             } else if (line == "UNLEND") {
+                enc_back();
                 serve_print("UNLENT\n");
             } else if (line == "QUIT") {
                 std::lock_guard<std::mutex> lk(mu);
                 eof = true;
                 lines.clear();
             } else {
-                serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...>\n");
+                serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...>, or GENI <max_new> [key=value ...] "
+                            "<file> <id,id,...>\n");
             }
         }
     }
 };
 
 int run_engine(int argc, char** argv, bool check_only) {
-    std::string model, tokens, force, dump_full, kv = "fp16";
+    std::string model, tokens, force, dump_full, emb_file, kv = "fp16";
+    bool vision = false;
     int64_t max_ctx = 0;
     int n_gen = 64, threads = 8;
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
@@ -4623,6 +4789,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--force") force = next();
         else if (a == "--dump-full-logits") dump_full = next();
         else if (a == "--serve") serve = true;
+        else if (a == "--vision") vision = true;    // pictures: GENI requests (their rows the image encoder's)
+        else if (a == "--emb") emb_file = next();   // generate mode: --tokens' pictures, a file of the encoder's rows
         else if (a == "--kv") kv = next();   // the cells: fp16 or q8_0
         else if (a == "--kv-grow") kv_grow = true;
         else if (a == "--no-kv-grow") kv_grow = false;   // the full visits' cells allocated whole at the start
@@ -4637,6 +4805,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
         else if (a == "--dspark") dspark = next();   // the model's block drafter (dspark-*.gguf)
+        else if (a == "--expert-vram") expert_vram = (uint64_t) (std::max(0.0, std::atof(next())) * 1073741824.0);   // (in GiB, as the hy4 path's)
         else if (a == "--expert-cache") {   // the experts' VRAM at most: auto (what the card has), or a size (6G, 9500M)
             const std::string v = next();
             if (v != "auto") {
@@ -4691,7 +4860,12 @@ int run_engine(int argc, char** argv, bool check_only) {
     LoadOpts lo;
     lo.threads = threads;
     lo.file_cache = file_cache;
-    lo.reserve = (size_t) *reserve;
+    // (what the server's image encoder will borrow on this card for a picture: experts in RAM give way to it; a card
+    // that holds every expert keeps it free of cells)
+    int main_dev = 0;
+    CK(cudaGetDevice(&main_dev));
+    const uint64_t loan = lamina::core::gpu_loan_asked(main_dev);
+    lo.reserve = (size_t) (*reserve + loan);
     lo.expert_vram = expert_vram;
     lo.profile = expert_profile;
     lo.max_ctx = max_ctx;
@@ -4736,6 +4910,12 @@ int run_engine(int argc, char** argv, bool check_only) {
         }
     }
     Engine E;
+    E.vision = vision || !emb_file.empty();
+    if (E.vision && m.image_pad < 0) {
+        std::fprintf(stderr, "lamina: the model's chat template names no token for a picture's rows, so --vision has no "
+                             "cells to fill\n");
+        return 2;
+    }
     E.cpu_threads = cpu_threads;
     E.profile_save = expert_save;
     E.profile_every = expert_save_every > 0 ? expert_save_every * 60.0 : 1e18;
@@ -4753,7 +4933,10 @@ int run_engine(int argc, char** argv, bool check_only) {
         at = comma + 1;
     }
     E.prefill = prefill;
-    E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) *reserve);
+    if (loan > 0 && !m.in_ram)
+        std::fprintf(stderr, "lamina: %llu MiB of this GPU stay free of cells for the image encoder's loan\n",
+                     (unsigned long long) (loan >> 20));
+    E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) (*reserve + (m.in_ram ? 0 : loan)));
     Drafts dr;
     dr.init(lookup, E.ctx);
     if (E.sp != nullptr) {
@@ -4771,9 +4954,17 @@ int run_engine(int argc, char** argv, bool check_only) {
     const std::vector<int32_t> forced = lamina::program::parse_ids(force.c_str());
     if (prompt.empty()) { std::fprintf(stderr, "lamina: --tokens is required\n"); return 2; }
     if (!forced.empty()) n_gen = (int) forced.size() + 1;
+    ImgReq ir;
+    if (!emb_file.empty()) {
+        if (const std::string ve = build_images(emb_file, prompt, m.image_pad, m.g.n_embd, {}, ir); !ve.empty()) {
+            std::fprintf(stderr, "lamina: --emb: %s\n", ve.c_str());
+            return 2;
+        }
+        E.img = &ir;
+    }
     for (const std::vector<int32_t>* v : {(const std::vector<int32_t>*) &prompt, &forced})
         for (const int32_t t : *v)
-            if (t < 0 || t >= m.g.n_vocab) {
+            if ((t < 0 && (v != &prompt || ir.cell_row.empty())) || t >= m.g.n_vocab) {
                 std::fprintf(stderr, "lamina: the token %d is outside the vocabulary (%lld)\n", (int) t, (long long) m.g.n_vocab);
                 return 2;
             }
@@ -4817,7 +5008,9 @@ int run_engine(int argc, char** argv, bool check_only) {
     } else {   // as a request's: the sampler's tokens (greedy unless --temperature), windows of a token and its drafts
         E.sampling(gen_smp);
         dr.begin();
-        std::vector<int32_t> seq = prompt, hist = prompt;
+        std::vector<int32_t> seq = prompt, hist;   // (the penalties' history: the prompt's text, not a picture's cells)
+        for (const int32_t t : prompt)
+            if (t >= 0) hist.push_back(t);
         run_windows(E, dr, seq, hist, along ? (long long) forced.size() : n_gen, [&](int32_t t) {
             gen.push_back(t);
             return (int) gen.size() < (along ? (int) forced.size() : n_gen);

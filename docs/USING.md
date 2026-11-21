@@ -260,7 +260,8 @@ config renders Codex's compaction requests with the conversation's tools, so the
 With pictures on (an image projector beside the model, or a config's `vision` section), OpenAI `image_url` parts and
 Anthropic `image` blocks (base64 data, http(s) URLs or local file paths) go through the server's image encoder and
 reach the model as up to 1,024 tokens each
-(the `vision` section's `max_tokens`; a 640x480 photo is ~300). JPEG, PNG, BMP and GIF are read as they are; WebP, TIFF,
+(the `vision` section's `max_tokens`; a 640x480 photo is ~300; Inkling 2 Mini's are not resized: a token a 40 x 40 px
+patch, up to 4,096). JPEG, PNG, BMP and GIF are read as they are; WebP, TIFF,
 AVIF and others are converted to PNG first. A picture is encoded once (one sent again, as chat apps do every turn, is
 not encoded again), by default on the engine's main GPU in VRAM the encoder borrows from the engine for it (the
 `vision` section's `gpu` and `lend`, which `-m`'s presets set: [SETUP.md](SETUP.md#a-model-file) says what each engine

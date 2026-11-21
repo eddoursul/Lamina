@@ -99,7 +99,8 @@ bool vision_built();
 const char* vision_not_built();
 /// a projector file's type (clip.projector_type; "" for a file that names none or cannot be read)
 std::string projector_type(const std::string& mmproj);
-/// the types the encoder reads: qwen3vl_merger (Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B) and hy_v4_flash
+/// the types the encoder reads: qwen3vl_merger (Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B), hy_v4_flash and
+/// inkling2v (Inkling 2 Mini)
 bool projector_type_read(const std::string& type);
 /// a path to another computer (\\host\share, //host/share, \\?\UNC\..., \??\UNC\...): Windows would sign in to it
 bool network_path(const std::string& path);

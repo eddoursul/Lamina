@@ -159,7 +159,7 @@ std::string projector_problem(const std::string& path, const ModelFacts& m) {
             return "not an image projector (a GGUF of the architecture clip with a vision encoder)";
         if (const std::string type = projector_type(path); !projector_type_read(type))
             return "a projector of the type " + (type.empty() ? std::string("it does not name") : type) +
-                   ", which the image encoder does not read (it reads qwen3vl_merger and hy_v4_flash)";
+                   ", which the image encoder does not read (it reads qwen3vl_merger, hy_v4_flash and inkling2v)";
         const int64_t dim = meta_int(g, "clip.vision.projection_dim");
         if (m.n_embd > 0 && dim != m.n_embd)
             return "the projector of a model " + std::to_string(dim) + " wide, and this one is " +

@@ -1,8 +1,8 @@
 // include/lamina/vision/encoder.hpp - the image encoder: a picture's rows, the embeddings the text model reads in place
 // of its image pad tokens, from the model's projector file (mmproj: a vision tower and its adapter).
 //
-// Two projector types, the ones the engine's models have, on one tower shape (a ViT of pre-norm blocks, GELU FFNs,
-// 16x16 patches, heads of 72 values):
+// Three projector types, the ones the engine's models have, on one tower shape (a ViT of pre-norm blocks and GELU
+// FFNs; Qwen's and Hy4's with 16x16 patches and heads of 72 values):
 //   qwen3vl_merger  Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B: two patch kernels summed (a still picture is
 //                   both frames of a pair), the learned position table resized bilinearly, 2-D rotary positions in
 //                   every block, the patches in 2x2 groups from the start, each group's four concatenated and passed
@@ -10,11 +10,17 @@
 //   hy_v4_flash     Hy4-flash: the position table resampled on the host (HunyuanVL's sampling), no rotary positions,
 //                   an RMS norm, a 2x2 convolution of stride 2, GELU (erf), a 1x1 convolution, and a learned newline
 //                   row after each row of cells.  The text model reads the rows at text positions: one row of n.
+//   inkling2v       Inkling 2 Mini: 20x20 patches, heads of 64 values; a class token before the patches (dropped at
+//                   the end), the learned position table resized bilinearly, a norm before the blocks, rotary
+//                   positions in two dimensions (a head's first half by the column, its second by the row), each
+//                   block's two outputs times a learned vector, the exact GELU; the patches merged 2x2 through two
+//                   matrices.  A picture is not resized (unless it passes the token limit) but padded right and below
+//                   to whole merged patches.  One row of n, read at text positions.
 // A picture is first sized as the projector's reference processor sizes it (image.hpp): for Qwen's that is
 // transformers' way, a direct resize, where mtmd at the pinned commit letterboxes (LAMINA_VISION_LETTERBOX=1).
 //
 // Two implementations of one arithmetic, llama.cpp's mtmd's at the pinned commit (tools/mtmd, MIT; Hy4's projector as
-// its pull request 32517 has it):
+// its pull request 32517 has it, Inkling 2's as unsloth's fork):
 //   the CPU's    a ggml graph on ggml's CPU backend, mtmd's operation for operation (ggml_encoder.cpp): Qwen's rows,
 //                with its letterbox, are that library's bytes on a CPU without AVX-512 (with it the attention's heads
 //                are padded, GgmlEncoder::open)

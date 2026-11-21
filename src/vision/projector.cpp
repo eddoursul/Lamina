@@ -94,9 +94,10 @@ void Projector::open(const EncoderParams& p) {
     if (type.empty()) type = k.str("clip.vision.projector_type");
     if (type == "qwen3vl_merger") kind = ProjectorKind::qwen3vl;
     else if (type == "hy_v4_flash") kind = ProjectorKind::hy4;
+    else if (type == "inkling2v") kind = ProjectorKind::inkling2v;
     else
         throw std::runtime_error("its projector type is " + (type.empty() ? std::string("not named") : type) +
-                                 ": this encoder reads qwen3vl_merger and hy_v4_flash");
+                                 ": this encoder reads qwen3vl_merger, hy_v4_flash and inkling2v");
     n_embd = k.integer("clip.vision.embedding_length", true);
     n_head = k.integer("clip.vision.attention.head_count", true);
     n_embd_head = k.integer("clip.vision.attention.head_dim", false);
@@ -107,7 +108,9 @@ void Projector::open(const EncoderParams& p) {
     patch_size = k.integer("clip.vision.patch_size", true);
     k.rgb("clip.vision.image_mean", mean);
     k.rgb("clip.vision.image_std", std);
-    if (!k.boolean("clip.use_gelu")) throw std::runtime_error("its feed-forward activation is not GELU");
+    // (Inkling 2's blocks are GELU by the type: its file has no such key)
+    if (kind != ProjectorKind::inkling2v && !k.boolean("clip.use_gelu"))
+        throw std::runtime_error("its feed-forward activation is not GELU");
     if (n_embd <= 0 || n_head <= 0 || n_layer <= 0 || patch_size <= 0 || n_embd % n_head != 0 || n_head_kv != n_head)
         throw std::runtime_error("its tower's sizes are not ones this encoder reads");
     n_merge = k.integer("clip.vision.spatial_merge_size", false, 2);
@@ -128,6 +131,14 @@ void Projector::open(const EncoderParams& p) {
         const char* lb = std::getenv("LAMINA_VISION_LETTERBOX");
         letterbox = lb != nullptr && std::atoi(lb) != 0;
         size.half_even = !letterbox;
+    } else if (kind == ProjectorKind::inkling2v) {
+        // up to 4,096 tokens a picture (mtmd's limit for the type; the caller's): a picture keeps its size and is
+        // padded to whole merged patches; one whose padded area passes the limit is first resized to fit it (bicubic)
+        size.min_pixels = 0;
+        size.max_pixels = (p.max_tokens > 0 ? p.max_tokens : 4096) * patch_area;
+        filter = Filter::bicubic;
+        letterbox = false;
+        pad_to_align = true;
     } else {
         // the reference processor's 4 to 4,096 tokens, then the file's own pixel limits over them (the caller's
         // too, as the pull request has it); resized straight to its size, Lanczos
@@ -156,13 +167,20 @@ void Projector::open(const EncoderParams& p) {
     file_ = ggml_fopen(path_.c_str(), "rb");
     if (file_ == nullptr) throw std::runtime_error("the file cannot be opened");
 
-    // what mtmd's tower builder would also apply, and these projectors do not have
-    if (find("v.class_embd") != nullptr)
-        throw std::runtime_error("its tower has a class embedding, which this encoder does not read");
+    // what mtmd's tower builder would also apply, and these projectors do not have (Inkling 2's has a class token
+    // and scales each block's two outputs)
+    const bool inkling = kind == ProjectorKind::inkling2v;
+    if ((find("v.class_embd") != nullptr) != inkling)
+        throw std::runtime_error(inkling ? "its tower has no class embedding"
+                                         : "its tower has a class embedding, which this encoder does not read");
     for (int il = 0; il < n_layer; ++il) {
         const std::string blk = "v.blk." + std::to_string(il) + ".";
-        for (const char* other : {"attn_q_norm.weight", "attn_k_norm.weight", "ls1.weight", "ls2.weight",
-                                  "ffn_gate.weight", "attn_post_norm.weight", "ffn_post_norm.weight"})
+        for (const char* scale : {"ls1.weight", "ls2.weight"})
+            if ((find(blk + scale) != nullptr) != inkling)
+                throw std::runtime_error("its tower has " + std::string(inkling ? "no " : "") + blk + scale +
+                                         (inkling ? "" : ", which this encoder does not read"));
+        for (const char* other : {"attn_q_norm.weight", "attn_k_norm.weight", "ffn_gate.weight", "attn_post_norm.weight",
+                                  "ffn_post_norm.weight"})
             if (find(blk + other) != nullptr)
                 throw std::runtime_error("its tower has " + blk + other + ", which this encoder does not read");
         if (find("v.deepstack." + std::to_string(il) + ".fc1.weight") != nullptr)
@@ -199,8 +217,10 @@ std::vector<float> Projector::floats(const std::string& name) {
 }
 
 // ggml's upscale, GGML_SCALE_MODE_BILINEAR with GGML_SCALE_FLAG_ALIGN_CORNERS, over the table as a picture of
-// n_side x n_side cells: the output cell (x, y) reads the table at x / sf0, y / sf1, sf = (out - 1) / (in - 1)
-std::vector<float> qwen_position_table(const std::vector<float>& table, int n_embd, int n_side, int width, int height) {
+// n_side x n_side cells: the output cell (x, y) reads the table at x / sf0, y / sf1, sf = (out - 1) / (in - 1);
+// without the flag at (x + 0.5) / sf0 - 0.5, sf = out / in
+std::vector<float> qwen_position_table(const std::vector<float>& table, int n_embd, int n_side, int width, int height,
+                                       bool align_corners) {
     std::vector<float> out((size_t) width * height * n_embd);
     if (width == n_side && height == n_side) {
         std::copy(table.begin(), table.begin() + (ptrdiff_t) out.size(), out.begin());
@@ -208,10 +228,13 @@ std::vector<float> qwen_position_table(const std::vector<float>& table, int n_em
     }
     float sf0 = (float) width / n_side;
     float sf1 = (float) height / n_side;
-    sf0 = width > 1 && n_side > 1 ? (float) (width - 1) / (n_side - 1) : sf0;
-    sf1 = height > 1 && n_side > 1 ? (float) (height - 1) / (n_side - 1) : sf1;
+    const float pixel_offset = align_corners ? 0.0f : 0.5f;
+    if (align_corners) {
+        sf0 = width > 1 && n_side > 1 ? (float) (width - 1) / (n_side - 1) : sf0;
+        sf1 = height > 1 && n_side > 1 ? (float) (height - 1) / (n_side - 1) : sf1;
+    }
     for (int i1 = 0; i1 < height; i1++) {
-        const float y = (float) i1 / sf1;
+        const float y = ((float) i1 + pixel_offset) / sf1 - pixel_offset;
         int64_t y0 = (int64_t) floorf(y);
         int64_t y1 = y0 + 1;
         y0 = std::max(int64_t(0), std::min(y0, (int64_t) n_side - 1));
@@ -219,7 +242,7 @@ std::vector<float> qwen_position_table(const std::vector<float>& table, int n_em
         float dy = y - (float) y0;
         dy = std::max(0.0f, std::min(dy, 1.0f));
         for (int i0 = 0; i0 < width; i0++) {
-            const float x = (float) i0 / sf0;
+            const float x = ((float) i0 + pixel_offset) / sf0 - pixel_offset;
             int64_t x0 = (int64_t) floorf(x);
             int64_t x1 = x0 + 1;
             x0 = std::max(int64_t(0), std::min(x0, (int64_t) n_side - 1));

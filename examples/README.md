@@ -23,8 +23,8 @@ which takes the model file, the GPU, the draft layer, the projector and the file
   and V it has no room for), `"max-context"` in `"args"` to set one. A card smaller than the file keeps the experts
   in RAM (~14 GB) and the ones used most on the card; `expert_profile_save` is where it writes the ranking its runs
   learn (a card that holds every expert writes none). Drafts from the prompt lookup and from the
-  model's drafter, a `dspark-*.gguf` beside the model (`"drafts-per-step": 0` in `"args"`: without it). No pictures
-  yet.
+  model's drafter, a `dspark-*.gguf` beside the model (`"drafts-per-step": 0` in `"args"`: without it). Pictures
+  through the repository's `mmproj-F32.gguf` (a picture is up to 4,096 tokens, a token a 40 x 40 px patch).
 
 `lamina-server -m MODEL.gguf --write-config FILE` writes one with the PC's own files and GPUs. `run-<model>.bat.example`
 is a launcher for each: copied to `run-<model>.bat`, it starts the example from the clone's folder, the model's files

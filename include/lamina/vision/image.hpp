@@ -55,4 +55,11 @@ Rgb fit(const Rgb& src, int tw, int th, Filter filter, bool letterbox, const std
 /// The picture as the encoder's input: (v / 255 - mean) / std, a plane a channel (R, G, B), each rows top to bottom.
 std::vector<float> planes(const Rgb& img, const float mean[3], const float std[3]);
 
+/// A picture as Inkling 2's processor gives it (mtmd's mtmd_image_preprocessor_inkling2v): at its own size - resized
+/// (target_size, `filter`) only where its sides rounded up to `rule.align` pass rule.max_pixels - then padded right
+/// and below to whole aligns with a raw value of -1, and normalized as (v - 255 mean) / (255 std).  w x h: the
+/// padded size.  Planes as planes().
+std::vector<float> planes_padded(const Rgb& src, const SizeRule& rule, Filter filter, const float mean[3],
+                                 const float std[3], int& w, int& h);
+
 }  // namespace lamina::vision

@@ -70,6 +70,8 @@ struct Layer {
     ggml_tensor* ff_up_b = nullptr;
     ggml_tensor* ff_down_w = nullptr;
     ggml_tensor* ff_down_b = nullptr;
+    ggml_tensor* ls_1_w = nullptr;   // Inkling 2's: the block's attention and FFN outputs times a learned vector
+    ggml_tensor* ls_2_w = nullptr;
 };
 
 struct Model : ProjectorParams {
@@ -88,6 +90,8 @@ struct Model : ProjectorParams {
     ggml_tensor* mm_1_b = nullptr;
     ggml_tensor* mm_pre_norm_w = nullptr;   // Hy4's adapter
     ggml_tensor* image_newline = nullptr;
+    ggml_tensor* class_embd = nullptr;      // Inkling 2's class token and its position
+    ggml_tensor* class_pos_embd = nullptr;
 };
 
 constexpr int kMaxNodes = 8192;
@@ -108,6 +112,8 @@ struct Graph {
     ggml_tensor* inp_raw = nullptr;
     ggml_tensor* positions = nullptr;   // Qwen's rotary positions
     ggml_tensor* pos_embd = nullptr;    // Hy4's resampled position table
+    ggml_tensor* pos_w = nullptr;       // Inkling 2's rotary positions: a row's column and its row (the class token 0)
+    ggml_tensor* pos_h = nullptr;
     // LAMINA_VISION_DUMP: tensors kept past the graph's run (each an output, so its buffer is not reused)
     bool dump = false;
     std::vector<std::pair<std::string, ggml_tensor*>> taps;
@@ -141,12 +147,12 @@ struct Graph {
         return cur;
     }
 
-    // up, GELU (the tanh form, ggml_gelu), down
+    // up, GELU (the tanh form, ggml_gelu; `erf`: the exact one), down
     ggml_tensor* build_ffn(ggml_tensor* cur, ggml_tensor* up, ggml_tensor* up_b, ggml_tensor* down,
-                           ggml_tensor* down_b) const {
+                           ggml_tensor* down_b, bool erf = false) const {
         ggml_tensor* tmp = ggml_mul_mat(ctx0, up, cur);
         if (up_b) tmp = ggml_add(ctx0, tmp, up_b);
-        cur = ggml_gelu(ctx0, tmp);
+        cur = erf ? ggml_gelu_erf(ctx0, tmp) : ggml_gelu(ctx0, tmp);
         cur = ggml_mul_mat(ctx0, down, cur);
         if (down_b) cur = ggml_add(ctx0, cur, down_b);
         return cur;
@@ -314,9 +320,32 @@ struct Graph {
         return inp;
     }
 
-    // clip_graph::build_vit for a tower of separate q, k and v projections, with a learned position table
+    // clip_graph::build_rope_2d without interleaved frequencies: a head's first half turned by pos_w, its second by
+    // pos_h, each half's pairs over the base rope_theta
+    ggml_tensor* build_rope_2d(ggml_tensor* cur) const {
+        const int n_half = (int) (cur->ne[0] / 2);
+        cur = ggml_rope_ext(ctx0, cur, pos_w, nullptr, n_half, 0, 0, m.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        cur = ggml_rope_ext(ctx0, cur, pos_h, nullptr, n_half, 0, 0, m.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        return ggml_rope_set_offset(cur, n_half);
+    }
+
+    // clip_graph::build_patch_merge_permute: [n_embd, patches] in rows of the grid -> a row a group of s x s patches,
+    // the group's patches side by side in their own order, the groups in the grid's (the sides are whole groups)
+    ggml_tensor* build_patch_merge_permute(ggml_tensor* cur, int s) const {
+        const int width = n_patches_x, height = n_patches_y;
+        cur = ggml_reshape_3d(ctx0, cur, n_embd, width, height);
+        cur = ggml_reshape_3d(ctx0, cur, (int64_t) n_embd * s, width / s, height);
+        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+        cur = ggml_cont_3d(ctx0, cur, (int64_t) n_embd * s * s, height / s, width / s);
+        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
+        return ggml_cont_2d(ctx0, cur, cur->ne[0], cur->ne[1] * cur->ne[2]);
+    }
+
+    // clip_graph::build_vit for a tower of separate q, k and v projections, with a learned position table; Inkling
+    // 2's with its rotary positions on q and k, its two scales a block and the exact GELU
     ggml_tensor* build_vit(ggml_tensor* inp, int64_t n_pos, ggml_tensor* learned_pos_embd) {
         const int64_t B = inp->ne[2];
+        const bool ink = m.kind == Kind::inkling2v;
 
         if (learned_pos_embd) inp = ggml_add(ctx0, inp, learned_pos_embd);
 
@@ -347,16 +376,22 @@ struct Graph {
                 Qcur = ggml_reshape_4d(ctx0, Qcur, d_head, n_head, n_pos, B);
                 Kcur = ggml_reshape_4d(ctx0, Kcur, d_head, n_head_kv, n_pos, B);
                 Vcur = ggml_reshape_4d(ctx0, Vcur, d_head, n_head_kv, n_pos, B);
+                if (ink) {
+                    Qcur = build_rope_2d(Qcur);
+                    Kcur = build_rope_2d(Kcur);
+                }
 
                 cur = build_attn(layer.o_w, layer.o_b, Qcur, Kcur, Vcur);
             }
             if (il == 0) tap(cur, "attn0");
+            if (layer.ls_1_w) cur = ggml_mul(ctx0, cur, layer.ls_1_w);
 
             cur = ggml_add(ctx0, cur, inpL);
             inpL = cur;
 
             cur = build_norm(cur, layer.ln_2_w, layer.ln_2_b, false, eps);
-            cur = build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_down_w, layer.ff_down_b);
+            cur = build_ffn(cur, layer.ff_up_w, layer.ff_up_b, layer.ff_down_w, layer.ff_down_b, ink);
+            if (layer.ls_2_w) cur = ggml_mul(ctx0, cur, layer.ls_2_w);
 
             cur = ggml_add(ctx0, inpL, cur);
             inpL = cur;
@@ -414,7 +449,36 @@ struct Graph {
         return gf;
     }
 
-    ggml_cgraph* build() { return m.kind == Kind::qwen3vl ? build_qwen3vl() : build_hy4(); }
+    // unsloth's llama.cpp fork's models/inkling2v.cpp: a class token before the patches, the learned position table
+    // resized bilinearly, rotary positions in two dimensions; the class token dropped, the patches merged 2 x 2, two
+    // matrices with the exact GELU between them
+    ggml_cgraph* build_inkling2v() {
+        const int n_pos = n_patches + 1;
+        pos_w = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_pos);
+        ggml_set_name(pos_w, "pos_w");
+        ggml_set_input(pos_w);
+        pos_h = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_pos);
+        ggml_set_name(pos_h, "pos_h");
+        ggml_set_input(pos_h);
+
+        ggml_tensor* cur = build_inp();
+        cur = ggml_add(ctx0, cur, resize_position_embeddings((uint32_t) GGML_SCALE_MODE_BILINEAR));
+        ggml_tensor* cls = ggml_add(ctx0, m.class_embd, m.class_pos_embd);
+        cur = ggml_concat(ctx0, cls, cur, 1);
+
+        cur = build_vit(cur, n_pos, nullptr);
+
+        cur = ggml_view_2d(ctx0, cur, n_embd, n_patches, cur->nb[1], cur->nb[1]);   // (without the class token)
+        cur = build_patch_merge_permute(cur, m.n_merge);
+        cur = build_ffn(cur, m.mm_0_w, nullptr, m.mm_1_w, nullptr, true);
+
+        ggml_build_forward_expand(gf, cur);
+        return gf;
+    }
+
+    ggml_cgraph* build() {
+        return m.kind == Kind::qwen3vl ? build_qwen3vl() : m.kind == Kind::hy4 ? build_hy4() : build_inkling2v();
+    }
 };
 
 // Qwen's rotary positions (mtmd's encode): a patch's row and column, the patches in the 2x2 groups' order
@@ -544,11 +608,21 @@ private:
             l.ff_up_b = get(blk(il, "ffn_up.bias"), false);
             l.ff_down_w = get(blk(il, "ffn_down.weight"));
             l.ff_down_b = get(blk(il, "ffn_down.bias"), false);
+            l.ls_1_w = get(blk(il, "ls1.weight"), m_.kind == Kind::inkling2v);
+            l.ls_2_w = get(blk(il, "ls2.weight"), m_.kind == Kind::inkling2v);
         }
-        m_.mm_0_w = get("mm.0.weight");
-        m_.mm_0_b = get("mm.0.bias");
-        m_.mm_1_w = get("mm.2.weight");
-        m_.mm_1_b = get("mm.2.bias");
+        if (m_.kind == Kind::inkling2v) {   // its projector: two matrices, no biases
+            m_.mm_0_w = get("mm.1.weight");
+            m_.mm_1_w = get("mm.2.weight");
+            m_.class_embd = get("v.class_embd");
+            m_.class_pos_embd = get("v.class_position_embd.weight");
+            if (m_.pre_ln_w == nullptr || m_.pre_ln_b == nullptr) throw std::runtime_error("its tower has no pre_ln");
+        } else {
+            m_.mm_0_w = get("mm.0.weight");
+            m_.mm_0_b = get("mm.0.bias");
+            m_.mm_1_w = get("mm.2.weight");
+            m_.mm_1_b = get("mm.2.bias");
+        }
         if (m_.kind == Kind::hy4) {
             m_.mm_pre_norm_w = get("mm.pre_norm.weight");
             m_.image_newline = get("v.image_newline");
@@ -559,7 +633,8 @@ private:
                 throw std::runtime_error("its position table is not a square grid of the tower's width");
         }
         // the rows' width is the projection's
-        const int64_t width = m_.kind == Kind::qwen3vl ? m_.mm_1_b->ne[0] : m_.mm_1_w->ne[3];
+        const int64_t width = m_.kind == Kind::qwen3vl ? m_.mm_1_b->ne[0]
+                              : m_.kind == Kind::inkling2v ? m_.mm_1_w->ne[1] : m_.mm_1_w->ne[3];
         if (width != m_.projection_dim) throw std::runtime_error("its adapter's output is not its projection_dim wide");
 
         buf_.reset(ggml_backend_alloc_ctx_tensors_from_buft(data_.get(), ggml_backend_get_default_buffer_type(backend_)));
@@ -600,11 +675,15 @@ private:
         if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
             throw std::runtime_error("an empty picture");
         int tw = 0, th = 0;
-        target_size(picture.w, picture.h, m_.size, tw, th);
-        if (tw <= 0 || th <= 0 || tw % m_.size.align != 0 || th % m_.size.align != 0)
-            throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
-        const Rgb sized = fit(picture, tw, th, m_.filter, m_.letterbox, m_.pad);
-        const std::vector<float> pixels = planes(sized, m_.mean, m_.std);
+        std::vector<float> pixels;
+        if (m_.pad_to_align) {
+            pixels = planes_padded(picture, m_.size, m_.filter, m_.mean, m_.std, tw, th);
+        } else {
+            target_size(picture.w, picture.h, m_.size, tw, th);
+            if (tw <= 0 || th <= 0 || tw % m_.size.align != 0 || th % m_.size.align != 0)
+                throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
+            pixels = planes(fit(picture, tw, th, m_.filter, m_.letterbox, m_.pad), m_.mean, m_.std);
+        }
 
         // the first picture reserves the buffers, as mtmd's warm-up does
         if (!allocated_) {
@@ -624,6 +703,15 @@ private:
         if (m_.kind == Kind::qwen3vl) {
             const std::vector<int32_t> positions = qwen_positions(pw, ph, m_.n_merge);
             ggml_backend_tensor_set(g->positions, positions.data(), 0, ggml_nbytes(g->positions));
+        } else if (m_.kind == Kind::inkling2v) {
+            std::vector<int32_t> px{0}, py{0};   // the class token at 0, the patches from 1
+            for (int y = 0; y < ph; ++y)
+                for (int x = 0; x < pw; ++x) {
+                    px.push_back(x + 1);
+                    py.push_back(y + 1);
+                }
+            ggml_backend_tensor_set(g->pos_w, px.data(), 0, ggml_nbytes(g->pos_w));
+            ggml_backend_tensor_set(g->pos_h, py.data(), 0, ggml_nbytes(g->pos_h));
         } else {
             const int n_grid = (int) std::lround(std::sqrt((double) m_.position_embd->ne[1]));
             const std::vector<float> table = hy4_position_table(pos_host_, m_.n_embd, n_grid, pw, ph);
@@ -647,7 +735,7 @@ private:
         ggml_tensor* rows = ggml_graph_node(gf, -1);
         const int n = (int) rows->ne[1];
         const int merged_x = pw / m_.n_merge, merged_y = ph / m_.n_merge;
-        const int expected = m_.kind == Kind::qwen3vl ? merged_x * merged_y : (merged_x + 1) * merged_y;
+        const int expected = m_.kind == Kind::hy4 ? (merged_x + 1) * merged_y : merged_x * merged_y;
         if (rows->ne[0] != m_.projection_dim || n != expected || ggml_nelements(rows) != (int64_t) n * m_.projection_dim)
             throw std::runtime_error("the encoder gave " + std::to_string(n) + " rows of " +
                                      std::to_string(rows->ne[0]) + " where " + std::to_string(expected) + " of " +

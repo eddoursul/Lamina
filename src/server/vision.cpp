@@ -358,7 +358,9 @@ std::string projector_type(const std::string& mmproj) {
     return "";
 }
 
-bool projector_type_read(const std::string& type) { return type == "qwen3vl_merger" || type == "hy_v4_flash"; }
+bool projector_type_read(const std::string& type) {
+    return type == "qwen3vl_merger" || type == "hy_v4_flash" || type == "inkling2v";
+}
 
 bool vision_built() {
 #if LAMINA_VISION

@@ -104,7 +104,9 @@ The server builds a config for the file and says in its window what it took:
   where the CPU takes 8-10 s. What the engine lends: Qwen3.8-Flash-Next the last slots of a card's expert cache, as a
   prompt's buffers take them (their experts are copied back after, ~0.1 s); Hy4-flash a part of its main GPU's expert
   slots; Qwen3.6-35B-A3B and Qwen3.8-27B the buffers a prompt's experts are streamed through where the experts do not
-  all fit the GPUs, else VRAM they leave free (a layer split keeps the encoder's ~1 GB free on the main GPU). A picture
+  all fit the GPUs, else VRAM they leave free (a layer split keeps the encoder's ~1 GB free on the main GPU); Inkling
+  2 Mini VRAM its context leaves free for the loan from the start, or what its experts give up where they are in
+  RAM. A picture
   whose loan finds no memory is encoded on the CPU, on its logical cores (the log says so once). With batch slots
   (`--parallel`) the engine lends beside the requests that are generating, and after a prompt one of them is still
   reading. The engine does not lend to a server with replicas: the CPU encodes there, as the window says,
@@ -449,7 +451,11 @@ arguments JSON. The server reads them as such (a call's arguments are streamed a
 the server's own forms for it (a forced call's opening, the close of thinking at a budget). `reasoning_effort`
 none, low, medium and high are the template's levels 0, 0.2, 0.7 and 0.9; at none the model still writes a short
 thinking block, which comes as reasoning. The preset samples at temperature 1.0 over the 64 likeliest tokens (the
-model card: the plain distribution). No pictures and no drafts yet.
+model card: the plain distribution). Pictures: the repository's `mmproj-F32.gguf` beside the model (`-m` finds it;
+a config's `vision` section names it). Its processor does not resize: a picture is a token a patch of 40 x 40 px, its
+sides padded to whole patches, up to 4,096 tokens (the section's `max_tokens`; one past the limit is resized to fit):
+a 2,560 x 1,440 screenshot is 2,304 tokens, encoded in 0.5-0.6 s on an RTX 3090 (0.9 GB of VRAM while it works: the
+projector's F32 matrices are FP16 on the card).
 
 ## Updating
 

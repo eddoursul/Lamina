@@ -160,25 +160,38 @@ __global__ void k_add(float* x, const float* y, const float* b, int64_t T, int n
     x[i] += v;
 }
 
-constexpr int kHeadPad = 80;   // a head's values as the attention takes them: its 72 and zeros to a multiple of 16
-constexpr int kRopeFreqs = 18; // Qwen's rotary pairs a section: d_head / 4
+/// x[t][n] += (y[t][n] + b[n]) * s[n] (b may be null): a block's output through its learned scale (Inkling 2's)
+__global__ void k_add_scaled(float* x, const float* y, const float* b, const float* s, int64_t T, int n) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= T * n) return;
+    x[i] += (y[i] + (b != nullptr ? b[i % n] : 0.0f)) * s[i % n];
+}
+
+constexpr int kHeadPad = 80;   // a head's values as the attention takes them: its 72 (Inkling 2's 64) and zeros to 80
+constexpr int kRopeFreqs = 18; // rotary pairs a section at most: Qwen's d_head / 4 (Inkling 2's 16)
 
 /// A chunk's q, k and v rows ([T][3 E] FP32, the three one after the other, plus their bias) into the attention's
 /// FP16 layouts: q16 [token][head][80], k16 and v16 [head][token][80], a head's values padded with zeros.  With `cs`
 /// (Qwen): the 2-D rotary positions on q and k as ggml's rope of the vision type applies them: of a head's 72 values
 /// the pairs (i, i + 36), i < 18 turned by the patch's row and i >= 18 by its column, cs[position][i mod 18] the
 /// angle's cosine and sine.  The tokens are in the order of the 2x2 groups: token p is patch (2 my + dy, 2 mx + dx)
-/// of group p / 4 = my * (pw / 2) + mx, p mod 4 = 2 dy + dx.  grid (T), block 256.
+/// of group p / 4 = my * (pw / 2) + mx, p mod 4 = 2 dy + dx.  `ink` (Inkling 2, with `cs`): ggml's rope over each
+/// half of a head, as mtmd's build_rope_2d asks for it: the pairs (2 i, 2 i + 1), the first half's turned by the
+/// token's column and the second's by its row, both counted from 1 (token 0 is the class token, at 0: not turned; the
+/// patches follow in the grid's order), cs[position][i] the pair's cosine and sine.  grid (T), block 256.
 __global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* k16, __half* v16, const float* cs, int t0,
-                      int N, int H, int D, int pw) {
+                      int N, int H, int D, int pw, int ink) {
     const int t = (int) blockIdx.x, gt = t0 + t;
     const int E = H * D;
     const float* row = qkv + (size_t) t * 3 * E;
     int prow = 0, pcol = 0;
-    if (cs != nullptr) {
+    if (cs != nullptr && ink == 0) {
         const int cell = gt >> 2, sub = gt & 3, half_w = pw >> 1;
         prow = 2 * (cell / half_w) + (sub >> 1);
         pcol = 2 * (cell % half_w) + (sub & 1);
+    } else if (cs != nullptr && gt > 0) {
+        prow = (gt - 1) / pw + 1;
+        pcol = (gt - 1) % pw + 1;
     }
     const int half = D / 2;   // 36
     for (int i = (int) threadIdx.x; i < H * kHeadPad; i += (int) blockDim.x) {
@@ -189,7 +202,18 @@ __global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* 
             q = row[e] + bias[e];
             k = row[E + e] + bias[E + e];
             v = row[2 * E + e] + bias[2 * E + e];
-            if (cs != nullptr) {
+            if (cs != nullptr && ink != 0) {
+                const int other = (d & 1) != 0 ? e - 1 : e + 1;   // the pair's other value (the halves are even)
+                const float* a = cs + ((size_t) (d < half ? pcol : prow) * kRopeFreqs + ((d < half ? d : d - half) >> 1)) * 2;
+                const float qo = row[other] + bias[other], ko = row[E + other] + bias[E + other];
+                if ((d & 1) == 0) {   // x0 cos - x1 sin
+                    q = q * a[0] - qo * a[1];
+                    k = k * a[0] - ko * a[1];
+                } else {              // x0 sin + x1 cos
+                    q = qo * a[1] + q * a[0];
+                    k = ko * a[1] + k * a[0];
+                }
+            } else if (cs != nullptr) {
                 const int ic = d < half ? d : d - half;          // the pair's index
                 const int other = d < half ? e + half : e - half; // its other value
                 const float* a = cs + ((size_t) (ic < kRopeFreqs ? prow : pcol) * kRopeFreqs + ic % kRopeFreqs) * 2;
@@ -551,8 +575,11 @@ public:
         // the caller asks for FP16 products or MMQ has no tile for it here
         q8_fp16_ = p.q8_fp16 || !mmq::built() || !mmq::supported(kQ8_0);
     }
-    /// the patches of the largest picture the projector's limit gives: the buffers start at this size
-    int64_t first_patches() const { return proj_.size.max_pixels / (proj_.patch_size * proj_.patch_size); }
+    /// the rows of the largest picture the projector's limit gives (its patches, and Inkling 2's class token): the
+    /// buffers start at this size
+    int64_t first_patches() const {
+        return proj_.size.max_pixels / (proj_.patch_size * proj_.patch_size) + (proj_.kind == ProjectorKind::inkling2v ? 1 : 0);
+    }
     static uint64_t up(uint64_t bytes) { return (bytes + 255) & ~(uint64_t) 255; }
     /// LAMINA_VISION_MEM=1: the device's free memory after a step of the start, and what the step took
     void mem(const char* step) {
@@ -680,6 +707,19 @@ private:
             if (!measuring_) ck(cudaMemsetAsync((uint8_t*) m.d + bytes, 0, kMmqTail, st_), "a weight's tail");
             if (m.fp16) q8_elems_ = std::max(q8_elems_, n);
             else any_mmq_ = true;
+        } else if (info->type == kF32 && proj_.kind != ProjectorKind::qwen3vl) {
+            // the towers with separate q, k and v multiply FP16 values (mul16): an F32 file's matrices turned to them
+            // on the device, through a buffer of the file's bytes
+            m.type = kF16;
+            m.d = dmalloc(bytes / 2);
+            if (!measuring_) {
+                void* f32 = nullptr;
+                ck(cudaMalloc(&f32, bytes), "an F32 matrix's staging");
+                to_device(f32, raw.data(), bytes);
+                k_to_f16<<<grid1(n), kThreads, 0, st_>>>((const float*) f32, (__half*) m.d, n);
+                ck(cudaStreamSynchronize(st_), "an F32 matrix's conversion");
+                cudaFree(f32);
+            }
         } else if (info->type == kF32) {
             m.type = kF32;
             m.d = dmalloc(bytes);
@@ -720,13 +760,16 @@ private:
         float* o_b = nullptr;
         float* up_b = nullptr;
         float* down_b = nullptr;
+        float* ls1 = nullptr;   // Inkling 2: the attention's and the FFN's outputs times a learned vector
+        float* ls2 = nullptr;
     };
 
     void load() {
         const int E = proj_.n_embd, H = proj_.n_head, D = proj_.d_head();
-        const bool qwen = proj_.kind == ProjectorKind::qwen3vl;
-        if (D != 72 || E != H * D)
-            throw std::runtime_error("its heads are not 72 values wide, the size this encoder's attention kernel takes");
+        const bool qwen = proj_.kind == ProjectorKind::qwen3vl, ink = proj_.kind == ProjectorKind::inkling2v;
+        if (E != H * D || (ink ? D > kHeadPad || D % 4 != 0 || D / 4 > kRopeFreqs : D != 72))
+            throw std::runtime_error("its heads are not of a width this encoder's attention kernel takes (72 values; "
+                                     "Inkling 2's up to 80 in fours)");
         const int P = proj_.patch_size, in = 3 * P * P;
         // the patch kernel as a matrix [E][3 P P] (a patch's values: channel, row, column); Qwen's two summed
         {
@@ -747,8 +790,19 @@ private:
             if ((int64_t) n_side_ * n_side_ * E != (int64_t) pos_host_.size())
                 throw std::runtime_error("its position table is not a square grid of the tower's width");
         }
-        if (proj_.find("v.pre_ln.weight") != nullptr)
+        if (ink) {
+            pre_w_ = vec("v.pre_ln.weight", E);
+            pre_b_ = vec("v.pre_ln.bias", E);
+            if (!measuring_) {   // the host's: the class token's row, its embedding and its position
+                cls_ = proj_.floats("v.class_embd");
+                const std::vector<float> at = proj_.floats("v.class_position_embd.weight");
+                if ((int) cls_.size() != E || at.size() != cls_.size())
+                    throw std::runtime_error("its class token is not the tower's width");
+                for (size_t i = 0; i < cls_.size(); ++i) cls_[i] += at[i];
+            }
+        } else if (proj_.find("v.pre_ln.weight") != nullptr) {
             throw std::runtime_error("its tower has a norm before the blocks, which this encoder does not read");
+        }
         post_w_ = vec("v.post_ln.weight", E, false);
         post_b_ = post_w_ != nullptr ? vec("v.post_ln.bias", E) : nullptr;
         n_ff_ = 0;
@@ -789,9 +843,18 @@ private:
             l.up_b = vec(b + "ffn_up.bias", n_ff_);
             l.down = mat(b + "ffn_down.weight", E, n_ff_);
             l.down_b = vec(b + "ffn_down.bias", E);
+            if (ink) {
+                l.ls1 = vec(b + "ls1.weight", E);
+                l.ls2 = vec(b + "ls2.weight", E);
+            }
         }
         const int proj = proj_.projection_dim;
-        if (qwen) {
+        if (ink) {   // two matrices over a group's four rows, the exact GELU between them, no biases
+            mm0_ = mat("mm.1.weight", 4 * E, 4 * E);
+            mm1_ = mat("mm.2.weight", proj, 4 * E);
+            n_mid_ = 4 * E;
+            mm0_b_ = mm1_b_ = upload(std::vector<float>((size_t) std::max(n_mid_, proj), 0.0f));
+        } else if (qwen) {
             mm0_ = mat("mm.0.weight", 4 * E, 4 * E);
             mm0_b_ = vec("mm.0.bias", 4 * E);
             mm1_ = mat("mm.2.weight", proj, 4 * E);
@@ -864,8 +927,10 @@ private:
         };
         // the two streams' buffers: a row of the tower's width a patch, or a quarter of an adapter's row where that
         // is wider (the 27B's rows of 5,120): the adapters leave their rows in them, a row a group of four patches
+        // (a patch's pixels where those are more: Inkling 2's 20 x 20 patches)
         const int64_t adapter = std::max<int64_t>(n_mid_, proj_.projection_dim);
-        const size_t stream = (size_t) n_max * (size_t) std::max<int64_t>(E, (adapter + 3) / 4) * 4;
+        const int64_t pixels = (int64_t) 3 * proj_.patch_size * proj_.patch_size;
+        const size_t stream = (size_t) n_max * (size_t) std::max<int64_t>({(int64_t) E, (adapter + 3) / 4, pixels}) * 4;
         void* const x = work(stream);
         void* const h = work(stream);
         void* const c32 = work((size_t) chunk * wide * 4);
@@ -970,15 +1035,20 @@ private:
         if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
             throw std::runtime_error("an empty picture");
         int tw = 0, th = 0;
-        target_size(picture.w, picture.h, proj_.size, tw, th);
-        if (tw <= 0 || th <= 0 || tw % proj_.size.align != 0 || th % proj_.size.align != 0)
-            throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
-        const Rgb sized = fit(picture, tw, th, proj_.filter, proj_.letterbox, proj_.pad);
-        const std::vector<float> pixels = planes(sized, proj_.mean, proj_.std);
+        std::vector<float> pixels;
+        if (proj_.pad_to_align) {
+            pixels = planes_padded(picture, proj_.size, proj_.filter, proj_.mean, proj_.std, tw, th);
+        } else {
+            target_size(picture.w, picture.h, proj_.size, tw, th);
+            if (tw <= 0 || th <= 0 || tw % proj_.size.align != 0 || th % proj_.size.align != 0)
+                throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
+            pixels = planes(fit(picture, tw, th, proj_.filter, proj_.letterbox, proj_.pad), proj_.mean, proj_.std);
+        }
 
-        const bool qwen = proj_.kind == ProjectorKind::qwen3vl;
+        const bool qwen = proj_.kind == ProjectorKind::qwen3vl, ink = proj_.kind == ProjectorKind::inkling2v;
         const int E = proj_.n_embd, H = proj_.n_head, D = proj_.d_head(), P = proj_.patch_size;
-        const int pw = tw / P, ph = th / P, N = pw * ph, in = 3 * P * P;
+        // (Inkling 2: the class token's row before the patches')
+        const int cls = ink ? 1 : 0, pw = tw / P, ph = th / P, n_patch = pw * ph, N = n_patch + cls, in = 3 * P * P;
         if (N > n_max_) alloc(N, false);
 
         // the patches as rows (channel, row, column), and the position table, in the tokens' order: Qwen's the 2x2
@@ -995,7 +1065,7 @@ private:
         };
         host_.resize((size_t) N * std::max(in, E));
         const size_t plane = (size_t) tw * th;
-        for (int p = 0; p < N; ++p) {
+        for (int p = 0; p < n_patch; ++p) {
             int py, px;
             patch_of(p, py, px);
             float* row = &host_[(size_t) p * in];
@@ -1005,26 +1075,47 @@ private:
                     std::copy(src, src + P, row + (c * P + y) * P);
                 }
         }
-        to_device(h_, host_.data(), (size_t) N * in * 4);
-        for (int64_t t0 = 0; t0 < N; t0 += chunk_) {
-            const int64_t T = std::min<int64_t>(chunk_, N - t0);
-            mul(patch_, h_ + t0 * in, T, x_ + t0 * E, E);
+        to_device(h_, host_.data(), (size_t) n_patch * in * 4);
+        if (ink) ck(cudaMemsetAsync(x_, 0, (size_t) E * 4, st_), "the class token's row");
+        for (int64_t t0 = 0; t0 < n_patch; t0 += chunk_) {
+            const int64_t T = std::min<int64_t>(chunk_, n_patch - t0);
+            mul(patch_, h_ + t0 * in, T, x_ + (t0 + cls) * E, E);
         }
         {
-            const std::vector<float> table = qwen ? qwen_position_table(pos_host_, E, n_side_, pw, ph)
-                                                  : hy4_position_table(pos_host_, E, n_side_, pw, ph);
-            for (int p = 0; p < N; ++p) {
+            const std::vector<float> table = qwen  ? qwen_position_table(pos_host_, E, n_side_, pw, ph)
+                                             : ink ? qwen_position_table(pos_host_, E, n_side_, pw, ph, false)
+                                                   : hy4_position_table(pos_host_, E, n_side_, pw, ph);
+            if (ink) std::copy(cls_.begin(), cls_.end(), host_.begin());
+            for (int p = 0; p < n_patch; ++p) {
                 int py, px;
                 patch_of(p, py, px);
-                std::copy(&table[((size_t) py * pw + px) * E], &table[((size_t) py * pw + px) * E] + E, &host_[(size_t) p * E]);
+                std::copy(&table[((size_t) py * pw + px) * E], &table[((size_t) py * pw + px) * E] + E,
+                          &host_[(size_t) (p + cls) * E]);
             }
         }
         to_device(h_, host_.data(), (size_t) N * E * 4);   // after the patch products, which read h_
-        // x = patches + bias + positions
+        // x = patches + bias + positions (Inkling 2's first row: the class token)
         k_add<<<grid1((int64_t) N * E), kThreads, 0, st_>>>(x_, h_, patch_b_, N, E);
         dump("embed", x_, (size_t) N * E);
+        if (ink) k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, pre_w_, pre_b_, x_, E, proj_.eps, false);
         const float* cs = nullptr;
-        if (qwen) {
+        if (ink) {
+            // ggml's rope cache over a half of a head: position p's angles p * s^i, s = base^(-2 / (d_head / 2)), the
+            // recurrence in float as ggml runs it; the positions 0 (the class token) to the grid's longer side
+            const int n_pos = std::max(pw, ph) + 1, n_freq = D / 4;
+            const float theta_scale = powf(proj_.rope_theta, -2.0f / (float) (D / 2));
+            std::vector<float> table((size_t) n_pos * kRopeFreqs * 2);
+            for (int p = 0; p < n_pos; ++p) {
+                float theta = (float) p;
+                for (int i = 0; i < n_freq; ++i) {
+                    table[((size_t) p * kRopeFreqs + i) * 2] = cosf(theta);
+                    table[((size_t) p * kRopeFreqs + i) * 2 + 1] = sinf(theta);
+                    theta *= theta_scale;
+                }
+            }
+            to_device(cs_, table.data(), table.size() * 4);
+            cs = cs_;
+        } else if (qwen) {
             // ggml's rope cache for the vision type: position p's angles p * s^i, s = base^(-2 / (d_head / 2)), the
             // recurrence in float as ggml runs it
             const int n_pos = std::max(pw, ph);
@@ -1058,7 +1149,7 @@ private:
                     mul16(l.k, x16_, T, c32_ + E, 3 * E);
                     mul16(l.v, x16_, T, c32_ + 2 * E, 3 * E);
                 }
-                k_qkv<<<(unsigned) T, 256, 0, st_>>>(c32_, l.qkv_b, q16_, k16_, v16_, cs, (int) t0, N, H, D, pw);
+                k_qkv<<<(unsigned) T, 256, 0, st_>>>(c32_, l.qkv_b, q16_, k16_, v16_, cs, (int) t0, N, H, D, pw, cls);
             }
             attention(N);   // into h_
             if (il == 0) dump("fa0", h_, (size_t) N * E);
@@ -1068,26 +1159,52 @@ private:
                 if (il == 0 && t0 == 0) {   // the output projection with its bias, as the ggml encoder's tap has it
                     k_bias_act<<<grid1(T * E), kThreads, 0, st_>>>(c32_, l.o_b, T, E, E, 0);
                     dump("attn0", c32_, (size_t) T * E);
-                    k_add<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, nullptr, T, E);
+                    if (ink) k_add_scaled<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, nullptr, l.ls1, T, E);
+                    else k_add<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, nullptr, T, E);
                     continue;
                 }
-                k_add<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, l.o_b, T, E);
+                if (ink) k_add_scaled<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, l.o_b, l.ls1, T, E);
+                else k_add<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, l.o_b, T, E);
             }
             // feed-forward
             k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, l.ln2_w, l.ln2_b, h_, E, proj_.eps, false);
             for (int64_t t0 = 0; t0 < N; t0 += chunk_) {
                 const int64_t T = std::min<int64_t>(chunk_, N - t0);
                 mul(l.up, h_ + t0 * E, T, c32_, n_ff_);
-                k_bias_act<<<grid1(T * n_ff_), kThreads, 0, st_>>>(c32_, l.up_b, T, n_ff_, n_ff_, 1);
+                k_bias_act<<<grid1(T * n_ff_), kThreads, 0, st_>>>(c32_, l.up_b, T, n_ff_, n_ff_, ink ? 2 : 1);
                 mul_into_c32(l.down, T, E);
-                k_add<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, l.down_b, T, E);
+                if (ink) k_add_scaled<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, l.down_b, l.ls2, T, E);
+                else k_add<<<grid1(T * E), kThreads, 0, st_>>>(x_ + t0 * E, c32_, l.down_b, T, E);
             }
             if (il < 2 || il == proj_.n_layer - 1) dump("layer" + std::to_string(il), x_, (size_t) N * E);
         }
 
         const int proj = proj_.projection_dim;
         int n_rows = 0;
-        if (qwen) {
+        if (ink) {
+            // the patches' rows (not the class token's) into h_, then the projector between the two buffers: each
+            // group's four rows side by side through its first matrix into x_, the exact GELU, its second into h_
+            const int ow = pw / 2, oh = ph / 2, cells = ow * oh;
+            if (post_w_ != nullptr) k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, post_w_, post_b_, x_, E, proj_.eps, false);
+            ck(cudaMemcpyAsync(h_, x_ + E, (size_t) n_patch * E * 4, cudaMemcpyDeviceToDevice, st_), "the patches' rows");
+            for (int64_t t0 = 0; t0 < cells; t0 += chunk_) {
+                const int64_t T = std::min<int64_t>(chunk_, cells - t0);
+                k_gather_2x2<<<grid1(T * 4 * E), kThreads, 0, st_>>>(h_, c32_, pw, ow, (int) t0, (int) T, E);
+                mul(mm0_, c32_, T, x_ + t0 * n_mid_, n_mid_);
+            }
+            k_bias_act<<<grid1((int64_t) cells * n_mid_), kThreads, 0, st_>>>(x_, mm0_b_, cells, n_mid_, n_mid_, 2);
+            for (int64_t t0 = 0; t0 < cells; t0 += chunk_) {
+                const int64_t T = std::min<int64_t>(chunk_, cells - t0);
+                mul(mm1_, x_ + t0 * n_mid_, T, h_ + t0 * proj, proj);
+            }
+            n_rows = cells;
+            out.n = n_rows;
+            out.nx = n_rows;   // read at text positions: one row of n
+            out.ny = 1;
+            out.n_embd = proj;
+            out.data.resize((size_t) n_rows * proj);
+            ck(cudaMemcpyAsync(out.data.data(), h_, out.data.size() * 4, cudaMemcpyDeviceToHost, st_), "the rows' copy");
+        } else if (qwen) {
             if (post_w_ != nullptr) k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, post_w_, post_b_, x_, E, proj_.eps, false);
             // the rows into h_, free since the last block (alloc sizes it for them)
             n_rows = N / 4;
@@ -1187,6 +1304,9 @@ private:
     float* patch_b_ = nullptr;
     float* post_w_ = nullptr;
     float* post_b_ = nullptr;
+    float* pre_w_ = nullptr;    // Inkling 2: the norm before the blocks
+    float* pre_b_ = nullptr;
+    std::vector<float> cls_;    // its class token's row (the host's)
     float* mm0_b_ = nullptr;
     float* mm1_b_ = nullptr;
     float* pre_norm_w_ = nullptr;

@@ -16,5 +16,11 @@
   "log": "./lamina-inkling2-mini-ud-iq4_xs.log",
   "lib_dirs": [],
   "expert_profile_save": "./inkling2-mini-ud-iq4_xs-learned.bin",
-  "expert_profile_save_every": 1
+  "expert_profile_save_every": 1,
+  "vision": {
+    "mmproj": "../Lamina-data/models/Inkling-2-Mini-UD-IQ4_XS/mmproj-F32.gguf",
+    "gpu": true,
+    "lend": true,
+    "threads": 16
+  }
 }
