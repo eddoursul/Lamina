@@ -386,11 +386,11 @@ greedy, Lamina's conversation cache off (`bench/lamina_bench.py`, `scratch/inkli
 
 | | llama.cpp | llama.cpp, drafter (3 / 7) | Lamina, no drafts | Lamina |
 |---|---|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 107.7 | 120.0 |
-| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 107.1 | 140.2 |
-| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 2,184 / 104.8 | 2,180 / 247.8 |
-| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 2,072 / 97.0 | 2,067 / 173.1 |
-| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 1,703 / 75.1 | 1,709 / 117.1 |
+| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 111.7 | 128.0 |
+| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 110.9 | 153.4 |
+| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 2,595 / 107.9 | 2,558 / 289.5 |
+| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 2,400 / 99.5 | 2,385 / 196.6 |
+| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 1,923 / 77.0 | 1,912 / 129.8 |
 
 Lamina's greedy text is the same with drafts and without (a window's rows leave what a row at a time leaves, to the
 bit); sampled at temperature 0.7 the speeds are the greedy ones within 3% (the sampler runs on the GPU). Its drafter
@@ -403,9 +403,11 @@ drafter); the server ~1.1 GB of RAM. Lamina's prompt cache: a 21K-token prompt's
 22K-token conversation back in 0.4 s.
 
 Agreement with llama.cpp (`scratch/inkling/parity.sh`): Lamina forced along llama.cpp's own greedy text, the argmax
-agreeing at 97.5% / 98.75% / 99.25% of the positions (the short prompt, thinking, the edit; 200 / 400 / 400), mean KL
-2.3e-3 / 2.3e-3 / 1.2e-3; after the 21K prompt 96.9% and 5.4e-3 (64 positions), where llama.cpp at another batch size
-agrees with itself at 96.9-98.4% and 3.7e-3 to 1.5e-2.
+agreeing at 98.5% / 98.5% / 99.75% of the positions (the short prompt, thinking, the edit; 200 / 400 / 400), mean KL
+2.0e-3 / 2.1e-3 / 1.0e-3; after the 21K prompt 95.3% and 8.4e-3 (64 positions), where llama.cpp at another batch size
+agrees with itself at 96.9-98.4% and 3.7e-3 to 1.5e-2. A prompt chunk's experts read their activations as halves on
+this card (the FP16 tensor cores; llama.cpp and Lamina's shorter parts round them to 8 bits): a sum's error against
+exact arithmetic is 2,000 times smaller there.
 
 A card smaller than the model: the RTX 5070 Ti (16 GB, the card the desktop draws on) alone with the same file (15.7
 GB). Lamina keeps the experts in RAM and the ones used most on the card (2,330 of the 3,072 at the start, fewer as
