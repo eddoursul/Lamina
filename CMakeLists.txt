@@ -222,7 +222,7 @@ target_link_libraries(lamina-plan PRIVATE lamina_plan)
 # above has already refused anything older than sm_80 by the time this runs.
 if(LAMINA_ENABLE_CUDA)
   add_library(lamina_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
-                                 src/platform/console_quit.cpp)
+                                 src/platform/console_quit.cpp src/platform/slice_read.cpp)
   target_include_directories(lamina_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   # CUDA::cudart is PUBLIC because host translation units call the runtime: the .cu sources get cudart through the
   # CUDA language rules, a .cpp does not.
@@ -761,12 +761,11 @@ if(LAMINA_NATIVE_EXPERTS)
 
     # Hy4-flash (GGUF architecture hy_v4_flash): its own engine path, a library `lamina` switches to for such a model as
     # it does for Qwen3.6, and lamina-hy4 wraps on its own.  Fast math as ggml-cuda (llama.cpp's PR, the reference).
-    add_library(lamina_hy4 STATIC src/hy4/hy4_engine.cu src/hy4/hy4_dfly_file.cpp src/hy4/hy4_load.cpp
-                src/hy4/hy4_place.cpp)
+    add_library(lamina_hy4 STATIC src/hy4/hy4_engine.cu src/hy4/hy4_dfly_file.cpp src/hy4/hy4_place.cpp)
     target_include_directories(lamina_hy4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(lamina_hy4 PRIVATE lamina_kernels lamina_kernels_cpu lamina_warnings lamina_serve_io lamina_spec
-                          lamina_engine lamina_mmq nlohmann CUDA::cublas CUDA::cudart)
+    target_link_libraries(lamina_hy4 PRIVATE lamina_core lamina_kernels lamina_kernels_cpu lamina_warnings lamina_serve_io
+                          lamina_spec lamina_engine lamina_mmq nlohmann CUDA::cublas CUDA::cudart)
     target_compile_options(lamina_hy4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-hy4 src/hy4/hy4_main.cpp)
     target_link_libraries(lamina-hy4 PRIVATE lamina_hy4 CUDA::cudart)

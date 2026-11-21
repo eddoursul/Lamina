@@ -1,7 +1,7 @@
-// src/hy4/hy4_load.cpp - see hy4_load.hpp.  A copy out of a mapped file faults its pages in a few at a time (the routed
+// src/platform/slice_read.cpp - see lamina/platform/slice_read.hpp.  A copy out of a mapped file faults its pages in a few at a time (the routed
 // experts at 1.2-1.5 GiB/s from this PC's SSD); large reads go at the drive's rate (4.3-4.4 GiB/s), and past the cache
 // they leave the file's pages out of RAM the arena needs.
-#include "hy4_load.hpp"
+#include "lamina/platform/slice_read.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -23,7 +23,7 @@
 #include <unistd.h>
 #endif
 
-namespace lamina::hy4 {
+namespace lamina::platform {
 namespace {
 
 struct Piece {
@@ -84,14 +84,14 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
         for (size_t p; !bad && (p = next.fetch_add(1)) < pieces.size();) {
             const Piece& pc = pieces[p];
             const SliceRun& s = runs[pc.run];
-            uint8_t* dst = base(s.group);
-            if (dst == nullptr) { fail("no memory for the routed experts"); break; }
+            uint8_t* const group = base(s.group);
+            if (group == nullptr) { fail("no memory for the routed experts"); break; }
             // slice i's place: its own (places) or the run's stride
             auto place = [&](int64_t i) {
                 return s.places ? s.places[pc.first + i] + s.dst_off + pc.off
-                                : dst + s.dst_off + (uint64_t) (pc.first + i) * s.stride + pc.off;
+                                : group + s.dst_off + (uint64_t) (pc.first + i) * s.stride + pc.off;
             };
-            dst = place(0);
+            uint8_t* const dst = place(0);
             const uint64_t at = s.offset + (uint64_t) pc.first * s.bytes + pc.off;
             const uint64_t n = pc.len ? pc.len : (uint64_t) pc.n * s.bytes;   // bytes
             const uint64_t slice = pc.len ? pc.len : s.bytes;                  // one slice's (or part's)
@@ -182,4 +182,4 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
     return !bad;
 }
 
-}  // namespace lamina::hy4
+}  // namespace lamina::platform

@@ -1,4 +1,4 @@
-// src/hy4/hy4_load.hpp - the model file read in large pieces: runs of equal slices of a file copied to places a stride
+// include/lamina/platform/slice_read.hpp - a model file read in large pieces: runs of equal slices of a file copied to places a stride
 // apart, past the OS file cache or through it, on several threads.
 #pragma once
 
@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace lamina::hy4 {
+namespace lamina::platform {
 
 /// `count` consecutive slices of `bytes` each from `offset` in the file at `path`, slice i copied to
 /// base(group) + dst_off + i * stride, or with `places` to places[i] + dst_off (the group's base asked for all the same:
@@ -27,4 +27,4 @@ struct SliceRun {
 bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, uint64_t piece,
                  const std::function<uint8_t*(int)>& base, std::string& err, double* seconds = nullptr);
 
-}  // namespace lamina::hy4
+}  // namespace lamina::platform

@@ -13,7 +13,6 @@
 //     scratch/q36/logits_to_parity.py).
 #include "hy4_kernels.cuh"
 #include "hy4_dfly_file.hpp"
-#include "hy4_load.hpp"
 #include "hy4_place.hpp"
 #include "hy4_prompt.cuh"
 
@@ -32,6 +31,7 @@
 #include "lamina/ngram/ple_reader.hpp"
 #include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/memory.hpp"
+#include "lamina/platform/slice_read.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
 #include "lamina/program/host_sampling.hpp"
 #include "lamina/program/serve_io.hpp"
@@ -277,7 +277,7 @@ struct Loader {
     /// Every tensor `want` takes, read in large pieces into host memory: a copy out of the mapping faults its pages in a
     /// few at a time
     bool read_ahead(const std::function<bool(const std::string&)>& want, int threads, bool uncached, std::string& e) {
-        std::vector<lamina::hy4::SliceRun> runs;
+        std::vector<lamina::platform::SliceRun> runs;
         std::vector<std::pair<const lamina::TensorInfo*, uint64_t>> at;
         uint64_t total = 0;
         for (size_t s = 0; s < gm.size(); ++s)
@@ -291,7 +291,7 @@ struct Loader {
         pre_buf.reset(new (std::nothrow) uint8_t[std::max<uint64_t>(total, 64)]);
         if (!pre_buf) return true;   // the mapping's, then
         uint8_t* b = pre_buf.get();
-        if (!lamina::hy4::read_slices(runs, threads, uncached, (uint64_t) 32 << 20, [b](int) { return b; }, e)) return false;
+        if (!lamina::platform::read_slices(runs, threads, uncached, (uint64_t) 32 << 20, [b](int) { return b; }, e)) return false;
         for (const auto& [t, o] : at) pre[t] = b + o;
         return true;
     }
@@ -679,7 +679,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         cv.wait(lk, [&] { return made > (size_t) i || alloc_end; });
         return made > (size_t) i ? bases[(size_t) i] : nullptr;
     };
-    std::vector<lamina::hy4::SliceRun> runs;
+    std::vector<lamina::platform::SliceRun> runs;
     uint64_t read_bytes = 0;
     for (size_t i = 0; i < src.size(); ++i) {
         const Src& s = src[i];
@@ -692,7 +692,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         read_bytes += (uint64_t) (2 * s.gsz + s.dsz) * (uint64_t) g.n_expert;
     }
     double read_s = 0;
-    const bool read_ok = lamina::hy4::read_slices(runs, std::max(1, threads), !file_cache, (uint64_t) 32 << 20, base,
+    const bool read_ok = lamina::platform::read_slices(runs, std::max(1, threads), !file_cache, (uint64_t) 32 << 20, base,
                                                   err, &read_s);
     for (size_t i = 0; i < src.size(); ++i) base((int) i);   // every block made (or the allocation's end)
     if (alloc.joinable()) alloc.join();
