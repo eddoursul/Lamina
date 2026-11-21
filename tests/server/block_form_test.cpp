@@ -115,6 +115,10 @@ int main() {
                           false, nullptr, false, 1);
         CHECK(g.calls.empty() && g.content == "{}ab");
     }
+    {   // a block of a kind the form has no reading for: its text is the reply's
+        const Got g = run({t.model, "tool", "<|content_invoke_tool_text|>", "raw input", t.end}, false, kTools, false, 2);
+        CHECK(g.calls.empty() && g.content == "raw input");
+    }
     // a tag the model spells in plain tokens is text: only a whole piece is a tag
     CHECK(lamina::block_piece("<|end_", t) == "<|end_" && lamina::block_piece(t.end, t) == std::string(1, lamina::kBlkEnd));
     CHECK(lamina::blocks_control(t.model + "f" + t.call, t) == std::string(1, lamina::kBlkModel) + "f" + lamina::kBlkCall);

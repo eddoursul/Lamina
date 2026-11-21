@@ -137,6 +137,10 @@ std::string block_piece(std::string_view s, const BlockTags& t) {
     if (s == t.text) return std::string(1, kBlkText);
     if (s == t.call) return std::string(1, kBlkCall);
     if (s == t.end) return std::string(1, kBlkEnd);
+    // a block of another kind (a tag the template writes for no reply, <|content_invoke_tool_text|>): its text is
+    // the reply's
+    if (s.size() > 12 && s.compare(0, 10, "<|content_") == 0 && s.compare(s.size() - 2, 2, "|>") == 0)
+        return std::string(1, kBlkText);
     std::string out(s);
     out.erase(std::remove_if(out.begin(), out.end(), is_block_control), out.end());
     return out;
