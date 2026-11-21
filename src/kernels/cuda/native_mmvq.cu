@@ -1086,6 +1086,53 @@ void launch_multi(const void* weights, const void* x_q8_1, float* y, int n_in, i
     }
 }
 
+// ============================ several products a launch ============================
+// native_mmvq_multi_kernel<F, NCOLS, WARPS, 1> a job a block: block b is row b - (the rows of the jobs before) of its
+// job's matrix, against that job's activations.  The sums and their order are that kernel's, so each value is the
+// single launch's, bitwise.
+struct MmvqJobTable {
+    const void* w[kMmvqJobs];
+    const Q81Block* x[kMmvqJobs];
+    float* y[kMmvqJobs];
+    int end[kMmvqJobs];   // the first block past job j's rows
+};
+template<typename F, int NCOLS>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_mmvq_jobs_kernel(MmvqJobTable jt, int n_jobs, int n_in) {
+    int job = 0;
+#pragma unroll
+    for (int j = 0; j + 1 < kMmvqJobs; ++j) job += (j + 1 < n_jobs && int(blockIdx.x) >= jt.end[j]) ? 1 : 0;
+    const int first = job > 0 ? jt.end[job - 1] : 0;
+    const int row = int(blockIdx.x) - first, n_out = jt.end[job] - first;
+    const auto* w = static_cast<const typename F::Block*>(jt.w[job]);
+    const Q81Block* x = jt.x[job];
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int blocks_per_row = n_in / F::DIV;
+    const int x_stride = n_in / Q8K;
+    float tmp[NCOLS] = {};
+    for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += F::BPI) {
+        const int kby = kbx * F::KBY;
+        const int kqs = F::kqs(tid);
+        const typename F::W wv = F::load(w + std::size_t(row) * blocks_per_row + kbx, kqs);
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) tmp[j] += F::apply(wv, x + std::size_t(j) * x_stride + kby, kqs);
+    }
+    __shared__ float partial[WARPS - 1][NCOLS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) partial[threadIdx.y - 1][j][threadIdx.x] = tmp[j];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[j] += partial[l][j][threadIdx.x];
+        tmp[j] = warp_sum(tmp[j]);
+        if (threadIdx.x == 0) jt.y[job][std::size_t(j) * n_out + row] = tmp[j];
+    }
+}
+
 // ============================ plan v0.3 P6: ncols = 2..8 from interleaved activations ============================
 //
 // `native_quantize_q8_1_il` also writes the columns interleaved (native_mmvq.hpp), so one load reads the same int of
@@ -1673,6 +1720,34 @@ void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream) {
     small_mmvq<IQ4NLBlock, 4>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
+}
+
+bool native_mmvq_jobs(int ggml_type, const MmvqJob* jobs, int n_jobs, int n_in, int ncols, void* stream) {
+    using F = SmallTraits<Q80Block, 8>;
+    // (a row of fewer blocks than an iteration takes, and the generic multi-column layout, are other kernels)
+    if (ggml_type != 8 || jobs == nullptr || n_jobs < 1 || n_jobs > kMmvqJobs || ncols < 1 || ncols > MAX_NCOLS ||
+        n_in <= 0 || n_in % 32 != 0 || n_in / F::DIV < F::BPI || !g_multi_exact)
+        return false;
+    MmvqJobTable jt{};
+    int rows = 0;
+    for (int j = 0; j < n_jobs; ++j) {
+        if (jobs[j].weights == nullptr || jobs[j].x_q8_1 == nullptr || jobs[j].y == nullptr || jobs[j].n_out <= 0) return false;
+        jt.w[j] = jobs[j].weights;
+        jt.x[j] = static_cast<const Q81Block*>(jobs[j].x_q8_1);
+        jt.y[j] = jobs[j].y;
+        jt.end[j] = rows += jobs[j].n_out;
+    }
+    const auto s = static_cast<cudaStream_t>(stream);
+    const dim3 threads(WARP, WARPS);
+    switch (ncols) {
+#define LAMINA_JOBS_CASE(N) case N: native_mmvq_jobs_kernel<F, N><<<unsigned(rows), threads, 0, s>>>(jt, n_jobs, n_in); break;
+        LAMINA_JOBS_CASE(1) LAMINA_JOBS_CASE(2) LAMINA_JOBS_CASE(3) LAMINA_JOBS_CASE(4) LAMINA_JOBS_CASE(5)
+        LAMINA_JOBS_CASE(6) LAMINA_JOBS_CASE(7) LAMINA_JOBS_CASE(8)
+#undef LAMINA_JOBS_CASE
+        default: return false;
+    }
+    launch_check();
+    return true;
 }
 
 bool native_mmvq_supported(int ggml_type) noexcept {

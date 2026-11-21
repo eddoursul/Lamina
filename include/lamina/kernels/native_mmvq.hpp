@@ -86,6 +86,20 @@ std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out);
 void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
                  int n_in, int n_out, int ncols, void* stream);
 
+// Up to kMmvqJobs products of one weight format and n_in in one launch, each with its own matrix, activations
+// (ncols columns of q8_1 blocks, as native_mmvq's) and output: job j's y[c * n_out + r] is native_mmvq's for it,
+// bitwise - a launch's own time (2-3 us on this path's small products) is paid once.  False, and nothing launched:
+// a format or shape without this kernel (Q8_0 rows of 32+ blocks have it), where the caller's separate native_mmvq
+// calls stand.
+constexpr int kMmvqJobs = 6;
+struct MmvqJob {
+    const void* weights;
+    const void* x_q8_1;
+    float* y;
+    int n_out;
+};
+bool native_mmvq_jobs(int ggml_type, const MmvqJob* jobs, int n_jobs, int n_in, int ncols, void* stream);
+
 // Plan v0.3 P6: 2..8 columns also INTERLEAVED, so one 16-byte load reads a position of every column: CP = 2 (2
 // columns), 4 (3-4) or 8 (5-8), zero-padded; nb = n_in / 32 blocks; int32 bm[nb][8][CP] (block-major), int32
 // pm[8][nb][CP] (position-major), float d[nb][CP] (each block's scale as the dots read it, __low2float of ds).

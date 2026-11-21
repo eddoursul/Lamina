@@ -424,6 +424,8 @@ if(LAMINA_ENABLE_CUDA)
   # native_mmvq's multi_exact contract, bitwise: a T-column call against T single-column calls on the same Q8_1
   # bytes, with the flag off as the negative control (synthetic, GPU, no model; the control assumes 32-lane warps)
   lamina_kernel_test(mmvq_multi_parity src/kernels/mmvq_multi_parity.cpp)
+  # Several Q8_0 products in one launch (native_mmvq_jobs) against a launch each: bitwise.
+  lamina_kernel_test(mmvq_jobs_parity src/kernels/mmvq_jobs_parity.cpp)
 
   # Plan v0.3 P0.1: working-set lock of a host region (CPU only).
   add_executable(platform_memory_test src/platform/memory_test.cpp)

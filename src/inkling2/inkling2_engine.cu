@@ -991,6 +991,7 @@ struct Engine {
     int chunk_cap = 0;      // the rows the chunk's buffers hold now
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
+    bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
     // A chunk's NVFP4 experts on the FP16 tensor cores (nvfp4_gemm) instead of MMQ: where the card has no FP4 tensor
     // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC: 0 never, 1 on any card; LAMINA_INK_TC_MIN: tests')
     bool tc_on = false;
@@ -1480,6 +1481,7 @@ struct Engine {
         xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         tc_on = MMQ::built() && !MMQ::native_fp4(40);
         if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
@@ -3184,11 +3186,24 @@ struct Engine {
             mmb(R, L.wv, vi, fv, vraw, T);
         } else {
             const ik::Q81 *iq = R.img, *ikk = R.img + (size_t) ki * TB, *iv = R.img + (size_t) vi * TB;
-            run("a: q's product", [&] { mm(L.wq, iq, fq, R.qraw, T); });
-            run("a: the gate's product", [&] { mm(L.wgate, iq, fq, R.graw, T); });
-            run("a: r's product", [&] { mm(L.wrel, iq, fq, R.rraw, T); });
-            run("a: k's product", [&] { mm(L.wk, ikk, fk, kraw, T); });
-            run("a: v's product", [&] { mm(L.wv, iv, fv, vraw, T); });
+            // the five in one launch where their format has that kernel (the same values: a launch's own time once)
+            const K::MmvqJob five[5] = {{L.wq.d, iq, R.qraw, (int) L.wq.n_out},     {L.wgate.d, iq, R.graw, (int) L.wgate.n_out},
+                                        {L.wrel.d, iq, R.rraw, (int) L.wrel.n_out}, {L.wk.d, ikk, kraw, (int) L.wk.n_out},
+                                        {L.wv.d, iv, vraw, (int) L.wv.n_out}};
+            bool as_one = fuse_products;
+            for (const Mat* W : {&L.wq, &L.wgate, &L.wrel, &L.wk, &L.wv}) as_one = as_one && W->type == L.wq.type && W->n_in == N;
+            if (as_one) {
+                bool took = false;
+                run("a: the projections", [&] { took = K::native_mmvq_jobs((int) L.wq.type, five, 5, N, T, st); });
+                as_one = took;
+            }
+            if (!as_one) {
+                run("a: q's product", [&] { mm(L.wq, iq, fq, R.qraw, T); });
+                run("a: the gate's product", [&] { mm(L.wgate, iq, fq, R.graw, T); });
+                run("a: r's product", [&] { mm(L.wrel, iq, fq, R.rraw, T); });
+                run("a: k's product", [&] { mm(L.wk, ikk, fk, kraw, T); });
+                run("a: v's product", [&] { mm(L.wv, iv, fv, vraw, T); });
+            }
         }
         // a decode forward takes the sink's product, tau, q's clip and the bias in one launch (q_bias_kernel)
         if (batch)
