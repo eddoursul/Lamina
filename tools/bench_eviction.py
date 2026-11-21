@@ -9,7 +9,7 @@ the engine's own `h`, at any slot count, on any machine.
 
     python tools/bench_eviction.py TRACE... [--slots 4105,8000] [--per-layer] [--windows 4]
                                  [--policies fill-only,lru,lfu-decay,oracle] [--decay-window 65536]
-                                 [--prefill data/expert-profile.bin] [--n-expert 512] [--csv out.csv]
+                                 [--prefill data/expert-profiles/qwen3.8-flash-next.bin] [--n-expert 512] [--csv out.csv]
 
 Policies (`--policies`, default all four):
 

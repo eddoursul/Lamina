@@ -290,9 +290,9 @@ if(LAMINA_ENABLE_CUDA)
   # already links `lamina_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  # Qwen3.8-Flash-Next's expert profile, --expert-profile builtin (the default under --serve)
-  lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/embedded_profile.cpp ${CMAKE_CURRENT_SOURCE_DIR}/data expert-profile.bin
-               profile_file "Embedding the expert profile")
+  # the models' expert profiles (data/expert-profiles), --expert-profile builtin (the default under --serve)
+  lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/embedded_profile.cpp ${CMAKE_CURRENT_SOURCE_DIR}/data/expert-profiles *.bin
+               profile_file "Embedding the expert profiles")
   add_library(lamina_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/prompt_cache.cpp src/core/adaptive_tier.cpp src/core/second_gpu.cpp src/core/arena_place.cpp

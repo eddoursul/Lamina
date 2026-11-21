@@ -1,5 +1,5 @@
 # Writes a C++ source that holds files as byte arrays, so a program needs none of them beside it: the web app
-# (src/server/web), the server's presets (examples/*.json), the engine's expert profile (data/expert-profile.bin).
+# (src/server/web), the server's presets (examples/*.json), the engine's expert profiles (data/expert-profiles/*.bin).
 # Run by CMake at build time:
 #   cmake -DDIR=<dir> -DGLOB=<pattern below it> -DOUT=<file.cpp> -DFUNC=<name> -P embed_files.cmake
 # The source defines `const lamina::EmbeddedFile* lamina::FUNC(std::string_view path)` (include/lamina/embedded.hpp):

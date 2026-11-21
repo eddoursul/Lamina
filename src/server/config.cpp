@@ -41,13 +41,10 @@ std::vector<std::string> args_of(const json& cfg) {
 
 bool has(const std::vector<std::string>& args, const char* flag) { return std::find(args.begin(), args.end(), flag) != args.end(); }
 
-/// an expert profile's (layers, experts per layer) from its header (tools/make_profile.py's format); `path`
-/// core::kBuiltinExpertProfile is the engine's own
+/// an expert profile's (layers, experts per layer) from its header (tools/make_profile.py's format)
 std::optional<std::pair<uint32_t, uint32_t>> profile_shape(const std::string& path) {
     std::string bytes;
-    if (path == core::kBuiltinExpertProfile) {
-        bytes = core::builtin_expert_profile();
-    } else {
+    {
         std::ifstream f(u8_path(path), std::ios::binary);
         if (!f) return std::nullopt;
         bytes.assign(std::istreambuf_iterator<char>(f), {});
@@ -616,11 +613,16 @@ std::vector<std::string> engine_args(const json& cfg) {
     if (every.is_number() && every.get<double>() >= 0)
         args.insert(args.end(), {"--expert-profile-save-every", every.is_number_integer() ? std::to_string(every.get<int64_t>())
                                                                                            : py_repr(every.get<double>())});
-    // the profile the engine would start from: the args' --expert-profile, else (--serve) its built-in one
+    // the profile the engine would start from: the args' --expert-profile, else (--serve) the built-in one of the
+    // model's shape (the one a config's earlier path to the clone's data/expert-profile.bin stands for too)
     auto at = std::find(args.begin(), args.end(), "--expert-profile");
     const bool named = at != args.end() && at + 1 != args.end();
     const auto learned = profile_shape(here_path(cfg, save.get<std::string>()));
-    const auto base = profile_shape(named ? here_path(cfg, *(at + 1)) : core::kBuiltinExpertProfile);
+    const bool builtin = !named || *(at + 1) == core::kBuiltinExpertProfile ||
+                         core::legacy_expert_profile_path(here_path(cfg, *(at + 1)));
+    const auto base = !builtin ? profile_shape(here_path(cfg, *(at + 1)))
+                      : learned && !core::builtin_expert_profile(learned->first, learned->second).empty() ? learned
+                      : std::nullopt;
     if (learned && learned == base) {
         if (named) *(at + 1) = save.get<std::string>();
         else args.insert(args.end(), {"--expert-profile", save.get<std::string>()});

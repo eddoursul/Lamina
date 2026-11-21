@@ -56,16 +56,42 @@ size_t device_free_bytes() {
     return free_b;
 }
 
-std::string_view builtin_expert_profile() {
-    const EmbeddedFile* f = profile_file("expert-profile.bin");
-    return f != nullptr ? f->data : std::string_view();
+std::string_view builtin_expert_profile(int64_t n_layers, int64_t n_expert) {
+    // data/expert-profiles' files: a model's profile is found by its shape (the header's layers and experts)
+    static const char* const names[] = {"qwen3.8-flash-next.bin", "inkling-2-mini.bin"};
+    for (const char* name : names) {
+        const EmbeddedFile* f = profile_file(name);
+        uint32_t hdr[5] = {0, 0, 0, 0, 0};
+        if (f == nullptr || f->data.size() < 4 + sizeof hdr || std::memcmp(f->data.data(), "STRP", 4) != 0) continue;
+        std::memcpy(hdr, f->data.data() + 4, sizeof hdr);
+        if ((int64_t) hdr[1] == n_layers && (int64_t) hdr[2] == n_expert) return f->data;
+    }
+    return {};
+}
+
+bool legacy_expert_profile_path(const std::string& path) {
+    std::error_code ec;
+    const std::filesystem::path p(path);
+    return p.filename() == "expert-profile.bin" && !std::filesystem::exists(p, ec);
 }
 
 bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_expert,
                          std::vector<std::pair<int32_t, int32_t>>& ranked, int64_t& slots, std::string& err) {
     std::string bytes;
-    if (path == kBuiltinExpertProfile) {
-        bytes = builtin_expert_profile();
+    const bool legacy = path != kBuiltinExpertProfile && legacy_expert_profile_path(path);
+    if (path == kBuiltinExpertProfile || legacy) {
+        bytes = builtin_expert_profile(n_layers, n_expert);
+        if (bytes.empty()) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "read_expert_profile: no profile of a %lldx%lld model is built into the programs - name "
+                          "one with --expert-profile", (long long) n_layers, (long long) n_expert);
+            err = buf;
+            return false;
+        }
+        if (legacy)
+            std::fprintf(stderr, "lamina: %s is not there (the profiles moved to data/expert-profiles): the one built "
+                         "into the programs is used, as --expert-profile builtin\n", path.c_str());
     } else {
         std::FILE* f = std::fopen(path.c_str(), "rb");
         if (f == nullptr) {

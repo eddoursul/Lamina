@@ -38,11 +38,16 @@ namespace lamina::core {
 /// in the two places that use it.
 inline constexpr int32_t kNotResident = -1;
 
-/// --expert-profile builtin: Qwen3.8-Flash-Next's profile built into the programs (data/expert-profile.bin, the
-/// configs' file), the one --serve starts from when no profile is named.
+/// --expert-profile builtin: the profile of the model's shape among those built into the programs
+/// (data/expert-profiles: Qwen3.8-Flash-Next's 48 x 512, Inkling 2 Mini's 24 x 128), the one --serve starts from
+/// when no profile is named.
 inline constexpr const char* kBuiltinExpertProfile = "builtin";
-/// Its bytes (a profile file's).
-std::string_view builtin_expert_profile();
+/// Its bytes (a profile file's); empty when no built-in profile ranks a model of that shape.
+std::string_view builtin_expert_profile(int64_t n_layers, int64_t n_expert);
+/// An earlier install's config names Flash-Next's profile as a file of the clone, data/expert-profile.bin, which
+/// has moved (data/expert-profiles/qwen3.8-flash-next.bin): true for such a path that is not there.  The built-in
+/// profile takes its place (read_expert_profile says so once).
+bool legacy_expert_profile_path(const std::string& path);
 
 /// **THE STATIC RESIDENCY PLAN, READ BACK FROM THE FILE `tools/make_profile.py` WROTE.**
 ///
@@ -57,7 +62,8 @@ std::string_view builtin_expert_profile();
 /// ANOTHER, which is the only way to know whether it transfers.
 ///
 /// The frequency table is not returned: it is the profile's own working, and the engine measures `h` by
-/// running rather than by re-deriving what the file claims.  `path` kBuiltinExpertProfile reads the built-in one.
+/// running rather than by re-deriving what the file claims.  `path` kBuiltinExpertProfile reads the built-in one
+/// of this shape.
 bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_expert,
                          std::vector<std::pair<int32_t, int32_t>>& ranked, int64_t& slots, std::string& err);
 

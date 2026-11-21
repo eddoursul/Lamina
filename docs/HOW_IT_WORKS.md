@@ -38,9 +38,9 @@ on an edit 87%, IQ3_S on thinking text 98%); the CPU computes the rest, from und
 ## Which experts the GPUs hold
 
 Routing is uneven: some experts serve far more tokens than others, and a conversation favours its own. The engine
-starts from a profile that ranks all 24,576 experts by how often the model routes to them (`data/expert-profile.bin`,
-built into the programs, or what this PC's runs learned: [SETUP.md](SETUP.md#the-config)); the main GPU takes the top
-of the list and each tier the next.
+starts from a profile that ranks all 24,576 experts by how often the model routes to them
+(`data/expert-profiles/qwen3.8-flash-next.bin`, built into the programs, or what this PC's runs learned:
+[SETUP.md](SETUP.md#the-config)); the main GPU takes the top of the list and each tier the next.
 
 While the model runs, the engine counts which experts the conversation routes to. Every round (`--adapt-every 1` in
 the configs) each GPU's adaptive tier ranks the counts, older ones decayed, and replaces its least-used experts with

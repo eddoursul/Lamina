@@ -1,11 +1,13 @@
-"""tools/make_profile.py - the expert-cache profile (`data/expert-profile.bin`): every (layer, expert) pair, ranked.
+"""tools/make_profile.py - Qwen3.8-Flash-Next's expert-cache profile: every (layer, expert) pair, ranked
+(`data/expert-profiles/qwen3.8-flash-next.bin`; another model's from its routing counts: profile_from_imatrix.py).
 
 `--expert-cache auto` fills the VRAM slots it can afford with the profile's pairs in order, so the ranking decides
 which experts start resident (the adaptive tier then swaps in what a conversation routes most).  A profile that
 ranks fewer pairs than a card can hold caps the cache (issue #46: a 32 GB card stopped at 8,000 slots); this tool
 writes one that ranks all 24,576.
 
-The order: the base profile's ranking (default: the shipped data/expert-profile.bin), then the pairs your routing
+The order: the base profile's ranking (default: the shipped
+data/expert-profiles/qwen3.8-flash-next.bin), then the pairs your routing
 traces used, most frequent first, then every pair still missing, interleaved across the layers.  The base is only
 *appended to*, never reordered - and the shipped profile already ranks all 24,576 pairs, so with it a trace is a
 no-op.  `--reorder` ranks the traces first and lets the base fill the rest, which is how a workload's trace decides
@@ -18,7 +20,7 @@ model reads this RANKING as if it were a frequency curve, and the coverage curve
 carries the measured hit rates that say how far off that goes (94.9% claimed against 69.2% measured at 5,805 pairs
 held, on the IQ3_S 4-way rig).
 
-    python tools/make_profile.py [TRACE ...] [--base data/expert-profile.bin | --no-base] [--reorder] [--out PATH]
+    python tools/make_profile.py [TRACE ...] [--base PROFILE | --no-base] [--reorder] [--out PATH]
                                  [--n-expert 256]      (a pruned model: GSQ-RCO Coder keeps 256 of 512)
 
 A routing trace comes from a one-shot engine run with `--dump-routing FILE` (a prompt typical of your use; the
@@ -100,12 +102,13 @@ def rank_profile(base_pairs, trace_freq, n_expert=N_EXPERT, no_base=False, reord
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("traces", nargs="*", help="routing traces from --dump-routing")
-    ap.add_argument("--base", default=str(ROOT / "data" / "expert-profile.bin"), help="ranking to keep first")
+    ap.add_argument("--base", default=str(ROOT / "data" / "expert-profiles" / "qwen3.8-flash-next.bin"),
+                    help="ranking to keep first")
     ap.add_argument("--no-base", action="store_true", help="rank by the traces only")
     ap.add_argument("--reorder", action="store_true",
                     help="rank the traces' pairs before the base's (the base, then the fill, follow); needed with a "
                          "base that already ranks every pair, where --base alone cannot change the order")
-    ap.add_argument("--out", default=str(ROOT / "data" / "expert-profile.bin"))
+    ap.add_argument("--out", default=str(ROOT / "data" / "expert-profiles" / "qwen3.8-flash-next.bin"))
     ap.add_argument("--n-expert", type=int, default=N_EXPERT, help="experts per layer (default 512)")
     a = ap.parse_args()
 

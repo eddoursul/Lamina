@@ -231,10 +231,11 @@ The server's other keys (the network, API keys, idle unload, MCP servers, image 
 [USING.md](USING.md#the-config).
 
 **The learned expert profile.** The GPUs' expert caches start from a ranking of the experts by how often the model
-routes to them (`data/expert-profile.bin`, built into the programs). With `expert_profile_save`, the engine also counts
-this PC's routing and writes a profile (`<model>-learned.bin` beside the config file, beside the server with `-m` alone)
-at exit, on Ctrl+C and between requests at most once a minute (`expert_profile_save_every`); the next start fills the
-caches from it. It ranks the experts by this PC's routing and the profile it started from at equal weight. On the
+routes to them (`data/expert-profiles`: one a model, built into the programs). With `expert_profile_save`, the engine
+also counts this PC's routing and writes a profile (`<model>-learned.bin` beside the config file, beside the server
+with `-m` alone) at exit, on Ctrl+C and between requests at most once a minute (`expert_profile_save_every`); the
+next start fills the caches from it. It ranks the experts by this PC's routing and the profile it started from at
+equal weight. On the
 development PC, after a session of code and reasoning requests, a round of fixed text took 9-14% less time on code, -3.8
 to +0.9% on thinking and edits. Remove both keys to start from the shipped profile every time.
 

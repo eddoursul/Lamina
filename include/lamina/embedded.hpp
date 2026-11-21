@@ -1,5 +1,5 @@
 // include/lamina/embedded.hpp - files built into the programs (cmake/embed_files.cmake): the web app, the server's
-// presets, the engine's expert profile.
+// presets, the engine's expert profiles.
 #pragma once
 
 #include <string_view>
@@ -15,7 +15,8 @@ struct EmbeddedFile {
 const EmbeddedFile* web_asset(std::string_view path);
 /// examples/*.json, the presets lamina-server builds a config from (src/server/model_config.hpp)
 const EmbeddedFile* preset_file(std::string_view path);
-/// data/expert-profile.bin, Qwen3.8-Flash-Next's built-in expert profile (lamina/core/expert_cache.hpp)
+/// data/expert-profiles/*.bin, the models' built-in expert profiles ("qwen3.8-flash-next.bin",
+/// "inkling-2-mini.bin"; lamina/core/expert_cache.hpp)
 const EmbeddedFile* profile_file(std::string_view path);
 /// data/bench-agent-files.json, the texts of lamina-server --bench's agent session (src/server/bench.hpp)
 const EmbeddedFile* bench_file(std::string_view path);
