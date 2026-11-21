@@ -1666,6 +1666,22 @@ __global__ void __launch_bounds__(128) tc_merge_kernel(TcMergeIn a) {
     a.out[at] = acc / sum / (1.0f + __expf(-a.gate[at]));
 }
 
+// ---------------------------------------------------------------------------------------------- BF16 in a chunk
+/// n BF16 values as floats
+__global__ void bf16_floats_kernel(const uint16_t* __restrict__ w, float* __restrict__ out, long long n) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __uint_as_float((unsigned) w[i] << 16);
+}
+/// Rows gathered or scattered by index: dst[r] = src[idx[r]] (`scatter` 0) or dst[idx[r]] = src[r]; n values a row
+__global__ void rows_index_kernel(const float* __restrict__ src, const int32_t* __restrict__ idx, float* __restrict__ dst,
+                                  int rows, int n, int scatter) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= (long long) rows * n) return;
+    const int r = (int) (i / n), c = (int) (i % n);
+    if (scatter) dst[(size_t) idx[r] * n + c] = src[i];
+    else dst[i] = src[(size_t) idx[r] * n + c];
+}
+
 // ---------------------------------------------------------------------------------------------- checks
 /// The first non-finite value's index among n floats into *at (a device int64, -1 before), for LAMINA_INK_NAN
 __global__ void nonfinite_kernel(const float* __restrict__ x, long long n, long long* __restrict__ at) {

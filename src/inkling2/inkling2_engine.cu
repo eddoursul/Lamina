@@ -540,6 +540,7 @@ struct Rows {
     uint8_t *xq[3][3] = {}, *aq[3] = {}, *tq = nullptr, *hq = nullptr, *wk = nullptr, *wv = nullptr;
     bool have[4][3] = {};
     float *gu = nullptr, *h = nullptr;
+    float* wf = nullptr;   // a BF16 matrix widened to floats for a GEMM
     float *cz = nullptr, *cs1 = nullptr, *cs2 = nullptr;   // the loop gates' normed pair [T][2 N] and their two products
     int32_t *ent_row = nullptr, *ent_exp = nullptr, *bounds = nullptr, *ident = nullptr;
     int64_t ids_rows = 0;
@@ -636,6 +637,7 @@ struct Engine {
     float* logits_h = nullptr;       // pinned
     std::unique_ptr<MMQ::Context> mmq;
     bool lay_used[3] = {};           // the MMQ activation layouts the dense formats take
+    bool bf16_chunks = false;        // a BF16 matrix among a chunk's products
     cublasHandle_t blas = nullptr;   // a chunk's float products (the loop gates, the router)
     ~Engine() {
         if (blas != nullptr) cublasDestroy(blas);
@@ -756,6 +758,7 @@ struct Engine {
         R.gu = dzero<float>(n_ent * 2 * F);
         R.h = dzero<float>(n_ent * F);
         R.cz = dzero<float>(T * 2 * N);
+        if (bf16_chunks) R.wf = dzero<float>(std::max(Q * N, 2 * F * N));
         R.cs1 = dzero<float>(T * N);
         R.cs2 = dzero<float>(T * N);
         R.ids_rows = MMQ::ids_table_rows((int64_t) n_ent);
@@ -780,16 +783,21 @@ struct Engine {
         const Geometry& g = m->g;
         for (const Layer& L : m->layers) {
             for (const Mat* W : {&L.wq, &L.wk, &L.wv, &L.wrel, &L.wgate, &L.wo}) {
-                if (W->type == 30) continue;   // BF16: the GEMV, 8 rows at a time
+                if (W->type == 30) {   // BF16: widened and through a GEMM
+                    bf16_chunks = true;
+                    continue;
+                }
                 if (!MMQ::fits(W->type, W->n_out)) return "a dense matrix's format has no MMQ kernel here";
                 lay_used[MMQ::ds_layout(W->type)] = true;
             }
             for (const int t : {L.gl.gu_type, L.gl.d_type})
                 if (MMQ::native_fp4(t)) return "this GPU runs NVFP4 on its FP4 tensor cores, which the prompt kernels do not feed yet";
-            if (!MMQ::fits(L.gl.gu_type, 2 * g.n_ff) || !MMQ::fits(L.gl.d_type, g.n_embd))
+            if (L.gl.gu_type == 30 || L.gl.d_type == 30) bf16_chunks = true;   // (BF16 experts: a GEMM an expert)
+            if ((L.gl.gu_type != 30 && !MMQ::fits(L.gl.gu_type, 2 * g.n_ff)) || (L.gl.d_type != 30 && !MMQ::fits(L.gl.d_type, g.n_embd)))
                 return "an expert format has no MMQ kernel here";
             // gate/up's rows end on the kernels' step, so nothing is read past them into the down rows
-            if (MMQ::tab_overread(L.gl.gu_type, g.n_embd) != 0) return "the experts' gate/up rows end inside an MMQ step";
+            if (L.gl.gu_type != 30 && MMQ::tab_overread(L.gl.gu_type, g.n_embd) != 0)
+                return "the experts' gate/up rows end inside an MMQ step";
         }
         return {};
     }
@@ -1495,10 +1503,10 @@ struct Engine {
     /// The same for a chunk's T rows: MMQ over the rows' image for W's layout, made once an input (`input` 0-2 the
     /// attention's inputs, 3 its output)
     void mmb(Rows& R, const Mat& W, int input, const float* xf, float* y, int T) {
-        if (W.type == 30) {
-            for (int t0 = 0; t0 < T; t0 += kMaxT)
-                K::bf16_gemv_fp32_mmvf_multi(xf + (size_t) t0 * W.n_in, (const uint16_t*) W.d, y + (size_t) t0 * W.n_out,
-                                             W.n_in, W.n_out, std::min(kMaxT, T - t0), st);
+        if (W.type == 30) {   // BF16: its floats, then a GEMM
+            const long long n = (long long) W.n_out * W.n_in;
+            ik::bf16_floats_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>((const uint16_t*) W.d, R.wf, n);
+            gemm(R.wf, W.n_out, W.n_in, xf, T, y);
             return;
         }
         const int lay = MMQ::ds_layout(W.type);
@@ -1574,36 +1582,59 @@ struct Engine {
         CK(cudaMemcpyAsync(R.ent_row, R.ent_row_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
         CK(cudaMemcpyAsync(R.ent_dst, R.ent_dst_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
         CK(cudaMemcpyAsync(R.ent_exp, R.ent_exp_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
-        MMQ::quantize(R.nrm, R.ent_row, R.tq, L.gl.gu_type, N, N, n_ent, st);
         MMQ::Product p{};
-        p.w = L.slots;
-        p.type = L.gl.gu_type;
-        p.w_rows = 2 * F;
-        p.w_cols = N;
         p.expert_bytes = L.stride;
         p.n = E;
-        p.xq = R.tq;
         p.bounds = R.bounds;
-        p.ids = R.ident;
         p.ids_rows = R.ids_rows;
         p.total_rows = n_ent;
         p.max_rows = max_rows;
-        p.dst = R.gu;
-        p.ld_dst = 2 * F;
-        mmq->run(p, st);
+        // a BF16 matrix (MMQ has none): an expert's rows widened to floats, a GEMM over the rows routed to it
+        auto bf16_product = [&](size_t off, int w_rows, int w_cols, const float* x, float* y) {
+            for (int e = 0; e < E; ++e) {
+                const int b0 = R.bounds_h[e], n = R.bounds_h[e + 1] - b0;
+                if (n == 0) continue;
+                const long long cnt = (long long) w_rows * w_cols;
+                ik::bf16_floats_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(
+                    (const uint16_t*) (L.slots + (size_t) e * L.stride + off), R.wf, cnt);
+                gemm(R.wf, w_rows, w_cols, x + (size_t) b0 * w_cols, n, y + (size_t) b0 * w_rows);
+            }
+        };
+        if (L.gl.gu_type == 30) {   // the entries' inputs in their experts' order first
+            const long long cnt = (long long) n_ent * N;
+            ik::rows_index_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.nrm, R.ent_row, R.rows, n_ent, N, 0);
+            bf16_product(0, 2 * F, N, R.rows, R.gu);
+        } else {
+            MMQ::quantize(R.nrm, R.ent_row, R.tq, L.gl.gu_type, N, N, n_ent, st);
+            p.w = L.slots;
+            p.type = L.gl.gu_type;
+            p.w_rows = 2 * F;
+            p.w_cols = N;
+            p.xq = R.tq;
+            p.ids = R.ident;
+            p.dst = R.gu;
+            p.ld_dst = 2 * F;
+            mmq->run(p, st);
+        }
         const long long cnt = (long long) n_ent * F;
         ik::situ_rows_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.gu, R.ent_exp, L.gu_scale, R.h, n_ent, F,
                                                                               g.situ_beta, g.situ_lbeta);
-        MMQ::quantize(R.h, nullptr, R.hq, L.gl.d_type, F, F, n_ent, st);
-        p.w = L.slots + L.gl.down_off;
-        p.type = L.gl.d_type;
-        p.w_rows = N;
-        p.w_cols = F;
-        p.xq = R.hq;
-        p.ids = R.ent_dst;
-        p.dst = R.rows;
-        p.ld_dst = N;
-        mmq->run(p, st);
+        if (L.gl.d_type == 30) {   // (gu is free again: the down rows in the experts' order, then to their entries)
+            bf16_product(L.gl.down_off, N, F, R.h, R.gu);
+            const long long all = (long long) n_ent * N;
+            ik::rows_index_kernel<<<(unsigned) ((all + 255) / 256), 256, 0, st>>>(R.gu, R.ent_dst, R.rows, n_ent, N, 1);
+        } else {
+            MMQ::quantize(R.h, nullptr, R.hq, L.gl.d_type, F, F, n_ent, st);
+            p.w = L.slots + L.gl.down_off;
+            p.type = L.gl.d_type;
+            p.w_rows = N;
+            p.w_cols = F;
+            p.xq = R.hq;
+            p.ids = R.ent_dst;
+            p.dst = R.rows;
+            p.ld_dst = N;
+            mmq->run(p, st);
+        }
     }
 
     /// Visit v over T rows of R at positions p0 ..: x in, x out
