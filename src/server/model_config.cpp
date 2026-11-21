@@ -98,7 +98,7 @@ std::string preset_name(const std::string& arch, const std::string& quantized_by
     if (arch == "qwen35moe") return "qwen36-ud-q4_k_xl";
     if (arch == "qwen35") return "qwen38-27b-ud-q6_k_m";
     if (arch == "hy_v4_flash") return "hy4-flash-q4_k_m";
-    if (arch == "inkling2" || arch == "inkling2_loop") return "inkling2-mini";
+    if (arch == "inkling2" || arch == "inkling2_loop") return "inkling2-mini-ud-iq4_xs";
     return "";
 }
 

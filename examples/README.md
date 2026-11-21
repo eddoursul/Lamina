@@ -16,7 +16,7 @@ which takes the model file, the GPU, the draft layer, the projector and the file
   instead of 7.5, which leaves more of the routed experts to the GPU at long contexts), the routed experts in RAM for
   the CPU (~90 GB), the Engram table (59 GiB) read from the drive.
 
-- `inkling2-mini.json`: Inkling 2 Mini, one of unsloth's quants (the preset names UD-IQ4_XS), on the engine's
+- `inkling2-mini-ud-iq4_xs.json`: Inkling 2 Mini, unsloth's UD-IQ4_XS (the preset of the model's other quants too), on the engine's
   inkling2 path: the whole model on the main GPU (UD-IQ4_XS: ~15 GiB of VRAM at a short context, ~1 GB of RAM), the context what the VRAM left holds
   K and V for (32.0 KiB a token in FP16, 17.0 with `"kv": "q8_0"` in `"args"`; ~245,000 tokens on a 24 GB card in
   FP16), `"max-context"` in `"args"` to set one. No pictures and no drafts yet.

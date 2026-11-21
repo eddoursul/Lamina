@@ -87,7 +87,7 @@ The server builds a config for the file and says in its window what it took:
 - **The preset**, one of `examples/*.json`, built into the server and picked by the file's header: ISTA-DASLab's
   Qwen3.8-Flash-Next files take `iq3_s`, the family's other files (unsloth's quants, Agention's Gyro-L) `ud-q4_k_xl`,
   Qwen3.6-35B-A3B's `qwen36-ud-q4_k_xl`, Qwen3.8-27B's `qwen38-27b-ud-q6_k_m`, Hy4-flash's `hy4-flash-q4_k_m`,
-  Inkling 2 Mini's `inkling2-mini`. Its engine options, sampling and port (8081 to 8087) are the config's; the
+  Inkling 2 Mini's `inkling2-mini-ud-iq4_xs`. Its engine options, sampling and port (8081 to 8087) are the config's; the
   model's name in the API is the file's, without the shard number.
 - **The GPUs** ([below](#the-gpus)): the model on the card of the RTX 30 series or newer with the most VRAM that
   drives no display (the lower number on a tie), every other card an expert tier, as the preset's `"gpu"` (that card,
