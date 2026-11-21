@@ -257,6 +257,8 @@ json model_card_sampling(const std::string& arch, bool thinking) {
     if (arch == "qwen35moe")
         return thinking ? json{{"temperature", 1.0}, {"top_p", 0.95}, {"top_k", 20}, {"presence_penalty", 1.5}}
                         : json{{"temperature", 0.7}, {"top_p", 0.8}, {"top_k", 20}, {"presence_penalty", 1.5}};
+    if (arch == "inkling2" || arch == "inkling2_loop")   // Inkling 2 Mini's: the plain distribution, of the 64 likeliest here
+        return json{{"temperature", 1.0}, {"top_p", 1.0}, {"top_k", 64}};
     return json::object();
 }
 
@@ -264,6 +266,7 @@ std::string default_model_name(const json& cfg, const std::string& arch) {
     if (!jstr(cfg, "model_name").empty()) return jstr(cfg, "model_name");
     if (arch == "qwen35moe") return "qwen3.6-35b-a3b";
     if (arch == "qwen35") return "qwen3.8-27b";
+    if (arch == "inkling2" || arch == "inkling2_loop") return "inkling-2-mini";
     return "qwen3.8-flash-next";
 }
 
@@ -1236,6 +1239,7 @@ bool Service::short_opening(const json& messages) const {
 
 std::string Service::render_prompt(const json& messages, const json& tools, const json& kwargs) {
     if (tok.hy4) return tpl->render(messages, tools, true, hy4_kwargs(kwargs));   // its own effort levels, no workarounds
+    if (tok.blocks) return tpl->render(messages, tools, true, block_kwargs(kwargs));
     // #458: with effort_end, a request with a non-default effort is rendered as a default one up to the answer (the
     // same prompt start, so the conversation cache keeps it) and its effort follows in a short system turn
     const json& effort = jget(kwargs, "reasoning_effort");

@@ -3,7 +3,8 @@
 The server, `lamina-server`, runs the engine in its own process and serves the OpenAI, Anthropic and Responses APIs and
 a web app. It starts with a model file, `lamina-server -m MODEL.gguf`, or a config, `lamina-server --config FILE`
 ([SETUP.md](SETUP.md#a-model-file)). It listens on the config's `port` (the presets': 8081 for ISTA-DASLab's Flash-Next
-files, 8082 for the family's others, 8083 for Qwen3.6-35B-A3B, 8084 for Qwen3.8-27B; `--port` overrides it), on this PC
+files, 8082 for the family's others, 8083 for Qwen3.6-35B-A3B, 8084 for Qwen3.8-27B, 8086 for Hy4-flash, 8087 for
+Inkling 2 Mini; `--port` overrides it), on this PC
 only unless told otherwise ([below](#from-other-devices)). Ctrl+C in its window stops the engine, which saves its
 learned expert profile, and the server.
 

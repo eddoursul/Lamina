@@ -1,5 +1,7 @@
-// src/server/dialect.cpp - Hy4-flash's chat forms against Qwen's (dialect.hpp).
+// src/server/dialect.cpp - Hy4-flash's and Inkling 2's chat forms against Qwen's (dialect.hpp).
 #include "dialect.hpp"
+
+#include <algorithm>
 
 namespace lamina {
 
@@ -114,6 +116,95 @@ json hy4_kwargs(const json& kwargs) {
         const std::string v = e.get<std::string>();
         if (v == "medium" || v == "xhigh") out["reasoning_effort"] = "high";   // Qwen's levels: Hy4 has low, high, max
     }
+    return out;
+}
+
+std::optional<BlockTags> BlockTags::from_template(std::string_view src) {
+    BlockTags t;
+    for (const std::string* tag : {&t.model, &t.think, &t.text, &t.end})
+        if (src.find(*tag) == std::string_view::npos) return std::nullopt;
+    // a picture's marker: the tag the template writes right after <|content_image|>
+    if (const size_t at = src.find(t.image + "<|"); at != std::string_view::npos) {
+        const size_t from = at + t.image.size(), to = src.find("|>", from);
+        if (to != std::string_view::npos && to - from < 64) t.image_pad = std::string(src.substr(from, to + 2 - from));
+    }
+    return t;
+}
+
+std::string block_piece(std::string_view s, const BlockTags& t) {
+    if (s == t.model) return std::string(1, kBlkModel);
+    if (s == t.think) return std::string(1, kBlkThink);
+    if (s == t.text) return std::string(1, kBlkText);
+    if (s == t.call) return std::string(1, kBlkCall);
+    if (s == t.end) return std::string(1, kBlkEnd);
+    std::string out(s);
+    out.erase(std::remove_if(out.begin(), out.end(), is_block_control), out.end());
+    return out;
+}
+
+std::string blocks_control(std::string_view s, const BlockTags& t) {
+    std::string out;
+    const std::pair<const std::string*, char> tags[] = {
+        {&t.model, kBlkModel}, {&t.think, kBlkThink}, {&t.text, kBlkText}, {&t.call, kBlkCall}, {&t.end, kBlkEnd}};
+    for (size_t i = 0; i < s.size();) {
+        bool hit = false;
+        for (const auto& [tag, c] : tags)
+            if (s.compare(i, tag->size(), *tag) == 0) {
+                out.push_back(c);
+                i += tag->size();
+                hit = true;
+                break;
+            }
+        if (hit) continue;
+        if (!is_block_control(s[i])) out.push_back(s[i]);
+        ++i;
+    }
+    return out;
+}
+
+std::string qwen_to_blocks(std::string_view s, const BlockTags& t, bool in_block) {
+    std::string out;
+    const std::string_view think = "</think>", call = "<tool_call>\n<function=";
+    auto drop_newlines = [&] {   // the newlines Qwen's form has around its tags are not this form's
+        while (!out.empty() && out.back() == '\n') out.pop_back();
+    };
+    for (size_t i = 0; i < s.size();) {
+        if (s.compare(i, think.size(), think) == 0) {
+            drop_newlines();
+            if (in_block) out += t.end;
+            in_block = false;
+            i += think.size();
+            while (i < s.size() && s[i] == '\n') ++i;
+            continue;
+        }
+        if (s.compare(i, call.size(), call) == 0) {
+            const size_t name = i + call.size(), gt = s.find(">\n", name);
+            if (gt != std::string_view::npos && s.find('<', name) > gt) {
+                drop_newlines();
+                if (in_block) out += t.end;
+                out += t.model + std::string(s.substr(name, gt - name)) + t.call;
+                in_block = true;
+                i = gt + 2;
+                continue;
+            }
+        }
+        out.push_back(s[i++]);
+    }
+    if (!in_block) drop_newlines();   // text outside a block is no part of the form
+    return out;
+}
+
+json block_kwargs(const json& kwargs) {
+    json out = kwargs.is_object() ? kwargs : json::object();
+    const json& et = jget(out, "enable_thinking");
+    const bool off = et.is_boolean() && !et.get<bool>();
+    if (out.contains("enable_thinking")) out.erase("enable_thinking");
+    if (off) {
+        out["reasoning_effort"] = "none";
+        return out;
+    }
+    const json& e = jget(out, "reasoning_effort");
+    if (e.is_string() && e.get_ref<const std::string&>() == "xhigh") out["reasoning_effort"] = "high";   // Qwen's top level
     return out;
 }
 

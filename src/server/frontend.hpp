@@ -50,6 +50,7 @@ private:
     json detect_caps() const;
     std::string source_;
     std::optional<Hy4Tags> hy4_;   ///< Hy4-flash's tags: the probes read their renders translated
+    std::optional<BlockTags> blocks_;   ///< a block form's tags (Inkling 2's): the probes read its calls' JSON
     std::unique_ptr<jinja::program> prog_;
     json caps_;
 };
@@ -135,9 +136,12 @@ std::shared_ptr<ToolCall> json_tool_call(std::string_view body, const json& sche
 /// <function=NAME><parameter=P>VALUE</parameter>...</function> -> its call; std::invalid_argument when malformed
 ToolCall parse_tool_call(std::string_view body, const json& schema = nullptr);
 
+/// A reply in Qwen's form (the tags above, as text), or with `blocks` in a block form (dialect.hpp, BlockTags): the
+/// model's tags as control characters, a block of thinking, of text or of a call's JSON between them.
 class OutputParser {
 public:
-    OutputParser(bool thinking = true, const json& tools = nullptr, bool stream_tools = false, bool recover = false);
+    OutputParser(bool thinking = true, const json& tools = nullptr, bool stream_tools = false, bool recover = false,
+                 bool blocks = false);
     std::vector<Event> feed(std::string_view delta);
     /// the end of generation: whatever is held; `reason` is how the turn ended (empty or "stop": a natural stop)
     std::vector<Event> finish(std::string_view reason = "");
@@ -146,6 +150,7 @@ public:
     const std::string& state() const { return state_; }
     const std::string& buf() const { return buf_; }      ///< text held back (a tag still arriving)
     bool has_pending() const { return !pending_.empty(); }   ///< calls from the reasoning waiting to settle
+    bool in_block() const { return bk_ == Blk::Think || bk_ == Blk::Text || bk_ == Blk::Call; }   ///< block mode: one is open
 
 private:
     bool ok_at(size_t p);
@@ -181,6 +186,26 @@ private:
     bool sfirst_ = true, sval_started_ = false;
     json sdeclared_ = json::object();
     std::string sparam_;   ///< the parameter being streamed
+    // block mode
+    std::vector<Event> feed_blocks(std::string_view delta);
+    std::vector<Event> finish_blocks();
+    void block_text(std::string& text, std::vector<Event>& out);
+    void block_close(std::vector<Event>& out);
+    bool blocks_ = false;
+    enum class Blk { None, Header, Think, Text, Call } bk_ = Blk::None;
+    std::string hdr_, body_;   ///< a block's header (a call's name), a call's JSON so far
+    bool texts_ = false;       ///< a text block has written something: the next one starts a paragraph
+    bool sep_ = false;         ///< that paragraph break is due
+    bool args_sent_ = false;   ///< a piece of the call's arguments went out
+    /// where a call's JSON {"name": ..., "args": {...}} holds its arguments' object, found as the text arrives
+    struct ArgScan {
+        int st = 0, depth = 0;
+        bool esc = false, in_str = false, is_args = false, done = false;
+        char kind = 0;
+        std::string key;
+        bool push(char c);
+        void end_value();
+    } as_;
 };
 
 }  // namespace lamina

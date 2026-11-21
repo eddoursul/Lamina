@@ -82,6 +82,12 @@ const char* const kHyV4Regex[] = {
     "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+",
 };
 
+// inkling2 (Inkling 2 Mini): llama.cpp's GPT-4o expression (LLAMA_VOCAB_PRE_TYPE_GPT4O), through its general path
+const char* kGpt4oRegex =
+    "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL]"
+    "[lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'"
+    "[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+
 constexpr size_t kHeapMin = 64;          // longer words merge through a heap (same order as the scan)
 constexpr size_t kPieceCacheMax = 200000;
 
@@ -116,10 +122,13 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
         t->regex_.assign(std::begin(kHyV4Regex), std::end(kHyV4Regex));
     else if (t->pre == "qwen35" || t->pre == "qwen2" || t->pre == "qwen3")
         t->regex_ = {kQwen35Regex};
+    else if (t->pre == "inkling2")
+        t->regex_ = {kGpt4oRegex};
     else
         throw std::runtime_error(path + ": the pre-tokenizer '" + t->pre + "' is not one this server runs");
     t->chat_template = str("tokenizer.chat_template");
     t->hy4 = Hy4Tags::from_template(t->chat_template);
+    if (!t->hy4) t->blocks = BlockTags::from_template(t->chat_template);
     t->architecture = str("general.architecture");
     for (int64_t i = 0, n = gguf_get_n_kv(g); i < n; ++i) {
         const std::string k = gguf_get_key(g, i);

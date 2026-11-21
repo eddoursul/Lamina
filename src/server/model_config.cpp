@@ -98,6 +98,7 @@ std::string preset_name(const std::string& arch, const std::string& quantized_by
     if (arch == "qwen35moe") return "qwen36-ud-q4_k_xl";
     if (arch == "qwen35") return "qwen38-27b-ud-q6_k_m";
     if (arch == "hy_v4_flash") return "hy4-flash-q4_k_m";
+    if (arch == "inkling2" || arch == "inkling2_loop") return "inkling2-mini";
     return "";
 }
 
@@ -195,7 +196,8 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
     mc.preset = preset_name(m.arch, m.quantized_by);
     if (mc.preset.empty())
         throw ConfigError(m.path + ": not a model Lamina runs (its architecture '" + m.arch + "'; Lamina runs qwen4exp, "
-                          "Qwen3.8-Flash-Next, qwen35moe, Qwen3.6-35B-A3B, qwen35, Qwen3.8-27B, and hy_v4_flash, Hy4-flash)");
+                          "Qwen3.8-Flash-Next, qwen35moe, Qwen3.6-35B-A3B, qwen35, Qwen3.8-27B, hy_v4_flash, Hy4-flash, and "
+                          "inkling2 / inkling2_loop, Inkling 2 Mini)");
     if (!m.unsupported.empty()) throw ConfigError(m.path + ": " + m.unsupported);
     json p;
     try {

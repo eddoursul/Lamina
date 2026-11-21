@@ -80,6 +80,7 @@ std::string utf8_prefix(std::string_view s, size_t chars) {
 
 // ---------------------------------------------------------------------------------------------- template
 ChatTemplate::ChatTemplate(std::string source) : source_(std::move(source)), hy4_(Hy4Tags::from_template(source_)) {
+    if (!hy4_) blocks_ = BlockTags::from_template(source_);
     jinja::lexer lexer;
     const auto tokens = lexer.tokenize(source_);
     prog_ = std::make_unique<jinja::program>(jinja::parse_from_tokens(tokens));
@@ -166,6 +167,19 @@ json ChatTemplate::detect_caps() const {
         }
         messages.push_back(user);
         const std::string prompt = render_probe(messages, tools);
+        if (blocks_) {   // a block form: each call's JSON after its header
+            for (int i = 0; i < count; ++i) {
+                const std::string head = blocks_->model + jstr(calls[(size_t) i], "name") + blocks_->call;
+                const size_t at = prompt.find(head), end = at == std::string::npos ? at : prompt.find(blocks_->end, at);
+                json body;
+                if (end == std::string::npos || !py_loads(prompt.substr(at + head.size(), end - at - head.size()), body) ||
+                    jget(body, "name") != calls[(size_t) i]["name"] || jget(body, "args") != calls[(size_t) i]["arguments"])
+                    return false;
+            }
+            for (const auto& r : replies)
+                if (prompt.find(r) == std::string::npos) return false;
+            return true;
+        }
         // the complete calls to the probe functions, as re.findall(r"<tool_call>\s*(<function=lamina_caps_call_\d+>
         // .*?</function>)\s*</tool_call>", re.S) finds them
         json parsed = json::array();
@@ -210,7 +224,7 @@ json ChatTemplate::detect_caps() const {
                                       user});
     auto has = [&](const std::string& s, std::string_view x) { return s.find(x) != std::string::npos; };
     return {{"supports_tools", has(tool_prompt, "lamina_caps_call_0") && has(tool_prompt, "lamina_caps_description") &&
-                                   has(tool_prompt, "<tool_call>") && has(tool_prompt, "<function=")},
+                                   (blocks_ || (has(tool_prompt, "<tool_call>") && has(tool_prompt, "<function=")))},
             {"supports_tool_calls", calls_supported(1)},
             {"supports_system_role",
              has(render_probe(json::array({{{"role", "system"}, {"content", "lamina_caps_system"}}, user})),
@@ -685,9 +699,11 @@ Converted openai_to_messages(const json& req) {
                 if (!fn.is_object())
                     throw RequestError("tool_calls must be a list of objects (each with a \"function\" object)");
                 calls.push_back({{"function", {{"name", jget(fn, "name")}, {"arguments", tool_arguments(jget(fn, "arguments"))}}}});
+                if (jget(c, "id").is_string()) calls.back()["id"] = c["id"];
             }
             out["tool_calls"] = calls;
         }
+        if (role == "tool" && jget(m, "tool_call_id").is_string()) out["tool_call_id"] = m["tool_call_id"];
         r.messages.push_back(out);
     }
     json tools = json::array();
@@ -779,9 +795,11 @@ Converted anthropic_to_messages(json& req, bool think_unasked) {
                     any_reasoning = true;
                 } else if (kind == "tool_use") {
                     calls.push_back({{"function", {{"name", jget(block, "name")}, {"arguments", tool_arguments(jget(block, "input"))}}}});
+                    if (jget(block, "id").is_string()) calls.back()["id"] = block["id"];
                 } else if (kind == "tool_result") {
                     // a tool's image (Claude Code's Read of a picture) reaches the encoder like a user's
                     r.messages.push_back({{"role", "tool"}, {"content", parts_of(check_parts(jget(block, "content")))}});
+                    if (jget(block, "tool_use_id").is_string()) r.messages.back()["tool_call_id"] = block["tool_use_id"];
                 }
             }
         if (any_text || !calls.empty() || any_reasoning || !parts.empty()) {
@@ -1028,8 +1046,8 @@ namespace {
 constexpr size_t kRcallMax = 32768;   // the most of a <tool_call> inside the reasoning held while waiting for its end
 }
 
-OutputParser::OutputParser(bool thinking, const json& tools, bool stream_tools, bool recover)
-    : state_(thinking ? "reasoning" : "content"), stream_tools_(stream_tools), recover_(recover) {
+OutputParser::OutputParser(bool thinking, const json& tools, bool stream_tools, bool recover, bool blocks)
+    : state_(thinking ? "reasoning" : "content"), stream_tools_(stream_tools), recover_(recover), blocks_(blocks) {
     if (tools.is_array())
         for (const auto& t : tools) schemas_[jstr(t, "name")] = t;
     reset_scan();
@@ -1296,7 +1314,224 @@ std::vector<Event> OutputParser::close_scan() {
     return out;
 }
 
+// ---- block mode
+bool OutputParser::ArgScan::push(char c) {
+    // st: 0 before the object, 1 between members, 2 in a key, 3 after a key, 4 before a value, 5 in a value
+    switch (st) {
+    case 0:
+        if (c == '{') st = 1;
+        return false;
+    case 1:
+        if (c == '"') {
+            st = 2;
+            key.clear();
+            esc = false;
+        }
+        return false;
+    case 2:
+        if (esc) {
+            esc = false;
+            key.push_back(c);
+        } else if (c == '\\') {
+            esc = true;
+        } else if (c == '"') {
+            st = 3;
+        } else {
+            key.push_back(c);
+        }
+        return false;
+    case 3:
+        if (c == ':') {
+            st = 4;
+            is_args = !done && (key == "args" || key == "arguments" || key == "parameters");
+        }
+        return false;
+    case 4:
+        if (c == ' ' || c == '\n' || c == '\t' || c == '\r') return false;
+        st = 5;
+        depth = 0;
+        in_str = esc = false;
+        if (c == '"') {
+            kind = '"';
+            in_str = true;
+        } else if (c == '{' || c == '[') {
+            kind = '{';
+            depth = 1;
+        } else {
+            kind = 's';
+        }
+        is_args = is_args && c == '{';   // an object is streamed as written; anything else is read at the call's end
+        return is_args;
+    case 5: {
+        const bool mine = is_args;
+        if (kind == 's') {   // a number or a literal: up to the next separator
+            if (c == ',' || c == '}' || c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+                end_value();
+                return false;
+            }
+        } else if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') {
+                in_str = false;
+                if (kind == '"') end_value();
+            }
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '{' || c == '[') {
+            ++depth;
+        } else if (c == '}' || c == ']') {
+            if (--depth == 0) end_value();
+        }
+        return mine;
+    }
+    default:
+        return false;
+    }
+}
+
+void OutputParser::ArgScan::end_value() {
+    if (is_args) done = true;
+    is_args = false;
+    st = 1;
+}
+
+void OutputParser::block_text(std::string& text, std::vector<Event>& out) {
+    if (text.empty()) return;
+    switch (bk_) {
+    case Blk::Header:
+        hdr_ += text;
+        break;
+    case Blk::Think:
+        out.push_back({"reasoning", text, nullptr});
+        break;
+    case Blk::Call:
+        if (schemas_.empty()) {   // a request that declares no tools gets the model's text
+            out.push_back({"content", text, nullptr});
+        } else {
+            body_ += text;
+            if (scall_ != nullptr) {
+                std::string piece;
+                for (const char c : text)
+                    if (as_.push(c)) piece.push_back(c);
+                if (!piece.empty()) {
+                    out.push_back({"tool_args", piece, scall_});
+                    args_sent_ = true;
+                }
+            }
+        }
+        break;
+    default:   // a text block; text outside any block is the reply's too (thinking where none was closed yet)
+        if (bk_ == Blk::None && state_ == "reasoning") {
+            out.push_back({"reasoning", text, nullptr});
+            break;
+        }
+        if (sep_) out.push_back({"content", "\n\n", nullptr});
+        sep_ = false;
+        texts_ = true;
+        out.push_back({"content", text, nullptr});
+    }
+    text.clear();
+}
+
+void OutputParser::block_close(std::vector<Event>& out) {
+    const Blk was = bk_;
+    bk_ = Blk::None;
+    if (was == Blk::Think || was == Blk::Header) state_ = "content";
+    if (was != Blk::Call) return;
+    state_ = "content";
+    const std::shared_ptr<ToolCall> streamed = scall_;
+    const bool sent = args_sent_;
+    scall_ = nullptr;
+    args_sent_ = false;
+    as_ = ArgScan{};
+    std::string body = std::move(body_);
+    body_.clear();
+    if (schemas_.empty()) return;
+    // the call: its header's name, its JSON's arguments
+    json obj, args;
+    bool ok = py_loads(strip(body), obj) && obj.is_object();
+    if (ok) {
+        args = obj.contains("args") ? obj["args"] : obj.contains("arguments") ? obj["arguments"]
+                                                : obj.contains("parameters") ? obj["parameters"] : json::object();
+        if (args.is_string()) {
+            json v;
+            ok = py_loads(args.get<std::string>(), v);
+            args = v;
+        }
+        if (args.is_null()) args = json::object();
+        ok = ok && args.is_object();
+    }
+    std::string name(strip(hdr_));
+    if (name.empty() && ok) name = jstr(obj, "name");
+    if (!ok || name.empty()) {
+        if (!recover_) throw ToolCallError("the model wrote a tool call that does not parse (its JSON)");
+        out.push_back({"content", body, nullptr});
+        return;
+    }
+    auto call = std::make_shared<ToolCall>();
+    call->name = name;
+    call->arguments = args;
+    if (streamed != nullptr) {
+        call->id = streamed->id;
+        if (!sent) out.push_back({"tool_args", py_dumps(args, false), streamed});
+    }
+    out.push_back({"tool_call", "", call});
+}
+
+std::vector<Event> OutputParser::feed_blocks(std::string_view delta) {
+    std::vector<Event> out;
+    std::string text;
+    for (const char c : delta) {
+        if (!is_block_control(c)) {
+            text.push_back(c);
+            continue;
+        }
+        block_text(text, out);
+        if (c == kBlkModel) {   // a block opens; one left open ends there
+            block_close(out);
+            bk_ = Blk::Header;
+            hdr_.clear();
+        } else if (c == kBlkThink) {
+            bk_ = Blk::Think;
+            state_ = "reasoning";
+        } else if (c == kBlkText) {
+            bk_ = Blk::Text;
+            state_ = "content";
+            sep_ = texts_;
+        } else if (c == kBlkCall) {
+            bk_ = Blk::Call;
+            state_ = "call";
+            body_.clear();
+            as_ = ArgScan{};
+            args_sent_ = false;
+            scall_ = nullptr;
+            const std::string name(strip(hdr_));
+            if (stream_tools_ && !schemas_.empty() && !name.empty()) {
+                scall_ = std::make_shared<ToolCall>();
+                scall_->name = name;
+                out.push_back({"tool_start", "", scall_});
+            }
+        } else {
+            block_close(out);
+        }
+    }
+    block_text(text, out);
+    return out;
+}
+
+std::vector<Event> OutputParser::finish_blocks() {
+    std::vector<Event> out;
+    // the output ended inside a call: one that was announced ends as it is, any other is the text it was
+    if (bk_ == Blk::Call && scall_ == nullptr && !body_.empty() && !schemas_.empty()) out.push_back({"content", body_, nullptr});
+    body_.clear();
+    scall_ = nullptr;
+    bk_ = Blk::None;
+    return out;
+}
+
 std::vector<Event> OutputParser::feed(std::string_view delta) {
+    if (blocks_) return feed_blocks(delta);
     buf_ += delta;
     std::vector<Event> out;
     auto append = [&](std::vector<Event> evs) {
@@ -1568,6 +1803,7 @@ std::vector<Event> OutputParser::feed(std::string_view delta) {
 }
 
 std::vector<Event> OutputParser::finish(std::string_view reason) {
+    if (blocks_) return finish_blocks();
     std::vector<Event> out;
     auto append = [&](std::vector<Event> evs) {
         for (auto& e : evs) out.push_back(std::move(e));

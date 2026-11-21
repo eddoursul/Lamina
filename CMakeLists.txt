@@ -852,6 +852,9 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   add_executable(tool_args_test tests/server/tool_args_test.cpp)
   target_link_libraries(tool_args_test PRIVATE lamina_text)
   add_test(NAME tool_args_test COMMAND tool_args_test)
+  add_executable(block_form_test tests/server/block_form_test.cpp)
+  target_link_libraries(block_form_test PRIVATE lamina_text)
+  add_test(NAME block_form_test COMMAND block_form_test)
   if(TARGET lamina_program)
     # the web app and the presets (examples/*.json: lamina-server -m) inside the binary
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/server/web * web_asset
@@ -958,7 +961,7 @@ endif()
 
 # The tests that need no GPU (nor a CUDA driver): `ctest -L cpu`, what CI runs (.github/workflows/build.yml)
 if(LAMINA_BUILD_TESTS)
-  foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test pool_stress expert_multi_test iq_avx2_parity
+  foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test block_form_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
              conversation_cache_test control_vector_test deterministic_adapt_help platform_memory_test
              ple_reader_selftest model_config_test params_test bench_test cpu_floor_test)

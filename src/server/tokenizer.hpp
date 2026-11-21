@@ -61,6 +61,7 @@ public:
     std::map<std::string, int64_t> special_ids;   ///< tokenizer.ggml.<name>_token_id
     std::string architecture;                  ///< general.architecture
     std::optional<Hy4Tags> hy4;                ///< the template's tags when it is Hy4-flash's (dialect.hpp)
+    std::optional<BlockTags> blocks;           ///< the template's tags when a reply is blocks (Inkling 2's)
 
 private:
     void encode_plain(std::string_view text, std::vector<int32_t>& out) const;
@@ -102,9 +103,11 @@ public:
     explicit Detokenizer(const Tokenizer& tok) : tok_(tok) {
         if (tok.hy4) tr_.emplace(*tok.hy4);
     }
-    /// the token's text; Hy4-flash's tags as Qwen's forms, which the output parser reads
+    /// the token's text; Hy4-flash's tags as Qwen's forms, a block form's as the control characters, which the
+    /// output parser reads
     std::string push(int32_t id) {
         std::string s = dec_.push(tok_.token_bytes(id));
+        if (tok_.blocks) return block_piece(s, *tok_.blocks);
         return tr_ ? tr_->piece(s) : s;
     }
     bool pending() const { return dec_.pending(); }

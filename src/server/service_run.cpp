@@ -135,7 +135,8 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
                                                          !kwargs["enable_thinking"].get<bool>());
     if (tok.hy4 && !ids.empty()) thinking_off = tok.token_bytes(ids.back()) != tok.hy4->think_open;   // its last tag says
     if (force && thinking_off) {
-        const std::vector<int32_t> f = tok.encode(tok.hy4 ? qwen_to_hy4(*force, *tok.hy4) : *force, true);
+        const std::vector<int32_t> f = tok.encode(tok.blocks ? qwen_to_blocks(*force, *tok.blocks, false)
+                                                             : tok.hy4 ? qwen_to_hy4(*force, *tok.hy4) : *force, true);
         ids.insert(ids.end(), f.begin(), f.end());
     }
     embeddings = Embeddings{};
@@ -147,9 +148,12 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         if (vision == nullptr)
             throw RequestError("this server was started without the vision encoder (an image projector beside the model, or the "
                                "config's vision section), so it cannot read images");
-        // a picture's tags: Qwen's, or Hy4's (its template writes the same three)
-        const std::string pad_tag = tok.hy4 ? tok.hy4->image_pad : "<|image_pad|>",
-                          start_tag = tok.hy4 ? tok.hy4->image_start : "<|vision_start|>";
+        // a picture's tags: Qwen's, or Hy4's (its template writes the same three), or a block form's (the marker
+        // its template writes after the picture block's tag)
+        if (tok.blocks && tok.blocks->image_pad.empty())
+            throw RequestError("this model's chat template has no place for a picture");
+        const std::string pad_tag = tok.blocks ? tok.blocks->image_pad : tok.hy4 ? tok.hy4->image_pad : "<|image_pad|>",
+                          start_tag = tok.blocks ? tok.blocks->image : tok.hy4 ? tok.hy4->image_start : "<|vision_start|>";
         const int32_t pad = tok.encode(pad_tag, true)[0], start = tok.encode(start_tag, true)[0];
         // an image URL is downloaded first, outside the turn: under it, a slow server held every other request
         std::vector<std::pair<std::string, bool>> sources;
@@ -447,7 +451,12 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
             budget = std::max<int64_t>(1, max_new - reserve);
         }
     }
-    OutputParser parser(thinking, tools, true, tool_call_recovery);
+    OutputParser parser(thinking, tools, true, tool_call_recovery, tok.blocks.has_value());
+    // the server's own Qwen-form text (a close of thinking, a forced call's opening) in the model's form
+    auto to_model = [&](const std::string& text) {
+        if (tok.blocks) return qwen_to_blocks(text, *tok.blocks, parser.in_block());
+        return tok.hy4 ? qwen_to_hy4(text, *tok.hy4) : text;
+    };
     Detokenizer detok(tok);
     int64_t n = 0;
     std::string finish = "length";
@@ -477,7 +486,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     };
     std::vector<Event> opening;   // without thinking the prompt ends with the forced opening: parsed as the model's
     if (force && !thinking) {
-        opening = parser.feed(*force);
+        opening = parser.feed(tok.blocks ? blocks_control(qwen_to_blocks(*force, *tok.blocks, false), *tok.blocks) : *force);
         force.reset();
     }
     std::string tail;   // the last characters written (the newlines before a call)
@@ -955,8 +964,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 parser.state() == "reasoning" && parser.buf() != kThinkEnd && !(stops && stops->hit) && !cancel.is_set()) {
                 // #1053: the model wrote its reasoning and stopped before </think>: close the thinking once and let it answer
                 close_retried = true;
-                const std::vector<int32_t> extra =
-                    tok.encode(tok.hy4 ? qwen_to_hy4(kReasoningClose, *tok.hy4) : std::string(kReasoningClose), true);
+                const std::vector<int32_t> extra = tok.encode(to_model(kReasoningClose), true);
                 if (max_new - n - (int64_t) extra.size() >= 1) {
                     say("[lamina] the reply ended inside its thinking with no answer: closing the thinking once and "
                         "continuing (reasoning_close_retry)");
@@ -1002,7 +1010,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 text = std::string(2 - std::min<size_t>(2, nl), '\n') + force.value_or("");
             }
             force.reset();
-            const std::vector<int32_t> extra = tok.encode(tok.hy4 ? qwen_to_hy4(text, *tok.hy4) : text, true);
+            const std::vector<int32_t> extra = tok.encode(to_model(text), true);
             if (max_new - n - (int64_t) extra.size() < 1) break;   // no room left to answer: "length"
             if (wrap) say("[lamina] thinking budget reached (" + std::to_string(thought) + " tokens): wrapping up the thinking");
             for (const int32_t t : extra) {

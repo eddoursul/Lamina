@@ -1,8 +1,8 @@
 # Setup
 
 What a PC needs: [the README](../README.md#what-you-need). This page covers the build from the source, a model file
-run with `lamina-server -m`, the release binaries, the config, the GPUs, the engine options worth knowing, and
-Qwen3.6-35B-A3B and Qwen3.8-27B.
+run with `lamina-server -m`, the release binaries, the config, the GPUs, the engine options worth knowing,
+Qwen3.6-35B-A3B and Qwen3.8-27B, and Inkling 2 Mini.
 
 ## Building
 
@@ -86,8 +86,9 @@ The server builds a config for the file and says in its window what it took:
 
 - **The preset**, one of `examples/*.json`, built into the server and picked by the file's header: ISTA-DASLab's
   Qwen3.8-Flash-Next files take `iq3_s`, the family's other files (unsloth's quants, Agention's Gyro-L) `ud-q4_k_xl`,
-  Qwen3.6-35B-A3B's `qwen36-ud-q4_k_xl`, Qwen3.8-27B's `qwen38-27b-ud-q6_k_m`. Its engine options, sampling and port
-  (8081 to 8084) are the config's; the model's name in the API is the file's, without the shard number.
+  Qwen3.6-35B-A3B's `qwen36-ud-q4_k_xl`, Qwen3.8-27B's `qwen38-27b-ud-q6_k_m`, Hy4-flash's `hy4-flash-q4_k_m`,
+  Inkling 2 Mini's `inkling2-mini`. Its engine options, sampling and port (8081 to 8087) are the config's; the
+  model's name in the API is the file's, without the shard number.
 - **The GPUs** ([below](#the-gpus)): the model on the card of the RTX 30 series or newer with the most VRAM that
   drives no display (the lower number on a tie), every other card an expert tier, as the preset's `"gpu"` (that card,
   then `auto`) has them; `--gpu NAME` names the main one, `--gpu 0,1` keeps it to those cards (the main one picked
@@ -384,6 +385,28 @@ path yet: `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) 
 holds a conversation with checkpoints of its own, a request runs in the session that holds its conversation, and
 the conversations the sessions do not hold are parked in RAM (`--prompt-cache 0`: each slot keeps its conversation
 and continues it only when the request extends it).
+
+## Inkling 2 Mini
+
+The engine runs Thinking Machines Lab's Inkling 2 Mini (GGUF architectures `inkling2`, unsloth's files, and
+`inkling2_loop`, mainline llama.cpp's layout of the same tensors) on a path of its own (`src/inkling2`): `lamina`
+switches to it from the model file's header. The model is 24 layers of which 12 run three times a token, 128 experts
+a layer with 8 used; five layers of six attend their last 1,024 tokens and the sixth every token, so K and V are kept
+whole for 8 of the 48 layer applications: 32.0 KiB a token in FP16, 17.0 with `--kv q8_0`.
+
+It runs on one GPU, which holds the whole file (the experts in the file's own formats: NVFP4 in most layers of
+unsloth's quants) beside the K and V; the embedding table stays in RAM (~0.5 GB). Its options: `--kv fp16 | q8_0`;
+`--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
+32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
+card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
+mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
+
+Its chat form is its own: a reply is blocks of thinking, text and tool calls between special tokens, a call's
+arguments JSON. The server reads them as such (a call's arguments are streamed as the model writes them) and writes
+the server's own forms for it (a forced call's opening, the close of thinking at a budget). `reasoning_effort`
+none, low, medium and high are the template's levels 0, 0.2, 0.7 and 0.9; at none the model still writes a short
+thinking block, which comes as reasoning. The preset samples at temperature 1.0 over the 64 likeliest tokens (the
+model card: the plain distribution). No pictures and no drafts yet.
 
 ## Updating
 

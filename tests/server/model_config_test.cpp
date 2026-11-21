@@ -101,14 +101,19 @@ int main() {
     CHECK(lamina::preset_name("qwen35moe", "Unsloth") == "qwen36-ud-q4_k_xl");
     CHECK(lamina::preset_name("qwen35", "") == "qwen38-27b-ud-q6_k_m");
     CHECK(lamina::preset_name("hy_v4_flash", "") == "hy4-flash-q4_k_m");
+    CHECK(lamina::preset_name("inkling2", "Unsloth") == "inkling2-mini");
+    CHECK(lamina::preset_name("inkling2_loop", "") == "inkling2-mini");
     CHECK(lamina::preset_name("llama", "Unsloth").empty());
-    for (const char* name : {"iq3_s", "ud-q4_k_xl", "qwen36-ud-q4_k_xl", "qwen38-27b-ud-q6_k_m", "hy4-flash-q4_k_m"}) {
+    for (const char* name : {"iq3_s", "ud-q4_k_xl", "qwen36-ud-q4_k_xl", "qwen38-27b-ud-q6_k_m", "hy4-flash-q4_k_m",
+                             "inkling2-mini"}) {
         const json p = lamina::preset(name);   // built in from examples/
         CHECK(!lamina::model_file(p).empty() && lamina::gpu_cards(p).has_value());   // "model", the "gpu" cards
         const std::vector<std::string> a = lamina::engine_args(p);
         CHECK(std::find(a.begin(), a.end(), "--native") != a.end() && std::find(a.begin(), a.end(), "--gpu") != a.end());
         CHECK(p["port"].is_number_integer());
-        // its pictures: on a GPU, in VRAM borrowed from the engine, on the card the PC's choice gives it (none named)
+        // its pictures: on a GPU, in VRAM borrowed from the engine, on the card the PC's choice gives it (none named);
+        // Inkling 2 Mini's preset reads none
+        if (std::string(name) == "inkling2-mini") continue;
         const json v = p.value("vision", json::object());
         CHECK(v.value("gpu", json()) == true && v.value("lend", json()) == true && !v.contains("cuda_device") &&
               v.contains("threads"));

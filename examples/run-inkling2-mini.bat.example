@@ -1,0 +1,7 @@
+@echo off
+title Lamina Inkling 2 Mini
+rem Inkling 2 Mini, one of unsloth's quants, on http://127.0.0.1:8087/v1 with inkling2-mini.json (README.md).
+rem The engine's inkling2 path: the model on the config's GPU, the context what its VRAM holds cells for.
+cd /d "%~dp0.."
+build\lamina-server.exe --config examples\inkling2-mini.json
+pause
