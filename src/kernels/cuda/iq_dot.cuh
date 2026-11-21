@@ -907,6 +907,76 @@ template<> struct Split<147> : SplitTqp<5> {};
 template<> struct Split<148> : SplitTqp<6> {};
 template<> struct Split<149> : SplitTqp<7> {};
 
+// ---------------------------------------------------------------- NVFP4 and MXFP4 (vecdotq.cuh)
+// E2M1 codes (ggml-common.h's kvalues_fp4: the values doubled) against q8_1.  NVFP4: a block of 64 values is four
+// sub-blocks of 16, a UE4M3 scale each; a sub-block's 8 bytes hold its first 8 values in the low nibbles and its last
+// 8 in the high ones.  MXFP4: a block of 32, one E8M0 scale, the low nibbles its first 16 values.
+/// ggml_ue4m3_to_fp32: the scale halved, for the doubled codes (0 and 0x7F: zero)
+__device__ __forceinline__ float ue4m3_half(uint8_t x) {
+    const uint32_t e = (x >> 3) & 0xF, m = x & 7;
+    const float v = e ? __uint_as_float(((e + 119u) << 23) | (m << 20)) : (float) m * 0.0009765625f;
+    return x == 0x7F ? 0.0f : v;
+}
+/// GGML_E8M0_TO_FP32_HALF
+__device__ __forceinline__ float e8m0_half(uint8_t x) {
+    return __uint_as_float(x < 2 ? 0x00200000u << x : (uint32_t) (x - 1) << 23);
+}
+__device__ __forceinline__ int get_int_b1(const void* x, const int& i32) {
+    const uint8_t* x8 = (const uint8_t*) x;
+    return (int) ((uint32_t) x8[4 * i32] | (uint32_t) x8[4 * i32 + 1] << 8 | (uint32_t) x8[4 * i32 + 2] << 16 |
+                  (uint32_t) x8[4 * i32 + 3] << 24);
+}
+// one call: two sub-blocks (iqs 0 or 4, the block's ints); bq8_1 the q8_1 blocks of this weight block's 64 values
+__device__ __forceinline__ float vec_dot_nvfp4_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                    const int& kbx, const int& iqs) {
+    const block_nvfp4* bq4 = (const block_nvfp4*) vbq + kbx;
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        const int iqs0 = iqs + 2 * i, is = iqs0 >> 1;
+        const int2 v0 = get_int_from_table_16(get_int_b4(bq4->qs, iqs0), kvalues_mxfp4);
+        const int2 v1 = get_int_from_table_16(get_int_b4(bq4->qs, iqs0 + 1), kvalues_mxfp4);
+        const block_q8_1* bq8 = bq8_1 + (is >> 1);
+        const int i8 = (is & 1) << 2;
+        int sumi = ggml_cuda_dp4a(v0.x, get_int_b4(bq8->qs, i8 + 0), 0);
+        sumi = ggml_cuda_dp4a(v0.y, get_int_b4(bq8->qs, i8 + 2), sumi);
+        sumi = ggml_cuda_dp4a(v1.x, get_int_b4(bq8->qs, i8 + 1), sumi);
+        sumi = ggml_cuda_dp4a(v1.y, get_int_b4(bq8->qs, i8 + 3), sumi);
+        const float d = ue4m3_half(bq4->d[is]) * __low2float(bq8->ds);
+        sum += d * (float) sumi;
+    }
+    return sum;
+}
+// one call: half a block (iqs 0 or 2)
+__device__ __forceinline__ float vec_dot_mxfp4_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                    const int& kbx, const int& iqs) {
+    const block_mxfp4* bq4 = (const block_mxfp4*) vbq + kbx;
+    const int* q8 = (const int*) bq8_1->qs + iqs;
+    int sumi = 0;
+#pragma unroll
+    for (int l = 0; l < 2; ++l) {
+        const int2 v = get_int_from_table_16(get_int_b1(bq4->qs, iqs + l), kvalues_mxfp4);
+        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
+        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+    }
+    const float d = e8m0_half(bq4->e) * __low2float(bq8_1->ds);
+    return d * (float) sumi;
+}
+
+// ---------------------------------------------------------------- BF16
+// A weight as its file's bfloat16 (the top 16 bits of the float) against q8_1: one call 8 values of a 32-value "block"
+// (iqs 0, 2, 4, 6: the q8_1 block's ints).
+__device__ __forceinline__ float bf16_float(uint16_t b) { return __uint_as_float((uint32_t) b << 16); }
+__device__ __forceinline__ float vec_dot_bf16_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+                                                   const int& kbx, const int& iqs) {
+    const uint16_t* w = (const uint16_t*) vbq + (size_t) kbx * 32 + 4 * iqs;
+    const int8_t* q = bq8_1->qs + 4 * iqs;
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) sum += bf16_float(w[i]) * (float) q[i];
+    return sum * __low2float(bq8_1->ds);
+}
+
 // ---------------------------------------------------------------- the formats
 // qk = values per block, ipb = dot calls per block (qi / vdr), step = the iqs stride between calls.
 template<int TY> struct Fmt;
@@ -945,6 +1015,13 @@ template<> struct Fmt<19> { static constexpr int qk = 256, ipb = QI1_S, step = 1
 template<> struct Fmt<23> { static constexpr int qk = 256, ipb = QI4_XS / 4, step = 4;
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq4_xs_q8_1(v, y, kbx, iqs); } };
 
+template<> struct Fmt<30> { static constexpr int qk = 32, ipb = 4, step = 2;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_bf16_q8_1(v, y, kbx, iqs); } };
+template<> struct Fmt<39> { static constexpr int qk = 32, ipb = 2, step = 2;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_mxfp4_q8_1(v, y, kbx, iqs); } };
+template<> struct Fmt<40> { static constexpr int qk = 64, ipb = 2, step = 4;
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_nvfp4_q8_1(v, y, kbx, iqs); } };
+
 #define LAMINA_TQP_FMT(T) template<> struct Fmt<T> { static constexpr int qk = 128, ipb = 8, step = 4; \
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { \
         return Split<T>::apply(Split<T>::load(v, kbx, iqs, tq_lut_i8), Split<T>::fetch(y, iqs)); } };
@@ -955,7 +1032,7 @@ LAMINA_TQP_FMT(149)
 
 // Every format above, for the dispatch switches: X(type) once per Fmt<type>.
 #define LAMINA_TQP_FMTS(X) X(147) X(148) X(149)
-#define LAMINA_FMTS(X) X(6) X(7) X(8) X(11) X(12) X(13) X(14) X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(29) X(42) LAMINA_TQP_FMTS(X)
+#define LAMINA_FMTS(X) X(6) X(7) X(8) X(11) X(12) X(13) X(14) X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(29) X(30) X(39) X(40) X(42) LAMINA_TQP_FMTS(X)
 
 inline int fmt_qk(int t) {
     switch (t) {

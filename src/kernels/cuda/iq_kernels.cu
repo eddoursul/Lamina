@@ -32,6 +32,17 @@ __device__ __forceinline__ float swiglu_l(float g, float u, float lim) {
     return (g / (1.0f + __expf(-g))) * u;
 }
 
+/// A layout's activation of a gate and an up value: SwiGLU, or (act 1, Inkling 2's) the gate capped at beta and up at
+/// lbeta, beta tanh(g / beta) sigmoid(g) * lbeta tanh(u / lbeta)
+__device__ __forceinline__ float expert_act(float g, float u, const NativeExpertLayout& L) {
+    if (L.act == 1) return L.act_beta * tanhf(g / L.act_beta) / (1.0f + __expf(-g)) * (L.act_lbeta * tanhf(u / L.act_lbeta));
+    return swiglu_l(g, u, L.swiglu_limit);
+}
+/// A blob's two scales (its gate/up rows' products, its down rows'), or 1: `which` 0 or 1
+__device__ __forceinline__ float blob_scale(unsigned long long blob, const NativeExpertLayout& L, int which) {
+    return L.scale_off ? ((const float*) ((const uint8_t*) blob + L.scale_off))[which] : 1.0f;
+}
+
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
@@ -124,6 +135,7 @@ __global__ void __launch_bounds__(GUS_WARPS * 32, gus_min_blocks<TG>()) native_g
     const uint8_t* wu = wg + L.up_off;
     const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const float sc = blob_scale(grp_ptr[g], L, 0);
     for (int b0 = e0; b0 < e1; b0 += GUS_BATCH) {
         const int b1 = min(e1, b0 + GUS_BATCH);
         for (int e = b0; e < b1; ++e) {
@@ -142,8 +154,8 @@ __global__ void __launch_bounds__(GUS_WARPS * 32, gus_min_blocks<TG>()) native_g
             }
 #pragma unroll
             for (int i = 0; i < GUS_ROWS; ++i) {
-                const float gv = warp_sum(sg[i]), uv = warp_sum(su[i]);
-                if (lane == 0) sh[e - b0][GUS_ROWS * warp + i] = swiglu_l(gv, uv, L.swiglu_limit);
+                const float gv = warp_sum(sg[i]) * sc, uv = warp_sum(su[i]) * sc;
+                if (lane == 0) sh[e - b0][GUS_ROWS * warp + i] = expert_act(gv, uv, L);
             }
         }
         __syncthreads();
@@ -181,6 +193,7 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_kernel(const unsi
     __builtin_assume(__isGlobal(wr));
     const int nb = (int) (L.n_ff / F::qk), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const float sc = blob_scale(grp_ptr[g], L, 1);
     for (int e = e0; e < e1; ++e) {
         const block_q8_1* x = hq + (size_t) e * hb;
         float sd[DOWN_ROWS];
@@ -194,7 +207,7 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_kernel(const unsi
         }
         float v[DOWN_ROWS];
 #pragma unroll
-        for (int i = 0; i < DOWN_ROWS; ++i) v[i] = warp_sum(sd[i]);
+        for (int i = 0; i < DOWN_ROWS; ++i) v[i] = warp_sum(sd[i]) * sc;
         if (lane == 0) {
             float* o = out + (size_t) ent_dst[e] * L.n_embd + r0;
             if constexpr (DOWN_ROWS == 4) *(float4*) o = make_float4(v[0], v[1], v[2], v[3]);
@@ -494,6 +507,7 @@ __global__ void __launch_bounds__(256) hadamard_rows_kernel(const T* x, T* y, co
 // 8 lanes a row; 4 or 16: 3-6% slower) and Q2_0 (20 calls, 4 lanes; 8 or 16: up to 14% slower at 8 tokens)
 #define LAMINA_GU80_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(42)
 bool gu80(const NativeExpertLayout& L) {
+    if (L.act != 0 || L.scale_off != 0) return false;
     switch (L.gu_type) {
 #define LAMINA_GU80(T) case T:
         LAMINA_GU80_FMTS(LAMINA_GU80)
@@ -504,7 +518,7 @@ bool gu80(const NativeExpertLayout& L) {
 }
 constexpr int DOWN_G_IQ4_NL = 8, DOWN_G_Q2_0 = 4;
 int down_sub_g(const NativeExpertLayout& L) {
-    const int G = L.n_ff != 640 ? 0 : L.d_type == 20 ? DOWN_G_IQ4_NL : L.d_type == 42 ? DOWN_G_Q2_0 : 0;
+    const int G = L.n_ff != 640 || L.scale_off != 0 ? 0 : L.d_type == 20 ? DOWN_G_IQ4_NL : L.d_type == 42 ? DOWN_G_Q2_0 : 0;
     return G > 0 && L.n_embd % (DOWN_WARPS * 32 / G) == 0 ? G : 0;
 }
 
@@ -1016,9 +1030,48 @@ __device__ void dq_tqp(const void* vx, int64_t ibs, dst_t* yy, int tid) {
     }
 }
 
+// BF16: thread tid 8 of the superblock's 256 values
+template<typename dst_t>
+__device__ void dq_bf16(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const uint16_t* x = (const uint16_t*) vx + ibs * QK_K + 8 * tid;
+    dst_t* y = yy + 8 * tid;
+    for (int j = 0; j < 8; ++j) y[j] = cvt<dst_t>(bf16_float(x[j]));
+}
+// MXFP4: 8 blocks of 32 a superblock; thread tid 4 bytes of block tid % 8 (their low nibbles the block's first 16
+// values, the high ones its last 16)
+template<typename dst_t>
+__device__ void dq_mxfp4(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const block_mxfp4* x = (const block_mxfp4*) vx + ibs * (QK_K / QK_MXFP4);
+    const int ib = tid % 8, il = tid / 8;
+    const float d = e8m0_half(x[ib].e);
+    dst_t* y = yy + 32 * ib;
+    for (int j = 0; j < 4; ++j) {
+        const int iqs = 4 * il + j;
+        y[iqs] = cvt<dst_t>(d * (float) kvalues_mxfp4[x[ib].qs[iqs] & 0xf]);
+        y[iqs + 16] = cvt<dst_t>(d * (float) kvalues_mxfp4[x[ib].qs[iqs] >> 4]);
+    }
+}
+// NVFP4: 4 blocks of 64 a superblock, each four sub-blocks of 16 with a scale; thread tid 4 bytes of a sub-block (their
+// low nibbles among its first 8 values, the high ones among its last 8)
+template<typename dst_t>
+__device__ void dq_nvfp4(const void* vx, int64_t ibs, dst_t* yy, int tid) {
+    const block_nvfp4* x = (const block_nvfp4*) vx + ibs * (QK_K / QK_NVFP4) + tid / 8;
+    const int s = (tid % 8) / 2, half = tid % 2;
+    const float d = ue4m3_half(x->d[s]);
+    dst_t* y = yy + 64 * (tid / 8) + 16 * s + 4 * half;
+    for (int j = 0; j < 4; ++j) {
+        const uint8_t b = x->qs[8 * s + 4 * half + j];
+        y[j] = cvt<dst_t>(d * (float) kvalues_mxfp4[b & 0xf]);
+        y[j + 8] = cvt<dst_t>(d * (float) kvalues_mxfp4[b >> 4]);
+    }
+}
+
 template<typename dst_t>
 __device__ __forceinline__ void dq_dispatch(int ty, const void* vx, int64_t ibs, dst_t* y, int tid) {
     switch (ty) {
+        case 30: dq_bf16(vx, ibs, y, tid); break;
+        case 39: dq_mxfp4(vx, ibs, y, tid); break;
+        case 40: dq_nvfp4(vx, ibs, y, tid); break;
         case 147: dq_tqp<5>(vx, ibs, y, tid); break;
         case 148: dq_tqp<6>(vx, ibs, y, tid); break;
         case 149: dq_tqp<7>(vx, ibs, y, tid); break;
@@ -1071,7 +1124,8 @@ __global__ void dequant_experts_kernel(int gu_ty, int d_ty, const uint8_t* const
 // the formats dq_dispatch dequantizes
 bool is_iq(int t) {
     return t == 16 || t == 17 || t == 18 || t == 20 || t == 21 || t == 22 || t == 23 || t == 29 || t == 42 || t == 11 ||
-           t == 12 || t == 13 || t == 14 || t == 19 || t == 6 || t == 7 || t == 8 || (t >= 147 && t <= 149);
+           t == 12 || t == 13 || t == 14 || t == 19 || t == 6 || t == 7 || t == 8 || t == 30 || t == 39 || t == 40 ||
+           (t >= 147 && t <= 149);
 }
 
 }  // namespace
@@ -1097,6 +1151,9 @@ size_t iq_row_bytes(int t, int64_t n) noexcept {
         case 6: return (size_t) (n / 32) * sizeof(block_q5_0);
         case 7: return (size_t) (n / 32) * sizeof(block_q5_1);
         case 8: return (size_t) (n / 32) * sizeof(block_q8_0);
+        case 30: return (size_t) n * 2;
+        case 39: return (size_t) (n / 32) * sizeof(block_mxfp4);
+        case 40: return (size_t) (n / 64) * sizeof(block_nvfp4);
         case 147: return (size_t) (n / 128) * sizeof(block_tqp5);
         case 148: return (size_t) (n / 128) * sizeof(block_tqp6);
         case 149: return (size_t) (n / 128) * sizeof(block_tqp7);

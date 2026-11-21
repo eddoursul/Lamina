@@ -1,6 +1,7 @@
 // include/lamina/kernels/iq_kernels.hpp - the GGUF expert and embedding formats on the GPU: the i-quants (IQ1_M,
 // IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL) and Q2_0 of the IQ2_XS / IQ3_XXS model files, Q4_K, Q5_K,
-// Q5_1 and Q8_0 of the UD-Q4_K_XL file, and Q5_0 of unsloth's Dynamic 3.1 quants.
+// Q5_1 and Q8_0 of the UD-Q4_K_XL file, Q5_0 of unsloth's Dynamic 3.1 quants, and NVFP4 and MXFP4 (Inkling 2 Mini's
+// experts as its checkpoint holds them).
 //
 // The block layouts, codebook grids and dot products are llama.cpp's (ggml-common.h, ggml-cuda/vecdotq.cuh,
 // ggml-cuda/dequantize.cuh; MIT, see third_party/ggml/LICENSE and VERSION.txt), so a weight means exactly what it
@@ -53,6 +54,10 @@ struct NativeExpertLayout {
     int had_block = 0;                  // Hadamard-folded down weights: h is rotated before it is quantized (hadamard.hpp)
     const float* d_signs = nullptr;     // their sign vector, n_ff floats on this device, or null
     float swiglu_limit = 0.f;           // SwiGLU's clamp: silu(min(g, L)) * clamp(u, -L, L) (Hy4-flash); 0: none
+    int act = 0;                        // 0: SwiGLU; 1: beta tanh(g / beta) sigmoid(g) * lbeta tanh(u / lbeta) (Inkling 2)
+    float act_beta = 0.f, act_lbeta = 0.f;
+    size_t scale_off = 0;               // > 0: two floats there in the blob, the scales of its gate/up and down rows'
+                                        // products (NVFP4's per-expert scales); the q8_1 kernels alone read them
 };
 NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd, int64_t n_ff,
                                         int gu_act = -1, int d_act = -1);
