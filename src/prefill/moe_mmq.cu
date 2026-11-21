@@ -226,6 +226,7 @@ bool supported(int t) {
         case GGML_TYPE_Q3_K:   // AngelSlim's Hy4-flash Q3_K
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q8_0:
+        case GGML_TYPE_MXFP4: case GGML_TYPE_NVFP4:   // Inkling 2 Mini's experts
 #if defined(LAMINA_MMQ_TQP)
         case GGML_TYPE_TQP5: case GGML_TYPE_TQP6: case GGML_TYPE_TQP7:   // Gyro-L (cmake/lamina_ggml_tq_overlay.cmake)
 #endif
@@ -233,6 +234,13 @@ bool supported(int t) {
         default:
             return false;
     }
+}
+
+int ds_layout(int t) { return supported(t) ? (int) mmq_get_q8_1_ds_layout((ggml_type) t) : -1; }
+
+bool native_fp4(int t) {
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    return blackwell_mma_available(cc) && (t == GGML_TYPE_MXFP4 || t == GGML_TYPE_NVFP4);
 }
 
 bool fits(int t, int64_t w_rows) {
@@ -432,6 +440,8 @@ void Context::run(const Product& p, void* stream) {
         case GGML_TYPE_Q6_K: mul_mat_q_case<GGML_TYPE_Q6_K>(ctx, a, s); break;
         case GGML_TYPE_Q5_0: mul_mat_q_case<GGML_TYPE_Q5_0>(ctx, a, s); break;
         case GGML_TYPE_Q5_1: mul_mat_q_case<GGML_TYPE_Q5_1>(ctx, a, s); break;
+        case GGML_TYPE_MXFP4: mul_mat_q_case<GGML_TYPE_MXFP4>(ctx, a, s); break;
+        case GGML_TYPE_NVFP4: mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s); break;
 #if defined(LAMINA_MMQ_TQP)
         case GGML_TYPE_TQP5: mul_mat_q_case<GGML_TYPE_TQP5>(ctx, a, s); break;
         case GGML_TYPE_TQP6: mul_mat_q_case<GGML_TYPE_TQP6>(ctx, a, s); break;
@@ -474,6 +484,8 @@ void Context::run_dense(const void* w, int type, int64_t rows, int64_t cols, con
         case GGML_TYPE_Q6_K: mul_mat_q_case<GGML_TYPE_Q6_K>(ctx, a, s); break;
         case GGML_TYPE_Q5_0: mul_mat_q_case<GGML_TYPE_Q5_0>(ctx, a, s); break;
         case GGML_TYPE_Q5_1: mul_mat_q_case<GGML_TYPE_Q5_1>(ctx, a, s); break;
+        case GGML_TYPE_MXFP4: mul_mat_q_case<GGML_TYPE_MXFP4>(ctx, a, s); break;
+        case GGML_TYPE_NVFP4: mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s); break;
         default:
             std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t);
             std::exit(1);

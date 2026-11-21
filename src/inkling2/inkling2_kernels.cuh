@@ -15,6 +15,7 @@
 #include <cuda_runtime.h>
 
 #include <cfloat>
+#include <cstring>
 #include <cstdint>
 
 namespace ik {
@@ -22,6 +23,8 @@ namespace ik {
 using lamina::kernels::q8_1_ds;
 using lamina::kernels::q8_1_finite;
 using lamina::kernels::q8_1_quant;
+using lamina::kernels::ldsm4;
+using lamina::kernels::ldsm4t;
 using lamina::kernels::warp_max;
 using lamina::kernels::warp_sum;
 
@@ -295,7 +298,7 @@ __global__ void q_clip_kernel(const float* __restrict__ raw, const float* __rest
 
 /// tau of T positions: 1 + alpha ln(max(1, (pos + 1) / floor)), a full layer's q and r scale
 __global__ void tau_kernel(const int32_t* __restrict__ pos, float* __restrict__ tau, int T, float alpha, float floor_) {
-    const int t = threadIdx.x;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t < T) tau[t] = 1.0f + alpha * logf(fmaxf(1.0f, ((float) pos[t] + 1.0f) / floor_));
 }
 
@@ -333,6 +336,26 @@ __global__ void __launch_bounds__(kTB) bias_kernel(BiasIn a) {
         b[d] = s - sink;
     }
     if (threadIdx.x == 0) b[a.ext] = -sink;
+}
+
+/// bias_kernel's two halves around a GEMM, for a prompt chunk.  r of T rows: the projection times the layer's scale,
+/// clipped to `clip` a head, times tau: rc [T][H][R].  A warp a row and head.
+__global__ void __launch_bounds__(32) r_clip_kernel(const float* __restrict__ raw, const float* __restrict__ scale,
+                                                    const float* __restrict__ tau, float* __restrict__ rc, int H, int R,
+                                                    float clip) {
+    const int t = blockIdx.x, h = blockIdx.y, k = threadIdx.x;
+    const float y = k < R ? raw[((size_t) t * H + h) * R + k] * scale[(size_t) h * R + k] : 0.f;
+    const float ss = warp_sum(y * y);
+    const float f = fminf(1.0f, clip / (sqrtf(ss) + 1e-6f)) * (tau ? tau[t] : 1.0f);
+    if (k < R) rc[((size_t) t * H + h) * R + k] = y * f;
+}
+/// The table's products [T * H][ext + 1] (the first ext of a row written) less the row's sink, the last value -sink
+__global__ void bias_fix_kernel(float* __restrict__ bias, const float* __restrict__ sink, long long rows, int ext) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= rows * (ext + 1)) return;
+    const long long r = i / (ext + 1);
+    const int d = (int) (i % (ext + 1));
+    bias[i] = (d < ext ? bias[i] : 0.f) - sink[r];
 }
 
 // ---------------------------------------------------------------------------------------------- the cells
@@ -383,7 +406,8 @@ __global__ void __launch_bounds__(128) cells_put_kernel(Cells c, const float* __
 /// `win` positions, is left out.  `sub` is kSub (a thread a cell's K) or kSub / 4 (four threads a cell: shorter chains
 /// of loads where the cells are few and the blocks many).  With `dyn` the stretches' size and count come from the
 /// device ({chunk, stretches in use}: a launch captured in a graph serves any number of cells), `n_chunks` then the
-/// grid's.
+/// grid's.  `slide` (a prompt chunk's window visit, its cells a range in position order from win - 1 before the
+/// chunk): row t's stretch starts t cells in, so each row scores its own window alone.
 struct AttnIn {
     Cells c;
     const float* q;         // [T][H][D]
@@ -393,7 +417,7 @@ struct AttnIn {
     const int32_t* dyn;     // null, or {chunk, stretches in use}
     float* part;            // [T][H][n_chunks][D + 2]: m, s, the D sums
     int H, HK, D, ext, win; // win: a window layer's cells (0: every cell)
-    int chunk, n_chunks, sub;
+    int chunk, n_chunks, sub, slide;
 };
 constexpr int kQH = 4;      // query heads a K/V head at most
 __global__ void __launch_bounds__(kSub) attn_part_kernel(AttnIn a) {
@@ -407,7 +431,9 @@ __global__ void __launch_bounds__(kSub) attn_part_kernel(AttnIn a) {
     const int64_t p = a.pos[t];
     const int64_t live = *a.live;
     // this block's cells: slots [s0, s1)
-    const int64_t s0 = (int64_t) cb * chunk, s1 = min((int64_t) s0 + chunk, a.c.ring ? a.c.cap : live);
+    const int64_t s0 = (int64_t) cb * chunk + (a.slide ? t : 0);
+    int64_t s1 = min((int64_t) s0 + chunk, a.c.ring ? a.c.cap : live);
+    if (!a.c.ring) s1 = min(s1, p - a.c.first + 1);   // a range's cells at or before the row
     float* out = a.part + (((size_t) t * a.H + (size_t) g * QH) * a.n_chunks + cb) * (a.D + 2);
     const size_t pstride = (size_t) a.n_chunks * (a.D + 2);   // a query head to the next
     if (s0 >= s1) {
@@ -559,7 +585,7 @@ struct AttnOutIn {
     const float* part;    // [T][H][n_chunks][D + 2]
     const float* gate;    // [T][H * D], the gate's projection
     float* out;           // [T][H * D] or null
-    Q81* q;               // [T][H * D / 32]
+    Q81* q;               // [T][H * D / 32] or null
     const int32_t* dyn;   // null, or {chunk, stretches in use}
     int H, D, n_chunks;
 };
@@ -580,6 +606,7 @@ __global__ void __launch_bounds__(128) attn_out_kernel(AttnOutIn a) {
     const size_t at = ((size_t) t * a.H + h) * a.D + i;
     const float y = acc / sum / (1.0f + __expf(-a.gate[at]));
     if (a.out) a.out[at] = y;
+    if (a.q == nullptr) return;
     const float amax = warp_max(fabsf(y)), s = warp_sum(y);
     const float d = q8_1_finite(amax / 127.0f);
     Q81* q = a.q + at / 32;
@@ -739,13 +766,389 @@ __global__ void __launch_bounds__(kTB) pick_plan_kernel(PlanIn a) {
 }
 
 /// The MoE's output of T rows: the routed experts' rows by their weights, in the router's order.  rows [T * top_k][N].
+/// `dscale` ([E], with `ids`): each expert's scale of its down rows, where the rows come without it (a prompt chunk's).
 __global__ void __launch_bounds__(kTB) expert_sum_kernel(const float* __restrict__ rows, const float* __restrict__ w,
-                                                         float* __restrict__ y, int N, int top_k) {
+                                                         float* __restrict__ y, int N, int top_k,
+                                                         const float* __restrict__ dscale, const int32_t* __restrict__ ids) {
     const int t = blockIdx.y, i = blockIdx.x * kTB + threadIdx.x;
     if (i >= N) return;
     float acc = 0.f;
-    for (int k = 0; k < top_k; ++k) acc += rows[((size_t) t * top_k + k) * N + i] * w[(size_t) t * top_k + k];
+    for (int k = 0; k < top_k; ++k) {
+        const size_t e = (size_t) t * top_k + k;
+        acc += rows[e * N + i] * (w[e] * (dscale ? dscale[ids[e]] : 1.0f));
+    }
     y[(size_t) t * N + i] = acc;
+}
+
+// ---------------------------------------------------------------------------------------------- a prompt chunk's
+/// A window visit's cells in position order for a chunk at positions p0 ..: range slot j is position p0 - (win - 1) +
+/// j.  The win - 1 cells before the chunk come from the ring (a position before 0: left as it is, never read).  A
+/// block a cell and a side.
+__global__ void __launch_bounds__(256) ring_to_range_kernel(Cells ring, uint8_t* __restrict__ rk, uint8_t* __restrict__ rv,
+                                                            long long p0, int win, int bytes) {
+    const long long pos = p0 - (win - 1) + blockIdx.x;
+    if (pos < 0) return;
+    const uint32_t* src = (const uint32_t*) ((blockIdx.y ? ring.v : ring.k) + (size_t) (pos % ring.cap) * bytes);
+    uint32_t* dst = (uint32_t*) ((blockIdx.y ? rv : rk) + (size_t) blockIdx.x * bytes);
+    for (int i = threadIdx.x; i < bytes / 4; i += blockDim.x) dst[i] = src[i];
+}
+/// The chunk's last cells back into the ring (its n rows' cells are range slots win - 1 ..): the positions the ring
+/// holds after the chunk that are the chunk's own.  A block a cell and a side, the last cell first.
+__global__ void __launch_bounds__(256) range_to_ring_kernel(Cells ring, const uint8_t* __restrict__ rk,
+                                                            const uint8_t* __restrict__ rv, long long p0, int n, int win,
+                                                            int bytes) {
+    const long long pos = p0 + n - 1 - blockIdx.x;
+    if (pos < p0) return;
+    const uint32_t* src = (const uint32_t*) ((blockIdx.y ? rv : rk) + (size_t) (pos - p0 + win - 1) * bytes);
+    uint32_t* dst = (uint32_t*) ((blockIdx.y ? ring.v : ring.k) + (size_t) (pos % ring.cap) * bytes);
+    for (int i = threadIdx.x; i < bytes / 4; i += blockDim.x) dst[i] = src[i];
+}
+
+/// T rows' experts picked, a warp a row, as pick_plan_kernel picks them: ids, w [T][top_k].
+struct PickIn {
+    float* prob;         // [T][E]; with `logits` the router's products, made the scores here
+    const float* bias;   // [E] or null
+    int32_t* ids;
+    float* w;
+    int E, top_k;
+    float scale;
+    int logits;
+};
+__global__ void __launch_bounds__(32) pick_kernel(PickIn a) {
+    const int t = blockIdx.x, lane = threadIdx.x;
+    __shared__ float sel[kExpertMax];
+    float* prob = a.prob + (size_t) t * a.E;
+    for (int e = lane; e < a.E; e += 32) {
+        if (a.logits) prob[e] = 1.0f / (1.0f + __expf(-prob[e]));
+        sel[e] = prob[e] + (a.bias ? a.bias[e] : 0.f);
+    }
+    __syncwarp();
+    float sum = 0.f;
+    float pw[kTopMax];
+    int pid[kTopMax];
+    for (int k = 0; k < a.top_k; ++k) {
+        float best = -FLT_MAX;
+        int bi = 0;
+        for (int e = lane; e < a.E; e += 32)
+            if (sel[e] > best) {
+                best = sel[e];
+                bi = e;
+            }
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {   // the largest, the lower index of equals
+            const float ob = __shfl_xor_sync(0xffffffffu, best, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            if (ob > best || (ob == best && oi < bi)) {
+                best = ob;
+                bi = oi;
+            }
+        }
+        if (lane == 0) {
+            pid[k] = bi;
+            sel[bi] = -FLT_MAX;
+            pw[k] = prob[bi];
+            sum += pw[k];
+        }
+        __syncwarp();
+    }
+    if (lane == 0) {
+        const float r = a.scale / (sum + 1e-20f);
+        for (int k = 0; k < a.top_k; ++k) {
+            a.ids[(size_t) t * a.top_k + k] = pid[k];
+            a.w[(size_t) t * a.top_k + k] = pw[k] * r;
+        }
+    }
+}
+
+/// A chunk's routed entries after their gate/up products: h = beta tanh(g s / beta) sigmoid(g s) * lbeta tanh(u s /
+/// lbeta), s the entry's expert's scale (`scale` [E], or null: 1).  gu [n][2 F], the gate first; h [n][F].
+__global__ void situ_rows_kernel(const float* __restrict__ gu, const int32_t* __restrict__ ent_exp,
+                                 const float* __restrict__ scale, float* __restrict__ h, long long n, int F, float beta,
+                                 float lbeta) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n * F) return;
+    const long long r = i / F;
+    const int k = (int) (i % F);
+    const float s = scale ? scale[ent_exp[r]] : 1.0f;
+    const float g = gu[r * 2 * F + k] * s, u = gu[r * 2 * F + F + k] * s;
+    h[i] = beta * tanhf(g / beta) / (1.0f + __expf(-g)) * (lbeta * tanhf(u / lbeta));
+}
+
+// ---------------------------------------------------------------------------------------------- a chunk's loop gates
+/// The gates' input of T rows for a GEMM: z[t] = [u / rms(u) ; m / rms(m)] (2 N floats).  A block a row.
+__global__ void __launch_bounds__(kTB) ctrl_cat_kernel(const float* __restrict__ u, const float* __restrict__ m,
+                                                       float* __restrict__ z, int N) {
+    const int t = blockIdx.x;
+    __shared__ float red[8][2];
+    const float* ur = u + (size_t) t * N;
+    const float* mr = m + (size_t) t * N;
+    float v[2] = {0.f, 0.f};
+    for (int i = threadIdx.x; i < N; i += kTB) {
+        v[0] += ur[i] * ur[i];
+        v[1] += mr[i] * mr[i];
+    }
+    block_sums<2>(v, red);
+    const float iu = rsqrtf(v[0] / (float) N + 1e-6f), im = rsqrtf(v[1] / (float) N + 1e-6f);
+    float* zr = z + (size_t) t * 2 * N;
+    for (int i = threadIdx.x; i < N; i += kTB) {
+        zr[i] = ur[i] * iu;
+        zr[N + i] = mr[i] * im;
+    }
+}
+/// out = (1 - tanh(sf)) u + tanh(sg) m over n values (sg, sf: the gain's and the forget's products)
+__global__ void ctrl_gate_kernel(const float* __restrict__ u, const float* __restrict__ m, const float* __restrict__ sg,
+                                 const float* __restrict__ sf, float* __restrict__ out, long long n) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = (1.0f - tanhf(sf[i])) * u[i] + tanhf(sg[i]) * m[i];
+}
+
+// ---------------------------------------------------------------------------------------------- a chunk's attention
+// On the tensor cores: mma.m16n8k16 (FP16 in, FP32 sums), operands through ldmatrix from shared memory whose rows are
+// padded so that ldmatrix's eight rows fall on distinct banks (the Hy4 path's tiles: src/hy4/hy4_prompt.cuh).
+__device__ __forceinline__ void mma16816(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                 "{%0,%1,%2,%3};\n"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ unsigned h2(float a, float b) {
+    const __half2 v = __floats2half2_rn(a, b);
+    return *reinterpret_cast<const unsigned*>(&v);
+}
+/// four q8_0 codes times their block's scale, as halves
+__device__ __forceinline__ uint2 q8_widen4(uint32_t w, float d) {
+    return make_uint2(h2((float) (int8_t) (w & 0xff) * d, (float) (int8_t) ((w >> 8) & 0xff) * d),
+                      h2((float) (int8_t) ((w >> 16) & 0xff) * d, (float) (int8_t) (w >> 24) * d));
+}
+
+constexpr int kTcRows = 32;    // token rows a block
+constexpr int kTcCells = 32;   // cells a tile
+constexpr int kTcPad = 136;    // a row of 128 halves in shared memory (272 bytes)
+constexpr int kTcPPad = 40;    // a probability row, halves (80 bytes)
+
+struct __align__(16) TcSmem {
+    __half q[kTcRows * kTcPad];
+    __half k[kTcCells * kTcPad];
+    __half v[kTcCells * kTcPad];
+    __half p[kTcRows * kTcPPad];
+    float red[2][4][kTcRows];   // [max | sum][the cells' quarter][row]
+};
+
+/// A chunk's attention of one query head: block (b, h) takes rows 32 b .. of head h over the cells its rows can see,
+/// in tiles of 32 (K and V of the head's K/V head, halves, or with Q8 q8_0 blocks widened into halves as they are
+/// stashed).  The cells are a range in position order (c.first): a full visit's from position 0, a window visit's
+/// from win - 1 before the chunk; a row sees those at or before it, and within `win` of it.  logit = q . k /
+/// sqrt(D) + bias[min(distance, ext)]; an online softmax that starts from the zero sink (m = 0, l = 1); the output,
+/// divided by l and times sigmoid(gate), to out [T][H * D].  D is 128.  Warps: scores m-tile w & 1 x cells (w >> 1) *
+/// 8 .. +8; values m-tile w & 1 x dims (w >> 1) * 32 .. +32.  The next tile waits in registers through the current
+/// one's products.  Grid (ceil(T / 32), H), block 256.
+struct TcIn {
+    Cells c;
+    const float* q;        // [T][H][D]
+    const float* bias;     // [T][H][ext + 1]
+    const float* gate;     // [T][H * D]
+    const int32_t* pos;    // [T]
+    float* out;            // [T][H * D]
+    int T, H, HK, ext, win;
+    long long cells;       // the range's cells in use
+};
+template <bool Q8>
+__global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
+    constexpr int D = 128;
+    __shared__ TcSmem sm;
+    const int t0 = blockIdx.x * kTcRows, h = blockIdx.y, g = h / (a.H / a.HK);
+    const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
+    const int li = lane >> 3, lr = lane & 7, tig = lane & 3;
+    const int nrows = min(kTcRows, a.T - t0);
+    // the block's cells: slots [s_lo, s_lo + cnt) of the range
+    const long long p_first = a.pos[t0], p_last = a.pos[t0 + nrows - 1];
+    const long long first = (long long) a.c.first;
+    const long long s_lo = max(0LL, (a.win ? max(0LL, p_first - a.win + 1) : 0LL) - first);
+    const int cnt = (int) (min(p_last - first + 1, a.cells) - s_lo);
+    const size_t cbytes = cell_bytes(a.c, a.HK, D);
+    // the queries as halves
+    for (int i = tid; i < kTcRows * (D / 4); i += 256) {
+        const int r = i / (D / 4), c4 = i % (D / 4);
+        float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (r < nrows) v = *reinterpret_cast<const float4*>(a.q + ((size_t) (t0 + r) * a.H + h) * D + 4 * c4);
+        *reinterpret_cast<uint2*>(sm.q + r * kTcPad + 4 * c4) = make_uint2(h2(v.x, v.y), h2(v.z, v.w));
+    }
+    // a tile: 32 cells of K and of V.  Halves: 16 chunks of 16 bytes a cell and side, two a thread and side; Q8: 8
+    // pieces of 16 codes a cell and side (half a block, with its block's scale), one a thread and side
+    uint4 nk[2], nv[2];
+    [[maybe_unused]] float dk = 0.f, dv = 0.f;
+    auto fetch = [&](int base) {
+        if constexpr (Q8) {
+            const int c = tid / 8, pc = tid % 8;
+            nk[0] = nv[0] = make_uint4(0, 0, 0, 0);
+            dk = dv = 0.f;
+            if (base + c < cnt) {
+                const size_t at = (size_t) (s_lo + base + c) * cbytes + ((size_t) g * (D / 32) + pc / 2) * 34;
+                const uint8_t *kb = a.c.k + at, *vb = a.c.v + at;
+                dk = __half2float(*reinterpret_cast<const __half*>(kb));
+                dv = __half2float(*reinterpret_cast<const __half*>(vb));
+                memcpy(&nk[0], kb + 2 + (pc % 2) * 16, 16);
+                memcpy(&nv[0], vb + 2 + (pc % 2) * 16, 16);
+            }
+        } else {
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int i = tid + 256 * j, c = i / 16, ch = i % 16;
+                if (base + c < cnt) {
+                    const size_t at = (size_t) (s_lo + base + c) * cbytes + (size_t) g * D * 2 + ch * 16;
+                    nk[j] = *reinterpret_cast<const uint4*>(a.c.k + at);
+                    nv[j] = *reinterpret_cast<const uint4*>(a.c.v + at);
+                } else {
+                    nk[j] = nv[j] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+    };
+    auto stash = [&] {
+        if constexpr (Q8) {
+            const int c = tid / 8, pc = tid % 8;
+            const uint2 k0 = q8_widen4(nk[0].x, dk), k1 = q8_widen4(nk[0].y, dk), k2 = q8_widen4(nk[0].z, dk),
+                        k3 = q8_widen4(nk[0].w, dk);
+            const uint2 v0 = q8_widen4(nv[0].x, dv), v1 = q8_widen4(nv[0].y, dv), v2 = q8_widen4(nv[0].z, dv),
+                        v3 = q8_widen4(nv[0].w, dv);
+            uint4* kd = reinterpret_cast<uint4*>(sm.k + c * kTcPad + pc * 16);
+            uint4* vd = reinterpret_cast<uint4*>(sm.v + c * kTcPad + pc * 16);
+            kd[0] = make_uint4(k0.x, k0.y, k1.x, k1.y);
+            kd[1] = make_uint4(k2.x, k2.y, k3.x, k3.y);
+            vd[0] = make_uint4(v0.x, v0.y, v1.x, v1.y);
+            vd[1] = make_uint4(v2.x, v2.y, v3.x, v3.y);
+        } else {
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int i = tid + 256 * j, c = i / 16, ch = i % 16;
+                *reinterpret_cast<uint4*>(sm.k + c * kTcPad + ch * 8) = nk[j];
+                *reinterpret_cast<uint4*>(sm.v + c * kTcPad + ch * 8) = nv[j];
+            }
+        }
+    };
+    fetch(0);
+    stash();
+    const int mt = w & 1, nt = w >> 1;
+    const int rA = mt * 16 + (lane >> 2), rB = rA + 8;
+    const bool inA = rA < nrows, inB = rB < nrows;
+    const long long pA = inA ? a.pos[t0 + rA] : 0, pB = inB ? a.pos[t0 + rB] : 0;
+    const float* bA = a.bias + ((size_t) (t0 + (inA ? rA : 0)) * a.H + h) * (a.ext + 1);
+    const float* bB = a.bias + ((size_t) (t0 + (inB ? rB : 0)) * a.H + h) * (a.ext + 1);
+    const float scale = rsqrtf((float) D);
+    float mA = 0.f, mB = 0.f, lA = 1.f, lB = 1.f;   // the zero sink
+    float o[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.f;
+    const __half* qrow = sm.q + (mt * 16 + ((li & 1) << 3) + lr) * kTcPad + (li >> 1) * 8;
+    const int n_tiles = (max(cnt, 0) + kTcCells - 1) / kTcCells;
+    for (int it = 0; it < n_tiles; ++it) {
+        const int base = it * kTcCells;
+        __syncthreads();   // the tile (and the queries) in shared memory
+        if (it + 1 < n_tiles) fetch(base + kTcCells);
+        float sc[4] = {0.f, 0.f, 0.f, 0.f};
+        const __half* krow = sm.k + (nt * 8 + lr) * kTcPad + li * 8;
+#pragma unroll
+        for (int kk = 0; kk < D / 16; kk += 2) {
+            unsigned a0[4], a1[4], b[4];
+            ldsm4(a0, qrow + kk * 16);
+            ldsm4(a1, qrow + kk * 16 + 16);
+            ldsm4(b, krow + kk * 16);
+            mma16816(sc, a0, b[0], b[1]);
+            mma16816(sc, a1, b[2], b[3]);
+        }
+        float xA = -INFINITY, xB = -INFINITY;
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+            const int col = base + nt * 8 + 2 * tig + e;
+            const long long cp = first + s_lo + col;
+            const long long dA = pA - cp, dB = pB - cp;
+            const bool okA = inA && col < cnt && dA >= 0 && (a.win == 0 || dA < a.win);
+            const bool okB = inB && col < cnt && dB >= 0 && (a.win == 0 || dB < a.win);
+            sc[e] = okA ? sc[e] * scale + bA[dA < a.ext ? dA : a.ext] : -INFINITY;
+            sc[2 + e] = okB ? sc[2 + e] * scale + bB[dB < a.ext ? dB : a.ext] : -INFINITY;
+            xA = fmaxf(xA, sc[e]);
+            xB = fmaxf(xB, sc[2 + e]);
+        }
+        xA = fmaxf(xA, __shfl_xor_sync(0xffffffffu, xA, 1));
+        xA = fmaxf(xA, __shfl_xor_sync(0xffffffffu, xA, 2));
+        xB = fmaxf(xB, __shfl_xor_sync(0xffffffffu, xB, 1));
+        xB = fmaxf(xB, __shfl_xor_sync(0xffffffffu, xB, 2));
+        if (tig == 0) {
+            sm.red[0][nt][rA] = xA;
+            sm.red[0][nt][rB] = xB;
+        }
+        __syncthreads();
+        const float nA = fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
+        const float nB = fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
+        const float aA = __expf(mA - nA), aB = __expf(mB - nB);
+        const float p0A = sc[0] == -INFINITY ? 0.f : __expf(sc[0] - nA), p1A = sc[1] == -INFINITY ? 0.f : __expf(sc[1] - nA);
+        const float p0B = sc[2] == -INFINITY ? 0.f : __expf(sc[2] - nB), p1B = sc[3] == -INFINITY ? 0.f : __expf(sc[3] - nB);
+        const int pc = nt * 8 + 2 * tig;
+        *reinterpret_cast<unsigned*>(sm.p + rA * kTcPPad + pc) = h2(p0A, p1A);
+        *reinterpret_cast<unsigned*>(sm.p + rB * kTcPPad + pc) = h2(p0B, p1B);
+        float sA = p0A + p1A, sB = p0B + p1B;
+        sA += __shfl_xor_sync(0xffffffffu, sA, 1);
+        sA += __shfl_xor_sync(0xffffffffu, sA, 2);
+        sB += __shfl_xor_sync(0xffffffffu, sB, 1);
+        sB += __shfl_xor_sync(0xffffffffu, sB, 2);
+        if (tig == 0) {
+            sm.red[1][nt][rA] = sA;
+            sm.red[1][nt][rB] = sB;
+        }
+        __syncthreads();
+        lA = lA * aA + ((sm.red[1][0][rA] + sm.red[1][1][rA]) + (sm.red[1][2][rA] + sm.red[1][3][rA]));
+        lB = lB * aB + ((sm.red[1][0][rB] + sm.red[1][1][rB]) + (sm.red[1][2][rB] + sm.red[1][3][rB]));
+        mA = nA;
+        mB = nB;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            o[j][0] *= aA;
+            o[j][1] *= aA;
+            o[j][2] *= aB;
+            o[j][3] *= aB;
+        }
+#pragma unroll
+        for (int k = 0; k < 2; ++k) {
+            unsigned pa[4];
+            ldsm4(pa, sm.p + (mt * 16 + ((li & 1) << 3) + lr) * kTcPPad + (2 * k + (li >> 1)) * 8);
+            const __half* vrow = sm.v + (16 * k + ((li & 1) << 3) + lr) * kTcPad + nt * 32 + (li >> 1) * 8;
+#pragma unroll
+            for (int n2 = 0; n2 < 2; ++n2) {
+                unsigned b[4];
+                ldsm4t(b, vrow + n2 * 16);
+                mma16816(o[2 * n2], pa, b[0], b[1]);
+                mma16816(o[2 * n2 + 1], pa, b[2], b[3]);
+            }
+        }
+        __syncthreads();   // the tile's cells and probabilities are read
+        if (it + 1 < n_tiles) stash();
+    }
+    const float iA = 1.f / lA, iB = 1.f / lB;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int d = nt * 32 + j * 8 + 2 * tig;
+        if (inA) {
+            const size_t at = ((size_t) (t0 + rA) * a.H + h) * D + d;
+            const float2 gt = *reinterpret_cast<const float2*>(a.gate + at);
+            *reinterpret_cast<float2*>(a.out + at) =
+                make_float2(o[j][0] * iA / (1.0f + __expf(-gt.x)), o[j][1] * iA / (1.0f + __expf(-gt.y)));
+        }
+        if (inB) {
+            const size_t at = ((size_t) (t0 + rB) * a.H + h) * D + d;
+            const float2 gt = *reinterpret_cast<const float2*>(a.gate + at);
+            *reinterpret_cast<float2*>(a.out + at) =
+                make_float2(o[j][2] * iB / (1.0f + __expf(-gt.x)), o[j][3] * iB / (1.0f + __expf(-gt.y)));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------- checks
+/// The first non-finite value's index among n floats into *at (a device int64, -1 before), for LAMINA_INK_NAN
+__global__ void nonfinite_kernel(const float* __restrict__ x, long long n, long long* __restrict__ at) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float v = x[i];
+    if (!(fabsf(v) <= FLT_MAX)) atomicMin((unsigned long long*) at, (unsigned long long) i);
 }
 
 // ---------------------------------------------------------------------------------------------- the head

@@ -25,11 +25,13 @@
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/slice_read.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 #include "lamina/program/host_sampling.hpp"
 #include "lamina/program/serve_io.hpp"
 
 #include "ggml.h"
 
+#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -48,6 +50,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <string>
@@ -59,6 +62,7 @@ using lamina::program::serve_print;
 namespace {
 
 namespace K = lamina::kernels;
+namespace MMQ = lamina::prefill::mmq;
 using ik::kMaxT;
 using lamina::core::ms_since;
 using lamina::inkling2::Geometry;
@@ -149,7 +153,8 @@ struct Layer {
     // the MoE
     const float *router = nullptr, *route_bias = nullptr;
     K::NativeExpertLayout gl;
-    size_t stride = 0;             // a blob's bytes in a slot
+    const float *gu_scale = nullptr, *d_scale = nullptr;   // [n_expert]: the scales of an expert's rows' products, or none
+    size_t stride = 0;             // a blob's bytes in a slot: a multiple of both formats' blocks
     uint8_t* slots = nullptr;      // device: n_slots blobs
     int n_slots = 0;
     int32_t* slot_of = nullptr;    // device [n_expert]: its slot or -1
@@ -321,8 +326,16 @@ bool load(const std::string& path, Model& m, int threads, bool file_cache, size_
         y.gl.act_beta = g.situ_beta;
         y.gl.act_lbeta = g.situ_lbeta;
         const bool scaled = gm.find(p + "ffn_gate_up_exps.scale") || gm.find(p + "ffn_down_exps.scale");
-        y.gl.scale_off = scaled ? (y.gl.bytes + 7) / 8 * 8 : 0;
-        y.stride = ((scaled ? y.gl.scale_off + 8 : y.gl.bytes) + 255) / 256 * 256;
+        // A prompt chunk's MMQ reads past the down matrix's last row (its steps of 256 values against rows of n_ff,
+        // meeting zero activations): zeros follow the matrix for as far as it reads, the scales after them.  It walks
+        // from one expert's matrix to the next in the format's blocks: a blob apart is whole blocks of both formats.
+        const size_t over = MMQ::built() && MMQ::supported((int) td->type) ? MMQ::tab_overread((int) td->type, g.n_ff) : 0;
+        y.gl.scale_off = scaled ? (y.gl.bytes + over + 7) / 8 * 8 : 0;
+        int eg = 0, bg = 0, ed = 0, bd = 0;
+        lamina::block_geometry(tg->type, eg, bg);
+        lamina::block_geometry(td->type, ed, bd);
+        const size_t unit = std::lcm(std::lcm((size_t) std::max(bg, 1), (size_t) std::max(bd, 1)), (size_t) 8);
+        y.stride = ((scaled ? y.gl.scale_off + 8 : y.gl.bytes + over) + unit - 1) / unit * unit;
         experts += (uint64_t) E * y.stride + kWeightPad;
         stage_max = std::max<uint64_t>(stage_max, (uint64_t) E * y.stride);
     }
@@ -450,14 +463,20 @@ bool load(const std::string& path, Model& m, int threads, bool file_cache, size_
             {gm.shard(sd).path(), gm.shard(sd).data_start() + td->offset, y.gl.bytes - y.gl.down_off, y.gl.down_off, y.stride, E, 0}};
         if (!lamina::platform::read_slices(runs, threads, !file_cache, (uint64_t) 32 << 20, [stage](int) { return stage; }, err))
             return false;
+        // the bytes between one blob and the next: zeros (a prompt chunk's kernels read past a matrix's last row,
+        // against zero activations: what they read there must be finite in the row's format)
+        for (int64_t e = 0; e < E; ++e)
+            std::memset(stage + (size_t) e * y.stride + y.gl.bytes, 0, y.stride - y.gl.bytes);
         if (y.gl.scale_off) {
-                    std::vector<float> sgu((size_t) E, 1.0f), sdn((size_t) E, 1.0f);
+            std::vector<float> sgu((size_t) E, 1.0f), sdn((size_t) E, 1.0f);
             if (L.has(p + "ffn_gate_up_exps.scale")) sgu = L.floats(p + "ffn_gate_up_exps.scale");
             if (L.has(p + "ffn_down_exps.scale")) sdn = L.floats(p + "ffn_down_exps.scale");
             for (int64_t e = 0; e < E; ++e) {
                 const float two[2] = {sgu[(size_t) e], sdn[(size_t) e]};
                 std::memcpy(stage + (size_t) e * y.stride + y.gl.scale_off, two, 8);
             }
+            y.gu_scale = f32_dev(sgu);
+            y.d_scale = f32_dev(sdn);
         }
         y.n_slots = (int) E;
             y.slots = dalloc<uint8_t>((size_t) E * y.stride + kWeightPad);
@@ -477,6 +496,40 @@ bool load(const std::string& path, Model& m, int threads, bool file_cache, size_
 }
 
 // ------------------------------------------------------------------------------------------------ the engine
+/// The rows' buffers of a forward: the decode's (kMaxT rows), or a prompt chunk's (`cap` rows, `batch`: its matrix
+/// products through llama.cpp's MMQ, its routed entries grouped by expert, a window visit's cells in position order).
+struct Rows {
+    int cap = 0;
+    bool batch = false;
+    float *x = nullptr, *prelude = nullptr, *pass_out = nullptr, *sblk = nullptr, *vblk = nullptr, *mixed = nullptr,
+          *ctl = nullptr, *msg = nullptr, *nrm = nullptr;
+    ik::Q81 *img = nullptr, *aimg = nullptr;
+    float *qraw = nullptr, *graw = nullptr, *rraw = nullptr, *sink = nullptr, *kraw = nullptr, *vraw = nullptr,
+          *dynk = nullptr, *dynv = nullptr, *tau = nullptr, *q = nullptr, *bias = nullptr, *kc = nullptr, *vc = nullptr,
+          *part = nullptr, *aout = nullptr, *oraw = nullptr, *fraw = nullptr, *w = nullptr, *rows = nullptr,
+          *logits = nullptr, *ctl_h = nullptr, *probs = nullptr;
+    // the step record: the rows' positions, then the cells in use, the full visits' {stretch, stretches in use} and
+    // a chunk's window range's cells
+    int32_t *step_d = nullptr, *pos_d = nullptr, *live_d = nullptr, *dyn_d = nullptr, *wlive_d = nullptr;
+    int32_t *ids = nullptr, *grp_start = nullptr, *n_groups = nullptr, *n_miss = nullptr, *ent_dst = nullptr,
+            *ent_tok = nullptr;
+    unsigned long long* grp_ptr = nullptr;
+    void* scratch = nullptr;
+    // pinned host rows
+    float* emb_h = nullptr;
+    int32_t* step_h = nullptr;
+    // a chunk's: the inputs' and the attention output's MMQ images a layout, the routed entries by expert (their
+    // token rows, their experts, each expert's bounds), their gate/up rows and hidden rows, a window visit's cells
+    uint8_t *xq[3][3] = {}, *aq[3] = {}, *tq = nullptr, *hq = nullptr, *wk = nullptr, *wv = nullptr;
+    bool have[4][3] = {};
+    float *gu = nullptr, *h = nullptr;
+    float *cz = nullptr, *cs1 = nullptr, *cs2 = nullptr;   // the loop gates' normed pair [T][2 N] and their two products
+    int32_t *ent_row = nullptr, *ent_exp = nullptr, *bounds = nullptr, *ident = nullptr;
+    int64_t ids_rows = 0;
+    int32_t *ids_h = nullptr, *ent_row_h = nullptr, *ent_dst_h = nullptr, *ent_exp_h = nullptr, *bounds_h = nullptr;
+    int head_rows() const { return batch ? 1 : cap; }
+};
+
 struct Engine {
     const Model* m = nullptr;
     cudaStream_t st = nullptr;
@@ -487,6 +540,9 @@ struct Engine {
     bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each)
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
+    int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
+    static constexpr int kChunkMin = 16;   // a shorter prompt part goes through the decode's forwards
+    int feed_rows = kMaxT;                  // rows a decode forward of a prompt part takes (LAMINA_INK_ROWS: fewer, a test's)
 
     // a visit: one application of a layer
     struct Visit {
@@ -508,24 +564,15 @@ struct Engine {
     std::vector<int32_t> seq;
     int64_t pos() const { return (int64_t) seq.size(); }
 
-    // rows
-    float *x = nullptr, *prelude = nullptr, *pass_out = nullptr, *sblk = nullptr, *vblk = nullptr, *mixed = nullptr,
-          *ctl = nullptr, *msg = nullptr, *nrm = nullptr;
-    ik::Q81* img = nullptr;
-    float *qraw = nullptr, *graw = nullptr, *rraw = nullptr, *sink = nullptr, *kraw = nullptr, *vraw = nullptr,
-          *dynk = nullptr, *dynv = nullptr, *tau = nullptr, *q = nullptr, *bias = nullptr, *kc = nullptr, *vc = nullptr,
-          *part = nullptr, *aout = nullptr, *oraw = nullptr, *fraw = nullptr, *w = nullptr, *rows = nullptr,
-          *logits = nullptr, *ctl_h = nullptr, *probs = nullptr;
-    ik::Q81* aimg = nullptr;
-    // the step record: the rows' positions, then the cells in use and the full visits' {stretch, stretches in use}
-    int32_t *step_d = nullptr, *pos_d = nullptr, *live_d = nullptr, *dyn_d = nullptr;
-    int32_t *ids = nullptr, *grp_start = nullptr, *n_groups = nullptr, *n_miss = nullptr, *ent_dst = nullptr,
-            *ent_tok = nullptr;
-    unsigned long long* grp_ptr = nullptr;
-    void* scratch = nullptr;
-    // pinned host rows
-    float *emb_h = nullptr, *logits_h = nullptr;
-    int32_t* step_h = nullptr;
+    Rows D, P;                       // the decode's rows, a prompt chunk's
+    Rows* lg_rows = nullptr;         // whose logits the last head wrote
+    float* logits_h = nullptr;       // pinned
+    std::unique_ptr<MMQ::Context> mmq;
+    bool lay_used[3] = {};           // the MMQ activation layouts the dense formats take
+    cublasHandle_t blas = nullptr;   // a chunk's float products (the loop gates, the router)
+    ~Engine() {
+        if (blas != nullptr) cublasDestroy(blas);
+    }
 
     // the prompt ends kept: the window visits' cells and every visit's convolution state there
     struct Snap {
@@ -548,9 +595,118 @@ struct Engine {
         const Geometry& g = m->g;
         return g.n_pass > 1 && b * g.res_block > g.loop_start && b * g.res_block < g.loop_end;
     }
-    float* blk_at(int b, int pass) const {
-        const size_t row = (size_t) kMaxT * (size_t) m->g.n_embd;
-        return varying(b) ? vblk + ((size_t) pass * ik::kBlk + (size_t) b) * row : sblk + (size_t) b * row;
+    float* blk_at(const Rows& R, int b, int pass) const {
+        const size_t row = (size_t) R.cap * (size_t) m->g.n_embd;
+        return varying(b) ? R.vblk + ((size_t) pass * ik::kBlk + (size_t) b) * row : R.sblk + (size_t) b * row;
+    }
+
+    void make_rows(Rows& R, int cap, bool batch) {
+        const Geometry& g = m->g;
+        R.cap = cap;
+        R.batch = batch;
+        const size_t N = (size_t) g.n_embd, H = (size_t) g.n_head, D_ = (size_t) g.head_dim, KV = (size_t) g.kv_width(),
+                     Q = (size_t) g.q_width(), C = (size_t) g.n_conv, T = (size_t) cap, Rr = (size_t) g.n_rel,
+                     F = (size_t) g.n_ff, E = (size_t) g.n_expert;
+        const size_t ext_max = (size_t) std::max(g.rel_extent, g.n_swa);
+        const size_t Th = (size_t) R.head_rows();   // rows the head and the q8_1 images serve
+        R.x = dzero<float>(T * N);
+        R.prelude = dzero<float>(T * N);
+        R.pass_out = dzero<float>(T * N);
+        R.sblk = dzero<float>(ik::kBlk * T * N);
+        R.vblk = dzero<float>((size_t) g.n_pass * ik::kBlk * T * N);
+        R.mixed = dzero<float>(4 * T * N);
+        R.ctl = dzero<float>(3 * T * N);
+        R.msg = dzero<float>(4 * T * N);
+        R.nrm = dzero<float>(3 * T * N);
+        R.img = dzero<ik::Q81>(3 * Th * (N / 32));
+        R.qraw = dzero<float>(T * Q);
+        R.graw = dzero<float>(T * Q);
+        R.rraw = dzero<float>(T * H * Rr);
+        R.sink = dzero<float>(T * H);
+        R.kraw = dzero<float>(T * KV);
+        R.vraw = dzero<float>(T * KV);
+        R.dynk = dzero<float>(T * (size_t) g.n_head_kv * C);
+        R.dynv = dzero<float>(T * (size_t) g.n_head_kv * C);
+        R.tau = dzero<float>(T);
+        R.q = dzero<float>(T * Q);
+        R.bias = dzero<float>(T * H * (ext_max + 1));
+        R.kc = dzero<float>(T * KV);
+        R.vc = dzero<float>(T * KV);
+        if (!batch) R.part = dzero<float>(T * H * (size_t) kChunks * (D_ + 2));
+        R.aout = dzero<float>(T * Q);
+        R.aimg = dzero<ik::Q81>(Th * (Q / 32));
+        R.oraw = dzero<float>(T * N);
+        R.fraw = dzero<float>(T * N);
+        const size_t n_ent = T * (size_t) g.top_k;
+        R.ids = dzero<int32_t>(n_ent);
+        R.w = dzero<float>(n_ent);
+        R.rows = dzero<float>(n_ent * N);
+        R.probs = dzero<float>(T * E);
+        R.ctl_h = dzero<float>(3 * T * (size_t) std::max<int64_t>(g.gate_rank, 1));
+        R.logits = dzero<float>(Th * (size_t) g.n_vocab);
+        R.step_d = dzero<int32_t>(T + 4);
+        R.pos_d = R.step_d;
+        R.live_d = R.step_d + T;
+        R.dyn_d = R.step_d + T + 1;
+        R.wlive_d = R.step_d + T + 3;
+        R.emb_h = halloc<float>(T * N);
+        R.step_h = halloc<int32_t>(T + 4);
+        if (!batch) {
+            R.grp_ptr = dzero<unsigned long long>(n_ent + 1);
+            R.grp_start = dzero<int32_t>(n_ent + 1);
+            R.n_groups = dzero<int32_t>(1);
+            R.n_miss = dzero<int32_t>(1);
+            R.ent_dst = dzero<int32_t>(n_ent);
+            R.ent_tok = dzero<int32_t>(n_ent);
+            R.scratch = dzero<uint8_t>(K::native_expert_scratch_bytes((int64_t) n_ent, g.n_ff));
+            return;
+        }
+        for (int lay = 0; lay < 3; ++lay) {
+            if (!lay_used[lay]) continue;
+            for (int c = 0; c < 3; ++c) R.xq[c][lay] = dzero<uint8_t>(MMQ::q8_bytes((int64_t) T, (int64_t) N));
+            R.aq[lay] = dzero<uint8_t>(MMQ::q8_bytes((int64_t) T, (int64_t) Q));
+        }
+        R.tq = dzero<uint8_t>(MMQ::q8_bytes((int64_t) n_ent, (int64_t) N));
+        R.hq = dzero<uint8_t>(MMQ::q8_bytes((int64_t) n_ent, (int64_t) F));
+        R.gu = dzero<float>(n_ent * 2 * F);
+        R.h = dzero<float>(n_ent * F);
+        R.cz = dzero<float>(T * 2 * N);
+        R.cs1 = dzero<float>(T * N);
+        R.cs2 = dzero<float>(T * N);
+        R.ids_rows = MMQ::ids_table_rows((int64_t) n_ent);
+        R.ent_dst = dzero<int32_t>((size_t) R.ids_rows);
+        R.ident = dzero<int32_t>((size_t) R.ids_rows);
+        MMQ::iota(R.ident, R.ids_rows, st);
+        R.ent_row = dzero<int32_t>(n_ent);
+        R.ent_exp = dzero<int32_t>(n_ent);
+        R.bounds = dzero<int32_t>(E + 1);
+        R.wk = dzero<uint8_t>((T + (size_t) g.n_swa) * cell_bytes);
+        R.wv = dzero<uint8_t>((T + (size_t) g.n_swa) * cell_bytes);
+        R.ids_h = halloc<int32_t>(n_ent);
+        R.ent_row_h = halloc<int32_t>(n_ent);
+        R.ent_dst_h = halloc<int32_t>(n_ent);
+        R.ent_exp_h = halloc<int32_t>(n_ent);
+        R.bounds_h = halloc<int32_t>(E + 1);
+    }
+
+    /// Whether a prompt chunk's products have their MMQ kernels on this GPU: "" or why not
+    std::string batch_problem() {
+        if (!MMQ::built()) return "this build has no MMQ kernels";
+        const Geometry& g = m->g;
+        for (const Layer& L : m->layers) {
+            for (const Mat* W : {&L.wq, &L.wk, &L.wv, &L.wrel, &L.wgate, &L.wo}) {
+                if (W->type == 30) continue;   // BF16: the GEMV, 8 rows at a time
+                if (!MMQ::fits(W->type, W->n_out)) return "a dense matrix's format has no MMQ kernel here";
+                lay_used[MMQ::ds_layout(W->type)] = true;
+            }
+            for (const int t : {L.gl.gu_type, L.gl.d_type})
+                if (MMQ::native_fp4(t)) return "this GPU runs NVFP4 on its FP4 tensor cores, which the prompt kernels do not feed yet";
+            if (!MMQ::fits(L.gl.gu_type, 2 * g.n_ff) || !MMQ::fits(L.gl.d_type, g.n_embd))
+                return "an expert format has no MMQ kernel here";
+            // gate/up's rows end on the kernels' step, so nothing is read past them into the down rows
+            if (MMQ::tab_overread(L.gl.gu_type, g.n_embd) != 0) return "the experts' gate/up rows end inside an MMQ step";
+        }
+        return {};
     }
 
     void init(const Model& model, int64_t max_ctx, bool q8, bool grow_cells, size_t reserve_bytes) {
@@ -558,65 +714,34 @@ struct Engine {
         kv_q8 = q8;
         reserve = reserve_bytes;
         prof = std::getenv("LAMINA_INK_PROF") != nullptr;
-        if (prof) use_graphs = false;
+        nan_probe = std::getenv("LAMINA_INK_NAN") != nullptr;
+        if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
+        if (prof || nan_probe) use_graphs = false;
+        if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
-        const size_t N = (size_t) g.n_embd, H = (size_t) g.n_head, D = (size_t) g.head_dim, KV = (size_t) g.kv_width(),
-                     Q = (size_t) g.q_width(), C = (size_t) g.n_conv, T = (size_t) kMaxT, R = (size_t) g.n_rel;
-        const size_t ext_max = (size_t) std::max(g.rel_extent, g.n_swa);
+        const size_t N = (size_t) g.n_embd, D_ = (size_t) g.head_dim, KV = (size_t) g.kv_width(), C = (size_t) g.n_conv;
         CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
         own(&Owned::streams, st);
-        x = dzero<float>(T * N);
-        prelude = dzero<float>(T * N);
-        pass_out = dzero<float>(T * N);
-        sblk = dzero<float>(ik::kBlk * T * N);
-        vblk = dzero<float>((size_t) g.n_pass * ik::kBlk * T * N);
-        mixed = dzero<float>(4 * T * N);
-        ctl = dzero<float>(3 * T * N);
-        msg = dzero<float>(4 * T * N);
-        nrm = dzero<float>(3 * T * N);
-        img = dzero<ik::Q81>(3 * T * (N / 32));
-        qraw = dzero<float>(T * Q);
-        graw = dzero<float>(T * Q);
-        rraw = dzero<float>(T * H * R);
-        sink = dzero<float>(T * H);
-        kraw = dzero<float>(T * KV);
-        vraw = dzero<float>(T * KV);
-        dynk = dzero<float>(T * (size_t) g.n_head_kv * C);
-        dynv = dzero<float>(T * (size_t) g.n_head_kv * C);
-        tau = dzero<float>(32);
-        q = dzero<float>(T * Q);
-        bias = dzero<float>(T * H * (ext_max + 1));
-        kc = dzero<float>(T * KV);
-        vc = dzero<float>(T * KV);
-        part = dzero<float>(T * H * (size_t) kChunks * (D + 2));
-        aout = dzero<float>(T * Q);
-        aimg = dzero<ik::Q81>(T * (Q / 32));
-        oraw = dzero<float>(T * N);
-        fraw = dzero<float>(T * N);
-        const size_t n_ent = T * (size_t) g.top_k;
-        ids = dzero<int32_t>(n_ent);
-        w = dzero<float>(n_ent);
-        grp_ptr = dzero<unsigned long long>(n_ent + 1);
-        grp_start = dzero<int32_t>(n_ent + 1);
-        n_groups = dzero<int32_t>(1);
-        n_miss = dzero<int32_t>(1);
-        ent_dst = dzero<int32_t>(n_ent);
-        ent_tok = dzero<int32_t>(n_ent);
-        scratch = dzero<uint8_t>(K::native_expert_scratch_bytes((int64_t) n_ent, g.n_ff));
-        rows = dzero<float>(n_ent * N);
-        logits = dzero<float>(T * (size_t) g.n_vocab);
-        ctl_h = dzero<float>(3 * T * (size_t) std::max<int64_t>(g.gate_rank, 1));
-        probs = dzero<float>(T * (size_t) g.n_expert);
-        step_d = dzero<int32_t>(T + 4);
-        pos_d = step_d;
-        live_d = step_d + T;
-        dyn_d = step_d + T + 1;
-        emb_h = halloc<float>(T * N);
+        cell_bytes = kv_q8 ? (size_t) g.n_head_kv * (D_ / 32) * 34 : KV * 2;
+        make_rows(D, kMaxT, false);
         logits_h = halloc<float>((size_t) g.n_vocab);
-        step_h = halloc<int32_t>(T + 4);
+        if (prefill > 0) {
+            if (const std::string why = batch_problem(); !why.empty()) {
+                std::fprintf(stderr, "lamina: prompts go through the decode's forwards, %d rows at a time: %s\n", kMaxT,
+                             why.c_str());
+                prefill = 0;
+            } else {
+                mmq = std::make_unique<MMQ::Context>();
+                if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
+                    std::fprintf(stderr, "lamina: cuBLAS could not start\n");
+                    throw Fatal{1};
+                }
+                make_rows(P, prefill, true);
+                gemm(m->layers[0].router, (int) g.n_expert, (int) g.n_embd, P.nrm, 1, P.probs);   // cuBLAS's start, not a first prompt's
+            }
+        }
 
         // the visits: convolution state, cells
-        cell_bytes = kv_q8 ? (size_t) g.n_head_kv * (D / 32) * 34 : KV * 2;
         conv_floats = (C - 1) * (2 * KV + 2 * N);
         const int64_t nv = g.n_visits();
         conv_all = dzero<float>((size_t) nv * conv_floats);
@@ -687,9 +812,10 @@ struct Engine {
             throw Fatal{1};
         }
         std::fprintf(stderr, "lamina: a context of %lld tokens (%s cells: %.1f KiB a token over %lld full-attention "
-                     "applications, %.0f MiB of window cells), %s\n", (long long) ctx, kv_q8 ? "q8_0" : "FP16",
-                     (double) per_pos / 1024.0, (long long) g.n_full_visits(), (double) ring_bytes / 1048576.0,
-                     grow ? "mapped as it grows" : "allocated whole");
+                     "applications, %.0f MiB of window cells), %s; prompts %d rows a chunk\n", (long long) ctx,
+                     kv_q8 ? "q8_0" : "FP16", (double) per_pos / 1024.0, (long long) g.n_full_visits(),
+                     (double) ring_bytes / 1048576.0, grow ? "mapped as it grows" : "allocated whole",
+                     prefill > 0 ? prefill : kMaxT);
     }
 
     /// Memory for the full visits' cells of positions [0, n): false when the VRAM above the reserve does not hold them
@@ -715,6 +841,23 @@ struct Engine {
     }
 
     // ---- the steps
+    bool nan_probe = false, nan_found = false;   // LAMINA_INK_NAN: the first non-finite value named
+    long long* nan_at = nullptr;
+    int nan_visit = 0;
+    void probe(const char* what, const float* x, size_t rows, size_t width) {
+        if (!nan_probe || nan_found) return;
+        const long long n = (long long) (rows * width), none = -1;
+        CK(cudaMemcpyAsync(nan_at, &none, 8, cudaMemcpyHostToDevice, st));
+        ik::nonfinite_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>(x, n, nan_at);
+        long long at = -1;
+        CK(cudaMemcpyAsync(&at, nan_at, 8, cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        if (at < 0) return;
+        nan_found = true;
+        std::fprintf(stderr, "lamina: a non-finite value: visit %d (layer %d, pass %d), %s, row %lld, value %lld of %zu\n",
+                     nan_visit, visits[(size_t) nan_visit].layer, visits[(size_t) nan_visit].pass, what,
+                     at / (long long) width, at % (long long) width, width);
+    }
     void tick(const char* what) {
         if (!prof) return;
         CK(cudaStreamSynchronize(st));
@@ -731,6 +874,23 @@ struct Engine {
         else if (K::native_mmvq_supported(W.type)) K::native_mmvq(W.type, W.d, xq, y, W.n_in, W.n_out, T, st);
         else K::iq_mmvq(W.type, W.d, xq, y, W.n_in, W.n_out, T, st);
     }
+    /// The same for a chunk's T rows: MMQ over the rows' image for W's layout, made once an input (`input` 0-2 the
+    /// attention's inputs, 3 its output)
+    void mmb(Rows& R, const Mat& W, int input, const float* xf, float* y, int T) {
+        if (W.type == 30) {
+            for (int t0 = 0; t0 < T; t0 += kMaxT)
+                K::bf16_gemv_fp32_mmvf_multi(xf + (size_t) t0 * W.n_in, (const uint16_t*) W.d, y + (size_t) t0 * W.n_out,
+                                             W.n_in, W.n_out, std::min(kMaxT, T - t0), st);
+            return;
+        }
+        const int lay = MMQ::ds_layout(W.type);
+        uint8_t* xq = input == 3 ? R.aq[lay] : R.xq[input][lay];
+        if (!R.have[input][lay]) {
+            MMQ::quantize(xf, nullptr, xq, W.type, W.n_in, W.n_in, T, st);
+            R.have[input][lay] = true;
+        }
+        mmq->run_dense(W.d, W.type, W.n_out, W.n_in, xq, T, y, W.n_out, st);
+    }
     void mix(const float* const* blks, int nb, const float* cur, const float* queries, int nq, float* out, float* cur_n,
              int T) {
         ik::MixIn a{};
@@ -745,18 +905,98 @@ struct Engine {
         a.T = T;
         ik::mix_kernel<<<dim3((unsigned) T, (unsigned) std::max(nq, 1)), ik::kTB, 0, st>>>(a);
     }
+    /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
+    /// (`ld`: floats from one row of C to the next, m when not given)
+    void gemm(const float* A, int m_, int k, const float* B, int T, float* C, int ld = 0) {
+        const float one = 1.f, zero = 0.f;
+        if (cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m_, T, k, &one, A, k, B, k, &zero, C, ld > 0 ? ld : m_) !=
+            CUBLAS_STATUS_SUCCESS) {
+            std::fprintf(stderr, "lamina: a cuBLAS product failed\n");
+            throw Fatal{1};
+        }
+    }
+    /// A chunk's loop gate of one input: out = (1 - tanh(F h)) u + tanh(G h) m, h = D [u / rms(u); m / rms(m)]
+    void ctrl_batch(Rows& R, const float* u, const float* msg, const float* Dm, const float* G, const float* F, float* out,
+                    int T) {
+        const int N = (int) m->g.n_embd, rank = (int) m->g.gate_rank;
+        ik::ctrl_cat_kernel<<<(unsigned) T, ik::kTB, 0, st>>>(u, msg, R.cz, N);
+        gemm(Dm, rank, 2 * N, R.cz, T, R.ctl_h);
+        gemm(G, N, rank, R.ctl_h, T, R.cs1);
+        gemm(F, N, rank, R.ctl_h, T, R.cs2);
+        const long long cnt = (long long) T * N;
+        ik::ctrl_gate_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(u, msg, R.cs1, R.cs2, out, cnt);
+    }
     void conv_keep(float* state, const float* raw, int n, int T) {
         ik::conv_state_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>(state, raw, n, T, (int) m->g.n_conv);
     }
 
-    /// Visit v over T rows: x in, x out
-    void visit(int v, int T) {
+    /// A chunk's routed entries through their experts: R.rows [T * top_k][N] without the down rows' scales
+    void experts_batch(Rows& R, const Layer& L, int T) {
+        const Geometry& g = m->g;
+        const int N = (int) g.n_embd, E = (int) g.n_expert, top_k = (int) g.top_k, F = (int) g.n_ff;
+        const int n_ent = T * top_k;
+        // the entries by expert, on the host: each expert's bounds, an entry's token row and its row of the output
+        CK(cudaMemcpyAsync(R.ids_h, R.ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        std::fill(R.bounds_h, R.bounds_h + E + 1, 0);
+        for (int i = 0; i < n_ent; ++i) ++R.bounds_h[R.ids_h[i] + 1];
+        int max_rows = 0;
+        for (int e = 0; e < E; ++e) {
+            max_rows = std::max(max_rows, R.bounds_h[e + 1]);
+            R.bounds_h[e + 1] += R.bounds_h[e];
+        }
+        std::vector<int32_t> at(R.bounds_h, R.bounds_h + E);
+        for (int i = 0; i < n_ent; ++i) {
+            const int e = R.ids_h[i], p = at[(size_t) e]++;
+            R.ent_row_h[p] = i / top_k;
+            R.ent_dst_h[p] = i;
+            R.ent_exp_h[p] = e;
+        }
+        CK(cudaMemcpyAsync(R.bounds, R.bounds_h, (size_t) (E + 1) * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(R.ent_row, R.ent_row_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(R.ent_dst, R.ent_dst_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(R.ent_exp, R.ent_exp_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
+        MMQ::quantize(R.nrm, R.ent_row, R.tq, L.gl.gu_type, N, N, n_ent, st);
+        MMQ::Product p{};
+        p.w = L.slots;
+        p.type = L.gl.gu_type;
+        p.w_rows = 2 * F;
+        p.w_cols = N;
+        p.expert_bytes = L.stride;
+        p.n = E;
+        p.xq = R.tq;
+        p.bounds = R.bounds;
+        p.ids = R.ident;
+        p.ids_rows = R.ids_rows;
+        p.total_rows = n_ent;
+        p.max_rows = max_rows;
+        p.dst = R.gu;
+        p.ld_dst = 2 * F;
+        mmq->run(p, st);
+        const long long cnt = (long long) n_ent * F;
+        ik::situ_rows_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.gu, R.ent_exp, L.gu_scale, R.h, n_ent, F,
+                                                                              g.situ_beta, g.situ_lbeta);
+        MMQ::quantize(R.h, nullptr, R.hq, L.gl.d_type, F, F, n_ent, st);
+        p.w = L.slots + L.gl.down_off;
+        p.type = L.gl.d_type;
+        p.w_rows = N;
+        p.w_cols = F;
+        p.xq = R.hq;
+        p.ids = R.ent_dst;
+        p.dst = R.rows;
+        p.ld_dst = N;
+        mmq->run(p, st);
+    }
+
+    /// Visit v over T rows of R at positions p0 ..: x in, x out
+    void visit(int v, int T, Rows& R, int64_t p0) {
         const Geometry& g = m->g;
         Visit& V = visits[(size_t) v];
         const Layer& L = m->layers[(size_t) V.layer];
+        const bool batch = R.batch;
         const int l = V.layer, pass = V.pass, res = (int) g.res_block;
-        const int N = (int) g.n_embd, H = (int) g.n_head, HK = (int) g.n_head_kv, D = (int) g.head_dim, C = (int) g.n_conv;
-        const int KV = HK * D, R = (int) g.n_rel, E = (int) g.n_expert, top_k = (int) g.top_k;
+        const int N = (int) g.n_embd, H = (int) g.n_head, HK = (int) g.n_head_kv, D_ = (int) g.head_dim, C = (int) g.n_conv;
+        const int KV = HK * D_, Rr = (int) g.n_rel, E = (int) g.n_expert, top_k = (int) g.top_k, win = (int) g.n_swa;
         const size_t TN = (size_t) T * (size_t) N, TB = (size_t) T * (size_t) (N / 32);
         const bool msgs = pass > 0;
         float *ck = V.conv, *cv = ck + (size_t) (C - 1) * KV, *ca = cv + (size_t) (C - 1) * KV, *cf = ca + (size_t) (C - 1) * N;
@@ -764,47 +1004,53 @@ struct Engine {
         // a pass of the loop starts from the state before the loop; the pass before it speaks through messages
         if (L.looped && l == g.loop_start) {
             if (pass == 0) {
-                copy(prelude, x, TN);
+                copy(R.prelude, R.x, TN);
             } else {
-                copy(pass_out, x, TN);
-                copy(x, prelude, TN);
+                copy(R.pass_out, R.x, TN);
+                copy(R.x, R.prelude, TN);
             }
         }
         const int use_pass = l >= g.loop_end ? (int) g.n_pass - 1 : pass;
         const float* blks[ik::kBlk] = {};
         const int nb = (l + res - 1) / res;
-        for (int j = 0; j < nb; ++j) blks[j] = blk_at(j, use_pass);
-        float* newblk = L.first ? blk_at(l / res, use_pass) : nullptr;
+        for (int j = 0; j < nb; ++j) blks[j] = blk_at(R, j, use_pass);
+        float* newblk = L.first ? blk_at(R, l / res, use_pass) : nullptr;
         if (msgs) {
             const float* bank[ik::kBlk] = {};
             int nbank = 0;
             for (int b = 0; b < nblocks(); ++b)
-                if (varying(b)) bank[nbank++] = blk_at(b, pass - 1);
-            mix(bank, nbank, pass_out, L.msg_query, 4, msg, nullptr, T);
+                if (varying(b)) bank[nbank++] = blk_at(R, b, pass - 1);
+            mix(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T);
         }
 
         // ---- attention: its inputs
         const float* u[3];
         if (L.nq == 0) {
-            mix(blks, nb, x, nullptr, 0, nullptr, newblk, T);
-            u[0] = u[1] = u[2] = x;
+            mix(blks, nb, R.x, nullptr, 0, nullptr, newblk, T);
+            u[0] = u[1] = u[2] = R.x;
         } else {
-            mix(blks, nb, x, L.attn_query, L.nq, mixed, newblk, T);
-            for (int c = 0; c < 3; ++c) u[c] = mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
+            mix(blks, nb, R.x, L.attn_query, L.nq, R.mixed, newblk, T);
+            for (int c = 0; c < 3; ++c) u[c] = R.mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
         }
         const int n_in = msgs || L.full ? 3 : 1;
-        if (msgs) {
+        if (msgs && batch) {
+            for (int c = 0; c < 3; ++c) {
+                float* out = R.ctl + (size_t) c * TN;
+                ctrl_batch(R, u[c], R.msg + (size_t) c * TN, L.cD[c], L.cG[c], L.cF[c], out, T);
+                u[c] = out;
+            }
+        } else if (msgs) {
             ik::CtrlIn a{};
             for (int c = 0; c < 3; ++c) {
                 a.u[c] = u[c];
-                a.m[c] = msg + (size_t) c * TN;
+                a.m[c] = R.msg + (size_t) c * TN;
                 a.D[c] = L.cD[c];
                 a.G[c] = L.cG[c];
                 a.F[c] = L.cF[c];
-                a.out[c] = ctl + (size_t) c * TN;
+                a.out[c] = R.ctl + (size_t) c * TN;
                 u[c] = a.out[c];
             }
-            a.h = ctl_h;
+            a.h = R.ctl_h;
             a.n = 3;
             a.N = N;
             a.R = (int) g.gate_rank;
@@ -816,8 +1062,8 @@ struct Engine {
             for (int c = 0; c < n_in; ++c) {
                 a.x[c] = u[c];
                 a.w[c] = L.norm[c];
-                a.y[c] = nrm + (size_t) c * TN;
-                a.q[c] = img + (size_t) c * TB;
+                a.y[c] = R.nrm + (size_t) c * TN;
+                a.q[c] = batch ? nullptr : R.img + (size_t) c * TB;
             }
             a.n = n_in;
             a.N = N;
@@ -825,163 +1071,236 @@ struct Engine {
             ik::norm_kernel<<<dim3((unsigned) T, (unsigned) n_in), ik::kTB, 0, st>>>(a);
         }
         tick("attention inputs");
+        nan_visit = v;
+        probe("the visit's input x", R.x, (size_t) T, (size_t) N);
+        probe("the attention inputs' norms", R.nrm, (size_t) T * (size_t) n_in, (size_t) N);
         const int ki = n_in == 3 ? 1 : 0, vi = n_in == 3 ? 2 : 0;
-        const ik::Q81 *iq = img, *ikk = img + (size_t) ki * TB, *iv = img + (size_t) vi * TB;
-        const float *fq = nrm, *fk = nrm + (size_t) ki * TN, *fv = nrm + (size_t) vi * TN;
-        mm(L.wq, iq, fq, qraw, T);
-        mm(L.wgate, iq, fq, graw, T);
-        mm(L.wrel, iq, fq, rraw, T);
-        mm(L.wk, ikk, fk, kraw, T);
-        mm(L.wv, iv, fv, vraw, T);
-        ik::sproj_kernel<<<dim3((unsigned) H, (unsigned) T), ik::kTB, 0, st>>>(L.sink, fq, sink, N, H);
+        const float *fq = R.nrm, *fk = R.nrm + (size_t) ki * TN, *fv = R.nrm + (size_t) vi * TN;
+        if (batch) {
+            std::memset(R.have, 0, sizeof R.have);
+            mmb(R, L.wq, 0, fq, R.qraw, T);
+            mmb(R, L.wgate, 0, fq, R.graw, T);
+            mmb(R, L.wrel, 0, fq, R.rraw, T);
+            mmb(R, L.wk, ki, fk, R.kraw, T);
+            mmb(R, L.wv, vi, fv, R.vraw, T);
+        } else {
+            const ik::Q81 *iq = R.img, *ikk = R.img + (size_t) ki * TB, *iv = R.img + (size_t) vi * TB;
+            mm(L.wq, iq, fq, R.qraw, T);
+            mm(L.wgate, iq, fq, R.graw, T);
+            mm(L.wrel, iq, fq, R.rraw, T);
+            mm(L.wk, ikk, fk, R.kraw, T);
+            mm(L.wv, iv, fv, R.vraw, T);
+        }
+        ik::sproj_kernel<<<dim3((unsigned) H, (unsigned) T), ik::kTB, 0, st>>>(L.sink, fq, R.sink, N, H);
         if (L.full) {
-            ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.k_dyn, fk, dynk, N, HK * C);
-            ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.v_dyn, fv, dynv, N, HK * C);
-            ik::tau_kernel<<<1, 32, 0, st>>>(pos_d, tau, T, g.log_alpha, (float) g.log_floor);
+            ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.k_dyn, fk, R.dynk, N, HK * C);
+            ik::sproj_kernel<<<dim3((unsigned) (HK * C), (unsigned) T), ik::kTB, 0, st>>>(L.v_dyn, fv, R.dynv, N, HK * C);
+            ik::tau_kernel<<<(unsigned) ((T + 31) / 32), 32, 0, st>>>(R.pos_d, R.tau, T, g.log_alpha, (float) g.log_floor);
         }
         tick("attention projections");
-        ik::q_clip_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D, 0, st>>>(qraw, L.q_scale, L.full ? tau : nullptr, q, H,
-                                                                                    D, g.qk_clip);
-        {
-            ik::BiasIn a{rraw, L.rel_scale, L.rel_table, sink, L.full ? tau : nullptr, bias, H, R, L.ext, g.rel_clip};
+        probe("q's projection", R.qraw, (size_t) T, (size_t) H * D_);
+        probe("the gate's projection", R.graw, (size_t) T, (size_t) H * D_);
+        probe("the distance projection", R.rraw, (size_t) T, (size_t) H * Rr);
+        probe("k's projection", R.kraw, (size_t) T, (size_t) KV);
+        probe("v's projection", R.vraw, (size_t) T, (size_t) KV);
+        ik::q_clip_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(R.qraw, L.q_scale, L.full ? R.tau : nullptr,
+                                                                                     R.q, H, D_, g.qk_clip);
+        if (batch) {   // the table's products as one GEMM: r clipped in place, the sink taken off after
+            ik::r_clip_kernel<<<dim3((unsigned) T, (unsigned) H), 32, 0, st>>>(R.rraw, L.rel_scale, L.full ? R.tau : nullptr,
+                                                                              R.rraw, H, Rr, g.rel_clip);
+            gemm(L.rel_table, L.ext, Rr, R.rraw, T * H, R.bias, L.ext + 1);
+            const long long cnt = (long long) T * H * (L.ext + 1);
+            ik::bias_fix_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.bias, R.sink, (long long) T * H, L.ext);
+        } else {
+            ik::BiasIn a{R.rraw, L.rel_scale, L.rel_table, R.sink, L.full ? R.tau : nullptr, R.bias, H, Rr, L.ext, g.rel_clip};
             ik::bias_kernel<<<dim3((unsigned) T, (unsigned) H), ik::kTB, 0, st>>>(a);
         }
         {
             ik::KvIn a{};
-            a.raw[0] = kraw;
-            a.raw[1] = vraw;
+            a.raw[0] = R.kraw;
+            a.raw[1] = R.vraw;
             a.state[0] = ck;
             a.state[1] = cv;
             a.w[0] = L.k_conv;
             a.w[1] = L.v_conv;
-            a.dyn[0] = L.full ? dynk : nullptr;
-            a.dyn[1] = L.full ? dynv : nullptr;
-            a.out[0] = kc;
-            a.out[1] = vc;
+            a.dyn[0] = L.full ? R.dynk : nullptr;
+            a.dyn[1] = L.full ? R.dynv : nullptr;
+            a.out[0] = R.kc;
+            a.out[1] = R.vc;
             a.HK = HK;
-            a.D = D;
+            a.D = D_;
             a.C = C;
             a.clip = g.qk_clip;
             a.eps = g.eps;
-            ik::kv_conv_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D, 0, st>>>(a);
+            ik::kv_conv_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(a);
         }
-        conv_keep(ck, kraw, KV, T);
-        conv_keep(cv, vraw, KV, T);
-        ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), 128, 0, st>>>(V.cells, kc, vc, pos_d, HK, D);
+        conv_keep(ck, R.kraw, KV, T);
+        conv_keep(cv, R.vraw, KV, T);
+        // the cells the rows attend: the visit's own, or for a chunk's window visit a range in position order (the
+        // win - 1 cells before the chunk out of the ring, then the chunk's)
+        ik::Cells cells = V.cells;
+        const bool slide = batch && V.cells.ring;
+        if (slide) {
+            ik::ring_to_range_kernel<<<dim3((unsigned) (win - 1), 2), 256, 0, st>>>(V.cells, R.wk, R.wv, (long long) p0, win,
+                                                                                   (int) cell_bytes);
+            cells.k = R.wk;
+            cells.v = R.wv;
+            cells.first = p0 - (win - 1);
+            cells.cap = T + win - 1;
+            cells.ring = 0;
+        }
+        ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), 128, 0, st>>>(cells, R.kc, R.vc, R.pos_d, HK, D_);
         tick("q, k, v, bias");
+        probe("q", R.q, (size_t) T, (size_t) H * D_);
+        probe("the bias", R.bias, (size_t) T, (size_t) H * (L.ext + 1));
+        probe("k", R.kc, (size_t) T, (size_t) KV);
+        probe("v", R.vc, (size_t) T, (size_t) KV);
         // ---- attention over the cells
         ik::AttnIn at{};
-        at.c = V.cells;
-        at.q = q;
-        at.bias = bias;
-        at.pos = pos_d;
-        at.live = live_d;
-        at.part = part;
+        at.c = cells;
+        at.q = R.q;
+        at.bias = R.bias;
+        at.pos = R.pos_d;
+        at.live = slide ? R.wlive_d : R.live_d;
+        at.part = R.part;
         at.H = H;
         at.HK = HK;
-        at.D = D;
+        at.D = D_;
         at.ext = L.ext;
-        at.win = L.full ? 0 : (int) g.n_swa;
-        if (V.cells.ring) {
-            at.sub = at.chunk = kRingSub;
-            at.n_chunks = (int) (ring_cap / kRingSub);
-        } else {   // the stretches from the step record: the same launch for any number of cells
-            at.dyn = dyn_d;
-            at.sub = ik::kSub;
-            at.n_chunks = kChunks;
+        at.win = L.full ? 0 : win;
+        if (batch) {   // on the tensor cores: 32 rows of a query head a block, over the cells its rows see
+            ik::TcIn a{cells, R.q, R.bias, R.graw, R.pos_d, R.aout, T, H, HK, L.ext, L.full ? 0 : win,
+                       slide ? (long long) (T + win - 1) : (long long) (p0 + T)};
+            const dim3 grid((unsigned) ((T + ik::kTcRows - 1) / ik::kTcRows), (unsigned) H);
+            if (kv_q8) ik::attn_tc_kernel<true><<<grid, 256, 0, st>>>(a);
+            else ik::attn_tc_kernel<false><<<grid, 256, 0, st>>>(a);
+        } else {
+            if (V.cells.ring) {
+                at.sub = at.chunk = kRingSub;
+                at.n_chunks = (int) (ring_cap / kRingSub);
+            } else {   // the stretches from the step record: the same launch for any number of cells
+                at.dyn = R.dyn_d;
+                at.sub = ik::kSub;
+                at.n_chunks = kChunks;
+            }
+            ik::attn_part_kernel<<<dim3((unsigned) at.n_chunks, (unsigned) HK, (unsigned) T), ik::kSub, 0, st>>>(at);
+            ik::AttnOutIn a{R.part, R.graw, L.wo.type == 30 ? R.aout : nullptr, R.aimg, at.dyn, H, D_, at.n_chunks};
+            ik::attn_out_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(a);
         }
-        ik::attn_part_kernel<<<dim3((unsigned) at.n_chunks, (unsigned) HK, (unsigned) T), ik::kSub, 0, st>>>(at);
-        {
-            ik::AttnOutIn a{part, graw, L.wo.type == 30 ? aout : nullptr, aimg, at.dyn, H, D, at.n_chunks};
-            ik::attn_out_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D, 0, st>>>(a);
-        }
+        if (slide)
+            ik::range_to_ring_kernel<<<dim3((unsigned) std::min<int64_t>(T, ring_cap), 2), 256, 0, st>>>(
+                V.cells, R.wk, R.wv, (long long) p0, T, win, (int) cell_bytes);
         tick(L.full ? "attention, full" : "attention, window");
-        mm(L.wo, aimg, aout, oraw, T);
+        if (batch || L.wo.type == 30) probe("the attention's output", R.aout, (size_t) T, (size_t) H * D_);
+        if (batch) mmb(R, L.wo, 3, R.aout, R.oraw, T);
+        else mm(L.wo, R.aimg, R.aout, R.oraw, T);
         const dim3 gN((unsigned) ((N + ik::kTB - 1) / ik::kTB), (unsigned) T);
-        ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(oraw, ca, L.a_conv, x, N, C, L.first ? 1 : 0);
-        conv_keep(ca, oraw, N, T);
+        ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.oraw, ca, L.a_conv, R.x, N, C, L.first ? 1 : 0);
+        conv_keep(ca, R.oraw, N, T);
         tick("attention output");
+        probe("the output projection", R.oraw, (size_t) T, (size_t) N);
+        probe("x after the attention", R.x, (size_t) T, (size_t) N);
 
         // ---- the MoE
         const int nb2 = l / res + 1;
         if (L.first) blks[nb2 - 1] = newblk;
-        mix(blks, nb2, x, L.ffn_query, 1, mixed, nullptr, T);
-        const float* fu = mixed;
-        if (msgs) {
+        mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T);
+        const float* fu = R.mixed;
+        if (msgs && batch) {
+            ctrl_batch(R, R.mixed, R.msg + (size_t) 3 * TN, L.cD[3], L.cG[3], L.cF[3], R.ctl, T);
+            fu = R.ctl;
+        } else if (msgs) {
             ik::CtrlIn a{};
-            a.u[0] = mixed;
-            a.m[0] = msg + (size_t) 3 * TN;
+            a.u[0] = R.mixed;
+            a.m[0] = R.msg + (size_t) 3 * TN;
             a.D[0] = L.cD[3];
             a.G[0] = L.cG[3];
             a.F[0] = L.cF[3];
-            a.out[0] = ctl;
-            a.h = ctl_h;
+            a.out[0] = R.ctl;
+            a.h = R.ctl_h;
             a.n = 1;
             a.N = N;
             a.R = (int) g.gate_rank;
             ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 1), ik::kTB, 0, st>>>(a);
             ik::ctrl_apply_kernel<<<dim3((unsigned) ((N + ik::kTB - 1) / ik::kTB), (unsigned) T, 1), ik::kTB, 0, st>>>(a);
-            fu = ctl;
+            fu = R.ctl;
         }
         {
             ik::NormIn a{};
             a.x[0] = fu;
             a.w[0] = L.ffn_norm;
-            a.y[0] = nrm;
-            a.q[0] = img;
+            a.y[0] = R.nrm;
+            a.q[0] = batch ? nullptr : R.img;
             a.n = 1;
             a.N = N;
             a.eps = g.eps;
             ik::norm_kernel<<<dim3((unsigned) T, 1), ik::kTB, 0, st>>>(a);
         }
-        ik::route_dot_kernel<<<dim3((unsigned) E, (unsigned) T), ik::kTB, 0, st>>>(L.router, nrm, probs, E, N);
         const int n_ent = T * top_k;
-        {
-            ik::PlanIn a{probs, L.route_bias, L.slot_of, (unsigned long long) (uintptr_t) L.slots, L.stride, ids, w, grp_ptr,
-                         grp_start, n_groups, ent_dst, ent_tok, n_miss, T, E, top_k, g.w_scale != 0.f ? g.w_scale : 1.0f};
+        const float w_scale = g.w_scale != 0.f ? g.w_scale : 1.0f;
+        if (batch) {
+            gemm(L.router, E, N, R.nrm, T, R.probs);
+            ik::PickIn a{R.probs, L.route_bias, R.ids, R.w, E, top_k, w_scale, 1};
+            ik::pick_kernel<<<(unsigned) T, 32, 0, st>>>(a);
+            tick("MoE input and router");
+            probe("the MoE's input", R.nrm, (size_t) T, (size_t) N);
+            probe("the router's weights", R.w, (size_t) T, (size_t) top_k);
+            experts_batch(R, L, T);
+            tick("experts");
+            probe("the experts' gate/up rows", R.gu, (size_t) n_ent, (size_t) 2 * g.n_ff);
+            probe("the experts' hidden rows", R.h, (size_t) n_ent, (size_t) g.n_ff);
+            probe("the experts' rows", R.rows, (size_t) n_ent, (size_t) N);
+            ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, L.d_scale, R.ids);
+        } else {
+            ik::route_dot_kernel<<<dim3((unsigned) E, (unsigned) T), ik::kTB, 0, st>>>(L.router, R.nrm, R.probs, E, N);
+            ik::PlanIn a{R.probs, L.route_bias, L.slot_of, (unsigned long long) (uintptr_t) L.slots, L.stride, R.ids, R.w,
+                         R.grp_ptr, R.grp_start, R.n_groups, R.ent_dst, R.ent_tok, R.n_miss, T, E, top_k, w_scale};
             ik::pick_plan_kernel<<<1, ik::kTB, 0, st>>>(a);
+            tick("MoE input and router");
+            K::native_expert_grouped(L.gl, R.grp_ptr, R.grp_start, R.n_groups, R.ent_dst, R.ent_tok, n_ent, n_ent, R.img,
+                                     (int64_t) (N / 32) * 36, R.scratch, R.rows, st);
+            tick("experts");
+            ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(R.rows, R.w, R.fraw, N, top_k, nullptr, nullptr);
         }
-        tick("MoE input and router");
-        K::native_expert_grouped(L.gl, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, n_ent, n_ent, img, (int64_t) (N / 32) * 36,
-                                 scratch, rows, st);
-        tick("experts");
-        ik::expert_sum_kernel<<<gN, ik::kTB, 0, st>>>(rows, w, fraw, N, top_k);
-        ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(fraw, cf, L.f_conv, x, N, C, 0);
-        conv_keep(cf, fraw, N, T);
+        ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(R.fraw, cf, L.f_conv, R.x, N, C, 0);
+        conv_keep(cf, R.fraw, N, T);
         tick("MoE output");
+        probe("the MoE's output", R.fraw, (size_t) T, (size_t) N);
+        probe("x after the MoE", R.x, (size_t) T, (size_t) N);
     }
 
-    /// The logits of rows [r0, r0 + n) of the last forward, into logits rows [0, n)
-    void head(int r0, int n) {
+    /// The logits of rows [r0, r0 + n) of R's last forward, into its logits rows [0, n)
+    void head(Rows& R, int r0, int n) {
         const Geometry& g = m->g;
         const int N = (int) g.n_embd;
         const float* blks[ik::kBlk] = {};
-        for (int b = 0; b < nblocks(); ++b) blks[b] = blk_at(b, (int) g.n_pass - 1) + (size_t) r0 * N;
-        mix(blks, nblocks(), x + (size_t) r0 * N, m->out_query, 1, mixed, nullptr, n);
+        for (int b = 0; b < nblocks(); ++b) blks[b] = blk_at(R, b, (int) g.n_pass - 1) + (size_t) r0 * N;
+        mix(blks, nblocks(), R.x + (size_t) r0 * N, m->out_query, 1, R.mixed, nullptr, n);
         ik::NormIn a{};
-        a.x[0] = mixed;
+        a.x[0] = R.mixed;
         a.w[0] = m->out_norm;
-        a.y[0] = nrm;
-        a.q[0] = img;
+        a.y[0] = R.nrm;
+        a.q[0] = R.img;
         a.n = 1;
         a.N = N;
         a.eps = g.eps;
         ik::norm_kernel<<<dim3((unsigned) n, 1), ik::kTB, 0, st>>>(a);
-        mm(m->head, img, nrm, logits, n);
+        mm(m->head, R.img, R.nrm, R.logits, n);
         if (g.softcap > 0) {
             const long long cnt = (long long) n * g.n_vocab;
-            ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(logits, cnt, g.softcap);
+            ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap);
         }
+        lg_rows = &R;
         tick("head");
     }
 
-    /// T tokens' embedding rows as the first layer reads them (normed by the embedding's weight), in emb_h
-    void embed(const int32_t* tok, int T) {
+    /// T tokens' embedding rows as the first layer reads them (normed by the embedding's weight), in R.emb_h
+    void embed(Rows& R, const int32_t* tok, int T) {
         const Geometry& g = m->g;
         const size_t N = (size_t) g.n_embd;
         const ggml_type_traits* tr = m->embd_type != 0 ? ggml_get_type_traits((ggml_type) m->embd_type) : nullptr;
         for (int t = 0; t < T; ++t) {
-            float* row = emb_h + (size_t) t * N;
+            float* row = R.emb_h + (size_t) t * N;
             const uint8_t* src = m->embd.get() + (size_t) tok[t] * m->embd_row;
             if (tr) tr->to_float(src, row, (int64_t) N);
             else std::memcpy(row, src, N * 4);
@@ -992,13 +1311,24 @@ struct Engine {
         }
     }
 
+    /// The step record of T rows at p0 ..
+    void steps(Rows& R, int64_t p0, int T) {
+        const int64_t live = p0 + T;
+        for (int t = 0; t < R.cap; ++t) R.step_h[t] = (int32_t) (p0 + std::min(t, T - 1));
+        const int64_t per = (live + kChunks - 1) / kChunks;
+        const int64_t chunk = std::max<int64_t>(ik::kSub, (per + ik::kSub - 1) / ik::kSub * ik::kSub);
+        R.step_h[R.cap] = (int32_t) live;
+        R.step_h[R.cap + 1] = (int32_t) chunk;
+        R.step_h[R.cap + 2] = (int32_t) ((live + chunk - 1) / chunk);
+        R.step_h[R.cap + 3] = (int32_t) (T + m->g.n_swa - 1);
+    }
     /// A forward's launches: the rows and the step record from their pinned copies, every visit, the head's rows
-    void launches(int T, int n_head) {
-        CK(cudaMemcpyAsync(x, emb_h, (size_t) T * (size_t) m->g.n_embd * 4, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(step_d, step_h, (size_t) (kMaxT + 4) * 4, cudaMemcpyHostToDevice, st));
+    void launches(Rows& R, int T, int n_head, int64_t p0) {
+        CK(cudaMemcpyAsync(R.x, R.emb_h, (size_t) T * (size_t) m->g.n_embd * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(R.step_d, R.step_h, (size_t) (R.cap + 4) * 4, cudaMemcpyHostToDevice, st));
         tick("embedding");
-        for (int v = 0; v < (int) visits.size(); ++v) visit(v, T);
-        if (n_head > 0) head(T - n_head, n_head);
+        for (int v = 0; v < (int) visits.size(); ++v) visit(v, T, R, p0);
+        if (n_head > 0) head(R, T - n_head, n_head);
     }
     /// T tokens at the sequence's end through every visit; the logits of the last n_head rows.  False: no cells left.
     bool forward(const int32_t* tok, int T, int n_head) {
@@ -1006,30 +1336,36 @@ struct Engine {
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
         CK(cudaStreamSynchronize(st));   // the last forward has read the pinned rows
         if (prof) prof_t = Clock::now();
-        embed(tok, T);
-        const int64_t live = p0 + T;
-        for (int t = 0; t < kMaxT; ++t) step_h[t] = (int32_t) (p0 + std::min(t, T - 1));
-        const int64_t per = (live + kChunks - 1) / kChunks;
-        const int64_t chunk = std::max<int64_t>(ik::kSub, (per + ik::kSub - 1) / ik::kSub * ik::kSub);
-        step_h[kMaxT] = (int32_t) live;
-        step_h[kMaxT + 1] = (int32_t) chunk;
-        step_h[kMaxT + 2] = (int32_t) ((live + chunk - 1) / chunk);
-        step_h[kMaxT + 3] = 0;
+        embed(D, tok, T);
+        steps(D, p0, T);
         if (!use_graphs) {
-            launches(T, n_head);
+            launches(D, T, n_head, p0);
         } else {
             cudaGraphExec_t& exec = graphs[T * 16 + n_head];
             if (exec == nullptr) {
                 cudaGraph_t graph = nullptr;
                 CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
-                launches(T, n_head);
+                launches(D, T, n_head, p0);
                 CK(cudaStreamEndCapture(st, &graph));
                 CK(cudaGraphInstantiate(&exec, graph, 0));
                 CK(cudaGraphDestroy(graph));
                 own(&Owned::graphs, exec);
             }
             CK(cudaGraphLaunch(exec, st));
+            if (n_head > 0) lg_rows = &D;
         }
+        seq.insert(seq.end(), tok, tok + T);
+        return true;
+    }
+    /// T tokens of a prompt as one chunk (T <= prefill); the last one's logits with `logits`.  False: no cells left.
+    bool chunk(const int32_t* tok, int T, bool logits) {
+        const int64_t p0 = pos();
+        if (p0 + T > ctx || !ensure(p0 + T)) return false;
+        CK(cudaStreamSynchronize(st));
+        if (prof) prof_t = Clock::now();
+        embed(P, tok, T);
+        steps(P, p0, T);
+        launches(P, T, logits ? 1 : 0, p0);
         seq.insert(seq.end(), tok, tok + T);
         return true;
     }
@@ -1037,8 +1373,17 @@ struct Engine {
     /// `n` prompt tokens; the last one's logits are row 0.  0, -1 when `progress` said stop, -2 without cells.
     int feed(const int32_t* tok, int64_t n, const std::function<bool(int64_t)>& progress) {
         for (int64_t at = 0; at < n;) {
-            const int T = (int) std::min<int64_t>(kMaxT, n - at);
-            if (!forward(tok + at, T, at + T == n ? 1 : 0)) return -2;
+            const int64_t left = n - at;
+            int T;
+            bool ok;
+            if (prefill > 0 && left >= kChunkMin) {
+                T = (int) std::min<int64_t>(prefill, left);
+                ok = chunk(tok + at, T, at + T == n);
+            } else {
+                T = (int) std::min<int64_t>(feed_rows, left);
+                ok = forward(tok + at, T, at + T == n ? 1 : 0);
+            }
+            if (!ok) return -2;
             at += T;
             if (progress) {
                 CK(cudaStreamSynchronize(st));
@@ -1050,7 +1395,7 @@ struct Engine {
 
     void host_logits(int row, std::vector<float>& lg) {
         const size_t V = (size_t) m->g.n_vocab;
-        CK(cudaMemcpyAsync(logits_h, logits + (size_t) row * V, V * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaMemcpyAsync(logits_h, lg_rows->logits + (size_t) row * V, V * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
         lg.assign(logits_h, logits_h + V);
     }
@@ -1306,6 +1651,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     int64_t max_ctx = 0;
     int n_gen = 64, threads = 8;
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
+    int prefill = 1024;
     std::optional<uint64_t> reserve;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1318,6 +1664,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         };
         if (a == "--native" || a == "--model") model = next();
         else if (a == "--no-graph") graphs = false;   // every launch issued each forward
+        else if (a == "--prefill") prefill = std::max(0, std::atoi(next()));   // rows a prompt chunk (0: the decode's forwards)
         else if (a == "--max-context") max_ctx = std::atoll(next());
         else if (a == "--tokens") tokens = next();
         else if (a == "--tokens-file") {
@@ -1364,6 +1711,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     Engine E;
     E.use_graphs = graphs;
+    E.prefill = prefill;
     E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) *reserve);
     if (serve) {
         Serve sv(E, m.eos);

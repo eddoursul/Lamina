@@ -640,12 +640,24 @@ if(LAMINA_NATIVE_EXPERTS)
     foreach(_t q2_0 iq1_s iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q3_k q4_k q5_k q6_k q5_0 q5_1 q8_0)
       target_sources(lamina_mmq PRIVATE ${_lamina_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
+    # NVFP4 and MXFP4 (Inkling 2 Mini's experts): their instances hold the RTX 50's FP4 tensor-core instructions,
+    # which assemble for sm_120a alone, so these two files are built for 120a where the build names 120
+    add_library(lamina_mmq_fp4 OBJECT ${_lamina_mmq}/template-instances/mmq-instance-mxfp4.cu
+                                      ${_lamina_mmq}/template-instances/mmq-instance-nvfp4.cu)
+    set(_lamina_fp4_archs "")
+    foreach(_a ${CMAKE_CUDA_ARCHITECTURES})
+      string(REGEX REPLACE "^120(-real)?$" "120a\\1" _a "${_a}")
+      list(APPEND _lamina_fp4_archs ${_a})
+    endforeach()
+    set_target_properties(lamina_mmq_fp4 PROPERTIES CUDA_ARCHITECTURES "${_lamina_fp4_archs}")
+    target_sources(lamina_mmq PRIVATE $<TARGET_OBJECTS:lamina_mmq_fp4>)
     if(LAMINA_TQ_OVERLAY_OK)
       foreach(_t tqp5 tqp6 tqp7)
         target_sources(lamina_mmq PRIVATE ${_lamina_tq_dir}/template-instances/mmq-instance-${_t}.cu)
       endforeach()
       target_include_directories(lamina_mmq BEFORE PRIVATE ${_lamina_tq_dir} ${_lamina_tq_dir}/include)
       target_compile_definitions(lamina_mmq PRIVATE LAMINA_MMQ_TQP=1)
+      target_include_directories(lamina_mmq_fp4 BEFORE PRIVATE ${_lamina_tq_dir} ${_lamina_tq_dir}/include)
     endif()
     # MMQ with a pointer per expert (src/prefill/moe_mmq_tab.cuh, upstream's copy of mmq.cuh's scheduler): the prompt
     # experts read in place.  The copy mirrors mmq.cuh from mul_mat_q_process_tile through mul_mat_q_case; another
@@ -681,10 +693,14 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_mmq PRIVATE ${_lamina_gg}/include ${_lamina_gg}/src ${_lamina_mmq}
                                PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(lamina_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+    target_include_directories(lamina_mmq_fp4 PRIVATE ${_lamina_gg}/include ${_lamina_gg}/src ${_lamina_mmq})
+    target_compile_options(lamina_mmq_fp4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
     if(MSVC)
       target_compile_options(lamina_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+      target_compile_options(lamina_mmq_fp4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
     endif()
     target_link_libraries(lamina_mmq PUBLIC ggml-base CUDA::cudart)
+    target_link_libraries(lamina_mmq_fp4 PRIVATE ggml-base)
     target_link_libraries(lamina_prefill PUBLIC lamina_mmq)
     target_link_libraries(lamina_engine PUBLIC lamina_mmq)   # the verify window's projections at 7-8 tokens
 
@@ -778,7 +794,7 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_inkling2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_inkling2 PRIVATE lamina_core lamina_engine lamina_kernels lamina_kernels_cpu
-                          lamina_warnings lamina_serve_io lamina_cards CUDA::cudart)
+                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq CUDA::cublas CUDA::cudart)
     target_compile_options(lamina_inkling2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-inkling2 src/inkling2/inkling2_main.cpp)
     target_link_libraries(lamina-inkling2 PRIVATE lamina_inkling2 CUDA::cudart)
