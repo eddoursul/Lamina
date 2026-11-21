@@ -1177,6 +1177,12 @@ __global__ void __launch_bounds__(kTB) pick_plan_kernel(PlanIn a) {
     rank_[i] = held && l == i ? g : -1;
     cnt[i] = c;
     __syncthreads();
+    if (held && l == i) {   // a group's first entry: the entries of the groups before it
+        int at = 0;
+        for (int j = 0; j < n; ++j) at += rank_[j] >= 0 && rank_[j] < g ? cnt[j] : 0;
+        start[g] = at;
+        a.grp_start[g] = at;
+    }
     if (i == 0) {
         int ng = 0, nm = 0;
         for (int j = 0; j < n; ++j) {
@@ -1185,16 +1191,7 @@ __global__ void __launch_bounds__(kTB) pick_plan_kernel(PlanIn a) {
         }
         *a.n_groups = ng;
         *a.n_miss = nm;
-        int at = 0;
-        for (int gi = 0; gi < ng; ++gi)
-            for (int j = 0; j < n; ++j)
-                if (rank_[j] == gi) {
-                    start[gi] = at;
-                    at += cnt[j];
-                    break;
-                }
-        start[ng] = at;
-        for (int gi = 0; gi <= ng; ++gi) a.grp_start[gi] = start[gi];
+        a.grp_start[ng] = n - nm;
     }
     __syncthreads();
     if (!held) return;
@@ -1656,6 +1653,202 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
             *reinterpret_cast<float2*>(a.out + at) =
                 make_float2(o[j][2] * iB / (1.0f + __expf(-gt.x)), o[j][3] * iB / (1.0f + __expf(-gt.y)));
         }
+    }
+}
+
+/// attn_tc_kernel for a decode forward's rows (2 .. kMaxT) over a stretch of a visit's cells: block (cb, g) takes the
+/// rows' query heads of K/V head g (row r: forward row r / QH, its head r % QH of g's; T QH <= 32) over stretch cb, in
+/// tiles of 32 cells, so a visit's cells are read once whatever the rows (a block a row reads them T times, and a full
+/// visit's cells are the time of a token deep in a context).  The stretches and their sums are attn_part_kernel's: m,
+/// the sum of exp(logit - m) and that-weighted V, no sink, into part [T][H][n_chunks][D + 2] (m = -1e30 and a sum of
+/// 0 where a row sees none of the cells); a ring's slot stands for the position last written there.  The arithmetic
+/// is the chunks': q and the probabilities as halves.  Grid (stretches, K/V heads), block 256.
+template <bool Q8>
+__global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
+    constexpr int D = 128;
+    __shared__ TcSmem sm;
+    const int cb = blockIdx.x, g = blockIdx.y;
+    const int chunk = a.dyn ? a.dyn[0] : a.chunk;
+    if (a.dyn && cb >= a.dyn[1]) return;
+    const int QH = a.H / a.HK, NQ = T * QH;
+    const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
+    const int li = lane >> 3, lr = lane & 7, tig = lane & 3;
+    const long long live = *a.live, last = live - 1, cap = (long long) a.c.cap, first = (long long) a.c.first;
+    // the block's cells: slots [s_lo, s_lo + cnt)
+    const long long s_lo = (a.dyn ? a.dyn[2] : 0) + (long long) cb * chunk;
+    const int cnt = (int) (min(s_lo + chunk, a.c.ring ? cap : live) - s_lo);
+    const size_t cbytes = cell_bytes(a.c, a.HK, D);
+    // the queries as halves
+    for (int i = tid; i < kTcRows * (D / 4); i += 256) {
+        const int r = i / (D / 4), c4 = i % (D / 4);
+        float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (r < NQ) v = *reinterpret_cast<const float4*>(a.q + ((size_t) (r / QH) * a.H + g * QH + r % QH) * D + 4 * c4);
+        *reinterpret_cast<uint2*>(sm.q + r * kTcPad + 4 * c4) = make_uint2(h2(v.x, v.y), h2(v.z, v.w));
+    }
+    // a tile: 32 cells of K and of V (attn_tc_kernel's)
+    uint4 nk[2], nv[2];
+    [[maybe_unused]] float dk = 0.f, dv = 0.f;
+    auto fetch = [&](int base) {
+        if constexpr (Q8) {
+            const int c = tid / 8, pc = tid % 8;
+            nk[0] = nv[0] = make_uint4(0, 0, 0, 0);
+            dk = dv = 0.f;
+            if (base + c < cnt) {
+                const size_t at = (size_t) (s_lo + base + c) * cbytes + ((size_t) g * (D / 32) + pc / 2) * 34;
+                const uint8_t *kb = a.c.k + at, *vb = a.c.v + at;
+                dk = __half2float(*reinterpret_cast<const __half*>(kb));
+                dv = __half2float(*reinterpret_cast<const __half*>(vb));
+                memcpy(&nk[0], kb + 2 + (pc % 2) * 16, 16);
+                memcpy(&nv[0], vb + 2 + (pc % 2) * 16, 16);
+            }
+        } else {
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int i = tid + 256 * j, c = i / 16, ch = i % 16;
+                if (base + c < cnt) {
+                    const size_t at = (size_t) (s_lo + base + c) * cbytes + (size_t) g * D * 2 + ch * 16;
+                    nk[j] = *reinterpret_cast<const uint4*>(a.c.k + at);
+                    nv[j] = *reinterpret_cast<const uint4*>(a.c.v + at);
+                } else {
+                    nk[j] = nv[j] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+    };
+    auto stash = [&] {
+        if constexpr (Q8) {
+            const int c = tid / 8, pc = tid % 8;
+            const uint2 k0 = q8_widen4(nk[0].x, dk), k1 = q8_widen4(nk[0].y, dk), k2 = q8_widen4(nk[0].z, dk),
+                        k3 = q8_widen4(nk[0].w, dk);
+            const uint2 v0 = q8_widen4(nv[0].x, dv), v1 = q8_widen4(nv[0].y, dv), v2 = q8_widen4(nv[0].z, dv),
+                        v3 = q8_widen4(nv[0].w, dv);
+            uint4* kd = reinterpret_cast<uint4*>(sm.k + c * kTcPad + pc * 16);
+            uint4* vd = reinterpret_cast<uint4*>(sm.v + c * kTcPad + pc * 16);
+            kd[0] = make_uint4(k0.x, k0.y, k1.x, k1.y);
+            kd[1] = make_uint4(k2.x, k2.y, k3.x, k3.y);
+            vd[0] = make_uint4(v0.x, v0.y, v1.x, v1.y);
+            vd[1] = make_uint4(v2.x, v2.y, v3.x, v3.y);
+        } else {
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int i = tid + 256 * j, c = i / 16, ch = i % 16;
+                *reinterpret_cast<uint4*>(sm.k + c * kTcPad + ch * 8) = nk[j];
+                *reinterpret_cast<uint4*>(sm.v + c * kTcPad + ch * 8) = nv[j];
+            }
+        }
+    };
+    fetch(0);
+    stash();
+    const int mt = w & 1, nt = w >> 1;
+    const int rA = mt * 16 + (lane >> 2), rB = rA + 8;
+    const bool inA = rA < NQ, inB = rB < NQ;
+    const int tA = inA ? rA / QH : 0, tB = inB ? rB / QH : 0, hA = inA ? rA % QH : 0, hB = inB ? rB % QH : 0;
+    const long long pA = a.pos[tA], pB = a.pos[tB];
+    const float* bA = a.bias + ((size_t) tA * a.H + g * QH + hA) * (a.ext + 1);
+    const float* bB = a.bias + ((size_t) tB * a.H + g * QH + hB) * (a.ext + 1);
+    const float scale = rsqrtf((float) D);
+    // nothing yet: a largest logit that any real one passes, finite (no cell, no NaN)
+    float mA = -1e30f, mB = mA, lA = 0.f, lB = 0.f;
+    float o[4][4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.f;
+    const __half* qrow = sm.q + (mt * 16 + ((li & 1) << 3) + lr) * kTcPad + (li >> 1) * 8;
+    const int n_tiles = (max(cnt, 0) + kTcCells - 1) / kTcCells;
+    for (int it = 0; it < n_tiles; ++it) {
+        const int base = it * kTcCells;
+        __syncthreads();   // the tile (and the queries) in shared memory
+        if (it + 1 < n_tiles) fetch(base + kTcCells);
+        float sc[4] = {0.f, 0.f, 0.f, 0.f};
+        const __half* krow = sm.k + (nt * 8 + lr) * kTcPad + li * 8;
+#pragma unroll
+        for (int kk = 0; kk < D / 16; kk += 2) {
+            unsigned a0[4], a1[4], b[4];
+            ldsm4(a0, qrow + kk * 16);
+            ldsm4(a1, qrow + kk * 16 + 16);
+            ldsm4(b, krow + kk * 16);
+            mma16816(sc, a0, b[0], b[1]);
+            mma16816(sc, a1, b[2], b[3]);
+        }
+        float xA = -INFINITY, xB = -INFINITY;
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+            const int col = base + nt * 8 + 2 * tig + e;
+            const long long slot = s_lo + col;
+            const long long cp = a.c.ring ? last - ((last - slot) % cap + cap) % cap : first + slot;
+            const long long dA = pA - cp, dB = pB - cp;
+            const bool okA = inA && col < cnt && cp >= 0 && dA >= 0 && (a.win == 0 || dA < a.win);
+            const bool okB = inB && col < cnt && cp >= 0 && dB >= 0 && (a.win == 0 || dB < a.win);
+            sc[e] = okA ? sc[e] * scale + bA[dA < a.ext ? dA : a.ext] : -INFINITY;
+            sc[2 + e] = okB ? sc[2 + e] * scale + bB[dB < a.ext ? dB : a.ext] : -INFINITY;
+            xA = fmaxf(xA, sc[e]);
+            xB = fmaxf(xB, sc[2 + e]);
+        }
+        xA = fmaxf(xA, __shfl_xor_sync(0xffffffffu, xA, 1));
+        xA = fmaxf(xA, __shfl_xor_sync(0xffffffffu, xA, 2));
+        xB = fmaxf(xB, __shfl_xor_sync(0xffffffffu, xB, 1));
+        xB = fmaxf(xB, __shfl_xor_sync(0xffffffffu, xB, 2));
+        if (tig == 0) {
+            sm.red[0][nt][rA] = xA;
+            sm.red[0][nt][rB] = xB;
+        }
+        __syncthreads();
+        const float nA = fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
+        const float nB = fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
+        const float aA = __expf(mA - nA), aB = __expf(mB - nB);
+        const float p0A = sc[0] == -INFINITY ? 0.f : __expf(sc[0] - nA), p1A = sc[1] == -INFINITY ? 0.f : __expf(sc[1] - nA);
+        const float p0B = sc[2] == -INFINITY ? 0.f : __expf(sc[2] - nB), p1B = sc[3] == -INFINITY ? 0.f : __expf(sc[3] - nB);
+        const int pc = nt * 8 + 2 * tig;
+        *reinterpret_cast<unsigned*>(sm.p + rA * kTcPPad + pc) = h2(p0A, p1A);
+        *reinterpret_cast<unsigned*>(sm.p + rB * kTcPPad + pc) = h2(p0B, p1B);
+        float sA = p0A + p1A, sB = p0B + p1B;
+        sA += __shfl_xor_sync(0xffffffffu, sA, 1);
+        sA += __shfl_xor_sync(0xffffffffu, sA, 2);
+        sB += __shfl_xor_sync(0xffffffffu, sB, 1);
+        sB += __shfl_xor_sync(0xffffffffu, sB, 2);
+        if (tig == 0) {
+            sm.red[1][nt][rA] = sA;
+            sm.red[1][nt][rB] = sB;
+        }
+        __syncthreads();
+        lA = lA * aA + ((sm.red[1][0][rA] + sm.red[1][1][rA]) + (sm.red[1][2][rA] + sm.red[1][3][rA]));
+        lB = lB * aB + ((sm.red[1][0][rB] + sm.red[1][1][rB]) + (sm.red[1][2][rB] + sm.red[1][3][rB]));
+        mA = nA;
+        mB = nB;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            o[j][0] *= aA;
+            o[j][1] *= aA;
+            o[j][2] *= aB;
+            o[j][3] *= aB;
+        }
+#pragma unroll
+        for (int k = 0; k < 2; ++k) {
+            unsigned pa[4];
+            ldsm4(pa, sm.p + (mt * 16 + ((li & 1) << 3) + lr) * kTcPPad + (2 * k + (li >> 1)) * 8);
+            const __half* vrow = sm.v + (16 * k + ((li & 1) << 3) + lr) * kTcPad + nt * 32 + (li >> 1) * 8;
+#pragma unroll
+            for (int n2 = 0; n2 < 2; ++n2) {
+                unsigned b[4];
+                ldsm4t(b, vrow + n2 * 16);
+                mma16816(o[2 * n2], pa, b[0], b[1]);
+                mma16816(o[2 * n2 + 1], pa, b[2], b[3]);
+            }
+        }
+        __syncthreads();   // the tile's cells and probabilities are read
+        if (it + 1 < n_tiles) stash();
+    }
+    // a row's m and sum by one of its lanes, its values by each lane's eight
+    float* oA = a.part + (((size_t) tA * a.H + g * QH + hA) * a.n_chunks + cb) * (D + 2);
+    float* oB = a.part + (((size_t) tB * a.H + g * QH + hB) * a.n_chunks + cb) * (D + 2);
+    if (nt == 0 && tig == 0) {
+        if (inA) *reinterpret_cast<float2*>(oA) = make_float2(mA, lA);
+        if (inB) *reinterpret_cast<float2*>(oB) = make_float2(mB, lB);
+    }
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int d = nt * 32 + j * 8 + 2 * tig;
+        if (inA) *reinterpret_cast<float2*>(oA + 2 + d) = make_float2(o[j][0], o[j][1]);
+        if (inB) *reinterpret_cast<float2*>(oB + 2 + d) = make_float2(o[j][2], o[j][3]);
     }
 }
 

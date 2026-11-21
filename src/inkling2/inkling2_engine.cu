@@ -563,6 +563,7 @@ struct Engine {
     bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each); 2: every launch, by events
     int prof_level = 0;
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
+    bool rows_attn = std::getenv("LAMINA_INK_ROW_ATTN") == nullptr || std::atoi(std::getenv("LAMINA_INK_ROW_ATTN")) != 0;
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
     int prefill = 1024;     // rows a prompt chunk takes at most (0: prompts through the decode's forwards)
     static constexpr int kChunkMin = 16;   // a shorter prompt part goes through the decode's forwards
@@ -624,7 +625,6 @@ struct Engine {
         cudaGraphExec_t exec = nullptr;
         int fi = -1;
         ik::AttnIn at{};
-        bool wide = false;
     };
     std::map<int, std::vector<Seg>> seg_graphs;   // by rows * 16 + head rows
     std::vector<Seg>* cur_segs = nullptr;         // the one being captured
@@ -1302,9 +1302,7 @@ struct Engine {
             at.win = 0;
             at.sub = ik::kSub;
             at.n_chunks = kChunks;
-            const dim3 grid((unsigned) kChunks, (unsigned) HK, (unsigned) T);
-            if (kv_q8) ik::attn_part_kernel<<<grid, ik::kSub, 0, c.st>>>(at);
-            else ik::attn_wide_kernel<<<grid, ik::kSub, 0, c.st>>>(at);
+            scan(at, T, true, c.st);
             ik::JoinIn j{c.part, c.sum, at.dyn, H, D_, kChunks};
             ik::attn_join_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, c.st>>>(j);
             CK(cudaMemcpyAsync(c.sum_h, c.sum, (size_t) T * H * (D_ + 2) * 4, cudaMemcpyDeviceToHost, c.st));
@@ -1369,6 +1367,20 @@ struct Engine {
         }
         CK(cudaStreamSynchronize(st));
         cards_scan(fi, T);
+    }
+    /// A decode forward's scan of a visit's cells on stream `s`: every row's in one launch on the tensor cores
+    /// (attn_rows_kernel; a test's LAMINA_INK_ROW_ATTN=0: a block a row as a forward of one row, whose sums a window's
+    /// then are to the bit), one row's by the kernel its cells take
+    void scan(const ik::AttnIn& at, int T, bool full, cudaStream_t s) {
+        if (T > 1 && rows_attn) {
+            const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK);
+            if (kv_q8) ik::attn_rows_kernel<true><<<grid, 256, 0, s>>>(at, T);
+            else ik::attn_rows_kernel<false><<<grid, 256, 0, s>>>(at, T);
+            return;
+        }
+        const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK, (unsigned) T);
+        if (full && !kv_q8) ik::attn_wide_kernel<<<grid, ik::kSub, 0, s>>>(at);
+        else ik::attn_part_kernel<<<grid, ik::kSub, 0, s>>>(at);
     }
     /// The cards' sums are in pinned memory: the next segment takes them
     void seg_begin() {
@@ -1926,8 +1938,11 @@ struct Engine {
             }
         } else {
             if (V.cells.ring) {
-                at.sub = at.chunk = kRingSub;
-                at.n_chunks = (int) (ring_cap / kRingSub);
+                // (a forward of several rows: three tiles a block of attn_rows_kernel, where the ring divides so)
+                const bool tiles = T > 1 && rows_attn && ring_cap % (3 * kRingSub) == 0;
+                at.sub = kRingSub;
+                at.chunk = tiles ? 3 * kRingSub : kRingSub;
+                at.n_chunks = (int) (ring_cap / at.chunk);
             } else {   // the stretches from the step record: the same launch for any number of cells
                 at.dyn = R.dyn_d;
                 at.sub = ik::kSub;
@@ -1941,16 +1956,9 @@ struct Engine {
                 CK(cudaMemcpyAsync(xq_h, R.q, (size_t) T * H * D_ * 4, cudaMemcpyDeviceToHost, st));
                 CK(cudaMemcpyAsync(xs_h, R.ns, (size_t) T * H * 4, cudaMemcpyDeviceToHost, st));
                 seg_end(full_of[(size_t) v], T);
-                if (capturing) {
-                    cur_segs->back().at = at;
-                    cur_segs->back().wide = !kv_q8;
-                }
+                if (capturing) cur_segs->back().at = at;
             }
-            run(L.full ? "a: attention's sums, full" : "a: attention's sums, window", [&] {
-                const dim3 grid((unsigned) at.n_chunks, (unsigned) HK, (unsigned) T);
-                if (L.full && !kv_q8) ik::attn_wide_kernel<<<grid, ik::kSub, 0, st>>>(at);
-                else ik::attn_part_kernel<<<grid, ik::kSub, 0, st>>>(at);
-            });
+            run(L.full ? "a: attention's sums, full" : "a: attention's sums, window", [&] { scan(at, T, L.full, st); });
             ik::AttnOutIn a{R.part, R.graw, L.wo.type == 30 ? R.aout : nullptr, R.aimg, at.dyn, H, D_, at.n_chunks};
             if (carded) {
                 (void) cudaStreamQuery(st);   // (this card's scan runs beside theirs)
@@ -2195,9 +2203,7 @@ struct Engine {
                     if (sg.fi < 0) continue;
                     CK(cudaStreamSynchronize(st));
                     cards_scan(sg.fi, T);
-                    const dim3 grid((unsigned) sg.at.n_chunks, (unsigned) sg.at.HK, (unsigned) T);
-                    if (sg.wide) ik::attn_wide_kernel<<<grid, ik::kSub, 0, st>>>(sg.at);
-                    else ik::attn_part_kernel<<<grid, ik::kSub, 0, st>>>(sg.at);
+                    scan(sg.at, T, true, st);
                     (void) cudaStreamQuery(st);   // (this card's scan runs beside theirs)
                     cards_wait();
                 }
@@ -2480,11 +2486,14 @@ int argmax(const std::vector<float>& lg) {
 /// tokens that followed them there.
 struct Drafts {
     int lookup = 0;   // prompt lookup's shortest match (0: none)
+    // LAMINA_INK_WINDOW=N (a test's): every window N drafts that are the token itself, so a window of N + 1 rows is
+    // timed at any context (its drafts stay only where the text repeats a token)
+    int fake = std::getenv("LAMINA_INK_WINDOW") ? std::max(0, std::atoi(std::getenv("LAMINA_INK_WINDOW"))) : 0;
     std::unique_ptr<lamina::spec::SuffixDrafter> sfx;
     size_t sfx_ok = 0;   // the lookup's history is the state's tokens, its first sfx_ok of them right
     // a run's count: windows, those with drafts, those from the lookup, the drafts offered and kept
     long long windows = 0, drafted = 0, looked = 0, offered = 0, kept = 0;
-    bool on() const { return lookup > 0; }
+    bool on() const { return lookup > 0 || fake > 0; }
     void init(int lookup_min, int64_t ctx) {
         lookup = lookup_min;
         if (lookup > 0) sfx = std::make_unique<lamina::spec::SuffixDrafter>(lookup, 32, (size_t) std::max<int64_t>(4096, ctx));
@@ -2494,6 +2503,11 @@ struct Drafts {
     std::vector<int32_t> propose(const std::vector<int32_t>& seq, int32_t x, int n) {
         std::vector<int32_t> out;
         ++windows;
+        if (fake > 0) {
+            out.assign((size_t) std::min(n, fake), x);
+            offered += (long long) out.size();
+            return out;
+        }
         if (n <= 0 || !sfx) return out;
         // the history up to where it and seq agree: seq's tokens before sfx_ok are the ones it was given
         sfx_ok = std::min(sfx_ok, seq.size());
@@ -3077,7 +3091,15 @@ int run_engine(int argc, char** argv, bool check_only) {
             if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
             if (i + 1 == n_gen) break;
             const int32_t nx = i < (int) forced.size() ? forced[(size_t) i] : a;
-            if (nx < 0 || !E.forward(&nx, 1, 1)) break;
+            if (nx < 0) break;
+            if (dr.fake > 0) {   // (a test's: the token as a window's first row, its drafts dropped)
+                const std::vector<int32_t> win((size_t) std::min<int64_t>(dr.fake + 1, E.ctx - E.pos()), nx);
+                if (win.empty() || !E.forward(win.data(), (int) win.size(), (int) win.size(), true)) break;
+                E.host_logits(0, lg);
+                E.keep(1);
+                continue;
+            }
+            if (!E.forward(&nx, 1, 1)) break;
             E.host_logits(0, lg);
         }
     } else {   // as a request's: the sampler's tokens (greedy unless --temperature), windows of a token and its drafts
