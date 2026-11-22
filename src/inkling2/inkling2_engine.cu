@@ -995,6 +995,11 @@ struct Engine {
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
+    // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
+    // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
+    bool il_on = true;
+    void* il_buf = nullptr;
+    static constexpr int kIlIn = 8192;   // values a row of such a product has at most
     // A chunk's NVFP4 experts on the FP16 tensor cores (nvfp4_gemm) instead of MMQ: where the card has no FP4 tensor
     // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC: 0 never, 1 on any card; LAMINA_INK_TC_MIN: tests')
     bool tc_on = false;
@@ -1519,6 +1524,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_IL")) il_on = std::atoi(r) != 0;
         tc_on = MMQ::built() && !MMQ::native_fp4(40);
         if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
@@ -1532,6 +1538,7 @@ struct Engine {
         cell_bytes = kv_q8 ? (size_t) g.n_head_kv * (D_ / 32) * 34 : KV * 2;
         make_rows(D, kMaxT, false);
         logits_h = halloc<float>((size_t) g.n_vocab);
+        il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));   // (the drafter's start multiplies through the head)
         if (sp != nullptr) spark_init();
         if (const char* f = std::getenv("LAMINA_INK_ROUTE")) {
             route_f = std::fopen(f, "wb");
@@ -2828,9 +2835,17 @@ struct Engine {
     }
     /// y[t] = W x[t] for T rows: x as q8_1 images (xq), or as floats (xf) for a BF16 matrix
     void mm(const Mat& W, const ik::Q81* xq, const float* xf, float* y, int T) {
-        if (W.type == 30) K::bf16_gemv_fp32_mmvf_multi(xf, (const uint16_t*) W.d, y, W.n_in, W.n_out, T, st);
-        else if (K::native_mmvq_supported(W.type)) K::native_mmvq(W.type, W.d, xq, y, W.n_in, W.n_out, T, st);
-        else K::iq_mmvq(W.type, W.d, xq, y, W.n_in, W.n_out, T, st);
+        if (W.type == 30) {
+            K::bf16_gemv_fp32_mmvf_multi(xf, (const uint16_t*) W.d, y, W.n_in, W.n_out, T, st);
+        } else if (il_on && T >= (W.n_out >= 16384 ? 2 : 4) && W.n_in <= kIlIn &&
+                   K::native_mmvq_il_takes(W.type, (int) W.n_out, T)) {   // (the copy is a launch: a small product pays it from 4 rows)
+            K::native_q8_1_il_from(xq, il_buf, (int) W.n_in, T, st);
+            K::native_mmvq_il(W.type, W.d, xq, il_buf, y, (int) W.n_in, (int) W.n_out, T, st, false);
+        } else if (K::native_mmvq_supported(W.type)) {
+            K::native_mmvq(W.type, W.d, xq, y, W.n_in, W.n_out, T, st);
+        } else {
+            K::iq_mmvq(W.type, W.d, xq, y, W.n_in, W.n_out, T, st);
+        }
     }
     /// The same for a chunk's T rows: MMQ over the rows' image for W's layout, made once an input (`input` 0-2 the
     /// attention's inputs, 3 its output)

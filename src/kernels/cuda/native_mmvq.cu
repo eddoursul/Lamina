@@ -1872,6 +1872,12 @@ void native_mmvq_il_tune(int rows, bool one) {
     g_tune_one = one;
 }
 
+bool native_mmvq_il_takes(int ggml_type, int n_out, int ncols) noexcept {
+    if (ncols < 2 || ncols > 8) return false;
+    const bool il = ggml_type == 23 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 8;
+    return (il || iq_mmvq_il_supported(ggml_type)) && il_rows(ggml_type, ncols, n_out) != 0;
+}
+
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream, bool tensor_cores) {
     if (ncols >= 2 && tensor_cores && !g_tune_rows && native_mma(ggml_type, weights, x_il, y, n_in, n_out, ncols, stream))
