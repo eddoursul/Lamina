@@ -39,12 +39,23 @@ struct Ckpt {
     bool end = false;
 };
 
+/// A parked copy's buffer, and who hears of its end: an engine that keeps the cells elsewhere meanwhile
+/// (SequenceCache::kv_drop).
+struct KvFree {
+    void (*drop)(void* who, const uint8_t* host) = nullptr;
+    void* who = nullptr;
+    void operator()(uint8_t* p) const {
+        if (p != nullptr && drop != nullptr) drop(who, p);
+        delete[] p;
+    }
+};
+
 /// One conversation: its tokens, its checkpoints (positions ascending) and, when parked, a copy of its K/V cells.
 struct Seq {
     std::vector<int64_t> tokens;
     std::vector<ImgKey> imgs;
     std::vector<Ckpt> ckpts;
-    std::unique_ptr<uint8_t[]> kv;   ///< cells [0, kv_cells) of every K/V state (parked conversations only)
+    std::unique_ptr<uint8_t[], KvFree> kv;   ///< cells [0, kv_cells) of every K/V state (parked conversations only)
     int64_t kv_cells = 0;
     uint64_t kv_bytes = 0;
     uint64_t stamp = 0;   ///< the park's clock at its last use (a session's conversation: at its last request)

@@ -1360,6 +1360,48 @@ struct Engine {
         R.tiles_h = halloc<int32_t>(n_tiles);
     }
 
+    // ---- parked conversations kept on this card: the prompt cache's copy of a conversation's cells (kv_copy) is
+    // made on the device while the VRAM free above the reserve holds it, and reaches the cache's buffer in RAM when
+    // the VRAM is needed (more cells, a larger chunk, the image encoder's loan); a conversation taken back while its
+    // copy is here is a copy on the device (--park-vram 0: every copy to RAM at once)
+    struct Stash {
+        const uint8_t* host;   // the cache's buffer it stands for
+        uint8_t* dev;
+        uint64_t bytes;
+    };
+    std::vector<Stash> stashes;
+    bool stash_on = true;
+    uint64_t stash_bytes() const {
+        uint64_t n = 0;
+        for (const Stash& s : stashes) n += s.bytes;
+        return n;
+    }
+    Stash* stash_of(const uint8_t* host) {
+        for (Stash& s : stashes)
+            if (s.host == host) return &s;
+        return nullptr;
+    }
+    /// The oldest copy kept here to its buffer in RAM; false: none is kept
+    bool stash_flush() {
+        if (stashes.empty()) return false;
+        const Stash s = stashes.front();
+        stashes.erase(stashes.begin());
+        CK(cudaStreamSynchronize(st));
+        CK(cudaMemcpy(const_cast<uint8_t*>(s.host), s.dev, s.bytes, cudaMemcpyDeviceToHost));
+        CK(cudaFree(s.dev));
+        return true;
+    }
+    /// The cache's buffer `host` is gone, or written anew
+    void stash_drop(const uint8_t* host) {
+        for (size_t i = 0; i < stashes.size(); ++i)
+            if (stashes[i].host == host) {
+                CK(cudaStreamSynchronize(st));
+                CK(cudaFree(stashes[i].dev));
+                stashes.erase(stashes.begin() + (std::ptrdiff_t) i);
+                return;
+            }
+    }
+
     // ---- a chunk's attention (attn_tc_kernel): its blocks, and the segments its cells are scored in
     int main_sms_ = 0, tc_segs = 0;   // (LAMINA_INK_TC_SEGS: that many segments, a test's)
     /// this card's SMs (called with it current)
@@ -1447,10 +1489,15 @@ struct Engine {
     void chunk_set(int rows) {
         if (rows == chunk_cap) return;
         chunk_free();
+        for (;;) {   // (a parked conversation's copy on the card gives way to a larger chunk's buffers)
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            if (fr >= reserve + chunk_bytes(rows) + (256ull << 20) || !stash_flush()) break;
+        }
         chunk_alloc(rows);
     }
     /// ensure(n) would find its VRAM on this card with `extra` more bytes of it taken (fewer: freed)
-    bool cells_fit(int64_t n, int64_t extra) {
+    bool cells_fit(int64_t n, int64_t extra, bool keep = false) {
         const int64_t G = (int64_t) lamina::core::vmm_granularity();
         auto chunks = [&](int64_t cells) { return ((int64_t) ((uint64_t) cells * cell_bytes) + G - 1) / G; };
         int64_t need = 0;
@@ -1461,23 +1508,28 @@ struct Engine {
         }
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
-        const int64_t above = (int64_t) fr - (int64_t) reserve - extra;
+        // (the parked conversations' copies kept here go, unless `keep`)
+        const int64_t above = (int64_t) fr + (keep ? 0 : (int64_t) stash_bytes()) - (int64_t) reserve - extra;
         return above >= 0 && need <= (int64_t) spare.size() + above / G;
     }
     /// Before a chunk of a part with `left` tokens to read: the rows its buffers hold (chunk_cap)
     void chunk_fit(int64_t left) {
         if (!elastic()) return;
         const int64_t p0 = pos();
-        auto fits = [&](int rows) {   // the buffers of `rows` rows beside the cells of a chunk that long
+        auto fits = [&](int rows, bool keep) {   // the buffers of `rows` rows beside the cells of a chunk that long
             const int64_t more = (int64_t) chunk_bytes(rows) - (int64_t) chunk_bytes(chunk_cap);
-            return cells_fit(std::min<int64_t>(ctx, p0 + std::min<int64_t>(rows, left)), more > 0 ? more + (256ll << 20) : more);
+            return cells_fit(std::min<int64_t>(ctx, p0 + std::min<int64_t>(rows, left)), more > 0 ? more + (256ll << 20) : more, keep);
         };
+        // a parked conversation's copy on the card gives way to a larger chunk for a part long enough to gain more
+        // than the copy's way to RAM and back takes: 8 tokens a MiB (a larger chunk reads ~55 us a token sooner,
+        // the link carries ~5 GB/s)
+        const bool keep = left <= (int64_t) (stash_bytes() >> 20) * 8;
         for (int rows = prefill_max; rows > chunk_cap; rows /= 2)
-            if (rows > prefill && left > rows / 2 && fits(rows)) {
+            if (rows > prefill && left > rows / 2 && fits(rows, keep)) {
                 chunk_set(rows);
                 return;
             }
-        if (chunk_cap > prefill && !fits(chunk_cap)) chunk_set(prefill);
+        if (chunk_cap > prefill && !fits(chunk_cap, false)) chunk_set(prefill);
     }
     /// After a request: the chunk's buffers are prefill's again
     void chunk_base() {
@@ -2186,6 +2238,7 @@ struct Engine {
             const int64_t have = (int64_t) spare.size() + (fr > reserve ? (int64_t) ((fr - reserve) / G) : 0);
             const bool room = need <= have;
             if (room && (main_limit <= 0 || target - lo <= std::max(3 * unit, main_limit))) break;
+            if (!room && stash_flush()) continue;   // (a parked conversation's copy on the card goes first)
             if (!evict()) {
                 if (room) break;   // (the test's limit alone: the card has the VRAM)
                 if (m->in_ram && give_way(need - have)) continue;   // (the experts the ranking puts last)
@@ -2556,11 +2609,14 @@ struct Engine {
     }
     /// `need` more chunks can be mapped: spare ones, VRAM free above the reserve, else the experts give way
     bool chunks_room(int64_t need) {
-        size_t fr = 0, tot = 0;
-        CK(cudaMemGetInfo(&fr, &tot));
         const uint64_t G = lamina::core::vmm_granularity();
-        const int64_t have = (int64_t) spare.size() + (fr > reserve ? (int64_t) ((fr - reserve) / G) : 0);
-        return have >= need || give_way(need - have);
+        for (;;) {
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            const int64_t have = (int64_t) spare.size() + (fr > reserve ? (int64_t) ((fr - reserve) / G) : 0);
+            if (have >= need) return true;
+            if (!stash_flush()) return give_way(need - have);
+        }
     }
     /// A chunk's scratch holds the RAM experts of any one layer
     bool scratch_fit() {
@@ -4280,6 +4336,44 @@ struct Engine {
     /// K, then its V, each `held` cells long)
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
         const size_t mine = (size_t) held * cell_bytes;
+        // a copy kept on the card: made here while the VRAM is free, taken from here while every cell is this card's
+        auto on_card = [&](uint8_t* at, bool out) {
+            const size_t w = (size_t) cells * cell_bytes;
+            bool ok = true;
+            for (Visit& V : visits) {
+                if (V.cells.ring) continue;
+                for (uint8_t* d : {V.cells.k, V.cells.v}) {
+                    if (w > 0)
+                        ok = ok && soft(out ? cudaMemcpyAsync(at, d, w, cudaMemcpyDeviceToDevice, st)
+                                            : cudaMemcpyAsync(d, at, w, cudaMemcpyDeviceToDevice, st));
+                    at += mine;
+                }
+            }
+            return soft(cudaStreamSynchronize(st)) && ok;
+        };
+        if (to_host) {
+            stash_drop(host);
+            const uint64_t bytes = kv_bytes(held);
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            if (stash_on && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + bytes + (256ull << 20)) {
+                void* dev = nullptr;
+                if (cudaMalloc(&dev, bytes) == cudaSuccess) {
+                    if (on_card(static_cast<uint8_t*>(dev), true)) {
+                        stashes.push_back({host, static_cast<uint8_t*>(dev), bytes});
+                        return true;
+                    }
+                    CK(cudaFree(dev));
+                } else {
+                    (void) cudaGetLastError();
+                }
+            }
+        } else if (Stash* s = stash_of(host); s != nullptr) {
+            if (lo == 0 && s->bytes == kv_bytes(held)) return on_card(s->dev, false);
+            for (size_t i = 0; i < stashes.size(); ++i)   // (cells on other cards meanwhile: through the buffer)
+                if (stashes[i].host == host) std::swap(stashes[0], stashes[i]);
+            stash_flush();
+        }
         if (cards.empty()) {
             const size_t w = (size_t) cells * cell_bytes;
             bool ok = true;
@@ -4546,6 +4640,7 @@ protected:
     }
     void state_zero() override { E.reset(); }
     uint64_t kv_bytes(int64_t cells) const override { return E.kv_bytes(cells); }
+    void kv_drop(const uint8_t* host) override { E.stash_drop(host); }
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override {
         return E.kv_copy(cells, held, host, to_host);
     }
@@ -4981,7 +5076,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     int64_t max_ctx = 0;
     int n_gen = 64, threads = 8;
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
-    int prefill = 1024, prefill_max = -1;
+    int prefill = 1024, prefill_max = -1, park_vram = -1;
     std::optional<uint64_t> reserve;
     std::string cell_gpus, cell_clocks;
     double clocks_hold = 1.0;
@@ -5008,6 +5103,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--no-graph") graphs = false;   // every launch issued each forward
         else if (a == "--prefill") prefill = std::max(0, std::atoi(next()));   // rows a prompt chunk (0: the decode's forwards)
         else if (a == "--prefill-max") prefill_max = std::max(0, std::atoi(next()));   // rows it grows to while VRAM is free
+        else if (a == "--park-vram") park_vram = std::atoi(next()) != 0;   // a parked conversation's copy on the card while VRAM is free
         else if (a == "--max-context") max_ctx = std::atoll(next());
         else if (a == "--tokens") tokens = next();
         else if (a == "--tokens-file") {
@@ -5167,6 +5263,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     E.prefill = prefill;
     if (prefill_max >= 0) E.prefill_max = prefill_max;
+    if (park_vram >= 0) E.stash_on = park_vram != 0;
     if (loan > 0 && !m.in_ram)
         std::fprintf(stderr, "lamina: %llu MiB of this GPU stay free of cells for the image encoder's loan\n",
                      (unsigned long long) (loan >> 20));

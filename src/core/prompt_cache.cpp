@@ -246,7 +246,9 @@ void SequenceCache::stash_live(int64_t keep_upto) {
     }
     evicted.clear();   // their K/V copies go before this one's is allocated
     Seq s;
-    s.kv.reset(new (std::nothrow) uint8_t[bytes]);
+    s.kv = std::unique_ptr<uint8_t[], KvFree>(new (std::nothrow) uint8_t[bytes], KvFree{[](void* who, const uint8_t* host) {
+        static_cast<SequenceCache*>(who)->kv_drop(host);
+    }, this});
     if (!s.kv || !kv_copy(L, L, s.kv.get(), true)) return;
     for (size_t i = 0; i < live_.ckpts.size();) {
         if (live_.ckpts[i].pos > keep_upto) {
