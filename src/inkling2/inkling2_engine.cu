@@ -1050,6 +1050,7 @@ struct Engine {
     std::vector<Card> cards;
     std::vector<int> cell_devs;        // --cell-gpus
     std::vector<std::string> cell_clocks;   // --cell-gpu-clocks: a card's lock while a request runs (the last for the rest)
+    std::vector<int64_t> cell_keep;         // --cell-gpu-reserve-mib: the VRAM a card leaves free (-1: by its use)
     lamina::core::GpuClocks clocks;
     double clocks_hold = 1.0;          // seconds a lock outlasts a request
     int main_dev = 0;
@@ -1809,7 +1810,7 @@ struct Engine {
         }
         if (main_limit > 0) fits = std::min(fits, std::max(3 * unit, main_limit / unit * unit));
         int64_t on_cards = 0;
-        for (const int dev : cell_devs) cards_add(dev, per_pos, on_cards);
+        for (size_t i = 0; i < cell_devs.size(); ++i) cards_add(cell_devs[i], i, per_pos, on_cards);
         CK(cudaSetDevice(main_dev));
         if (!cards.empty() && fits < 3 * unit) {
             std::fprintf(stderr, "lamina: the cell cards are left out: this GPU keeps under %lld cells itself\n",
@@ -1918,7 +1919,8 @@ struct Engine {
 
     /// A cell card: its stream, the address ranges of the cells it has room for, a decode forward's buffers.  Left out
     /// (with a line) where it has no room for a unit.
-    void cards_add(int dev, uint64_t per_pos, int64_t& on_cards) {
+    /// (at: the card's place among --cell-gpus, its clocks' and its reserve's)
+    void cards_add(int dev, size_t at, uint64_t per_pos, int64_t& on_cards) {
         const Geometry& g = m->g;
         const size_t D_ = (size_t) g.head_dim, rows = (size_t) kMaxT * (size_t) g.n_head;
         if (cudaSetDevice(dev) != cudaSuccess) {
@@ -1933,7 +1935,7 @@ struct Engine {
         bool known = false, desktop = false;
         for (const lamina::core::GpuInfo& gi : lamina::core::list_gpus(true))
             if (gi.ordinal == dev) desktop = lamina::core::gpu_in_desktop_use(gi.bus_id, known);
-        const uint64_t keep = (uint64_t) (known && !desktop ? 700 : 1536) << 20;
+        const uint64_t keep = (uint64_t) (at < cell_keep.size() && cell_keep[at] >= 0 ? cell_keep[at] : known && !desktop ? 700 : 1536) << 20;
         // (its own buffers: a decode forward's rows and stretches, a chunk's rows, and room to spare)
         const uint64_t own_bytes = rows * (D_ + 1 + (size_t) stretches(1 << 20) * (D_ + 2) + (D_ + 2)) * 4 +
                                    (uint64_t) std::max(chunk_most(), 0) * (uint64_t) g.n_head * (2 * D_ + 4) * 4 + (64ull << 20);
@@ -1947,7 +1949,7 @@ struct Engine {
         CK(cudaStreamCreateWithFlags(&c.st, cudaStreamNonBlocking));
         CK(cudaEventCreateWithFlags(&c.ev, cudaEventDisableTiming));
         if (!cell_clocks.empty()) {
-            const std::string& spec = cell_clocks[std::min(cards.size(), cell_clocks.size() - 1)];
+            const std::string& spec = cell_clocks[std::min(at, cell_clocks.size() - 1)];
             std::string why;
             if (spec != "0" && !clocks.add(dev, spec, why))
                 std::fprintf(stderr, "lamina: --cell-gpu-clocks %s: %s: GPU %d keeps the driver's clocks\n", spec.c_str(),
@@ -5279,7 +5281,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
     int prefill = 1024, prefill_max = -1, park_vram = -1;
     std::optional<uint64_t> reserve;
-    std::string cell_gpus, cell_clocks;
+    std::string cell_gpus, cell_clocks, cell_keep;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
     int lookup = 16, drafts = -1, cpu_threads = 0;
@@ -5330,6 +5332,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--vram-reserve-mib") reserve = (uint64_t) std::max(0, std::atoi(next())) << 20;
         else if (a == "--cell-gpus") cell_gpus = next();   // cards for the full visits' cells (CUDA ordinals)
         else if (a == "--cell-gpu-clocks") cell_clocks = next();   // their clocks locked while a request runs
+        else if (a == "--cell-gpu-reserve-mib") cell_keep = next();   // the VRAM each leaves free ("-": by its use)
         else if (a == "--clocks-hold") clocks_hold = std::max(0.0, std::atof(next()));
         else if (a == "--main-cells") main_cells = std::max<int64_t>(0, std::atoll(next()));   // (tests: fewer on this card)
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
@@ -5460,6 +5463,12 @@ int run_engine(int argc, char** argv, bool check_only) {
     for (size_t at = 0; !cell_clocks.empty() && at <= cell_clocks.size();) {
         const size_t comma = std::min(cell_clocks.find(',', at), cell_clocks.size());
         E.cell_clocks.push_back(cell_clocks.substr(at, comma - at));
+        at = comma + 1;
+    }
+    for (size_t at = 0; !cell_keep.empty() && at <= cell_keep.size();) {
+        const size_t comma = std::min(cell_keep.find(',', at), cell_keep.size());
+        const std::string v = cell_keep.substr(at, comma - at);
+        E.cell_keep.push_back(v.empty() || v == "-" ? -1 : std::max<int64_t>(0, std::atoll(v.c_str())));
         at = comma + 1;
     }
     E.prefill = prefill;

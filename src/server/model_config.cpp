@@ -5,6 +5,7 @@
 #include "lamina/embedded.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
 #include "lamina/platform/memory.hpp"
+#include "lamina/program/gpu_cards.hpp"
 #include "log.hpp"
 #include "process.hpp"
 #include "runconfig.hpp"
@@ -435,7 +436,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 const int i = name == "auto" ? -1 : find_gpu(name, gpus);
                 const GpuInfo* g = i < 0 ? nullptr : gpu_by_index(gpus, i);
                 say("  " + (g != nullptr ? gpu_line(*g) : name) + ": " + replace_all(card.substr(comma + 1), ",", ", ") +
-                    (flash ? "" : inkling ? " (this model's path takes the cards' order and a later card's clocks)"
+                    (flash ? "" : inkling ? " (this model's path takes the cards' order, the first card's cache= and reserve=, a "
+                                            "later card's clocks= and reserve=)"
                                           : " (this model's path takes the cards' order alone)"));
             }
             // what it takes
@@ -470,12 +472,39 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 } else if (!line.empty()) {
                     say("  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line));
                 }
+                // (a card's reserve= in place of the VRAM it leaves free by its use: 0.7 GiB, 1.5 where it draws the
+                // desktop; ~1.5 GiB of buffers beside the model on the first card, ~1 GiB on another)
+                std::vector<std::pair<std::string, double>> kept;   // each card's reserve=, by its name in the config
+                for (const std::string& card : engine_cards(c)) {
+                    program::GpuCard gc;
+                    std::string e;
+                    if (program::parse_gpu_card(card.c_str(), gc, e) && gc.reserve) kept.emplace_back(gc.name, (double) *gc.reserve);
+                }
+                auto keeps = [&](const GpuInfo& g, double by_use) {
+                    for (const auto& [name, bytes] : kept)
+                        if (name != "auto" && find_gpu(name, gpus) == g.index) return bytes;
+                    return by_use;
+                };
                 double room = 0, others = 0;
+                std::vector<std::pair<const GpuInfo*, double>> rooms;   // the other cards' room for K and V
                 if (main != nullptr)
-                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - (main->display ? 3.0 : 2.2) * gibi;
+                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi -
+                           keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
                 for (size_t i = 1; i < on.size(); ++i)
-                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]))
-                        others += std::max(0.0, (double) g->memory_mib * 1048576.0 - (g->display ? 2.5 : 1.7) * gibi);
+                    if (const GpuInfo* g = gpu_by_index(gpus, on[i])) {
+                        rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi -
+                                                            keeps(*g, (g->display ? 1.5 : 0.7) * gibi)));
+                        others += rooms.back().second;
+                    }
+                // the plan a card: K and V of how many tokens each holds, in FP16 and in q8_0
+                auto thousands = [&](double bytes) {
+                    return std::to_string((long long) (std::max(0.0, bytes) / (32.0 * 1024.0) / 1000.0)) + " thousand tokens in FP16, " +
+                           std::to_string((long long) (std::max(0.0, bytes) / (17.0 * 1024.0) / 1000.0)) + " in q8_0";
+                };
+                auto plan = [&](const std::string& first) {
+                    if (main != nullptr) say("    " + gpu_line(*main) + ": " + first);
+                    for (const auto& [g, bytes] : rooms) say("    " + gpu_line(*g) + ": K and V of " + thousands(bytes));
+                };
                 const std::string cells = std::string(q8 ? "17" : "32") + " KiB a token, " + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" 17");
                 if (main != nullptr && room < (on.size() > 1 ? 16384.0 : 32768.0) * per) {
                     // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
@@ -496,6 +525,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     say("  RAM: " + gib(std::min(experts, ram)) + " of experts" +
                         (alone > 0 ? ", the other " + gib(alone) + " on the GPU alone (no more RAM is free above the 6 GiB "
                                      "left to the system: \"ram-reserve-mib\")" : ", pinned"));
+                    plan("the dense weights, the experts used most and K and V in turn, about " + gib(std::max(0.0, beside - alone)));
                     if (alone > first)
                         stops.push_back("the model's " + gib(experts) + " of experts fit neither " + gpu_line(*main) +
                                         " nor the RAM that is free: a smaller quant of the model");
@@ -505,6 +535,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                         "context's K and V (" + cells + ") in the rest" + (on.size() > 1 ? " and on the other cards" : "") +
                         ": room for about " + std::to_string((long long) (tokens / 1000.0)) +
                         " thousand tokens of the model's 1,048,576");
+                    plan("the model, its buffers" + std::string(drafter > 0 ? ", the drafter" : "") + ", K and V of " + thousands(room));
                 }
             } else {
                 double vram = 0;

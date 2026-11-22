@@ -403,7 +403,9 @@ unsloth's quants) beside the K and V; the embedding table stays in RAM (~0.5 GB)
 hold the K and V the first has no VRAM for (`--cell-gpus`): its oldest cells move to them as a conversation grows,
 each card scores its cells for every token, and the context is what the cards hold together, up to the model's
 1,048,576 tokens. A card's `clocks=` locks its clocks while it holds cells and a request runs (a card that idles
-between its scans answers late; the lock needs administrator rights). Its options: `--kv fp16 | q8_0`;
+between its scans answers late; the lock needs administrator rights), and its `reserve=SIZE` is the VRAM it leaves
+free (700 MiB, or 1,536 where the desktop draws on it). `lamina-server --check` says what each card holds: the
+model and K and V of how many tokens, in FP16 and in q8_0. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
 32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
