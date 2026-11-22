@@ -437,7 +437,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 const GpuInfo* g = i < 0 ? nullptr : gpu_by_index(gpus, i);
                 say("  " + (g != nullptr ? gpu_line(*g) : name) + ": " + replace_all(card.substr(comma + 1), ",", ", ") +
                     (flash ? "" : inkling ? " (this model's path takes the cards' order, the first card's cache= and reserve=, a "
-                                            "later card's clocks= and reserve=, and one later card's layers=)"
+                                            "later card's clocks= and reserve=, one later card's layers=, and with layers on two "
+                                            "cards the first card's clocks=)"
                                           : " (this model's path takes the cards' order alone)"));
             }
             // what it takes

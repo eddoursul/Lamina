@@ -155,6 +155,14 @@ struct OnDev {
     OnDev& operator=(const OnDev&) = delete;
 };
 
+/// The VRAM a card leaves free where nothing sets it: more on one the desktop draws on
+uint64_t card_keep(int dev) {
+    bool known = false, desktop = false;
+    for (const lamina::core::GpuInfo& gi : lamina::core::list_gpus(true))
+        if (gi.ordinal == dev) desktop = lamina::core::gpu_in_desktop_use(gi.bus_id, known);
+    return (uint64_t) (known && !desktop ? 700 : 1536) << 20;
+}
+
 constexpr int64_t kGrow = 4096;           // cells a full visit's storage grows by
 constexpr int64_t kContextFloor = 32768;  // a context not set is what fits, not under this
 // the vocabulary's message tokens: where a prompt's read places the cache's checkpoints
@@ -256,6 +264,8 @@ struct LoadOpts {
     int prefill = 1024;
     uint64_t ram_reserve = 0;    // the experts take no RAM below this much available to the system
     int sat_dev = -1, sat_lo = 0, sat_hi = -1;   // --layer-split: the layers [sat_lo, sat_hi] on card sat_dev
+    int split_try = -1;          // the card the looped layers go to where this one would keep few of the experts, or -1
+    uint64_t sat_reserve = 700ull << 20;   // the VRAM a split's card leaves free
 };
 
 struct Loader {
@@ -429,7 +439,17 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         // A prompt chunk's MMQ reads past the down matrix's last row (its steps of 256 values against rows of n_ff,
         // meeting zero activations): zeros follow the matrix for as far as it reads, the scales after them.  It walks
         // from one expert's matrix to the next in the format's blocks: a blob apart is whole blocks of both formats.
-        const size_t over = MMQ::built() && MMQ::supported((int) td->type) ? MMQ::tab_overread((int) td->type, g.n_ff) : 0;
+        // How far it reads is the card's (FP4 rows on an RTX 50: steps of 512 values): the most of the cards that
+        // may run the layer, this one and a split's.
+        size_t over = 0;
+        if (MMQ::built() && MMQ::supported((int) td->type)) {
+            over = MMQ::tab_overread((int) td->type, g.n_ff);
+            for (const int dev : {o.sat_dev, o.split_try})
+                if (dev >= 0) {
+                    const OnDev dv(dev);
+                    over = std::max(over, MMQ::tab_overread((int) td->type, g.n_ff));
+                }
+        }
         y.gl.scale_off = scaled ? (y.gl.bytes + over + 7) / 8 * 8 : 0;
         y.gl.x_il = K::native_expert_il(y.gl);   // (a decode forward's image of the MoE's input follows it)
         int eg = 0, bg = 0, ed = 0, bd = 0;
@@ -454,14 +474,19 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         m.sat_dev = o.sat_dev;
         m.sat_lo = o.sat_lo;
         m.sat_hi = o.sat_hi;
+    }
+    auto split_weights = [&] {   // the weights of m's split
+        uint64_t n = 0;
         for (size_t s = 0; s < gm.size(); ++s)
             for (const lamina::TensorInfo& t : gm.shard(s).tensors())
                 if (t.name.rfind("blk.", 0) == 0 && t.name.find("_exps.weight") == std::string::npos &&
                     m.on_sat(std::atoll(t.name.c_str() + 4)))
-                    sat_bytes += lamina::tensor_payload_bytes(t) + kWeightPad;
-        for (int64_t l = o.sat_lo; l <= o.sat_hi; ++l) sat_bytes += (uint64_t) E * m.layers[(size_t) l].stride + kWeightPad;
-        m.sat_gib = (double) sat_bytes / (double) (1ull << 30);
-    }
+                    n += lamina::tensor_payload_bytes(t) + kWeightPad;
+        for (int64_t l = m.sat_lo; l <= m.sat_hi; ++l) n += (uint64_t) E * m.layers[(size_t) l].stride + kWeightPad;
+        return n;
+    };
+    if (m.sat_dev >= 0) sat_bytes = split_weights();
+    m.sat_gib = (double) sat_bytes / (double) (1ull << 30);
     // The experts' place.  A card that holds the dense weights, every expert and what a context takes beside them -
     // its cells (the floor's; those of the context asked for where this card alone holds it), the window rings, the
     // rows of the decode and of a chunk at its fewest - has them all, each in its own slot.  Else they are in RAM
@@ -478,19 +503,57 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                               (uint64_t) ((g.n_swa + kMaxT + kRingSub - 1) / kRingSub * kRingSub);
         const uint64_t beside = ring * (o.cache ? 2 : 1) + (o.prefill > 0 ? 230ull << 20 : 0) + (96ull << 20);
         const int64_t least = o.cell_cards ? 4 * kGrow : o.max_ctx > 0 ? std::min(o.max_ctx, kContextFloor) : kContextFloor;
-        const int64_t asked = o.max_ctx > 0 && !o.cell_cards ? std::min(o.max_ctx, trained) : least;
+        int64_t asked = o.max_ctx > 0 && !o.cell_cards ? std::min(o.max_ctx, trained) : least;
         m.expert_cap = o.expert_vram;
         int64_t full_sat = 0;   // the full visits a split runs on its card
-        for (int64_t v = 0; v < g.n_visits(); ++v) full_sat += g.full(g.visit_layer(v)) && m.on_sat(g.visit_layer(v));
-        const uint64_t per_main = per_pos - (uint64_t) full_sat * 2 * cell;
-        const bool all = dense + experts - sat_bytes + (uint64_t) asked * per_main + beside + reserve <= fr &&
-                         (o.expert_vram == 0 || o.expert_vram >= experts);
-        if (m.sat_dev >= 0) {   // each card holds its layers and its cells, or the start says which does not
+        uint64_t per_main = 0;
+        bool all = false;
+        auto fit = [&] {   // whether this card holds its share (with a split: less its layers and their cells)
+            full_sat = 0;
+            for (int64_t v = 0; v < g.n_visits(); ++v) full_sat += g.full(g.visit_layer(v)) && m.on_sat(g.visit_layer(v));
+            per_main = per_pos - (uint64_t) full_sat * 2 * cell;
+            all = dense + experts - sat_bytes + (uint64_t) asked * per_main + beside + reserve <= fr &&
+                  (o.expert_vram == 0 || o.expert_vram >= experts);
+        };
+        auto there = [&](size_t& fs) {   // whether the split's card holds its own
             const OnDev dv(m.sat_dev);
-            size_t fs = 0, ts = 0;
+            size_t ts = 0;
             CK(cudaMemGetInfo(&fs, &ts));
-            const uint64_t need = sat_bytes + (uint64_t) asked * (uint64_t) full_sat * 2 * cell + beside + (700ull << 20);
-            if (!all || need > fs) {
+            return sat_bytes + (uint64_t) asked * (uint64_t) full_sat * 2 * cell + beside + o.sat_reserve <= fs;
+        };
+        fit();
+        if (!all && m.sat_dev < 0 && o.split_try >= 0 && g.n_pass > 1 && o.expert_vram == 0) {
+            // The layers over two cards before experts in RAM: where this card would keep under 80% of the experts
+            // beside its cells, the looped layers go to the next card if both then hold their shares - with the
+            // cells of the context asked for, or the floor's: a split's two cards hold the context by themselves.
+            const uint64_t rest = dense + (uint64_t) asked * per_pos + beside + reserve;
+            const double share = fr > rest ? (double) (fr - rest) / (double) experts : 0.0;
+            if (share < 0.8) {
+                const int64_t with_cards = asked;
+                asked = o.max_ctx > 0 ? std::min(o.max_ctx, trained) : kContextFloor;
+                m.sat_dev = o.split_try;
+                m.sat_lo = (int) g.loop_start;
+                m.sat_hi = (int) g.loop_end - 1;
+                sat_bytes = split_weights();
+                fit();
+                size_t fs = 0;
+                if (all && there(fs)) {
+                    m.sat_gib = (double) sat_bytes / gib;
+                    std::fprintf(stderr, "lamina: this GPU would keep %.0f%% of the experts beside the cells of %lld tokens: the "
+                                 "looped layers run on GPU %d instead (a card's layers=A-B sets a split, --layer-split 0 keeps "
+                                 "the experts in RAM)\n", 100.0 * share, (long long) with_cards, m.sat_dev);
+                } else {
+                    m.sat_dev = -1;
+                    sat_bytes = 0;
+                    asked = with_cards;
+                    fit();
+                }
+            }
+        }
+        if (m.sat_dev >= 0) {   // each card holds its layers and its cells, or the start says which does not
+            size_t fs = 0;
+            const bool held = there(fs);
+            if (!all || !held) {
                 char b[512];
                 std::snprintf(b, sizeof b, "--layer-split: %s holds its layers with the cells of %lld tokens (%.2f GiB of "
                               "weights, %.2f GiB of VRAM free)", !all ? "the first card no more" : "the split's card no more",
@@ -1171,6 +1234,8 @@ struct Engine {
     std::unique_ptr<Sat> sat;
     bool at_sat = false;
     std::string sat_clocks;          // --layer-split-clocks: its lock while a request runs
+    std::string main_clocks;         // --main-gpu-clocks: the first card's, with a split
+    uint64_t sat_keep = 700ull << 20;   // --layer-split-reserve-mib: the VRAM the split's card leaves free
     bool on_sat(int v) const { return sat && v >= sat->v0 && v < sat->v1; }
     Rows& sat_rows(Rows& R) { return &R == &P ? sat->P : sat->D; }
 
@@ -1820,6 +1885,10 @@ struct Engine {
             if (!sat_clocks.empty() && sat_clocks != "0" && !clocks.add(sat->dev, sat_clocks, why))
                 std::fprintf(stderr, "lamina: --layer-split-clocks %s: %s: GPU %d keeps the driver's clocks\n", sat_clocks.c_str(),
                              why.c_str(), sat->dev);
+            // (the first card's too: each works a part of a token and clocks down in the other's)
+            if (!main_clocks.empty() && main_clocks != "0" && !clocks.add(dv.was, main_clocks, why))
+                std::fprintf(stderr, "lamina: --main-gpu-clocks %s: %s: GPU %d keeps the driver's clocks\n", main_clocks.c_str(),
+                             why.c_str(), dv.was);
         }
         if (sat && sp != nullptr && 1 + nblocks() + sp->n_layer + 1 > ik::kCarry) {
             std::fprintf(stderr, "lamina: --layer-split: a drafter of %d layers passes the rows a crossing carries\n", sp->n_layer);
@@ -2020,13 +2089,13 @@ struct Engine {
             fr -= std::min(fr, x_most);
         }
         int64_t fits = (int64_t) ((fr > reserve ? fr - reserve : 0) / per_pos) / kGrow * kGrow;
-        if (sat) {   // the split's card: its rows' partial sums, and the cells its VRAM holds above 700 MiB
+        if (sat) {   // the split's card: its rows' partial sums, and the cells its VRAM holds above what it leaves free
             const OnDev dv(sat->dev);
             sat->D.n_part = D.n_part;
             sat->D.part = dzero<float>((size_t) kMaxT * (size_t) g.n_head * (size_t) D.n_part * (D_ + 2));
             size_t fs = 0, ts = 0;
             CK(cudaMemGetInfo(&fs, &ts));
-            const uint64_t keep = 700ull << 20;
+            const uint64_t keep = sat_keep;
             if (full_sat > 0)
                 fits = std::min(fits, (int64_t) ((fs > keep ? fs - keep : 0) / ((uint64_t) full_sat * 2 * cell_bytes)) / kGrow * kGrow);
         }
@@ -2172,10 +2241,7 @@ struct Engine {
         c.dev = dev;
         cudaDeviceProp prop{};
         if (cudaGetDeviceProperties(&prop, dev) == cudaSuccess) c.name = prop.name;
-        bool known = false, desktop = false;
-        for (const lamina::core::GpuInfo& gi : lamina::core::list_gpus(true))
-            if (gi.ordinal == dev) desktop = lamina::core::gpu_in_desktop_use(gi.bus_id, known);
-        const uint64_t keep = (uint64_t) (at < cell_keep.size() && cell_keep[at] >= 0 ? cell_keep[at] : known && !desktop ? 700 : 1536) << 20;
+        const uint64_t keep = at < cell_keep.size() && cell_keep[at] >= 0 ? (uint64_t) cell_keep[at] << 20 : card_keep(dev);
         // (its own buffers: a decode forward's rows and stretches, a chunk's rows, and room to spare)
         const uint64_t own_bytes = rows * (D_ + 1 + (size_t) stretches(1 << 20) * (D_ + 2) + (D_ + 2)) * 4 +
                                    (uint64_t) std::max(chunk_most(), 0) * (uint64_t) g.n_head * (2 * D_ + 4) * 4 + (64ull << 20);
@@ -2519,11 +2585,11 @@ struct Engine {
         for (size_t v = 0; v < visits.size(); ++v)
             if (visits[v].k_vm) (on_sat((int) v) ? ranges_sat : ranges) += 2;
         const int64_t need = (chunks(target) - chunks(mapped)) * ranges;
-        if (ranges_sat > 0) {   // (the split's card: what is free above 700 MiB)
+        if (ranges_sat > 0) {   // (the split's card: what is free above what it leaves so)
             const OnDev dv(sat->dev);
             size_t fs = 0, ts = 0;
             CK(cudaMemGetInfo(&fs, &ts));
-            if ((uint64_t) ((chunks(target) - chunks(mapped)) * ranges_sat) * G + (700ull << 20) > fs) return false;
+            if ((uint64_t) ((chunks(target) - chunks(mapped)) * ranges_sat) * G + sat_keep > fs) return false;
         }
         for (;;) {
             size_t fr = 0, tot = 0;
@@ -5685,7 +5751,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
     int prefill = 1024, prefill_max = -1, park_vram = -1;
     std::optional<uint64_t> reserve;
-    std::string cell_gpus, cell_clocks, cell_keep, layer_split, split_clocks;
+    std::string cell_gpus, cell_clocks, cell_keep, layer_split, split_clocks, main_clocks;
+    int64_t split_keep = -1;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
     int lookup = 16, drafts = -1, cpu_threads = 0;
@@ -5737,6 +5804,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--cell-gpus") cell_gpus = next();   // cards for the full visits' cells (CUDA ordinals)
         else if (a == "--layer-split") layer_split = next();   // DEV:A-B: the layers A .. B on card DEV
         else if (a == "--layer-split-clocks") split_clocks = next();   // that card's clocks locked while a request runs
+        else if (a == "--layer-split-reserve-mib") split_keep = std::max(0, std::atoi(next()));   // the VRAM it leaves free
+        else if (a == "--main-gpu-clocks") main_clocks = next();   // this card's clocks locked too, with a split
         else if (a == "--cell-gpu-clocks") cell_clocks = next();   // their clocks locked while a request runs
         else if (a == "--cell-gpu-reserve-mib") cell_keep = next();   // the VRAM each leaves free ("-": by its use)
         else if (a == "--clocks-hold") clocks_hold = std::max(0.0, std::atof(next()));
@@ -5789,10 +5858,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     if (!reserve) {   // a card the desktop draws on keeps more free
         int dev = 0;
         CK(cudaGetDevice(&dev));
-        bool known = false, desktop = false;
-        for (const lamina::core::GpuInfo& gi : lamina::core::list_gpus(true))
-            if (gi.ordinal == dev) desktop = lamina::core::gpu_in_desktop_use(gi.bus_id, known);
-        reserve = (uint64_t) (known && !desktop ? 700 : 1536) << 20;
+        reserve = card_keep(dev);
     }
     Model m;
     std::string err;
@@ -5811,7 +5877,13 @@ int run_engine(int argc, char** argv, bool check_only) {
     lo.q8 = kv == "q8_0";
     lo.cache = serve && copt.chain > 0;
     lo.cell_cards = !cell_gpus.empty();
-    if (!layer_split.empty()) {
+    if (layer_split.empty() && !cell_gpus.empty()) {
+        // the next card: the loader's own split, where it comes to one (the card's clocks= and reserve= are then its)
+        const std::vector<int32_t> ids = lamina::program::parse_ids(cell_gpus.c_str());
+        if (!ids.empty()) lo.split_try = ids.front();
+        if (split_keep < 0 && !cell_keep.empty() && std::isdigit((unsigned char) cell_keep[0])) split_keep = std::atoi(cell_keep.c_str());
+    }
+    if (!layer_split.empty() && layer_split != "0") {
         int dev = -1, a = 0, b = -1, n_dev = 0;
         if (std::sscanf(layer_split.c_str(), "%d:%d-%d", &dev, &a, &b) != 3 || cudaGetDeviceCount(&n_dev) != cudaSuccess ||
             dev < 0 || dev >= n_dev) {
@@ -5826,11 +5898,18 @@ int run_engine(int argc, char** argv, bool check_only) {
             cell_gpus.clear();
         }
     }
+    if (const int card = lo.sat_dev >= 0 ? lo.sat_dev : lo.split_try; card >= 0)
+        lo.sat_reserve = split_keep >= 0 ? (uint64_t) split_keep << 20 : card_keep(card);
     lo.prefill = prefill;
     lo.ram_reserve = (uint64_t) copt.ram_reserve_mib << 20;
+    const bool own_split = lo.sat_dev < 0;
     if (!load(model, m, lo, err)) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
+    }
+    if (own_split && m.sat_dev >= 0) {   // the loader's own split: that card runs layers (its clocks= the split's), none holds other cells
+        if (split_clocks.empty() && !cell_clocks.empty()) split_clocks = cell_clocks.substr(0, cell_clocks.find(','));
+        cell_gpus.clear();
     }
     Spark spark;
     if (!dspark.empty() && drafts != 0) {
@@ -5882,6 +5961,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.spread = cell_spread;
     E.clocks_hold = clocks_hold;
     E.sat_clocks = split_clocks;
+    E.main_clocks = main_clocks;
+    E.sat_keep = lo.sat_reserve;
     for (size_t at = 0; !cell_clocks.empty() && at <= cell_clocks.size();) {
         const size_t comma = std::min(cell_clocks.find(',', at), cell_clocks.size());
         E.cell_clocks.push_back(cell_clocks.substr(at, comma - at));

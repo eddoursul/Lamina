@@ -1711,6 +1711,7 @@ struct Qwen35Line {
     std::vector<std::optional<uint64_t>> reserves;   ///< and its reserve=SIZE
     std::vector<std::optional<std::pair<int, int>>> layers;   ///< and its layers=A-B (Inkling 2's layer split)
     std::optional<uint64_t> main_cache, main_reserve;   ///< the first --gpu card's cache=SIZE and reserve=SIZE
+    std::string main_clocks;                             ///< and its clocks=
     bool main_slots = false;                             ///< its cache=N (a number of slots)
     std::vector<char*> rest;
     bool qwen35() const { return family == lamina::ModelFamily::Qwen35Moe || family == lamina::ModelFamily::Qwen35; }
@@ -1744,6 +1745,7 @@ Qwen35Line qwen35_line(int argc, char** argv) {
             if (cards == 0) {
                 q.main_cache = c.cache_bytes;
                 q.main_reserve = c.reserve;
+                q.main_clocks = c.clocks.value_or("");
                 q.main_slots = c.cache_slots.has_value();
             }
             if (cards++ == 0) q.main_gpu = c.name == "auto" ? "0" : c.name;
@@ -1922,7 +1924,8 @@ int hy4_switch(int argc, char** argv) {
 /// room for: --cell-gpus (their order), their clocks= as --cell-gpu-clocks, their reserve= as
 /// --cell-gpu-reserve-mib.  The first card's cache=SIZE is the VRAM its experts take at most (--expert-cache), its
 /// reserve= what it leaves free (--vram-reserve-mib).  A later card with layers=A-B runs those layers (--layer-split,
-/// its clocks= as --layer-split-clocks) and holds no other cells than theirs.
+/// its clocks= as --layer-split-clocks, its reserve= as --layer-split-reserve-mib) and holds no other cells than
+/// theirs; the first card's clocks= (--main-gpu-clocks) locks it where layers are split.
 int inkling2_switch(int argc, char** argv) {
     Qwen35Line q = qwen35_line(argc, argv);
     if (!q.inkling2()) return kNotQwen35;
@@ -1944,7 +1947,7 @@ int inkling2_switch(int argc, char** argv) {
     }
     std::vector<int> which;
     std::vector<int> others = other_cards(q, gpus, dev, &which);
-    std::string split, split_clocks;   // the card with layers=: the split's
+    std::string split, split_clocks, split_keep;   // the card with layers=: the split's
     for (size_t i = 0; i < others.size(); ++i) {
         const int w = which[i];
         if (w < 0 || (size_t) w >= q.layers.size() || !q.layers[(size_t) w]) continue;
@@ -1955,6 +1958,7 @@ int inkling2_switch(int argc, char** argv) {
         split = std::to_string(others[i]) + ":" + std::to_string(q.layers[(size_t) w]->first) + "-" +
                 std::to_string(q.layers[(size_t) w]->second);
         if ((size_t) w < q.clocks.size()) split_clocks = q.clocks[(size_t) w];
+        if ((size_t) w < q.reserves.size() && q.reserves[(size_t) w]) split_keep = std::to_string(*q.reserves[(size_t) w] >> 20);
         others.erase(others.begin() + (long) i);
         which.erase(which.begin() + (long) i);
         --i;
@@ -1989,7 +1993,7 @@ int inkling2_switch(int argc, char** argv) {
     if (q.main_slots)
         std::fprintf(stderr, "lamina: this model's path takes a card's cache= as a size (cache=6G), not a number of slots: "
                              "left out\n");
-    std::string f_split = "--layer-split", f_split_clocks = "--layer-split-clocks";
+    std::string f_split = "--layer-split", f_split_clocks = "--layer-split-clocks", f_split_keep = "--layer-split-reserve-mib";
     if (!split.empty() && !given("--layer-split")) {
         q.rest.push_back(f_split.data());
         q.rest.push_back(split.data());
@@ -1997,6 +2001,15 @@ int inkling2_switch(int argc, char** argv) {
             q.rest.push_back(f_split_clocks.data());
             q.rest.push_back(split_clocks.data());
         }
+        if (!split_keep.empty()) {
+            q.rest.push_back(f_split_keep.data());
+            q.rest.push_back(split_keep.data());
+        }
+    }
+    std::string f_main_clocks = "--main-gpu-clocks";
+    if (!q.main_clocks.empty() && q.main_clocks != "0" && !given("--main-gpu-clocks")) {
+        q.rest.push_back(f_main_clocks.data());
+        q.rest.push_back(q.main_clocks.data());
     }
     std::string f_gpus = "--cell-gpus", f_locks = "--cell-gpu-clocks", f_keeps = "--cell-gpu-reserve-mib";
     if (!list.empty()) {

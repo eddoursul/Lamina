@@ -411,11 +411,19 @@ agrees with itself at 96.9-98.4% and 3.7e-3 to 1.5e-2. A prompt chunk's experts 
 this card (the FP16 tensor cores; llama.cpp and Lamina's shorter parts round them to 8 bits): a sum's error against
 exact arithmetic is 2,000 times smaller there.
 
-The layers over two cards (a later card's `layers=6-17`: the repeated layers, half of the weights, on the other RTX
-3090; both on 4 lanes): the logits are one card's to the bit. Through the API with drafts 167 / 177 / 314 tok/s for
-code / thinking / an edit (one card: 158 / 167 / 322 - each card works part of a token and stays under its power
-cap), prompts at 2,380 / 2,760 / 2,335 tok/s at 2.9K / 21K / 86K tokens (3,274 / 3,344 / 2,805), a context of
-610,304 tokens in FP16 on the two cards.
+The layers over two cards (a later card's `layers=6-17`: the repeated layers, half of the weights and three
+quarters of a token's layer applications), through the API with drafts, against the RTX 3090 alone (158 / 167 / 322
+tok/s for code / thinking / an edit, prompts at 3,274 / 3,344 / 2,805 tok/s at 2.9K / 21K / 86K tokens):
+
+| The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 |
+|---|---|---|---|
+| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) | 176 / 193 / 374 | 2,940 / 3,402 / 2,961 | 221,184 |
+| RTX 5070 Ti, RTX 3090 | 175 / 189 / 350 | 2,791 / 3,107 / 2,604 | 499,712 |
+| RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 167 / 177 / 314 | 2,380 / 2,758 / 2,335 | 610,304 |
+
+Each card works a part of a token and stays under its power cap; the context is what the fuller card holds beside
+its layers. Two cards of one generation give one card's logits to the bit; the 3090 and the 5070 Ti agree with
+llama.cpp as one card does (99.0-99.25% of the argmaxes after the edit prompt, one card 99.5%).
 
 A card smaller than the model: the RTX 5070 Ti (16 GB, the card the desktop draws on) alone with the same file (15.7
 GB). Lamina keeps the experts in RAM and the ones used most on the card (2,330 of the 3,072 at the start, fewer as

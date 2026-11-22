@@ -409,7 +409,12 @@ model and K and V of how many tokens, in FP16 and in q8_0. Where no card holds t
 run of its layers instead - `layers=A-B` (`{"id": "RTX 3060", "layers": "6-17"}`): the layers' weights and their
 part of the context are on it, and the answers are one card's to the bit. The run holds the layers that repeat
 (Inkling 2 Mini: 6-17, half of the weights) all or not at all, and leaves the first and the last layer on the
-first card. Its options: `--kv fp16 | q8_0`;
+first card. Those layers are three quarters of a token's work: the faster card runs them best (an RTX 3090 with
+them on an RTX 5070 Ti generates 11-16% faster than the 3090 alone), and the context is what the fuller of the two
+cards holds beside its layers. Both cards take `clocks=` here (each works a part of a token and clocks down in the
+other's), the later one `reserve=`. Without `layers=` the engine does this by itself with the card after the first
+where the first would keep under 80% of the experts (two 12 GB cards: all the experts on cards instead of a third
+of them in RAM); `--layer-split 0` keeps the experts in RAM. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
 32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
