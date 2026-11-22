@@ -1131,6 +1131,8 @@ struct Engine {
     // chunk_back); with a layer split both cards take them.
     int prefill_max = 4096;
     int chunk_cap = 0;      // the rows the chunk's buffers hold now
+    int chunk_rows = 0;     // the rows a chunk takes now (chunk_fit: by the part, no more than the buffers hold)
+    bool chunk_held = false;   // a part's chunks are under way: the buffers stay as they are
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
@@ -1493,6 +1495,7 @@ struct Engine {
     uint8_t* snap = nullptr;           // the image
     uint8_t* snap_via = nullptr;       // pinned
     uint8_t* snap_to = nullptr;        // the buffer snap_via's contents belong in (null: none waits)
+    bool imaged = false;               // a staged run's image of the state its caller is told of (image_part)
     cudaStream_t st_snap = nullptr;
     cudaEvent_t ev_snap = nullptr, ev_landed = nullptr;
     bool logits_held = false;          // the state came from a prompt's end: its logits are the decode rows' row 0
@@ -1766,6 +1769,7 @@ struct Engine {
             ck_pin.assign(g_owned->pinned.begin() + (long) h0, g_owned->pinned.end());
         }
         chunk_cap = rows;
+        chunk_rows = rows;
         if (!cards.empty()) {
             chunk_parts(P, ck_dev);
             if (P2.cap > 0) chunk_parts(P2, ck_dev);
@@ -1938,27 +1942,35 @@ struct Engine {
         // than the copy's way to RAM and back takes: 8 tokens a MiB (a larger chunk reads ~55 us a token sooner,
         // the link carries ~5 GB/s)
         const bool keep = left <= (int64_t) (stash_bytes() >> 20) * 8;
+        // The rows a chunk takes follow the part; buffers that hold more stay while the cells fit beside them (a
+        // resize takes 100-200 ms, what 20K tokens gain: the next long part, or request, finds them made).
+        auto holds = [&](int rows) { return (rows <= chunk_cap && fits(chunk_cap, false)) || fits(rows, keep); };
+        int want = prefill;
         // In stages the cards overlap whatever the rows, and a larger chunk gains little (the RTX 3090 with an RTX
         // 5070 Ti: 6% at 2,048 rows, 1% more at 4,096) for VRAM the cells do not get: 2,048 rows at most, for a
-        // stretch of eight such chunks or more (a resize takes what 20K tokens gain).
-        if (whole) {   // (a size the second set exists at: the one in use where it is large enough and fits)
-            int want = prefill;
+        // stretch of eight such chunks or more.
+        if (whole) {   // (a size the second set exists at)
             for (int rows = std::min(prefill_max, kStageRows); rows > prefill && want == prefill; rows /= 2)
-                if (left >= 8 * (int64_t) rows && fits(rows, keep)) want = rows;
-            if (chunk_cap > kStageRows || chunk_cap < want) chunk_set(want);
-            else if (chunk_cap > prefill && !fits(chunk_cap, false)) chunk_set(prefill);
+                if (left >= 8 * (int64_t) rows && (chunk_cap > kStageRows ? fits(rows, keep) : holds(rows))) want = rows;
+            if (chunk_cap > kStageRows || chunk_cap < want || !fits(chunk_cap, false)) chunk_set(want);
+            chunk_rows = want;
             return;
         }
-        for (int rows = prefill_max; rows > chunk_cap; rows /= 2)
-            if (rows > prefill && left > rows / 2 && fits(rows, keep)) {
-                chunk_set(rows);
-                return;
-            }
-        if (chunk_cap > prefill && !fits(chunk_cap, false)) chunk_set(prefill);
+        for (int rows = prefill_max; rows > prefill && want == prefill; rows /= 2)
+            if (left > rows / 2 && holds(rows)) want = rows;
+        if (chunk_cap < want || !fits(chunk_cap, false)) chunk_set(want);
+        chunk_rows = want;
     }
-    /// After a request: the chunk's buffers are prefill's again
+    /// The chunk's buffers are prefill's again
     void chunk_base() {
         if (chunk_cap > prefill) chunk_set(prefill);
+    }
+    /// A grown chunk's buffers give their VRAM back (to cells, a parked conversation's copy).  False: they hold no
+    /// more than prefill's rows, or a part's chunks are under way.
+    bool chunk_give() {
+        if (chunk_cap <= prefill || chunk_held || m->in_ram) return false;
+        chunk_set(prefill);
+        return true;
     }
     /// A part is read, with experts in RAM: a grown chunk's VRAM is the experts' again before the tokens after it
     void chunk_back() {
@@ -2884,7 +2896,8 @@ struct Engine {
                 room_sat = (uint64_t) ((chunks(target) - chunks(mapped)) * ranges_sat) * G + sat_keep <= fs;
             }
             if (room && room_sat && (main_limit <= 0 || target - lo <= std::max(3 * unit, main_limit))) break;
-            if ((!room || !room_sat) && stash_flush()) continue;   // (a parked conversation's copy on the cards goes first)
+            // (a grown chunk's buffers go first, then a parked conversation's copy on the cards)
+            if ((!room || !room_sat) && (chunk_give() || stash_flush())) continue;
             if (!evict()) {
                 if (evict_held) return false;   // (cells mapped ahead: this step is the sequence's own to take, later)
                 if (room && room_sat) break;   // (the test's limit alone: the cards have the VRAM)
@@ -5081,13 +5094,14 @@ struct Engine {
         return n > prefill ? n : 0;
     }
     /// `n` tokens (a part's, from its token `at0` of `total`) as chunks in stages.  0, or -1 when `progress` said stop
-    /// (the chunk under way then is read to its end first); `done`: the tokens read.  `settles(d)`: the state after
-    /// the part's first d tokens is to be whole (a checkpoint's), so no chunk starts before the one that ends there
-    /// is through.
+    /// (the chunk under way then is read to its end first); `done`: the tokens read.  `settles(d)`: the caller takes
+    /// the state after the part's first d tokens (a checkpoint) when `progress` tells it of them: its image is taken
+    /// stage by stage (image_part) with the next chunk under way, and where there is no image to take it into no
+    /// chunk starts before the one that ends there is through.
     int stage_run(const int32_t* tok, int64_t n, int64_t at0, int64_t total, const std::function<bool(int64_t)>& progress,
                   const std::function<bool(int64_t)>* settles, int64_t& done) {
         const int64_t first_pos = pos();
-        const int rows = chunk_cap, n_chunks = (int) ((n + rows - 1) / rows);
+        const int rows = chunk_rows, n_chunks = (int) ((n + rows - 1) / rows);
         auto size = [&](int k) { return (int) std::min<int64_t>(rows, n - (int64_t) k * rows); };
         auto p0_of = [&](int k) { return first_pos + (int64_t) k * rows; };
         auto end_of = [&](int k) { return at0 + (int64_t) k * rows + size(k); };
@@ -5132,21 +5146,29 @@ struct Engine {
         for (int k = 0; k < n_chunks; ++k) {
             if (begun < k) begin(begun = k);
             if (posted < k) post(posted = k);
-            const bool ahead = k + 1 < n_chunks && !stop && !(settles != nullptr && (*settles)(end_of(k)));
+            const bool mark = settles != nullptr && (*settles)(end_of(k));
+            const bool ahead = k + 1 < n_chunks && !stop && !(mark && (snap == nullptr || snap_sync));
+            const bool image = ahead && mark;
             waited += !ahead && k + 1 < n_chunks;
+            if (image) image_part(0);
             if (ahead) begin(begun = k + 1);
             stage_cv.wait(lk, [&] { return !stage_busy; });   // the split's card's stage is queued whole
             use_card(false);
             if (stage_failed != 0) throw Fatal{stage_failed};
+            if (image) image_part(1);
             stage_c_in(stage_rows(k), size(k), k & 1);
             if (ahead) post(posted = k + 1);
             stage_c_rest(stage_rows(k), size(k), p0_of(k), end_of(k) == total ? 1 : 0);
+            if (image) image_part(2);
             stream_wait();   // chunk k is through
             n_pos += size(k);
             logits_held = false;
             spark_wrote(p0_of(k), size(k), true);
             done = end_of(k) - at0;
-            if (progress && !progress(end_of(k))) stop = true;
+            imaged = image;   // (the state after chunk k is the image's: the cards are past it)
+            const bool go = !progress || progress(end_of(k));
+            imaged = false;
+            if (!go) stop = true;
             if (stop && !ahead) {
                 rc = -1;
                 break;
@@ -5160,6 +5182,37 @@ struct Engine {
                          1000.0 * (double) done / std::max(ms, 1e-9));
         }
         return rc;
+    }
+    /// A checkpoint's image where the next chunk is under way before the one it follows is through: each card's
+    /// visits' rings and states into that card's image behind the stage that leaves them - 0: this card's visits
+    /// before the split's (before the next chunk's are queued), 1: the split's card's, 2: this card's after them.
+    /// snap_state sends the image on (`imaged`).
+    void image_part(int part) {
+        const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
+        const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
+        if (part == 1) {
+            const OnDev dv(sat->dev);
+            CK(cudaStreamWaitEvent(sat->st, sat->ev_landed, 0));   // (the image before is in its buffer)
+            CK(cudaMemcpyAsync(sat->snap, sat->rings + r0, r1 - r0, cudaMemcpyDeviceToDevice, sat->st));
+            CK(cudaMemcpyAsync(sat->snap + (r1 - r0), (const uint8_t*) sat->conv_all + c0, c1 - c0, cudaMemcpyDeviceToDevice,
+                               sat->st));
+            CK(cudaEventRecord(sat->ev_snap, sat->st));
+            (void) cudaStreamQuery(sat->st);
+            return;
+        }
+        const uint8_t* const cv = (const uint8_t*) conv_all;
+        auto keep_ = [&](size_t at, const uint8_t* from, size_t n) {
+            if (n > 0) CK(cudaMemcpyAsync(snap + at, from, n, cudaMemcpyDeviceToDevice, st));
+        };
+        if (part == 0) {
+            CK(cudaStreamWaitEvent(st, ev_landed, 0));
+            keep_(0, rings, r0);
+            keep_(ring_bytes, cv, c0);
+        } else {
+            keep_(r1, rings + r1, ring_bytes - r1);
+            keep_(ring_bytes + c1, cv + c1, cb - c1);
+            CK(cudaEventRecord(ev_snap, st));
+        }
     }
     /// The packed rows are in pinned memory once this card's stream is through; the other card is the current one
     /// after, and its segment takes them from there (a copy between the cards' own memory took 1.1 ms a crossing
@@ -5336,19 +5389,25 @@ struct Engine {
             const int64_t left = (cuts != nullptr && ci < cuts->size() ? std::min(n, (*cuts)[ci]) : n) - at;
             int T;
             bool ok;
+            struct Hold {   // (the buffers stay as chunk_fit left them while the part's chunks run)
+                bool& held;
+                explicit Hold(bool& h) : held(h) { held = true; }
+                ~Hold() { held = false; }
+            };
             if (const int64_t staged = prefill > 0 && left >= chunk_min ? stage_span(left) : 0; staged > 0) {
                 chunk_fit(staged, true);   // (the rows that fit beside the stretch's cells: those are mapped first)
+                const Hold hold(chunk_held);
                 // (whole chunks where the segment goes on past them, and as far as the cells are mapped ahead)
-                int64_t run = staged < left ? staged / chunk_cap * chunk_cap : staged;
-                if (P2.cap == chunk_cap && run > chunk_cap) {
+                int64_t run = staged < left ? staged / chunk_rows * chunk_rows : staged;
+                if (P2.cap == chunk_cap && run > chunk_rows) {
                     ensure_ahead(run);
-                    if (mapped - pos() < run) run = std::max<int64_t>(0, mapped - pos()) / chunk_cap * chunk_cap;
+                    if (mapped - pos() < run) run = std::max<int64_t>(0, mapped - pos()) / chunk_rows * chunk_rows;
                 }
-                const bool go = P2.cap == chunk_cap && run > chunk_cap;
+                const bool go = P2.cap == chunk_cap && run > chunk_rows;
                 if (stage_log && !go)
                     std::fprintf(stderr, "lamina: stages: none at %lld for %lld tokens (%lld of them within the layers' cards' "
                                  "%lld cells, chunks of %d rows, %lld cells on cards)\n", (long long) pos(), (long long) left,
-                                 (long long) run, (long long) near_cap, chunk_cap, (long long) lo);
+                                 (long long) run, (long long) near_cap, chunk_rows, (long long) lo);
                 if (go) {   // two chunks or more: the cards at once
                     int64_t read = 0;
                     const int rc = stage_run(tok + at, run, at, n, progress, settles, read);
@@ -5359,7 +5418,8 @@ struct Engine {
             }
             if (prefill > 0 && left >= chunk_min) {
                 chunk_fit(left);
-                T = (int) std::min<int64_t>(chunk_cap, left);
+                const Hold hold(chunk_held);
+                T = (int) std::min<int64_t>(chunk_rows, left);
                 ok = chunk(tok + at, T, at + T == n);
             } else {
                 T = (int) std::min<int64_t>(feed_rows, left);
@@ -5459,10 +5519,18 @@ struct Engine {
         auto io = [&](uint8_t* h, void* d, size_t n) {
             return n == 0 || soft(out ? cudaMemcpy(h, d, n, cudaMemcpyDeviceToHost) : cudaMemcpy(d, h, n, cudaMemcpyHostToDevice));
         };
-        bool ok = soft(cudaStreamSynchronize(st)) && io(host, rings, ring_bytes) && io(host + ring_bytes, conv_all, conv_bytes());
-        const OnDev dv(sat->dev);
         const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
         const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4;
+        if (out && imaged) {   // (a staged run's image, the cards being past it: image_part)
+            bool ok = soft(cudaStreamSynchronize(st)) && io(host, snap, r0) && io(host + r1, snap + r1, ring_bytes - r1) &&
+                      io(host + ring_bytes, snap + ring_bytes, c0) &&
+                      io(host + ring_bytes + c1, snap + ring_bytes + c1, conv_bytes() - c1);
+            const OnDev dv(sat->dev);
+            return ok && soft(cudaStreamSynchronize(sat->st)) && io(host + r0, sat->snap, r1 - r0) &&
+                   io(host + ring_bytes + c0, sat->snap + (r1 - r0), c1 - c0);
+        }
+        bool ok = soft(cudaStreamSynchronize(st)) && io(host, rings, ring_bytes) && io(host + ring_bytes, conv_all, conv_bytes());
+        const OnDev dv(sat->dev);
         return ok && soft(cudaStreamSynchronize(sat->st)) && io(host + r0, sat->rings + r0, r1 - r0) &&
                io(host + ring_bytes + c0, (uint8_t*) sat->conv_all + c0, c1 - c0);
     }
@@ -5492,20 +5560,25 @@ struct Engine {
             auto land = [&](size_t at, size_t n) {
                 return n == 0 || soft(cudaMemcpyAsync(host + at, snap + at, n, cudaMemcpyDeviceToHost, st_snap));
             };
-            bool ok = soft(cudaStreamWaitEvent(st, ev_landed, 0)) && keep_(0, rings, r0) && keep_(r1, rings + r1, ring_bytes - r1) &&
-                      keep_(ring_bytes, cv, c0) && keep_(ring_bytes + c1, cv + c1, cb - c1);
+            // (`imaged`: a staged run took the image stage by stage, the cards being past it - image_part)
+            bool ok = imaged || (soft(cudaStreamWaitEvent(st, ev_landed, 0)) && keep_(0, rings, r0) &&
+                                 keep_(r1, rings + r1, ring_bytes - r1) && keep_(ring_bytes, cv, c0) &&
+                                 keep_(ring_bytes + c1, cv + c1, cb - c1));
             if (end) ok = ok && keep_(body, (const uint8_t*) lg_rows->logits, V4);
             const int32_t held[2] = {end ? 1 : 0, 0};
             std::memcpy(host + body + V4, held, 8);
-            ok = ok && soft(cudaEventRecord(ev_snap, st)) && soft(cudaStreamWaitEvent(st_snap, ev_snap, 0)) && land(0, r0) &&
-                 land(r1, ring_bytes - r1) && land(ring_bytes, c0) && land(ring_bytes + c1, cb - c1) && (!end || land(body, V4)) &&
-                 soft(cudaEventRecord(ev_landed, st_snap));
+            ok = ok && (imaged || soft(cudaEventRecord(ev_snap, st))) && soft(cudaStreamWaitEvent(st_snap, ev_snap, 0)) &&
+                 land(0, r0) && land(r1, ring_bytes - r1) && land(ring_bytes, c0) && land(ring_bytes + c1, cb - c1) &&
+                 (!end || land(body, V4)) && soft(cudaEventRecord(ev_landed, st_snap));
             const OnDev dv(sat->dev);
-            return ok && soft(cudaStreamWaitEvent(sat->st, sat->ev_landed, 0)) &&
-                   soft(cudaMemcpyAsync(sat->snap, sat->rings + r0, r1 - r0, cudaMemcpyDeviceToDevice, sat->st)) &&
-                   soft(cudaMemcpyAsync(sat->snap + (r1 - r0), (const uint8_t*) sat->conv_all + c0, c1 - c0, cudaMemcpyDeviceToDevice,
-                                        sat->st)) &&
-                   soft(cudaEventRecord(sat->ev_snap, sat->st)) && soft(cudaStreamWaitEvent(sat->st_snap, sat->ev_snap, 0)) &&
+            return ok &&
+                   (imaged ||
+                    (soft(cudaStreamWaitEvent(sat->st, sat->ev_landed, 0)) &&
+                     soft(cudaMemcpyAsync(sat->snap, sat->rings + r0, r1 - r0, cudaMemcpyDeviceToDevice, sat->st)) &&
+                     soft(cudaMemcpyAsync(sat->snap + (r1 - r0), (const uint8_t*) sat->conv_all + c0, c1 - c0,
+                                          cudaMemcpyDeviceToDevice, sat->st)) &&
+                     soft(cudaEventRecord(sat->ev_snap, sat->st)))) &&
+                   soft(cudaStreamWaitEvent(sat->st_snap, sat->ev_snap, 0)) &&
                    soft(cudaMemcpyAsync(host + r0, sat->snap, r1 - r0, cudaMemcpyDeviceToHost, sat->st_snap)) &&
                    soft(cudaMemcpyAsync(host + ring_bytes + c0, sat->snap + (r1 - r0), c1 - c0, cudaMemcpyDeviceToHost, sat->st_snap)) &&
                    soft(cudaEventRecord(sat->ev_landed, sat->st_snap)) && (cudaStreamQuery(sat->st), true);
@@ -5606,14 +5679,18 @@ struct Engine {
             uint64_t b2 = 0;   // the split's card's share
             for (size_t vi = 0; vi < visits.size(); ++vi)
                 if (!visits[vi].cells.ring && on_sat((int) vi)) b2 += 2 * (uint64_t) mine;
-            size_t fr = 0, tot = 0;
-            CK(cudaMemGetInfo(&fr, &tot));
-            bool room = stash_on && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + (bytes - b2) + (256ull << 20);
-            if (room && b2 > 0) {
-                const OnDev dv(sat->dev);
-                size_t fs = 0, ts = 0;
-                CK(cudaMemGetInfo(&fs, &ts));
-                room = fs >= sat_keep + b2 + (256ull << 20);
+            bool room = false;
+            for (int pass = 0; pass < 2 && !room; ++pass) {   // (a grown chunk's buffers give way to the copy)
+                size_t fr = 0, tot = 0;
+                CK(cudaMemGetInfo(&fr, &tot));
+                room = stash_on && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + (bytes - b2) + (256ull << 20);
+                if (room && b2 > 0) {
+                    const OnDev dv(sat->dev);
+                    size_t fs = 0, ts = 0;
+                    CK(cudaMemGetInfo(&fs, &ts));
+                    room = fs >= sat_keep + b2 + (256ull << 20);
+                }
+                if (room || !(stash_on && lo == 0 && !m->in_ram && cells == held && bytes > 0) || !chunk_give()) break;
             }
             if (room) {
                 void *dev = nullptr, *dev2 = nullptr;
@@ -6302,7 +6379,7 @@ struct Serve {
             std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
             cache->spare();
         }
-        E.chunk_base();
+        if (E.m->in_ram) E.chunk_base();   // (else a grown chunk's buffers stay until their VRAM is asked for)
         E.relax();
     }
 
