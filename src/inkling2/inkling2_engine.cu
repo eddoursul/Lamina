@@ -1263,7 +1263,8 @@ struct Engine {
     std::unique_ptr<Sat> sat;
     bool at_sat = false;
     std::string sat_clocks;          // --layer-split-clocks: its lock while a request runs
-    std::string main_clocks;         // --main-gpu-clocks: the first card's, with a split
+    std::string main_clocks;         // --main-gpu-clocks: the first card's
+    bool main_locked = false;        // (it has a lock: held through every request)
     uint64_t sat_keep = 700ull << 20;   // --layer-split-reserve-mib: the VRAM the split's card leaves free
     bool on_sat(int v) const { return sat && v >= sat->v0 && v < sat->v1; }
     /// The card a forward works on now
@@ -2059,10 +2060,17 @@ struct Engine {
             if (!sat_clocks.empty() && sat_clocks != "0" && !clocks.add(sat->dev, sat_clocks, why))
                 std::fprintf(stderr, "lamina: --layer-split-clocks %s: %s: GPU %d keeps the driver's clocks\n", sat_clocks.c_str(),
                              why.c_str(), sat->dev);
-            // (the first card's too: each works a part of a token and clocks down in the other's)
-            if (!main_clocks.empty() && main_clocks != "0" && !clocks.add(dv.was, main_clocks, why))
+        }
+        if (!main_clocks.empty() && main_clocks != "0") {
+            // The first card's own lock, held through every request: a card that works a part of the time (a split's,
+            // or beside the CPU's experts) is left by the driver at one clock or another.
+            std::string why;
+            int here = 0;
+            CK(cudaGetDevice(&here));
+            main_locked = clocks.add(here, main_clocks, why);
+            if (!main_locked)
                 std::fprintf(stderr, "lamina: --main-gpu-clocks %s: %s: GPU %d keeps the driver's clocks\n", main_clocks.c_str(),
-                             why.c_str(), dv.was);
+                             why.c_str(), here);
         }
         if (sat && sp != nullptr && 1 + nblocks() + sp->n_layer + 1 > ik::kCarry) {
             std::fprintf(stderr, "lamina: --layer-split: a drafter of %d layers passes the rows a crossing carries\n", sp->n_layer);
@@ -6141,11 +6149,12 @@ struct Serve {
             return;
         }
         stop.store(false);
-        if (E.lo > 0 || E.sat) E.clocks.hold();   // (cells on cards, a split's card: their clocks, where locked for a request)
+        // (cells on cards, a split's card, the first card's own lock: their clocks, where locked for a request)
+        if (E.lo > 0 || E.sat || E.main_locked) E.clocks.hold();
         struct Release {
             Engine& e;
             ~Release() {
-                if (e.lo > 0 || e.sat) e.clocks.release_after(e.clocks_hold);
+                if (e.lo > 0 || e.sat || e.main_locked) e.clocks.release_after(e.clocks_hold);
             }
         } release{E};
         // ---- what the state continues from: with the cache the longest start of the prompt it holds (the
@@ -6372,7 +6381,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     uint64_t expert_vram = 0;
     std::string expert_profile, expert_save;
     double expert_save_every = 1.0;
-    float spec_min_p = 0.7f;
+    float spec_min_p = 0.5f;
     std::string dspark;
     int64_t dspark_reach = 32768;
     lamina::program::Sampling gen_smp;   // generate mode's sampling (greedy)
@@ -6418,7 +6427,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--layer-split") layer_split = next();   // DEV:A-B: the layers A .. B on card DEV
         else if (a == "--layer-split-clocks") split_clocks = next();   // that card's clocks locked while a request runs
         else if (a == "--layer-split-reserve-mib") split_keep = std::max(0, std::atoi(next()));   // the VRAM it leaves free
-        else if (a == "--main-gpu-clocks") main_clocks = next();   // this card's clocks locked too, with a split
+        else if (a == "--main-gpu-clocks") main_clocks = next();   // this card's clocks locked while a request runs
         else if (a == "--cell-gpu-clocks") cell_clocks = next();   // their clocks locked while a request runs
         else if (a == "--cell-gpu-reserve-mib") cell_keep = next();   // the VRAM each leaves free ("-": by its use)
         else if (a == "--clocks-hold") clocks_hold = std::max(0.0, std::atof(next()));
@@ -6642,6 +6651,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         return 2;
     }
     FILE* ff = dump_full.empty() ? nullptr : std::fopen(dump_full.c_str(), "wb");
+    if (E.sat || E.main_locked) E.clocks.hold();   // (the run is one request)
     const auto t0 = Clock::now();
     if (E.feed(prompt.data(), (int64_t) prompt.size(), nullptr) != 0) {
         std::fprintf(stderr, "lamina: no VRAM for the prompt's cells\n");

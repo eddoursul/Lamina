@@ -415,7 +415,8 @@ once (30-50% faster there; two cards on slow links gain less). The two hold the 
 the fuller one has room for beside its layers, the other holds older cells in what it has free, and cards after
 the two hold more, as without a split. Both cards take `clocks=` here (each works a part of a token and clocks down in the
 other's: an RTX 5070 Ti left to the driver ran at 2,150 or at 2,900 MHz, 5-8% apart in speed -
-`clocks=2900-3090/0` holds it), the later one `reserve=`. Without `layers=` the engine does this by itself with the card after the first
+`clocks=2900-3090/0` holds it), the later one `reserve=`. The first card's `clocks=` locks it while a request
+runs in any layout: a card that waits for the CPU's experts is left at one clock or the other too. Without `layers=` the engine does this by itself with the card after the first
 where the first would keep under 80% of the experts (two 12 GB cards: all the experts on cards instead of a third
 of them in RAM); `--layer-split 0` keeps the experts in RAM. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
@@ -447,7 +448,7 @@ with drafts and without. The drafts are the tokens that followed the text's last
 occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the model's block drafter, DSpark:
 `lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
 `dspark-Inkling-2-Mini-Q8_0.gguf`), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a
-window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.7).
+window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.5).
 It takes 0.40 GiB of VRAM for its weights and ~0.35 GiB for its context cells (made from the model's own states of
 every position; `--dspark-reach N`, 32,768: those its layer without a window keeps) and buffers, and is left out
 where the card alone holds the context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX 3090: 108

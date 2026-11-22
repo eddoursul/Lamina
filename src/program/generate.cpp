@@ -1925,7 +1925,7 @@ int hy4_switch(int argc, char** argv) {
 /// --cell-gpu-reserve-mib.  The first card's cache=SIZE is the VRAM its experts take at most (--expert-cache), its
 /// reserve= what it leaves free (--vram-reserve-mib).  A later card with layers=A-B runs those layers (--layer-split,
 /// its clocks= as --layer-split-clocks, its reserve= as --layer-split-reserve-mib) instead of being a cell card; the
-/// first card's clocks= (--main-gpu-clocks) locks it where layers are split.
+/// first card's clocks= (--main-gpu-clocks) locks it while a request runs.
 int inkling2_switch(int argc, char** argv) {
     Qwen35Line q = qwen35_line(argc, argv);
     if (!q.inkling2()) return kNotQwen35;
