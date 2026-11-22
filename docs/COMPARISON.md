@@ -378,16 +378,15 @@ thinking task, the edit, after the 16K prompt; 200 / 400 / 400 / 200 positions),
 The engine's inkling2 path (`src/inkling2`) on unsloth's UD-IQ4_XS (24 layers of which 12 run three times a token,
 128 experts a layer with 8 used; the experts NVFP4 in layers 0-19, the attention's matrices Q8_0), llama.cpp
 measured on 2026-11-21 and Lamina on 2026-11-22, the whole model on the main RTX 3090 in both engines, K and V in
-FP16. Lamina with its config on that card
-alone (the context what its VRAM holds: 196,608 tokens beside the drafter; prompts in chunks of 1,024 rows that grow
-to 4,096 while the card's free VRAM holds their buffers; the
-model's drafter, DSpark, found beside the model, and the prompt lookup). llama.cpp: unsloth's fork as released
+FP16. Lamina on that card alone (the context what its VRAM holds: 196,608 tokens beside the drafter; prompts in
+chunks of 1,024 rows that grow to 4,096 while the card's free VRAM holds their buffers; the model's drafter,
+DSpark, found beside the model, and the prompt lookup). llama.cpp: unsloth's fork as released
 (b12572-mix-8eebad4, the only build that reads the files' layout), `-ub 512`, a context of 32,768; for the 86K prompt
 98,304 with K and V in q8_0, which still passes the card's VRAM, so its numbers there are not clean; with the drafter
 (`--spec-type draft-dspark`) its drafts of up to 3 / up to 7 tokens. The same requests through each server's API,
 greedy, Lamina's conversation cache off (`bench/lamina_bench.py`, `scratch/inkling/llama/speed.py`). The last
-column is this PC's config: the model's looped layers on the RTX 5070 Ti beside that card (the table after this
-section's next).
+column is this PC's config: the model's looped layers on the RTX 5070 Ti beside that card (the second table
+below).
 
 | | llama.cpp | llama.cpp, drafter (3 / 7) | Lamina, no drafts | Lamina | Lamina, this PC's config |
 |---|---|---|---|---|---|
