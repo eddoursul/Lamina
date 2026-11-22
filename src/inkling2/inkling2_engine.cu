@@ -1443,6 +1443,7 @@ struct Engine {
     int stage_failed = 0;            // the code of an error on that driver (the first card's ends the run with it)
     // (by a chunk's parity) the rows left this card / were taken there / left that card / were taken here
     cudaEvent_t ev_out[2] = {}, ev_took[2] = {}, ev_back[2] = {}, ev_home[2] = {};
+    cudaEvent_t ev_q[2] = {};        // a decode forward's q is in pinned memory for the cell cards (this card's, a split's)
     Rows* lg_rows = nullptr;         // whose logits the last head wrote
     float* logits_h = nullptr;       // pinned
     std::unique_ptr<MMQ::Context> mmq;
@@ -2030,12 +2031,13 @@ struct Engine {
         }
         stage_log = std::getenv("LAMINA_INK_STAGE_LOG") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
+        CK(cudaEventCreateWithFlags(&ev_q[0], cudaEventDisableTiming));
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
             sat = std::make_unique<Sat>();
             sat->dev = m->sat_dev;
             for (cudaEvent_t* e : {&ev_out[0], &ev_out[1], &ev_home[0], &ev_home[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
             const OnDev dv(sat->dev);
-            for (cudaEvent_t* e : {&ev_took[0], &ev_took[1], &ev_back[0], &ev_back[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
+            for (cudaEvent_t* e : {&ev_took[0], &ev_took[1], &ev_back[0], &ev_back[1], &ev_q[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
             CK(cudaStreamCreateWithFlags(&sat->st, cudaStreamNonBlocking));
             own(&Owned::streams, sat->st);
             sat->il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));
@@ -2703,12 +2705,14 @@ struct Engine {
     }
     /// A decode forward's q and -sink (pinned) to every card that holds cells, its scan of full visit `fi` queued there
     /// and its sums on their way to pinned memory
-    void cards_scan(int fi, int T) {
+    /// `after`: an event the cards wait for first (q's copy to pinned memory, queued and not yet run)
+    void cards_scan(int fi, int T, cudaEvent_t after = nullptr) {
         const Geometry& g = m->g;
         const int H = (int) g.n_head, HK = (int) g.n_head_kv, D_ = (int) g.head_dim;
         for (Card& c : cards) {
             if (c.cells == 0) continue;
             CK(cudaSetDevice(c.dev));
+            if (after != nullptr) CK(cudaStreamWaitEvent(c.st, after, 0));
             for (int t = 0; t < kMaxT; ++t) c.step_h[t] = kFar;
             c.step_h[kMaxT] = (int32_t) c.cells;
             c.step_h[kMaxT + 1] = 0;
@@ -5235,6 +5239,18 @@ struct Engine {
                         CK(cudaStreamWaitEvent(st, ev, 0));
                     }
                     if (sg.fi < 0) continue;
+                    if (chain_cross) {
+                        // (the cards' scans behind this segment's end, this card's own beside them, the next segment
+                        // behind the cards' sums: events, no host between)
+                        const cudaEvent_t evq = ev_q[at_sat ? 1 : 0];
+                        CK(cudaEventRecord(evq, st));
+                        cards_scan(sg.fi, T, evq);
+                        scan(sg.at, T, st);
+                        (void) cudaStreamQuery(st);
+                        for (Card& c : cards)
+                            if (c.cells > 0) CK(cudaStreamWaitEvent(st, c.ev, 0));
+                        continue;
+                    }
                     CK(cudaStreamSynchronize(st));
                     cards_scan(sg.fi, T);
                     scan(sg.at, T, st);
