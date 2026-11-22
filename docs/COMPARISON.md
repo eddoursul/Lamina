@@ -37,8 +37,8 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   Lamina writes 4.7-6.1x as fast as llama.cpp's PR #32517 and reads prompts 17-31x as fast (its 64K prompt in 35 s
   against 18 minutes).
 - [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): with the
-  model's drafter in both, Lamina writes 2.2-3.1x as fast as unsloth's llama.cpp fork (152-305 tok/s against 62-98)
-  and reads prompts 3.0-3.4x as fast. On a 16 GB card, which the file does not fit, 139-316 tok/s against 21.
+  model's drafter in both, Lamina writes 2.3-3.2x as fast as unsloth's llama.cpp fork (157-312 tok/s against 62-98)
+  and reads prompts 3.4-3.8x as fast. On a 16 GB card, which the file does not fit, 141-312 tok/s against 21.
 
 ## The PC and the engines
 
@@ -388,11 +388,11 @@ greedy, Lamina's conversation cache off (`bench/lamina_bench.py`, `scratch/inkli
 
 | | llama.cpp | llama.cpp, drafter (3 / 7) | Lamina, no drafts | Lamina |
 |---|---|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 114.1 | 152.3 |
-| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 113.3 | 161.0 |
-| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 2,907 / 110.7 | 2,878 / 304.5 |
-| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 3,031 / 102.5 | 2,987 / 193.2 |
-| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 2,574 / 78.3 | 2,557 / 137.9 |
+| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 119.0 | 156.7 |
+| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 118.0 | 165.6 |
+| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 3,316 / 114.8 | 3,267 / 312.2 |
+| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 3,377 / 106.1 | 3,326 / 198.4 |
+| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 2,824 / 80.5 | 2,786 / 140.0 |
 
 Lamina's greedy text is the same with drafts and without (a window's rows leave what a row at a time leaves, to the
 bit); sampled at temperature 0.7 the speeds are the greedy ones within 3% (the sampler runs on the GPU). Its drafter
@@ -419,9 +419,9 @@ requests, greedy, Lamina with its drafts:
 
 | | llama.cpp | llama.cpp, expert cache | Lamina |
 |---|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 21.6 | 20.6 | 139-142 |
-| Generation: thinking (3,000 tokens) | | | 180-198 |
-| Edit: prompt / generation (t/s) | 507-530 / 21.4 | 459-468 / 20.5 | 2,556-2,609 / 302-316 |
+| Generation: code, 31-token prompt (t/s) | 21.6 | 20.6 | 141-156 |
+| Generation: thinking (3,000 tokens) | | | 158-205 |
+| Edit: prompt / generation (t/s) | 507-530 / 21.4 | 459-468 / 20.5 | 2,665-2,695 / 305-312 |
 
 An agent's session replayed there (20 requests, a context of up to 28.5K tokens): prompts at 2,050 tok/s, generation
 at 148 tok/s, 155 from the ranking of the experts a first run saved. With 6 GiB of the experts on a card (a 12 GB

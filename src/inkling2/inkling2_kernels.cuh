@@ -45,6 +45,13 @@ struct Q81 {
 };
 static_assert(sizeof(Q81) == 36, "q8_1 block");
 
+// An element of a kernel parameter's small array by a value known only at run time.  Indexing the array itself
+// (a.x[c]) makes the compiler copy the struct onto every thread's stack - local memory written and read by each
+// thread: a chunk's K and V convolution took 1.2 ms for 65,536 blocks that way, 0.05 without - so the elements are
+// selected.
+template <class P> __device__ __forceinline__ P at2(P const (&v)[2], int c) { return c == 0 ? v[0] : v[1]; }
+template <class P> __device__ __forceinline__ P at3(P const (&v)[3], int c) { return c == 0 ? v[0] : c == 1 ? v[1] : v[2]; }
+
 // ---------------------------------------------------------------------------------------------- block-wide sums
 /// K values a thread summed over a block of kTB threads: every thread gets the K block sums (shared `red`: [8][K])
 template <int K> __device__ __forceinline__ void block_sums(float (&v)[K], float (*red)[K]) {
@@ -108,9 +115,10 @@ struct MixIn {
     float* cur_n;    // [T][N] or null
     int nb, nq, N, T;
 };
-/// A block a row and a query; a thread four values (N <= 4 x its threads), loaded once for the sums and the mix.
+/// A block a query and a row (a row's queries side by side in the grid: its values come from the cache for all but the
+/// first); a thread four values (N <= 4 x its threads), loaded once for the sums and the mix.
 __global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
-    const int t = blockIdx.x, c = blockIdx.y, i4 = threadIdx.x;
+    const int c = blockIdx.x, t = blockIdx.y, i4 = threadIdx.x;
     __shared__ float red[32][kBlk + 2];
     __shared__ float tot[kBlk + 2];
     const bool on = i4 < a.N / 4;
@@ -140,22 +148,27 @@ __global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
         if (on) st4(a.cur_n + (size_t) t * a.N, i4, xn);
         return;
     }
-    // softmax over the nb block inputs and the state
+    // softmax over the nb block inputs and the state (the state's term the last of the sum)
     const float sc = rsqrtf((float) a.N);
-    float s[kBlk + 1], mx = v[kBlk + 1] * inv * sc;
-    s[a.nb] = mx;
-    for (int j = 0; j < a.nb; ++j) {
+    const float s_cur = v[kBlk + 1] * inv * sc;
+    float s[kBlk], mx = s_cur;
+#pragma unroll
+    for (int j = 0; j < kBlk; ++j) {
         s[j] = v[j] * sc;
-        mx = fmaxf(mx, s[j]);
+        if (j < a.nb) mx = fmaxf(mx, s[j]);
     }
     float sum = 0.f;
-    for (int j = 0; j <= a.nb; ++j) {
-        s[j] = __expf(s[j] - mx);
-        sum += s[j];
-    }
+#pragma unroll
+    for (int j = 0; j < kBlk; ++j)
+        if (j < a.nb) {
+            s[j] = __expf(s[j] - mx);
+            sum += s[j];
+        }
+    const float e_cur = __expf(s_cur - mx);
+    sum += e_cur;
     if (!on) return;
     const float r = 1.0f / sum;
-    float4 y = mul4(xn, s[a.nb] * r);
+    float4 y = mul4(xn, e_cur * r);
 #pragma unroll
     for (int j = 0; j < kBlk; ++j)
         if (j < a.nb) {
@@ -247,16 +260,20 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
     __shared__ float red[32][1];
     __shared__ float tot[1];
     const bool on = i4 < a.N / 4;
-    const float4 x = on ? ld4(a.x[c] + (size_t) t * a.N, i4) : make_float4(0.f, 0.f, 0.f, 0.f);
+    const float* const xc = at3(a.x, c);
+    const float* const wc = at3(a.w, c);
+    float* const yc = at3(a.y, c);
+    Q81* const qc = at3(a.q, c);
+    const float4 x = on ? ld4(xc + (size_t) t * a.N, i4) : make_float4(0.f, 0.f, 0.f, 0.f);
     float v[1] = {dot4(x, x)};
     block_sums_wide<1>(v, red, tot);
     float4 y = mul4(x, rsqrtf(v[0] / (float) a.N + a.eps));
-    if (on && a.w[c]) {
-        const float4 w = ld4(a.w[c], i4);
+    if (on && wc) {
+        const float4 w = ld4(wc, i4);
         y = make_float4(y.x * w.x, y.y * w.y, y.z * w.z, y.w * w.w);
     }
-    if (on && a.y[c]) st4(a.y[c] + (size_t) t * a.N, i4, y);
-    if (a.q[c] == nullptr) return;
+    if (on && yc) st4(yc + (size_t) t * a.N, i4, y);
+    if (qc == nullptr) return;
     float amax = fmaxf(fmaxf(fabsf(y.x), fabsf(y.y)), fmaxf(fabsf(y.z), fabsf(y.w)));
     float sum = (y.x + y.y) + (y.z + y.w);
 #pragma unroll
@@ -266,7 +283,7 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
     }
     if (!on) return;
     const float d = q8_1_finite(amax / 127.0f);
-    Q81* q = a.q[c] + (size_t) t * (a.N / 32) + i4 / 8;
+    Q81* q = qc + (size_t) t * (a.N / 32) + i4 / 8;
     if (a.il) {   // (a thread's four values stand two bytes apart there)
         const int l = (i4 & 7) * 4;
         q->qs[lamina::kernels::q8_1_il16(l)] = q8_1_quant(y.x, d, amax);
@@ -280,6 +297,44 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
         *reinterpret_cast<uint32_t*>(q->qs + (i4 & 7) * 4) = codes;
     }
     if ((i4 & 7) == 0) q->ds = q8_1_ds(d, sum);
+}
+
+/// norm_kernel for a chunk's rows, its values to the bit (no q8_1 image): a warp a row, a block 8 rows, where a
+/// block a row would be thousands of small blocks.  A lane holds the 16-byte loads i4 = 32 w + lane of its row (N <=
+/// 128 kNormW values); the row's sum of squares is norm_kernel's - each of its warps' sums by this warp's shuffles,
+/// then those sums' own.  Grid (ceil(T / 8), n), block 256.
+constexpr int kNormW = 32;   // 16-byte loads a lane at most: rows of up to 4,096 values
+__global__ void __launch_bounds__(256) norm_rows_kernel(NormIn a, int T) {
+    const int t = blockIdx.x * 8 + (threadIdx.x >> 5), c = blockIdx.y, lane = threadIdx.x & 31;
+    if (t >= T) return;
+    const int n4 = a.N / 4, nw = (n4 + 31) / 32;
+    const float* x = at3(a.x, c) + (size_t) t * a.N;
+    const float* const wc = at3(a.w, c);
+    float4 v[kNormW];
+    float tot = 0.f;
+#pragma unroll
+    for (int w = 0; w < kNormW; ++w) {
+        if (w >= nw) break;
+        const int i4 = 32 * w + lane;
+        v[w] = i4 < n4 ? ld4(x, i4) : make_float4(0.f, 0.f, 0.f, 0.f);
+        const float s = warp_sum(dot4(v[w], v[w]));
+        tot = lane == w ? s : tot;   // (norm_kernel's first warp gathers its warps' sums by lane)
+    }
+    tot = warp_sum(tot);
+    const float inv = rsqrtf(tot / (float) a.N + a.eps);
+    float* y = at3(a.y, c) + (size_t) t * a.N;
+#pragma unroll
+    for (int w = 0; w < kNormW; ++w) {
+        if (w >= nw) break;
+        const int i4 = 32 * w + lane;
+        if (i4 >= n4) continue;
+        float4 o = mul4(v[w], inv);
+        if (wc) {
+            const float4 wt = ld4(wc, i4);
+            o = make_float4(o.x * wt.x, o.y * wt.y, o.z * wt.z, o.w * wt.w);
+        }
+        st4(y, i4, o);
+    }
 }
 
 /// rows of floats to q8_1 (n / 32 blocks a row), as native_quantize_q8_1 rounds
@@ -322,9 +377,12 @@ __device__ __forceinline__ float conv_in(const float* raw, const float* state, i
 __global__ void conv_state_kernel(float* __restrict__ state, const float* __restrict__ raw, int n, int T, int C) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float keep[8];
-    for (int j = 0; j < C - 1; ++j) keep[j] = conv_in(raw, state, T, C - 1 - j, n, i, C);   // rows T - (C-1) .. T - 1
-    for (int j = 0; j < C - 1; ++j) state[(size_t) j * n + i] = keep[j];
+    float keep[7];   // (kernel_limits: up to 8 taps; constant bounds: the rows stay in registers)
+#pragma unroll
+    for (int j = 0; j < 7; ++j) keep[j] = j < C - 1 ? conv_in(raw, state, T, C - 1 - j, n, i, C) : 0.f;   // rows T - (C-1) .. T - 1
+#pragma unroll
+    for (int j = 0; j < 7; ++j)
+        if (j < C - 1) state[(size_t) j * n + i] = keep[j];
 }
 
 /// Every visit's states after the first `rows` rows of a decode forward of several: conv_state_kernel's for each of
@@ -345,9 +403,12 @@ __global__ void __launch_bounds__(256) conv_commit_kernel(float* __restrict__ st
     i = c - before;
     float* st = state + (size_t) v * (C - 1) * per + (size_t) (C - 1) * before;
     const float* rw = raw + (size_t) v * cap * per + (size_t) cap * before;
-    float keep[8];
-    for (int j = 0; j < C - 1; ++j) keep[j] = conv_in(rw, st, rows, C - 1 - j, n, i, C);
-    for (int j = 0; j < C - 1; ++j) st[(size_t) j * n + i] = keep[j];
+    float keep[7];
+#pragma unroll
+    for (int j = 0; j < 7; ++j) keep[j] = j < C - 1 ? conv_in(rw, st, rows, C - 1 - j, n, i, C) : 0.f;
+#pragma unroll
+    for (int j = 0; j < 7; ++j)
+        if (j < C - 1) st[(size_t) j * n + i] = keep[j];
 }
 
 /// K and V of T rows from their projections: y = (x + sum over lags of w[C - 1 - lag] x(t - lag) [+ the row's own taps
@@ -364,24 +425,36 @@ struct KvIn {
     float clip, eps;
 };
 __global__ void kv_conv_kernel(KvIn a) {
-    const int t = blockIdx.x, side = blockIdx.y, g = blockIdx.z, i = threadIdx.x;
+    const int g = blockIdx.x, side = blockIdx.y, t = blockIdx.z, i = threadIdx.x;
     __shared__ float part[4];
     const int n = a.HK * a.D, ch = g * a.D + i;
-    const float* raw = a.raw[side];
-    const float* st = a.state[side];
-    const float* w = a.w[side] + (size_t) ch * a.C;
-    const float* dyn = a.dyn[side] ? a.dyn[side] + ((size_t) t * a.HK + g) * a.C : nullptr;
-    float acc = 0.f;
-    for (int lag = 0; lag < a.C; ++lag) {
-        const float x = conv_in(raw, st, t, lag, n, ch, a.C);
-        acc += (w[a.C - 1 - lag] + (dyn ? dyn[lag] : 0.f)) * x;
+    const float* raw = at2(a.raw, side);
+    const float* st = at2(a.state, side);
+    const float* w = at2(a.w, side) + (size_t) ch * a.C;
+    const float* const dy = at2(a.dyn, side);
+    const float* dyn = dy ? dy + ((size_t) t * a.HK + g) * a.C : nullptr;
+    float acc = 0.f, x0;
+    if (a.C == 4) {   // (a channel's taps and the row's own in one load each: a thread's time is its loads in a row)
+        const float4 wv = *reinterpret_cast<const float4*>(w);
+        const float4 dv = dyn ? *reinterpret_cast<const float4*>(dyn) : make_float4(0.f, 0.f, 0.f, 0.f);
+        x0 = conv_in(raw, st, t, 0, n, ch, 4);
+        acc += (wv.w + dv.x) * x0;
+        acc += (wv.z + dv.y) * conv_in(raw, st, t, 1, n, ch, 4);
+        acc += (wv.y + dv.z) * conv_in(raw, st, t, 2, n, ch, 4);
+        acc += (wv.x + dv.w) * conv_in(raw, st, t, 3, n, ch, 4);
+    } else {
+        for (int lag = 0; lag < a.C; ++lag) {
+            const float x = conv_in(raw, st, t, lag, n, ch, a.C);
+            acc += (w[a.C - 1 - lag] + (dyn ? dyn[lag] : 0.f)) * x;
+        }
+        x0 = raw[(size_t) t * n + ch];
     }
-    const float y = (raw[(size_t) t * n + ch] + acc) * rsqrtf((float) ((dyn ? 2 : 1) * a.C + 1));
+    const float y = (x0 + acc) * rsqrtf((float) ((dyn ? 2 : 1) * a.C + 1));
     const float ss = lamina::kernels::block128_sum(y * y, part);
     float f;
     if (side == 0) f = fminf(1.0f, a.clip / (sqrtf(ss) + 1e-6f));
     else f = rsqrtf(ss / (float) a.D + a.eps);
-    a.out[side][(size_t) t * n + ch] = y * f;
+    at2(a.out, side)[(size_t) t * n + ch] = y * f;
 }
 
 /// q of T rows: its projection times the layer's per-value scale, clipped to an L2 norm of `clip` a head, times tau in a
@@ -546,6 +619,7 @@ struct QbIn {
     int H, D, R, ext, N, full;
     float qclip, rclip, alpha, floor_;
 };
+template <int R4>
 __global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
     const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
     __shared__ float red[32][3];
@@ -572,7 +646,13 @@ __global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
     for (int d = i; d < a.ext; d += (int) blockDim.x) {
         const float* tb = a.table + (size_t) d * a.R;
         float s = 0.f;
-        if (a.R % 4 == 0) {
+        if constexpr (R4 > 0) {   // (a count the compiler knows: the loop below leaves a frame on the threads' stacks)
+#pragma unroll
+            for (int k = 0; k < R4; ++k) {
+                const float4 tv = ld4(tb, k);
+                s += tv.x * r[4 * k] + tv.y * r[4 * k + 1] + tv.z * r[4 * k + 2] + tv.w * r[4 * k + 3];
+            }
+        } else if (a.R % 4 == 0) {
             for (int k = 0; k < a.R / 4; ++k) {
                 const float4 tv = ld4(tb, k);
                 s += tv.x * r[4 * k] + tv.y * r[4 * k + 1] + tv.z * r[4 * k + 2] + tv.w * r[4 * k + 3];
@@ -639,22 +719,26 @@ __global__ void __launch_bounds__(128) kv_cells_kernel(KvCellsIn b) {
     const int t = blockIdx.x, side = blockIdx.y, g = blockIdx.z, i = threadIdx.x;
     __shared__ float part[4];
     const int n = a.HK * a.D, ch = g * a.D + i;
-    const float* raw = a.raw[side];
-    const float* st = a.state[side];
-    const float* w = a.w[side] + (size_t) ch * a.C;
-    const float* dyn = a.dyn[side] ? a.dyn[side] + ((size_t) t * a.HK + g) * a.C : nullptr;
-    float xs[8];   // the channel's rows, the newest first
-    float acc = 0.f;
+    const float* raw = at2(a.raw, side);
+    const float* st = at2(a.state, side);
+    const float* w = at2(a.w, side) + (size_t) ch * a.C;
+    const float* const dy = at2(a.dyn, side);
+    const float* dyn = dy ? dy + ((size_t) t * a.HK + g) * a.C : nullptr;
+    // the channel's rows, the newest first; with `keep` (one row) the state's rows shift by one: the row read at one
+    // lag takes the value read at the lag before (no array of them: it would be the threads' stacks)
+    float* const keep = at2(b.keep, side);
+    float acc = 0.f, x0 = 0.f, prev = 0.f;
     for (int lag = 0; lag < a.C; ++lag) {
-        xs[lag] = conv_in(raw, st, t, lag, n, ch, a.C);
-        acc += (w[a.C - 1 - lag] + (dyn ? dyn[lag] : 0.f)) * xs[lag];
+        const float x = conv_in(raw, st, t, lag, n, ch, a.C);
+        acc += (w[a.C - 1 - lag] + (dyn ? dyn[lag] : 0.f)) * x;
+        if (lag == 0) x0 = x;
+        else if (keep) keep[(size_t) (a.C - 1 - lag) * n + ch] = prev;
+        prev = x;
     }
-    const float y = (xs[0] + acc) * rsqrtf((float) ((dyn ? 2 : 1) * a.C + 1));
+    const float y = (x0 + acc) * rsqrtf((float) ((dyn ? 2 : 1) * a.C + 1));
     const float ss = lamina::kernels::block128_sum(y * y, part);
     const float val = y * (side == 0 ? fminf(1.0f, a.clip / (sqrtf(ss) + 1e-6f)) : rsqrtf(ss / (float) a.D + a.eps));
-    a.out[side][(size_t) t * n + ch] = val;
-    if (b.keep[side])   // (one row: the state's rows shift by one)
-        for (int j = 0; j < a.C - 1; ++j) b.keep[side][(size_t) j * n + ch] = xs[a.C - 2 - j];
+    at2(a.out, side)[(size_t) t * n + ch] = val;
     const Cells& c = b.cells;
     const int64_t p = b.pos[t];
     if (!c.ring && (p < c.first || p >= c.first + c.cap)) return;   // another range's

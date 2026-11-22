@@ -982,7 +982,8 @@ struct Engine {
     bool kv_q8 = false;
     bool grow = true;       // the full visits' cells mapped as the context grows (CUDA virtual memory)
     size_t reserve = 0;     // VRAM left free
-    bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each); 2: every launch, by events
+    bool prof = false;      // LAMINA_INK_PROF: the steps timed (a wait after each); 2: every launch, by events; 3: the
+                            // steps with their parts apart (tick_part)
     int prof_level = 0;
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
     std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
@@ -2847,13 +2848,13 @@ struct Engine {
     void prof_start() {
         if (!prof) return;
         prof_t = Clock::now();
-        if (prof_level >= 2) {
+        if (prof_level == 2) {
             prof_n = 0;
             prof_mark("");
         }
     }
     void prof_collect() {
-        if (prof_level < 2 || prof_n == 0) return;
+        if (prof_level != 2 || prof_n == 0) return;
         CK(cudaStreamSynchronize(st));
         for (size_t i = 1; i < prof_n; ++i) {
             float ms = 0.f;
@@ -2870,12 +2871,12 @@ struct Engine {
         launch();
         if (dup_n > 0 && dup_name == what)
             for (int i = 0; i < dup_n; ++i) launch();
-        if (prof_level >= 2) prof_mark(what);
+        if (prof_level == 2) prof_mark(what);
     }
     /// A step's launches are queued
     void tick(const char* what) {
         if (!prof) return;
-        if (prof_level >= 2) {
+        if (prof_level == 2) {
             prof_mark(what);
             return;
         }
@@ -2883,6 +2884,15 @@ struct Engine {
         const auto now = Clock::now();
         prof_ms[what] += std::chrono::duration<double, std::milli>(now - prof_t).count();
         prof_t = now;
+    }
+    /// n inputs' norms of T rows: a block a row, or for a chunk's rows (no q8_1 image) a warp a row
+    void norm(const ik::NormIn& a, int T, int n, bool rows) {
+        if (rows) ik::norm_rows_kernel<<<dim3((unsigned) ((T + 7) / 8), (unsigned) n), 256, 0, st>>>(a, T);
+        else ik::norm_kernel<<<dim3((unsigned) T, (unsigned) n), row4(), 0, st>>>(a);
+    }
+    /// A part of a step, timed apart at level 3 (the step's own name then holds what follows its last part)
+    void tick_part(const char* what) {
+        if (prof_level == 3) tick(what);
     }
     /// A row kernel's threads: one a four values of the stream's row
     unsigned row4() const { return (unsigned) ((m->g.n_embd / 4 + 31) / 32 * 32); }
@@ -2932,7 +2942,7 @@ struct Engine {
         a.nq = nq;
         a.N = (int) m->g.n_embd;
         a.T = T;
-        ik::mix_kernel<<<dim3((unsigned) T, (unsigned) std::max(nq, 1)), row4(), 0, st>>>(a);
+        ik::mix_kernel<<<dim3((unsigned) std::max(nq, 1), (unsigned) T), row4(), 0, st>>>(a);
     }
     /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
     /// (`ld`: floats from one row of C to the next, m when not given)
@@ -3228,6 +3238,7 @@ struct Engine {
             for (int b = 0; b < nblocks(); ++b)
                 if (varying(b)) bank[nbank++] = blk_at(R, b, pass - 1);
             run("a: mix of the messages", [&] { mix(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T); });
+            tick_part("inputs: the messages' mix");
         }
 
         // ---- attention: its inputs
@@ -3240,6 +3251,7 @@ struct Engine {
             for (int c = 0; c < 3; ++c) u[c] = R.mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
         }
         const int n_in = msgs || L.full ? 3 : 1;
+        tick_part("inputs: the mix");
         if (msgs && batch) {
             for (int c = 0; c < 3; ++c) {
                 float* out = R.ctl + (size_t) c * TN;
@@ -3266,6 +3278,7 @@ struct Engine {
                 ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 3), ik::kTB, 0, st>>>(a);
             });
         }
+        tick_part("inputs: the loop gates");
         {
             ik::NormIn a{};
             for (int c = 0; c < n_in; ++c) {
@@ -3277,7 +3290,7 @@ struct Engine {
             a.n = n_in;
             a.N = N;
             a.eps = g.eps;
-            run("a: norm", [&] { ik::norm_kernel<<<dim3((unsigned) T, (unsigned) n_in), row4(), 0, st>>>(a); });
+            run("a: norm", [&] { norm(a, T, n_in, batch); });
         }
         tick("attention inputs");
         nan_visit = v;
@@ -3345,14 +3358,19 @@ struct Engine {
                                                                               R.rraw, H, Rr, g.rel_clip);
             ik::RingIn rb{R.rraw, L.rel_table, R.sink, R.pos_d, R.bias, R.ns,
                           slide ? (long long) p0 - (win - 1) : (long long) V.cells.first, H, Rr, L.ext};
+            tick_part("q, k, v: q's and r's clips");
             run("a: bias by cell", [&] {
                 if (Rr == 16) ik::bias_ring_kernel<4><<<(unsigned) T, 256, 0, st>>>(rb);
                 else ik::bias_ring_kernel<0><<<(unsigned) T, 256, 0, st>>>(rb);
             });
+            tick_part("q, k, v: the bias by cell");
         } else {
             ik::QbIn a{R.qraw, L.q_scale, R.rraw, L.rel_scale, L.rel_table, L.sink, fq, R.pos_d, R.q, R.bias, H, D_, Rr, L.ext,
                        N, L.full ? 1 : 0, g.qk_clip, g.rel_clip, g.log_alpha, (float) g.log_floor};
-            run("a: q, bias", [&] { ik::q_bias_kernel<<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a); });
+            run("a: q, bias", [&] {
+                if (Rr == 16) ik::q_bias_kernel<4><<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a);
+                else ik::q_bias_kernel<0><<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a);
+            });
         }
         // the cells the rows attend: the visit's own, or for a chunk's window visit the range
         ik::Cells cells = V.cells;
@@ -3375,7 +3393,7 @@ struct Engine {
             a.eps = g.eps;
             if (batch) {
                 run("a: k, v convolved", [&] {
-                    ik::kv_conv_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(a);
+                    ik::kv_conv_kernel<<<dim3((unsigned) HK, 2, (unsigned) T), (unsigned) D_, 0, st>>>(a);
                 });
             } else {   // with the cells' store, and a forward of one row its states
                 ik::KvCellsIn b{a, {T == 1 ? ck : nullptr, T == 1 ? cv : nullptr}, cells, R.pos_d};
@@ -3384,11 +3402,13 @@ struct Engine {
                 });
             }
         }
+        tick_part("q, k, v: K and V convolved");
         if (batch)
             run("a: k, v states kept", [&] {
                 conv_keep(ck, kraw, KV, T);
                 conv_keep(cv, vraw, KV, T);
             });
+        tick_part("q, k, v: the states kept");
         if (slide) {
             ik::ring_to_range_kernel<<<dim3((unsigned) (win - 1), 2), 256, 0, st>>>(V.cells, R.wk, R.wv, (long long) p0, win,
                                                                                    (int) cell_bytes);
@@ -3398,6 +3418,7 @@ struct Engine {
             cells.cap = T + win - 1;
             cells.ring = 0;
         }
+        tick_part("q, k, v: a window's range");
         if (batch)
             run("a: cells stored", [&] {
                 ik::cells_put_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), 128, 0, st>>>(cells, R.kc, R.vc, R.pos_d, HK, D_);
@@ -3522,6 +3543,7 @@ struct Engine {
         const int nb2 = l / res + 1;
         if (L.first) blks[nb2 - 1] = newblk;
         run("f: mix", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T); });
+        tick_part("MoE: the mix");
         const float* fu = R.mixed;
         if (msgs && batch) {
             ctrl_batch(R, R.mixed, R.msg + (size_t) 3 * TN, L.cD[3], L.cG[3], L.cF[3], R.ctl, T);
@@ -3554,7 +3576,9 @@ struct Engine {
             a.n = 1;
             a.N = N;
             a.eps = g.eps;
-            run("f: norm", [&] { ik::norm_kernel<<<dim3((unsigned) T, 1), row4(), 0, st>>>(a); });
+            tick_part("MoE: the loop gate");
+            run("f: norm", [&] { norm(a, T, 1, batch); });
+            tick_part("MoE: the norm");
         }
         const int n_ent = T * top_k;
         const float w_scale = g.w_scale != 0.f ? g.w_scale : 1.0f;
@@ -3661,7 +3685,7 @@ struct Engine {
         a.n = 1;
         a.N = N;
         a.eps = g.eps;
-        ik::norm_kernel<<<dim3((unsigned) T, 1), row4(), 0, st>>>(a);
+        norm(a, T, 1, R.batch);
         spark_tap(R, (int) sp->taps.size() - 1, T, R.nrm);
         spark_inject(R, T);
         if (n > 0) {
@@ -3833,7 +3857,7 @@ struct Engine {
         a.n = L;
         a.N = N;
         a.eps = s.eps;
-        run("d: mixes normed", [&] { ik::norm_kernel<<<dim3((unsigned) T, (unsigned) L), row4(), 0, st>>>(a); });
+        run("d: mixes normed", [&] { norm(a, T, L, R.batch); });
         {
             const int r0 = R.batch ? T - 1 : 0, n = R.batch ? 1 : T;
             ik::NormIn b{};
