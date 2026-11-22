@@ -1432,6 +1432,7 @@ struct Engine {
     Rows P2;
     bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
     bool stages_apart = false;       // LAMINA_INK_STAGES=2 (a test's): the stretches as in stages, their chunks one card after the other
+    bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
     bool stage_log = false;          // LAMINA_INK_STAGE_LOG=1: a line a segment of a part (staged, or why not)
     bool staging = false;            // a staged run is under way
     std::mutex stage_mu;
@@ -1630,14 +1631,21 @@ struct Engine {
     // copy is here is a copy on the device (--park-vram 0: every copy to RAM at once)
     struct Stash {
         const uint8_t* host;   // the cache's buffer it stands for
-        uint8_t* dev;
+        uint8_t* dev;          // this card's arrays (every one where the layers are one card's)
         uint64_t bytes;
+        uint8_t* dev2 = nullptr;   // a split's card's: its applications' arrays, in the copy's order
+        uint64_t bytes2 = 0;
     };
     std::vector<Stash> stashes;
     bool stash_on = true;
-    uint64_t stash_bytes() const {
+    uint64_t stash_bytes() const {   // (this card's)
         uint64_t n = 0;
         for (const Stash& s : stashes) n += s.bytes;
+        return n;
+    }
+    uint64_t stash_bytes2() const {   // (a split's card's)
+        uint64_t n = 0;
+        for (const Stash& s : stashes) n += s.bytes2;
         return n;
     }
     Stash* stash_of(const uint8_t* host) {
@@ -1645,22 +1653,41 @@ struct Engine {
             if (s.host == host) return &s;
         return nullptr;
     }
+    void stash_free(const Stash& s) {
+        CK(cudaFree(s.dev));
+        if (s.dev2 != nullptr) {
+            const OnDev dv(sat->dev);
+            CK(cudaFree(s.dev2));
+        }
+    }
     /// The oldest copy kept here to its buffer in RAM; false: none is kept
     bool stash_flush() {
         if (stashes.empty()) return false;
         const Stash s = stashes.front();
         stashes.erase(stashes.begin());
-        CK(cudaStreamSynchronize(st));
-        CK(cudaMemcpy(const_cast<uint8_t*>(s.host), s.dev, s.bytes, cudaMemcpyDeviceToHost));
-        CK(cudaFree(s.dev));
+        homes_sync();
+        if (s.dev2 == nullptr) {
+            CK(cudaMemcpy(const_cast<uint8_t*>(s.host), s.dev, s.bytes, cudaMemcpyDeviceToHost));
+        } else {   // (a split's: each application's K and V from its card, to their place in the copy)
+            const size_t two = (size_t) ((s.bytes + s.bytes2) / (uint64_t) m->g.n_full_visits());
+            const uint8_t *here = s.dev, *there = s.dev2;
+            for (size_t vi = 0; vi < visits.size(); ++vi) {
+                if (visits[vi].cells.ring) continue;
+                const uint8_t*& from = on_sat((int) vi) ? there : here;
+                const OnDev dv(home_dev(vi));
+                CK(cudaMemcpy(const_cast<uint8_t*>(s.host) + (size_t) full_of[vi] * two, from, two, cudaMemcpyDeviceToHost));
+                from += two;
+            }
+        }
+        stash_free(s);
         return true;
     }
     /// The cache's buffer `host` is gone, or written anew
     void stash_drop(const uint8_t* host) {
         for (size_t i = 0; i < stashes.size(); ++i)
             if (stashes[i].host == host) {
-                CK(cudaStreamSynchronize(st));
-                CK(cudaFree(stashes[i].dev));
+                homes_sync();
+                stash_free(stashes[i]);
                 stashes.erase(stashes.begin() + (std::ptrdiff_t) i);
                 return;
             }
@@ -1820,7 +1847,14 @@ struct Engine {
         for (;;) {   // (a parked conversation's copy on the card gives way to a larger chunk's buffers)
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
-            if (fr >= reserve + chunk_bytes_here(rows) + (256ull << 20) || !stash_flush()) break;
+            bool room = fr >= reserve + chunk_bytes_here(rows) + (256ull << 20);
+            if (room && sat && stash_bytes2() > 0) {
+                const OnDev dv(sat->dev);
+                size_t fs = 0, ts = 0;
+                CK(cudaMemGetInfo(&fs, &ts));
+                room = fs >= sat_keep + chunk_bytes(rows) + (256ull << 20);
+            }
+            if (room || !stash_flush()) break;
         }
         chunk_alloc(rows);
         if (stage_log)
@@ -1887,7 +1921,8 @@ struct Engine {
                 const OnDev dv(sat->dev);
                 size_t fs = 0, ts = 0;
                 CK(cudaMemGetInfo(&fs, &ts));
-                if ((int64_t) fs < need + (int64_t) sat_keep + (more > 0 ? more + (256ll << 20) : more)) return false;
+                if ((int64_t) fs + (keep ? 0 : (int64_t) stash_bytes2()) < need + (int64_t) sat_keep + (more > 0 ? more + (256ll << 20) : more))
+                    return false;
             }
             const int64_t here = (int64_t) chunk_bytes_here(rows) - (int64_t) chunk_bytes_here(chunk_cap);
             return cells_fit(n, here > 0 ? here + (256ll << 20) : here, keep);
@@ -1994,6 +2029,7 @@ struct Engine {
             stages_apart = std::atoi(r) == 2;
         }
         stage_log = std::getenv("LAMINA_INK_STAGE_LOG") != nullptr;
+        if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
             sat = std::make_unique<Sat>();
             sat->dev = m->sat_dev;
@@ -2820,7 +2856,7 @@ struct Engine {
                 room_sat = (uint64_t) ((chunks(target) - chunks(mapped)) * ranges_sat) * G + sat_keep <= fs;
             }
             if (room && room_sat && (main_limit <= 0 || target - lo <= std::max(3 * unit, main_limit))) break;
-            if (!room && stash_flush()) continue;   // (a parked conversation's copy on the card goes first)
+            if ((!room || !room_sat) && stash_flush()) continue;   // (a parked conversation's copy on the cards goes first)
             if (!evict()) {
                 if (evict_held) return false;   // (cells mapped ahead: this step is the sequence's own to take, later)
                 if (room && room_sat) break;   // (the test's limit alone: the cards have the VRAM)
@@ -5189,7 +5225,15 @@ struct Engine {
                     if (sg.moe >= 0) *bell_h = -1;
                     CK(cudaGraphLaunch(sg.exec, st));
                     if (sg.moe >= 0) moe_host(sg.moe, T);
-                    if (sg.cross >= 0) carry(sg.cross == 1);
+                    if (sg.cross >= 0 && !chain_cross) carry(sg.cross == 1);
+                    if (sg.cross >= 0 && chain_cross) {
+                        // (the other card's segment is queued behind this one's end: an event, no host between them)
+                        const cudaEvent_t ev = sg.cross == 1 ? ev_out[0] : ev_back[0];
+                        CK(cudaEventRecord(ev, st));
+                        (void) cudaStreamQuery(st);
+                        use_card(sg.cross == 1);
+                        CK(cudaStreamWaitEvent(st, ev, 0));
+                    }
                     if (sg.fi < 0) continue;
                     CK(cudaStreamSynchronize(st));
                     cards_scan(sg.fi, T);
@@ -5460,43 +5504,83 @@ struct Engine {
     /// K, then its V, each `held` cells long)
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
         const size_t mine = (size_t) held * cell_bytes;
-        // a copy kept on the card: made here while the VRAM is free, taken from here while every cell is this card's
-        auto on_card = [&](uint8_t* at, bool out) {
+        // a copy kept on the cards: made there while their VRAM is free, taken from there while every cell is theirs
+        // (at: this card's buffer, at2: a split's card's - each application's arrays on its own card)
+        auto on_card = [&](uint8_t* at, uint8_t* at2, bool out) {
             const size_t w = (size_t) cells * cell_bytes;
             bool ok = true;
-            for (Visit& V : visits) {
+            for (size_t vi = 0; vi < visits.size(); ++vi) {
+                Visit& V = visits[vi];
                 if (V.cells.ring) continue;
+                const bool there = on_sat((int) vi);
+                const OnDev dv(home_dev(vi));
+                const cudaStream_t s_ = home_st(vi);
+                uint8_t*& p = there ? at2 : at;
                 for (uint8_t* d : {V.cells.k, V.cells.v}) {
                     if (w > 0)
-                        ok = ok && soft(out ? cudaMemcpyAsync(at, d, w, cudaMemcpyDeviceToDevice, st)
-                                            : cudaMemcpyAsync(d, at, w, cudaMemcpyDeviceToDevice, st));
-                    at += mine;
+                        ok = ok && soft(out ? cudaMemcpyAsync(p, d, w, cudaMemcpyDeviceToDevice, s_)
+                                            : cudaMemcpyAsync(d, p, w, cudaMemcpyDeviceToDevice, s_));
+                    p += mine;
                 }
+                if (there) ok = soft(cudaStreamSynchronize(s_)) && ok;
             }
             return soft(cudaStreamSynchronize(st)) && ok;
         };
         if (to_host) {
             stash_drop(host);
             const uint64_t bytes = kv_bytes(held);
+            uint64_t b2 = 0;   // the split's card's share
+            for (size_t vi = 0; vi < visits.size(); ++vi)
+                if (!visits[vi].cells.ring && on_sat((int) vi)) b2 += 2 * (uint64_t) mine;
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
-            if (stash_on && !sat && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + bytes + (256ull << 20)) {
-                void* dev = nullptr;
-                if (cudaMalloc(&dev, bytes) == cudaSuccess) {
-                    if (on_card(static_cast<uint8_t*>(dev), true)) {
-                        stashes.push_back({host, static_cast<uint8_t*>(dev), bytes});
-                        return true;
-                    }
-                    CK(cudaFree(dev));
-                } else {
-                    (void) cudaGetLastError();
+            bool room = stash_on && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + (bytes - b2) + (256ull << 20);
+            if (room && b2 > 0) {
+                const OnDev dv(sat->dev);
+                size_t fs = 0, ts = 0;
+                CK(cudaMemGetInfo(&fs, &ts));
+                room = fs >= sat_keep + b2 + (256ull << 20);
+            }
+            if (room) {
+                void *dev = nullptr, *dev2 = nullptr;
+                bool got = cudaMalloc(&dev, bytes - b2) == cudaSuccess;
+                if (got && b2 > 0) {
+                    const OnDev dv(sat->dev);
+                    got = cudaMalloc(&dev2, b2) == cudaSuccess;
+                }
+                const Stash made{host, static_cast<uint8_t*>(dev), bytes - b2, static_cast<uint8_t*>(dev2), b2};
+                if (got && on_card(made.dev, made.dev2, true)) {
+                    stashes.push_back(made);
+                    return true;
+                }
+                (void) cudaGetLastError();
+                if (dev != nullptr) CK(cudaFree(dev));
+                if (dev2 != nullptr) {
+                    const OnDev dv(sat->dev);
+                    CK(cudaFree(dev2));
                 }
             }
         } else if (Stash* s = stash_of(host); s != nullptr) {
-            if (lo == 0 && s->bytes == kv_bytes(held)) return on_card(s->dev, false);
+            if (sat) {
+                // (with cell cards the cache leaves the cells' mapping to this copy: mapped as a sequence that grows;
+                // the growth may send the copy to RAM, or cells to the cards - then through the buffer)
+                const int64_t was = n_pos;
+                bool ok = lo == 0;
+                for (int64_t c0 = 0; ok && c0 < cells; c0 += unit) {
+                    n_pos = c0;
+                    ok = ensure(std::min(cells, c0 + unit)) && lo == 0;
+                }
+                n_pos = was;
+                s = stash_of(host);
+            }
+            if (s != nullptr && lo == 0 && s->bytes + s->bytes2 == kv_bytes(held)) {
+                const bool ok = on_card(s->dev, s->dev2, false);
+                if (ok && sat && !cards.empty()) n_pos = cells;   // (as the copy through the cards leaves it)
+                return ok;
+            }
             for (size_t i = 0; i < stashes.size(); ++i)   // (cells on other cards meanwhile: through the buffer)
                 if (stashes[i].host == host) std::swap(stashes[0], stashes[i]);
-            stash_flush();
+            if (stash_of(host) != nullptr) stash_flush();
         }
         if (cards.empty()) {
             const size_t w = (size_t) cells * cell_bytes;
