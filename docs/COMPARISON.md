@@ -38,7 +38,8 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   against 18 minutes).
 - [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): with the
   model's drafter in both, Lamina writes 2.3-3.3x as fast as unsloth's llama.cpp fork (158-322 tok/s against 62-98)
-  and reads prompts 3.4-3.8x as fast. On a 16 GB card, which the file does not fit, 135-319 tok/s against 21.
+  and reads prompts 3.4-3.8x as fast. On a 16 GB card, which the file does not fit, 135-319 tok/s against 21. With
+  its layers over the RTX 3090 and the RTX 5070 Ti (this PC's config) 182-400 tok/s and prompts at 4,100-4,800.
 
 ## The PC and the engines
 
@@ -412,21 +413,24 @@ this card (the FP16 tensor cores; llama.cpp and Lamina's shorter parts round the
 exact arithmetic is 2,000 times smaller there.
 
 The layers over two cards (a later card's `layers=6-17`: the repeated layers, half of the weights and three
-quarters of a token's layer applications), through the API with drafts, against the RTX 3090 alone (158 / 167 / 322
-tok/s for code / thinking / an edit, prompts at 3,274 / 3,344 / 2,805 tok/s at 2.9K / 21K / 86K tokens):
+quarters of a token's layer applications; a prompt's chunks on the two cards at once), through the API with drafts
+on 2026-11-22, against the RTX 3090 alone (158 / 167 / 322 tok/s for code / thinking / an edit, prompts at 3,274 /
+3,344 / 2,805 tok/s at 2.9K / 21K / 86K tokens):
 
 | The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 on the two |
 |---|---|---|---|
-| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) | 176 / 193 / 374 | 2,940 / 3,402 / 2,961 | 495,616 |
-| RTX 5070 Ti, RTX 3090 | 175 / 189 / 350 | 2,791 / 3,107 / 2,604 | 520,192 |
-| RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 167 / 177 / 314 | 2,380 / 2,758 / 2,335 | 786,432 |
+| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free: this PC's config | 182 / 203 / 400 | 4,394 / 4,783 / 4,144 | 405,504 |
+| the same without that reserve | 182 / 203 / 400 | 4,387 / 4,798 / 4,285 | 487,424 |
+| RTX 5070 Ti, RTX 3090 | 178 / 195 / 361 | 3,289 / 3,572 / 3,039 | 462,848 |
+| RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 167 / 177 / 313 | 3,017 / 3,321 / 2,862 | 778,240 |
 
-Each card works a part of a token and stays under its power cap. The two hold the cells of as many tokens as the
-fuller one has room for beside its layers, and the other holds older cells in what it has free; cards after them
-hold more: with the other RTX 3090 for cells the first row's layout has the model's 1,048,576 tokens, reads 171K
-tokens at 2,385 tok/s (the 3090 alone with its cells over the other cards: 2,220) and 341K at 2,270 with 107 tok/s
-after it (2,008 and 100). Two cards of one generation give one card's logits to the bit; the 3090 and the 5070 Ti
-agree with llama.cpp as one card does (99.0-99.25% of the argmaxes after the edit prompt, one card 99.5%).
+Each card works a part of a token and stays under its power cap, and on a prompt the two work at once. The two
+hold the cells of as many tokens as the fuller one has room for beside its layers, and the other holds older
+cells in what it has free; cards after them hold more: the config's other RTX 3090 brings it to the model's
+1,048,576 tokens. There it reads 100K more tokens at 171K at 3,210 tok/s (the 3090 alone with its cells over the
+other cards: 2,220) and, the engine alone, 341K tokens at 3,025 with 128 tok/s after them (2,008 and 100). Two
+cards of one generation give one card's logits to the bit; the 3090 and the 5070 Ti agree with llama.cpp as one
+card does (99.0-99.25% of the argmaxes after the edit prompt, one card 99.5%).
 
 A card smaller than the model: the RTX 5070 Ti (16 GB, the card the desktop draws on) alone with the same file (15.7
 GB). Lamina keeps the experts in RAM and the ones used most on the card (2,330 of the 3,072 at the start, fewer as
