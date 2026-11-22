@@ -1469,7 +1469,7 @@ struct Engine {
         else ik::attn_tc_kernel<kTcWarps, false><<<grid, 32 * kTcWarps, 0, s>>>(a);
     }
 
-    bool elastic() const { return prefill > 0 && prefill_max > prefill && !m->in_ram; }
+    bool elastic() const { return prefill > 0 && prefill_max > prefill; }
     int chunk_most() const { return elastic() ? prefill_max : prefill; }
     /// VRAM a chunk's buffers take a row, as measured (896 MiB at 1,024 rows with cuBLAS's and MMQ's 125 beside
     /// them; with the drafter the rows' mixes of the target's states and their context projections too)
@@ -1546,9 +1546,36 @@ struct Engine {
         const int64_t above = (int64_t) fr + (keep ? 0 : (int64_t) stash_bytes()) - (int64_t) reserve - extra;
         return above >= 0 && need <= (int64_t) spare.size() + above / G;
     }
+    /// `bytes` of this card's VRAM free above the reserve, with experts in RAM: the spare chunks go back to the
+    /// driver, then the coldest experts give way.  False: the ones left are in VRAM alone.
+    bool ram_room(uint64_t bytes) {
+        const uint64_t G = lamina::core::vmm_granularity();
+        for (int pass = 0; pass < 2; ++pass) {
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            if (fr >= reserve + bytes) return true;
+            if (pass == 1) break;
+            const int64_t need = (int64_t) ((reserve + bytes - fr + G - 1) / G);
+            if ((int64_t) spare.size() < need && !give_way(need - (int64_t) spare.size())) return false;
+            CK(cudaStreamSynchronize(st));
+            for (const lamina::core::VmmChunk h : spare) lamina::core::vmm_chunk_free(h);
+            spare.clear();
+        }
+        return false;
+    }
     /// Before a chunk of a part with `left` tokens to read: the rows its buffers hold (chunk_cap)
     void chunk_fit(int64_t left) {
         if (!elastic()) return;
+        if (m->in_ram) {
+            // A chunk of more rows reads a token sooner and sends a layer's RAM experts for more tokens at once.  Its
+            // buffers take the coldest experts' VRAM while the part is read (chunk_back returns it): for a part of
+            // two such chunks or more, and kept to the part's end.
+            int rows = std::max(chunk_cap, prefill);
+            for (int r = prefill_max; r > rows; r /= 2)
+                if (left >= 2 * (int64_t) r) rows = r;
+            if (rows > chunk_cap && ram_room(chunk_bytes(rows) - chunk_bytes(chunk_cap) + (256ull << 20))) chunk_set(rows);
+            return;
+        }
         const int64_t p0 = pos();
         auto fits = [&](int rows, bool keep) {   // the buffers of `rows` rows beside the cells of a chunk that long
             const int64_t more = (int64_t) chunk_bytes(rows) - (int64_t) chunk_bytes(chunk_cap);
@@ -1568,6 +1595,13 @@ struct Engine {
     /// After a request: the chunk's buffers are prefill's again
     void chunk_base() {
         if (chunk_cap > prefill) chunk_set(prefill);
+    }
+    /// A part is read, with experts in RAM: a grown chunk's VRAM is the experts' again before the tokens after it
+    void chunk_back() {
+        if (!m->in_ram || chunk_cap <= prefill) return;
+        chunk_set(prefill);
+        ahead_drop();
+        settle();
     }
 
     /// Whether a prompt chunk's products have their MMQ kernels on this GPU: "" or why not
@@ -1723,13 +1757,13 @@ struct Engine {
                 chunk_alloc(prefill);
                 gemm(m->layers[0].router, (int) g.n_expert, (int) g.n_embd, P.nrm, 1, P.probs);   // cuBLAS's start, not a first prompt's
                 if (m->in_ram) {
-                    nrm_p = halloc<float>((size_t) prefill * N);
+                    nrm_p = halloc<float>((size_t) chunk_most() * N);
                     crow_p = halloc<float>((size_t) kChunkCpu * N);
                     cdst_p = halloc<int32_t>(kChunkCpu);
                     x_rows = dzero<float>((size_t) kChunkCpu * N);
                     x_dst = dzero<int32_t>(kChunkCpu);
-                    cacts.resize((size_t) prefill * C::kNativeActBytes);
-                    cact_of.assign((size_t) prefill, -1);
+                    cacts.resize((size_t) chunk_most() * C::kNativeActBytes);
+                    cact_of.assign((size_t) chunk_most(), -1);
                 }
             }
         }
@@ -1914,7 +1948,8 @@ struct Engine {
                      (double) ring_bytes / 1048576.0, grow ? "mapped as it grows" : "allocated whole",
                      cards.empty() ? "" : (": " + std::to_string(fits) + " on this GPU").c_str(), with.c_str(),
                      prefill > 0 ? prefill : kMaxT,
-                     elastic() ? (", " + std::to_string(prefill_max) + " while this GPU's free VRAM holds their buffers").c_str() : "");
+                     !elastic() ? "" : m->in_ram ? (", " + std::to_string(prefill_max) + " for a long part, in the VRAM of the experts used least").c_str()
+                                               : (", " + std::to_string(prefill_max) + " while this GPU's free VRAM holds their buffers").c_str());
     }
 
     /// A cell card: its stream, the address ranges of the cells it has room for, a decode forward's buffers.  Left out
@@ -2693,6 +2728,16 @@ struct Engine {
             most = std::max<uint64_t>(most, (uint64_t) (m->g.n_expert - on_card[l]) * m->layers[l].stride);
         return most ? (int64_t) ((most + kWeightPad + G - 1) / G) : 0;
     }
+    /// The experts take the VRAM that is free again, and the scratch's chunks past a layer's RAM experts (the experts
+    /// that come back leave it less to hold)
+    void settle() {
+        for (int pass = 0; pass < 2; ++pass) {
+            place();
+            for (const int64_t want = scratch_chunks(); x_chunks > want; --x_chunks)
+                if (x_vm->mapped(x_chunks - 1)) spare.push_back(x_vm->unmap(x_chunks - 1));
+            if (spare.empty()) break;
+        }
+    }
     /// After a request: the cells' chunks past what the state needs (two steps of room) and the scratch's past a
     /// layer's RAM experts go back to the experts; chunks none takes are freed
     void relax() {
@@ -2716,12 +2761,7 @@ struct Engine {
                 mapped = target;
             }
         }
-        for (int pass = 0; pass < 2; ++pass) {   // (the experts that come back leave the scratch less to hold)
-            place();
-            for (const int64_t want = scratch_chunks(); x_chunks > want; --x_chunks)
-                if (x_vm->mapped(x_chunks - 1)) spare.push_back(x_vm->unmap(x_chunks - 1));
-            if (spare.empty()) break;
-        }
+        settle();
         for (const lamina::core::VmmChunk h : spare) lamina::core::vmm_chunk_free(h);
         spare.clear();
         profile_write(false);
@@ -4412,6 +4452,7 @@ struct Engine {
                 if (!progress(at)) return -1;
             }
         }
+        chunk_back();
         return 0;
     }
 
