@@ -485,14 +485,25 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                         if (name != "auto" && find_gpu(name, gpus) == g.index) return bytes;
                     return by_use;
                 };
+                // (the image encoder where it stays on a card: its projector's bytes and a little beside them)
+                double enc = 0;
+                int enc_gpu = -1;
+                if (const json& v = jget(c, "vision"); v.is_object() && truthy(jget(v, "gpu")) && !truthy(jget(v, "lend")) &&
+                                                       !jget(v, "cuda_device").is_null()) {
+                    std::error_code ec;
+                    const auto size = std::filesystem::file_size(u8_path(jstr(v, "mmproj")), ec);
+                    enc_gpu = find_gpu(str_of(v["cuda_device"]), gpus);
+                    enc = ec ? 0.0 : (double) size + 64.0 * 1048576.0;
+                }
+                auto beside_it = [&](const GpuInfo& g) { return g.index == enc_gpu ? enc : 0.0; };
                 double room = 0, others = 0;
                 std::vector<std::pair<const GpuInfo*, double>> rooms;   // the other cards' room for K and V
                 if (main != nullptr)
-                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi -
+                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi - beside_it(*main) -
                            keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
                 for (size_t i = 1; i < on.size(); ++i)
                     if (const GpuInfo* g = gpu_by_index(gpus, on[i])) {
-                        rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi -
+                        rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi - beside_it(*g) -
                                                             keeps(*g, (g->display ? 1.5 : 0.7) * gibi)));
                         others += rooms.back().second;
                     }
