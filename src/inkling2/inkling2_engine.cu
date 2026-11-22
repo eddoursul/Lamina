@@ -1194,6 +1194,7 @@ struct Engine {
     int main_dev = 0;
     int64_t unit = kGrow;              // positions a move takes: whole mapping chunks, of K and V alike
     int64_t lo = 0;                    // the main card's first cell
+    int64_t near_cap = 0;              // the cells the layers' cards hold themselves (the context without cell cards)
     int64_t main_limit = 0;            // --main-cells (a test's): the cells the main card keeps at most
     int64_t spread = 0;                // --cell-spread: tokens past which the cards share the cells (0: when it is full)
     static constexpr int kBalance = 6; // units a growth step moves to even the cards out
@@ -1228,6 +1229,7 @@ struct Engine {
         Rows D, P;                         // its decode rows, and a chunk's (as large as this card's)
         std::vector<void*> ck_dev, ck_pin; // the chunk's buffers there
         float* cpin = nullptr;             // pinned: a chunk's rows on their way between the cards [kCarry][rows][N]
+        float* cpin_back = nullptr;        // and on their way back, where chunks run in stages
         // what the engine swaps for its own while that card is the current one: st, il_buf, il_att, conv_all,
         // win_raw, main_sms_, main_arch_, il_proj_min, blas, mmq, tc_on
         cublasHandle_t blas = nullptr;
@@ -1265,7 +1267,7 @@ struct Engine {
             CK(cudaStreamSynchronize(sat->st));
         }
     }
-    Rows& sat_rows(Rows& R) { return &R == &P ? sat->P : sat->D; }
+    Rows& sat_rows(Rows& R) { return &R == &P || &R == &P2 ? sat->P : sat->D; }
 
     // ---- the drafter (--dspark): its weights, a ring of context cells a layer (K and V of every position the target
     // ran, made from the target's states in that forward: positions as slots, so a block's own rows at the sequence's
@@ -1408,6 +1410,23 @@ struct Engine {
     int64_t pos() const { return n_pos; }
 
     Rows D, P;                       // the decode's rows, a prompt chunk's
+    // ---- a split's chunks in stages.  The two cards work one after the other on a chunk; in stages the first card
+    // reads the next chunk's visits before the split, and this chunk's after it, while the split's card is in this
+    // chunk's: a second set of chunk rows here (P2: the chunks take P and P2 in turn), the rows between the cards in
+    // pinned memory behind events (a copy waits for the one before it on the other card, no host between them), and
+    // the split's card driven by a thread of its own.  A chunk's experts wait for the host at every visit (their
+    // routing), so the two drivers take turns at the host's work: stage_mu is held by the one that runs, and let go
+    // of only while it waits for its card's stream (stream_wait) or for the other driver.
+    Rows P2;
+    bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
+    bool staging = false;            // a staged run is under way
+    std::mutex stage_mu;
+    std::condition_variable stage_cv;
+    std::thread stage_thread;        // the split's card's driver
+    std::function<void()> stage_job;
+    bool stage_busy = false, stage_started = false, stage_quit = false;
+    // (by a chunk's parity) the rows left this card / were taken there / left that card / were taken here
+    cudaEvent_t ev_out[2] = {}, ev_took[2] = {}, ev_back[2] = {}, ev_home[2] = {};
     Rows* lg_rows = nullptr;         // whose logits the last head wrote
     float* logits_h = nullptr;       // pinned
     std::unique_ptr<MMQ::Context> mmq;
@@ -1415,6 +1434,14 @@ struct Engine {
     bool bf16_chunks = false;        // a BF16 matrix among a chunk's products
     cublasHandle_t blas = nullptr;   // a chunk's float products (the loop gates, the router)
     ~Engine() {
+        if (stage_thread.joinable()) {
+            {
+                const std::lock_guard<std::mutex> lk(stage_mu);
+                stage_quit = true;
+            }
+            stage_cv.notify_all();
+            stage_thread.join();
+        }
         if (route_f != nullptr) std::fclose(route_f);
         if (blas != nullptr) cublasDestroy(blas);
         for (const lamina::core::VmmChunk h : spare) lamina::core::vmm_chunk_free(h);
@@ -1664,6 +1691,8 @@ struct Engine {
     /// VRAM a chunk's buffers take a row, as measured (896 MiB at 1,024 rows with cuBLAS's and MMQ's 125 beside
     /// them; with the drafter the rows' mixes of the target's states and their context projections too)
     uint64_t chunk_bytes(int rows) const { return (uint64_t) rows * ((753ull + (sp ? 52 : 0)) << 10); }
+    /// The sets of chunk rows the first card holds: two where a split's chunks run in stages
+    uint64_t chunk_sets() const { return m->sat_dev >= 0 && stages_on ? 2 : 1; }
     /// A chunk's partial sums of the cells on cards (the cards are known by then), in the current card's rows `R`
     void chunk_parts(Rows& R, std::vector<void*>& devs) {
         const size_t d0 = g_owned ? g_owned->dev.size() : 0;
@@ -1677,12 +1706,17 @@ struct Engine {
         const size_t d0 = g_owned ? g_owned->dev.size() : 0, h0 = g_owned ? g_owned->pinned.size() : 0;
         P = Rows{};
         make_rows(P, rows, true);
+        P2 = Rows{};
+        if (chunk_sets() > 1) make_rows(P2, rows, true);
         if (g_owned) {
             ck_dev.assign(g_owned->dev.begin() + (long) d0, g_owned->dev.end());
             ck_pin.assign(g_owned->pinned.begin() + (long) h0, g_owned->pinned.end());
         }
         chunk_cap = rows;
-        if (!cards.empty()) chunk_parts(P, ck_dev);
+        if (!cards.empty()) {
+            chunk_parts(P, ck_dev);
+            if (P2.cap > 0) chunk_parts(P2, ck_dev);
+        }
         CK(cudaDeviceSynchronize());   // (the buffers' zeroing has run: the stream does not wait for it)
         if (sat) {   // the split's card: the same rows there, and the pinned rows between the two
             use_card(true);
@@ -1694,6 +1728,7 @@ struct Engine {
                 chunk_parts(sat->P, listed_below);
             }
             sat->cpin = halloc<float>((size_t) ik::kCarry * (size_t) rows * (size_t) m->g.n_embd);
+            if (P2.cap > 0) sat->cpin_back = halloc<float>((size_t) ik::kCarry * (size_t) rows * (size_t) m->g.n_embd);
             if (g_owned) {
                 sat->ck_dev.assign(g_owned->dev.begin() + (long) s0, g_owned->dev.end());
                 sat->ck_pin.assign(g_owned->pinned.begin() + (long) p0, g_owned->pinned.end());
@@ -1705,8 +1740,8 @@ struct Engine {
     /// They are freed (the stream idle); a prompt's logits they held move to the decode rows' first
     void chunk_free() {
         CK(cudaStreamSynchronize(st));
-        if (lg_rows == &P) {
-            CK(cudaMemcpy(D.logits, P.logits, (size_t) m->g.n_vocab * 4, cudaMemcpyDeviceToDevice));
+        if (lg_rows == &P || lg_rows == &P2) {
+            CK(cudaMemcpy(D.logits, lg_rows->logits, (size_t) m->g.n_vocab * 4, cudaMemcpyDeviceToDevice));
             CK(cudaDeviceSynchronize());   // (a copy on the device may return before it ran)
             lg_rows = &D;
         }
@@ -1725,6 +1760,7 @@ struct Engine {
         ck_dev.clear();
         ck_pin.clear();
         P = Rows{};
+        P2 = Rows{};
         chunk_cap = 0;
         if (sat) {
             const OnDev dv(sat->dev);
@@ -1743,6 +1779,7 @@ struct Engine {
             sat->ck_pin.clear();
             sat->P = Rows{};
             sat->cpin = nullptr;
+            sat->cpin_back = nullptr;
         }
     }
     void chunk_set(int rows) {
@@ -1751,7 +1788,7 @@ struct Engine {
         for (;;) {   // (a parked conversation's copy on the card gives way to a larger chunk's buffers)
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
-            if (fr >= reserve + chunk_bytes(rows) + (256ull << 20) || !stash_flush()) break;
+            if (fr >= reserve + chunk_bytes(rows) * chunk_sets() + (256ull << 20) || !stash_flush()) break;
         }
         chunk_alloc(rows);
     }
@@ -1810,7 +1847,8 @@ struct Engine {
                 CK(cudaMemGetInfo(&fs, &ts));
                 if ((uint64_t) more + (1ull << 30) > fs) return false;
             }
-            return cells_fit(std::min<int64_t>(ctx, p0 + std::min<int64_t>(rows, left)), more > 0 ? more + (256ll << 20) : more, keep);
+            const int64_t here = more * (int64_t) chunk_sets();
+            return cells_fit(std::min<int64_t>(ctx, p0 + std::min<int64_t>(rows, left)), here > 0 ? here + (256ll << 20) : here, keep);
         };
         // a parked conversation's copy on the card gives way to a larger chunk for a part long enough to gain more
         // than the copy's way to RAM and back takes: 8 tokens a MiB (a larger chunk reads ~55 us a token sooner,
@@ -1898,10 +1936,13 @@ struct Engine {
         il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));   // (the drafter's start multiplies through the head)
         for (void*& b : il_att) b = dzero<uint8_t>(K::native_q8_1_il_bytes((int) g.n_embd, kMaxT));
         if (il_proj_min == 0) il_proj_min = main_arch() >= 10 ? 8 : 3;
+        if (const char* r = std::getenv("LAMINA_INK_STAGES")) stages_on = std::atoi(r) != 0;
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
             sat = std::make_unique<Sat>();
             sat->dev = m->sat_dev;
+            for (cudaEvent_t* e : {&ev_out[0], &ev_out[1], &ev_home[0], &ev_home[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
             const OnDev dv(sat->dev);
+            for (cudaEvent_t* e : {&ev_took[0], &ev_took[1], &ev_back[0], &ev_back[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
             CK(cudaStreamCreateWithFlags(&sat->st, cudaStreamNonBlocking));
             own(&Owned::streams, sat->st);
             sat->il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));
@@ -2154,8 +2195,9 @@ struct Engine {
             // The other has VRAM past its share of them: it holds older cells there, as a cell card does (all the
             // full visits', scored where they are) - less what a chunk's buffers grow by.
             // (and the buffers made after this: the cards' partial sums, the pinned rows' pages)
-            const uint64_t growth = (elastic() ? chunk_bytes(prefill_max) - chunk_bytes(prefill) : 0) + (256ull << 20);
-            const uint64_t own_here = (uint64_t) fits * per_pos + reserve + growth, own_there = (uint64_t) fits * per_sat + sat_keep + growth;
+            const uint64_t growth = elastic() ? chunk_bytes(prefill_max) - chunk_bytes(prefill) : 0, spare_mib = 256ull << 20;
+            const uint64_t own_here = (uint64_t) fits * per_pos + reserve + growth * chunk_sets() + spare_mib;
+            const uint64_t own_there = (uint64_t) fits * per_sat + sat_keep + growth + spare_mib;
             const uint64_t more_here = fr > own_here ? fr - own_here : 0, more_there = sat_free > own_there ? sat_free - own_there : 0;
             if (std::max(more_here, more_there) >= (uint64_t) (4 * unit) * per_all)
                 cards_add(more_here >= more_there ? main_dev : sat->dev, SIZE_MAX, per_all, on_cards, std::max(more_here, more_there));
@@ -2172,6 +2214,7 @@ struct Engine {
         }
         const int64_t trained = m->trained_ctx > 0 ? m->trained_ctx : 1048576;
         const int64_t all = fits + on_cards;
+        near_cap = fits;
         if (max_ctx > 0) {
             ctx = max_ctx;
             if (all < ctx)
@@ -3503,7 +3546,7 @@ struct Engine {
         const int n_ent = T * top_k;
         // the entries by expert, on the host: each expert's bounds, an entry's token row and its row of the output
         CK(cudaMemcpyAsync(R.ids_h, R.ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaStreamSynchronize(st));
+        stream_wait();
         tick_part("experts: the routing, to the host");
         if (m->in_ram) up_rate();   // (the stream's last timed uploads and products are through)
         // The experts in the launches' order: the layer's slots (every expert's own where the card holds them all),
@@ -4753,6 +4796,160 @@ struct Engine {
         ik::carry_kernel<false><<<grid, ik::kTB, 0, st>>>(a);
         CK(cudaMemcpyAsync(to.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
     }
+    /// This card's stream has run what was queued.  In a staged run the other card's driver has the host's work
+    /// meanwhile, and this card is the current one again after.
+    void stream_wait() {
+        if (!staging) {
+            CK(cudaStreamSynchronize(st));
+            return;
+        }
+        const bool mine = at_sat;
+        const cudaStream_t s = st;
+        stage_mu.unlock();
+        const cudaError_t e = cudaStreamSynchronize(s);
+        stage_mu.lock();
+        use_card(mine);
+        CK(e);
+    }
+    /// The first card's set of chunk rows chunk k takes
+    Rows& stage_rows(int k) { return (k & 1) != 0 ? P2 : P; }
+    /// A chunk's first stage, on the first card: its rows in, the visits before the split, and the rows that carry
+    /// the state to pinned memory once the chunk before has taken its own from there
+    void stage_a(Rows& R, int T, int64_t p0, int par) {
+        const size_t row = (size_t) T * (size_t) m->g.n_embd;
+        CK(cudaMemcpyAsync(R.x, R.emb_h, row * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(R.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
+        if (sp != nullptr) CK(cudaMemcpyAsync(R.f_cs, R.f_cs_h, (size_t) T * (size_t) sp->D * 4, cudaMemcpyHostToDevice, st));
+        for (int v = 0; v < sat->v0; ++v) visit(v, T, R, p0);
+        float* buf[ik::kCarry];
+        const int nb = carry_list(R, sat->v0, buf);
+        CK(cudaStreamWaitEvent(st, ev_took[par ^ 1], 0));
+        for (int i = 0; i < nb; ++i) CK(cudaMemcpyAsync(sat->cpin + (size_t) i * row, buf[i], row * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaEventRecord(ev_out[par], st));
+        (void) cudaStreamQuery(st);   // (submitted now: the other card waits for it)
+    }
+    /// Its second, on the split's card (that card's driver, the card current): the rows from pinned memory, the
+    /// split's visits, and the rows back once the chunk before's are taken.  `Rm`: the chunk's rows on the first card
+    /// (its step record's pinned copy).
+    void stage_b(const Rows& Rm, int T, int64_t p0, int par) {
+        Rows& R = sat->P;
+        const size_t row = (size_t) T * (size_t) m->g.n_embd;
+        float* buf[ik::kCarry];
+        int nb = carry_list(R, sat->v0, buf);
+        CK(cudaStreamWaitEvent(st, ev_out[par], 0));
+        for (int i = 0; i < nb; ++i) CK(cudaMemcpyAsync(buf[i], sat->cpin + (size_t) i * row, row * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaMemcpyAsync(R.step_d, Rm.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaEventRecord(ev_took[par], st));
+        (void) cudaStreamQuery(st);
+        stage_started = true;   // (the events this stage's start records exist: the first card's driver goes on)
+        stage_cv.notify_all();
+        for (int v = sat->v0; v < sat->v1; ++v) visit(v, T, R, p0);
+        nb = carry_list(R, sat->v1, buf);
+        CK(cudaStreamWaitEvent(st, ev_home[par ^ 1], 0));
+        for (int i = 0; i < nb; ++i) CK(cudaMemcpyAsync(sat->cpin_back + (size_t) i * row, buf[i], row * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaEventRecord(ev_back[par], st));
+        (void) cudaStreamQuery(st);
+    }
+    /// Its third, on the first card: the rows back from pinned memory (c_in), then the visits after the split and
+    /// the head (c_rest)
+    void stage_c_in(Rows& R, int T, int par) {
+        const size_t row = (size_t) T * (size_t) m->g.n_embd;
+        float* buf[ik::kCarry];
+        const int nb = carry_list(R, sat->v1, buf);
+        CK(cudaStreamWaitEvent(st, ev_back[par], 0));
+        for (int i = 0; i < nb; ++i) CK(cudaMemcpyAsync(buf[i], sat->cpin_back + (size_t) i * row, row * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaEventRecord(ev_home[par], st));
+        (void) cudaStreamQuery(st);
+    }
+    void stage_c_rest(Rows& R, int T, int64_t p0, int n_head) {
+        for (int v = sat->v1; v < (int) visits.size(); ++v) visit(v, T, R, p0);
+        if (sp != nullptr) head_all(R, T, n_head);
+        else if (n_head > 0) head(R, T - n_head, n_head);
+    }
+    /// The split's card's driver: a chunk's second stage at a time, as the first card's driver posts them
+    void stage_worker() {
+        std::unique_lock<std::mutex> lk(stage_mu);
+        for (;;) {
+            stage_cv.wait(lk, [&] { return stage_quit || stage_job; });
+            if (stage_quit) return;
+            const std::function<void()> job = std::move(stage_job);
+            stage_job = nullptr;
+            use_card(true);
+            job();
+            stage_busy = false;
+            stage_cv.notify_all();
+        }
+    }
+    /// How many of the `left` tokens up to a part's next cut can be read in stages: a split whose first card has the
+    /// second set of rows, no cells on cell cards, and as far as the layers' cards hold the cells themselves - those
+    /// are mapped here, none leaves for a card (a chunk's scan over cells on cards waits for the host: the cards one
+    /// after the other from there)
+    int64_t stage_can(int64_t left) {
+        if (!sat || !stages_on || prof || nan_probe || xrow_on || lo > 0) return 0;
+        const int64_t p0 = pos(), n = std::min(left, std::min(ctx, near_cap) - p0);
+        return n > prefill && ensure(p0 + n) && lo == 0 ? n : 0;
+    }
+    /// `n` tokens (a part's, from its token `at0` of `total`) as chunks in stages.  0, or -1 when `progress` said stop
+    /// (the chunk under way then is read to its end first); `done`: the tokens read.  `settles(d)`: the state after
+    /// the part's first d tokens is to be whole (a checkpoint's), so no chunk starts before the one that ends there
+    /// is through.
+    int stage_run(const int32_t* tok, int64_t n, int64_t at0, int64_t total, const std::function<bool(int64_t)>& progress,
+                  const std::function<bool(int64_t)>* settles, int64_t& done) {
+        const int64_t first_pos = pos();
+        const int rows = chunk_cap, n_chunks = (int) ((n + rows - 1) / rows);
+        auto size = [&](int k) { return (int) std::min<int64_t>(rows, n - (int64_t) k * rows); };
+        auto p0_of = [&](int k) { return first_pos + (int64_t) k * rows; };
+        auto end_of = [&](int k) { return at0 + (int64_t) k * rows + size(k); };
+        CK(cudaStreamSynchronize(st));
+        far_mode = false;
+        std::unique_lock<std::mutex> lk(stage_mu);
+        staging = true;
+        if (!stage_thread.joinable()) stage_thread = std::thread([this] { stage_worker(); });
+        auto begin = [&](int k) {   // chunk k's rows, and its visits before the split
+            Rows& R = stage_rows(k);
+            embed(R, tok + (int64_t) k * rows, size(k), p0_of(k));
+            steps(R, p0_of(k), size(k));
+            if (sp != nullptr) rope_rows(R.f_cs_h, p0_of(k), size(k));
+            stage_a(R, size(k), p0_of(k), k & 1);
+        };
+        auto post = [&](int k) {   // its visits on the split's card: posted, and begun (the events its start records)
+            const Rows* const Rm = &stage_rows(k);
+            const int T = size(k), par = k & 1;
+            const int64_t p0 = p0_of(k);
+            stage_started = false;
+            stage_busy = true;
+            stage_job = [this, Rm, T, p0, par] { stage_b(*Rm, T, p0, par); };
+            stage_cv.notify_all();
+            stage_cv.wait(lk, [&] { return stage_started; });
+            use_card(false);
+        };
+        int begun = -1, posted = -1, rc = 0;
+        bool stop = false;
+        done = 0;
+        for (int k = 0; k < n_chunks; ++k) {
+            if (begun < k) begin(begun = k);
+            if (posted < k) post(posted = k);
+            const bool ahead = k + 1 < n_chunks && !stop && !(settles != nullptr && (*settles)(end_of(k)));
+            if (ahead) begin(begun = k + 1);
+            stage_cv.wait(lk, [&] { return !stage_busy; });   // the split's card's stage is queued whole
+            use_card(false);
+            stage_c_in(stage_rows(k), size(k), k & 1);
+            if (ahead) post(posted = k + 1);
+            stage_c_rest(stage_rows(k), size(k), p0_of(k), end_of(k) == total ? 1 : 0);
+            stream_wait();   // chunk k is through
+            n_pos += size(k);
+            logits_held = false;
+            spark_wrote(p0_of(k), size(k), true);
+            done = end_of(k) - at0;
+            if (progress && !progress(end_of(k))) stop = true;
+            if (stop && !ahead) {
+                rc = -1;
+                break;
+            }
+        }
+        staging = false;
+        return rc;
+    }
     /// The packed rows are in pinned memory once this card's stream is through; the other card is the current one
     /// after, and its segment takes them from there (a copy between the cards' own memory took 1.1 ms a crossing
     /// here, cudaMemcpyPeerAsync; outside the streams, cudaMemcpyPeer, it returned before the rows were there)
@@ -4898,14 +5095,28 @@ struct Engine {
 
     /// `n` prompt tokens; the last one's logits are row 0.  A chunk (or a decode forward) ends at each of `cuts`
     /// (ascending, counted in this part's tokens).  0, -1 when `progress` said stop, -2 without cells.
+    /// `settles(d)`: the caller takes the state after the part's first d tokens (a checkpoint): a split's staged chunks
+    /// start none past it before it is whole.
     int feed(const int32_t* tok, int64_t n, const std::function<bool(int64_t)>& progress,
-             const std::vector<int64_t>* cuts = nullptr) {
+             const std::vector<int64_t>* cuts = nullptr, const std::function<bool(int64_t)>* settles = nullptr) {
         size_t ci = 0;
         for (int64_t at = 0; at < n;) {
             while (cuts != nullptr && ci < cuts->size() && (*cuts)[ci] <= at) ++ci;
             const int64_t left = (cuts != nullptr && ci < cuts->size() ? std::min(n, (*cuts)[ci]) : n) - at;
             int T;
             bool ok;
+            if (const int64_t staged = prefill > 0 && left >= chunk_min ? stage_can(left) : 0; staged > 0) {
+                chunk_fit(staged);
+                // (whole chunks where the segment goes on past them)
+                const int64_t run = staged < left ? staged / chunk_cap * chunk_cap : staged;
+                if (P2.cap == chunk_cap && run > chunk_cap) {   // two chunks or more: the cards at once
+                    int64_t read = 0;
+                    const int rc = stage_run(tok + at, run, at, n, progress, settles, read);
+                    at += read;
+                    if (rc != 0) return rc;
+                    continue;
+                }
+            }
             if (prefill > 0 && left >= chunk_min) {
                 chunk_fit(left);
                 T = (int) std::min<int64_t>(chunk_cap, left);
@@ -5689,22 +5900,24 @@ struct Serve {
         };
         int64_t done = 0;
         auto last_pp = Clock::now();
+        // (a checkpoint follows the part's first d tokens: at a mark, or `every` tokens past the last one)
+        const std::function<bool(int64_t)> settles = [&](int64_t d) {
+            if (!cache || d >= (int64_t) fresh) return false;
+            const int64_t here = (int64_t) reuse + d;
+            const auto next = std::lower_bound(marks.begin(), marks.end(), here);
+            const bool mark = next != marks.end() && *next == here;
+            return mark || (here - saved >= every && (next != marks.end() ? *next : (int64_t) ids.size()) - here >= rows);
+        };
         const int fed = E.feed(ids.data() + reuse, fresh, [&](int64_t d) {
             done = d;
-            if (cache && done < fresh) {
-                const int64_t here = (int64_t) reuse + done;
-                const auto next = std::lower_bound(marks.begin(), marks.end(), here);
-                const bool mark = next != marks.end() && *next == here;
-                if (mark || (here - saved >= every && (next != marks.end() ? *next : (int64_t) ids.size()) - here >= rows))
-                    checkpoint(here, false);
-            }
+            if (settles(done)) checkpoint((int64_t) reuse + done, false);
             if (done == fresh || ms_since(last_pp) > 250) {
                 serve_print("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) fresh, ms_since(t0),
                             (double) done / std::max(1e-9, ms_since(t0) / 1000.0));
                 last_pp = Clock::now();
             }
             return !stop.load();
-        }, &cuts);
+        }, &cuts, &settles);
         E.prof_print("the prompt");
         note((int64_t) reuse + done);
         live.insert(live.end(), ids.begin() + (long) reuse, ids.begin() + (long) reuse + (long) done);
