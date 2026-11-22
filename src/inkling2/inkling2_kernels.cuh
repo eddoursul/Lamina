@@ -244,13 +244,18 @@ __global__ void __launch_bounds__(kTB) ctrl_apply_kernel(CtrlIn a) {
 
 // ---------------------------------------------------------------------------------------------- norms
 /// y = x rsqrt(mean(x^2) + eps) w, and its q8_1 image (N / 32 blocks) where q is not null; n inputs a launch.  w null:
-/// no weight.  il: the image's blocks interleaved (q8_1_il16.hpp), as the experts' NVFP4 kernels read them.
+/// no weight.  il: the image's blocks interleaved (q8_1_il16.hpp), as the experts' NVFP4 kernels read them.  bm, pm,
+/// dl (with q, not with il): the rows as the columns of native_quantize_q8_1_il's copy too (native_q8_1_il_view), cp
+/// its columns' pitch - what the products of several columns read.
 struct NormIn {
     const float* x[3];
     const float* w[3];
     float* y[3];
     Q81* q[3];
-    int n, N;
+    int* bm[3];
+    int* pm[3];
+    float* dl[3];
+    int n, N, cp;
     float eps;
     bool il;
 };
@@ -295,8 +300,17 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
                                (uint32_t) (uint8_t) q8_1_quant(y.z, d, amax) << 16 |
                                (uint32_t) (uint8_t) q8_1_quant(y.w, d, amax) << 24;
         *reinterpret_cast<uint32_t*>(q->qs + (i4 & 7) * 4) = codes;
+        if (int* const bm = at3(a.bm, c)) {
+            const int b = i4 / 8, p = i4 & 7;
+            bm[(size_t) (8 * b + p) * a.cp + t] = (int) codes;
+            at3(a.pm, c)[(size_t) (p * (a.N / 32) + b) * a.cp + t] = (int) codes;
+        }
     }
-    if ((i4 & 7) == 0) q->ds = q8_1_ds(d, sum);
+    if ((i4 & 7) == 0) {
+        const half2 ds = q8_1_ds(d, sum);
+        q->ds = ds;
+        if (float* const dl = at3(a.dl, c)) dl[(size_t) (i4 / 8) * a.cp + t] = __low2float(ds);
+    }
 }
 
 /// norm_kernel for a chunk's rows, its values to the bit (no q8_1 image): a warp a row, a block 8 rows, where a

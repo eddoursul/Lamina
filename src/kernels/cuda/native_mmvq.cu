@@ -1314,12 +1314,55 @@ template <> struct IlLoad<IlQ80> {
     __device__ static W load(const Q80Block* w, int kqs) { return IlQ80::load(w, kqs); }
 };
 
+// A warp's R rows from row0 of a matrix of n_out rows (bpr blocks a row) against the NC columns x
+template <typename I, int NC, int R, class X>
+__device__ __forceinline__ void il_group(const typename I::F::Block* __restrict__ w, const X& x, float* __restrict__ y,
+                                         int bpr, int n_out, int row0, int lane, int kqs, int nm) {
+    using F = typename I::F;
+    constexpr int SUB = WARP / F::T;   // weight blocks a chunk covers
+    float acc[4][R][NC];
+#pragma unroll
+    for (int v = 0; v < 4; ++v)
+#pragma unroll
+        for (int i = 0; i < R; ++i)
+#pragma unroll
+            for (int c = 0; c < NC; ++c) acc[v][i][c] = 0.0f;
+    for (int m0 = 0; m0 < nm; m0 += 4) {
+#pragma unroll
+        for (int v = 0; v < 4; ++v) {
+            const int kbx = SUB * (m0 + v) + lane / F::T;
+            if (kbx < bpr) {
+#pragma unroll
+                for (int i = 0; i < R; ++i) {
+                    const int row = min(row0 + i, n_out - 1);   // a partial last group recomputes its last row
+                    const typename IlLoad<I>::W wv = IlLoad<I>::load(w + std::size_t(row) * bpr + kbx, kqs);
+                    float o[NC];
+                    I::template apply<NC>(wv, x, kbx * F::KBY, kqs, o);
+#pragma unroll
+                    for (int c = 0; c < NC; ++c) acc[v][i][c] += o[c];
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < R; ++i)
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            float s = acc[0][i][c];
+            s += acc[1][i][c];
+            s += acc[2][i][c];
+            s += acc[3][i][c];
+            s = warp_sum(s);
+            if (lane == 0 && row0 + i < n_out) y[std::size_t(c) * n_out + row0 + i] = s;
+        }
+}
+
 template <typename I, int NC, int R>
 __launch_bounds__(4 * WARP)
 __global__ void native_mmvq_il_kernel(const typename I::F::Block* __restrict__ w, const void* __restrict__ xq,
                                       const float* __restrict__ xd, float* __restrict__ y, int n_in, int n_out) {
     using F = typename I::F;
-    constexpr int SUB = WARP / F::T;   // weight blocks a chunk covers
+    constexpr int SUB = WARP / F::T;
     const int lane = int(threadIdx.x) & (WARP - 1);
     const auto x = q8_1_cols<NC, I::PM>(xq, xd, n_in / Q8K);
     const int bpr = n_in / F::DIV;
@@ -1327,44 +1370,43 @@ __global__ void native_mmvq_il_kernel(const typename I::F::Block* __restrict__ w
     const int nm = (bpr + SUB - 1) / SUB;
     // A grid-stride loop over the row groups, though the grid gives each warp one: without it ptxas gives several
     // instances fewer registers, and Q6_K's at 3 columns run 10-50% slower (the rows-a-warp table is measured on it).
-    for (int grp = int(blockIdx.x) * 4 + (int(threadIdx.x) >> 5); grp * R < n_out; grp += int(gridDim.x) * 4) {
-        const int row0 = grp * R;
-        float acc[4][R][NC];
+    for (int grp = int(blockIdx.x) * 4 + (int(threadIdx.x) >> 5); grp * R < n_out; grp += int(gridDim.x) * 4)
+        il_group<I, NC, R>(w, x, y, bpr, n_out, grp * R, lane, kqs, nm);
+}
+
+// Several products a launch: a warp takes a row group of the job its index falls in.  The sums are il_group's.
+struct MmvqIlJobTable {
+    const void* w[kMmvqJobs];
+    const int* xq[kMmvqJobs];   // the columns' interleaved ints, in the order the format reads (block or position major)
+    const float* xd[kMmvqJobs];
+    float* y[kMmvqJobs];
+    int end[kMmvqJobs];         // the first row group past job j's
+    int n_out[kMmvqJobs];
+};
+// (a table read by a run-time index would be copied to every thread's stack)
+template <class T> __device__ __forceinline__ T job_of(T const (&v)[kMmvqJobs], int j) {
+    T r = v[0];
 #pragma unroll
-        for (int v = 0; v < 4; ++v)
+    for (int i = 1; i < kMmvqJobs; ++i) r = j == i ? v[i] : r;
+    return r;
+}
+template <typename I, int NC, int R>
+__launch_bounds__(4 * WARP)
+__global__ void native_mmvq_il_jobs_kernel(MmvqIlJobTable jt, int n_jobs, int n_in) {
+    using F = typename I::F;
+    constexpr int SUB = WARP / F::T;
+    const int lane = int(threadIdx.x) & (WARP - 1);
+    const int grp = int(blockIdx.x) * 4 + (int(threadIdx.x) >> 5);
+    int job = 0;
 #pragma unroll
-            for (int i = 0; i < R; ++i)
-#pragma unroll
-                for (int c = 0; c < NC; ++c) acc[v][i][c] = 0.0f;
-        for (int m0 = 0; m0 < nm; m0 += 4) {
-#pragma unroll
-            for (int v = 0; v < 4; ++v) {
-                const int kbx = SUB * (m0 + v) + lane / F::T;
-                if (kbx < bpr) {
-#pragma unroll
-                    for (int i = 0; i < R; ++i) {
-                        const int row = min(row0 + i, n_out - 1);   // a partial last group recomputes its last row
-                        const typename IlLoad<I>::W wv = IlLoad<I>::load(w + std::size_t(row) * bpr + kbx, kqs);
-                        float o[NC];
-                        I::template apply<NC>(wv, x, kbx * F::KBY, kqs, o);
-#pragma unroll
-                        for (int c = 0; c < NC; ++c) acc[v][i][c] += o[c];
-                    }
-                }
-            }
-        }
-#pragma unroll
-        for (int i = 0; i < R; ++i)
-#pragma unroll
-            for (int c = 0; c < NC; ++c) {
-                float s = acc[0][i][c];
-                s += acc[1][i][c];
-                s += acc[2][i][c];
-                s += acc[3][i][c];
-                s = warp_sum(s);
-                if (lane == 0 && row0 + i < n_out) y[std::size_t(c) * n_out + row0 + i] = s;
-            }
-    }
+    for (int j = 0; j + 1 < kMmvqJobs; ++j) job += (j + 1 < n_jobs && grp >= jt.end[j]) ? 1 : 0;
+    const int first = job > 0 ? job_of(jt.end, job - 1) : 0;
+    const int n_out = job_of(jt.n_out, job), row0 = (grp - first) * R;
+    if (row0 >= n_out) return;   // (the last block's warps past the last job)
+    const auto x = q8_1_cols<NC, I::PM>(job_of(jt.xq, job), job_of(jt.xd, job), n_in / Q8K);
+    const int bpr = n_in / F::DIV;
+    il_group<I, NC, R>(static_cast<const typename F::Block*>(job_of(jt.w, job)), x, job_of(jt.y, job), bpr, n_out, row0,
+                       lane, F::kqs(lane), (bpr + SUB - 1) / SUB);
 }
 
 template <typename I, int R>
@@ -1750,6 +1792,36 @@ bool native_mmvq_jobs(int ggml_type, const MmvqJob* jobs, int n_jobs, int n_in, 
     return true;
 }
 
+bool native_mmvq_il_jobs(int ggml_type, const MmvqJob* jobs, int n_jobs, int n_in, int ncols, void* stream) {
+    constexpr int R = 2;   // (Q8_0's rows a warp at 3+ columns, il_rows)
+    if (ggml_type != 8 || jobs == nullptr || n_jobs < 1 || n_jobs > kMmvqJobs || ncols < 2 || ncols > MAX_NCOLS ||
+        n_in <= 0 || n_in % 32 != 0 || !g_multi_exact)
+        return false;
+    MmvqIlJobTable jt{};
+    int groups = 0;
+    for (int j = 0; j < n_jobs; ++j) {
+        if (jobs[j].weights == nullptr || jobs[j].x_il == nullptr || jobs[j].y == nullptr || jobs[j].n_out <= 0) return false;
+        const Q81IlParts parts = q8_1_il_parts(jobs[j].x_il, n_in, ncols);
+        jt.w[j] = jobs[j].weights;
+        jt.xq[j] = IlQ80::PM ? parts.pm : parts.bm;
+        jt.xd[j] = parts.d;
+        jt.y[j] = jobs[j].y;
+        jt.n_out[j] = jobs[j].n_out;
+        jt.end[j] = groups += (jobs[j].n_out + R - 1) / R;
+    }
+    const auto s = static_cast<cudaStream_t>(stream);
+    const unsigned blocks = unsigned((groups + 3) / 4);
+    switch (ncols) {
+#define LAMINA_IL_JOBS_CASE(N) case N: native_mmvq_il_jobs_kernel<IlQ80, N, R><<<blocks, 4 * WARP, 0, s>>>(jt, n_jobs, n_in); break;
+        LAMINA_IL_JOBS_CASE(2) LAMINA_IL_JOBS_CASE(3) LAMINA_IL_JOBS_CASE(4) LAMINA_IL_JOBS_CASE(5) LAMINA_IL_JOBS_CASE(6)
+        LAMINA_IL_JOBS_CASE(7) LAMINA_IL_JOBS_CASE(8)
+#undef LAMINA_IL_JOBS_CASE
+        default: return false;
+    }
+    launch_check();
+    return true;
+}
+
 bool native_mmvq_supported(int ggml_type) noexcept {
     return ggml_type == 2 || ggml_type == 6 || ggml_type == 8 || ggml_type == 11 ||
            ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 20 ||
@@ -1805,6 +1877,13 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
 std::size_t native_q8_1_il_bytes(int n_in, int ncols) {
     validate_shape(n_in, ncols);
     return std::size_t(n_in / Q8K) * std::size_t(native_q8_1_il_cp(ncols)) * (16 * sizeof(int) + sizeof(float));
+}
+
+Q81IlView native_q8_1_il_view(void* x_il, int n_in, int ncols) {
+    validate_shape(n_in, ncols);
+    validate_pointer(x_il);
+    const Q81IlParts p = q8_1_il_parts(x_il, n_in, ncols);
+    return {const_cast<int*>(p.bm), const_cast<int*>(p.pm), const_cast<float*>(p.d)};
 }
 
 void native_quantize_q8_1_il(const float* x, void* x_q8_1, void* x_il, int n_in, int ncols, void* stream) {

@@ -1,6 +1,7 @@
 // src/kernels/mmvq_jobs_parity.cpp - native_mmvq_jobs (several Q8_0 products in one launch) against a native_mmvq
 // call a job: bitwise, at 1, 2, 3 and 8 columns, jobs of different row counts and of two activation images (random
-// codes with finite scales, normal activations); and that it declines what it has no kernel for.
+// codes with finite scales, normal activations); native_mmvq_il_jobs the same from the images' interleaved copies,
+// whose parts lie where native_q8_1_il_view says; and that both decline what they have no kernel for.
 //
 //     mmvq_jobs_parity
 #include "lamina/kernels/native_mmvq.hpp"
@@ -64,6 +65,78 @@ int main() {
     }
     long long checked = 0, diff = 0;
     int bad = 0;
+    const int nb = n_in / 32;
+    std::vector<uint8_t> img[2];
+    for (int i = 0; i < 2; ++i) {
+        img[i].resize((size_t) MAXC * nb * 36);
+        ck(cudaStreamSynchronize(s), "quantize");
+        ck(cudaMemcpy(img[i].data(), xq[i], img[i].size(), cudaMemcpyDeviceToHost), "down");
+    }
+    for (const int T : {2, 3, 8}) {   // the interleaved copies: their parts, then the products
+        void* xil[2];
+        long long dv = 0;
+        for (int i = 0; i < 2; ++i) {
+            const size_t bytes = native_q8_1_il_bytes(n_in, T);
+            ck(cudaMalloc(&xil[i], bytes), "alloc");
+            ck(cudaMemset(xil[i], 0, bytes), "memset");
+            native_q8_1_il_from(xq[i], xil[i], n_in, T, s);
+            ck(cudaStreamSynchronize(s), "copy");
+            std::vector<uint8_t> h(bytes);
+            ck(cudaMemcpy(h.data(), xil[i], bytes, cudaMemcpyDeviceToHost), "down");
+            const Q81IlView v = native_q8_1_il_view(xil[i], n_in, T);
+            const int cp = native_q8_1_il_cp(T);
+            const int* bm = (const int*) (h.data() + ((const uint8_t*) v.bm - (const uint8_t*) xil[i]));
+            const int* pm = (const int*) (h.data() + ((const uint8_t*) v.pm - (const uint8_t*) xil[i]));
+            const float* d = (const float*) (h.data() + ((const uint8_t*) v.d - (const uint8_t*) xil[i]));
+            for (int c = 0; c < T; ++c)
+                for (int b = 0; b < nb; ++b) {
+                    const uint8_t* blk = &img[i][((size_t) c * nb + b) * 36];
+                    for (int p = 0; p < 8; ++p) {
+                        int q;
+                        std::memcpy(&q, blk + 4 + 4 * p, 4);
+                        dv += bm[(size_t) (8 * b + p) * cp + c] != q;
+                        dv += pm[(size_t) (p * nb + b) * cp + c] != q;
+                    }
+                    uint16_t hb;
+                    std::memcpy(&hb, blk, 2);
+                    dv += half_bits(d[(size_t) b * cp + c]) != hb;
+                }
+        }
+        MmvqJob jobs[5];
+        for (int j = 0; j < 5; ++j) {
+            jobs[j] = MmvqJob{w[j], nullptr, yb[j], n_outs[j], xil[j < 3 ? 0 : 1]};
+            ck(cudaMemset(ya[j], 0xff, (size_t) MAXC * n_outs[j] * 4), "memset");
+            ck(cudaMemset(yb[j], 0xee, (size_t) MAXC * n_outs[j] * 4), "memset");
+            native_mmvq(8, w[j], xq[j < 3 ? 0 : 1], ya[j], n_in, n_outs[j], T, s);
+        }
+        if (!native_mmvq_il_jobs(8, jobs, 5, n_in, T, s)) {
+            std::printf("%d interleaved columns: declined\n", T);
+            ++bad;
+            continue;
+        }
+        ck(cudaStreamSynchronize(s), "run");
+        long long d = 0;
+        for (int j = 0; j < 5; ++j) {
+            std::vector<uint32_t> a((size_t) MAXC * n_outs[j]), b(a.size());
+            ck(cudaMemcpy(a.data(), ya[j], a.size() * 4, cudaMemcpyDeviceToHost), "down");
+            ck(cudaMemcpy(b.data(), yb[j], b.size() * 4, cudaMemcpyDeviceToHost), "down");
+            for (size_t i = 0; i < (size_t) T * n_outs[j]; ++i) d += a[i] != b[i];
+            for (size_t i = (size_t) T * n_outs[j]; i < b.size(); ++i) d += b[i] != 0xeeeeeeeeu;
+            checked += (long long) T * n_outs[j];
+        }
+        std::printf("%d interleaved columns, 5 products in a launch: %lld values differ from a launch each; the copy's "
+                    "parts: %lld differ from the image\n", T, d, dv);
+        diff += d + dv;
+        for (int i = 0; i < 2; ++i) ck(cudaFree(xil[i]), "free");
+    }
+    {   // declined: one column, a K-quant, a job without its copy
+        MmvqJob one{w[0], xq[0], yb[0], n_outs[0], xq[0]}, none{w[0], xq[0], yb[0], n_outs[0]};
+        const bool c1 = native_mmvq_il_jobs(8, &one, 1, n_in, 1, s), k = native_mmvq_il_jobs(12, &one, 1, n_in, 2, s);
+        const bool nc = native_mmvq_il_jobs(8, &none, 1, n_in, 2, s);
+        std::printf("declined, interleaved: one column %s, a Q4_K matrix %s, no copy %s\n", c1 ? "NO" : "yes",
+                    k ? "NO" : "yes", nc ? "NO" : "yes");
+        bad += c1 || k || nc;
+    }
     for (const int T : {1, 2, 3, 8}) {
         MmvqJob jobs[5];
         for (int j = 0; j < 5; ++j) {

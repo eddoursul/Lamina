@@ -1000,6 +1000,12 @@ struct Engine {
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
     bool il_on = true;
     void* il_buf = nullptr;
+    // A forward of il_proj_min rows or more: the attention's five projections read their columns interleaved too,
+    // from copies the norm writes (native_mmvq_il_jobs: the same values).  The RTX 3090 gains from 3 rows (1% of a
+    // forward, 2.8% at 8); the RTX 5070 Ti, whose plain kernel is as fast up to 6 columns, at 8 alone (1%).
+    bool il_proj = true;
+    int il_proj_min = 0;   // (0: by the card)
+    void* il_att[3] = {nullptr, nullptr, nullptr};
     static constexpr int kIlIn = 8192;   // values a row of such a product has at most
     // A chunk's NVFP4 experts on the FP16 tensor cores (nvfp4_gemm) instead of MMQ: where the card has no FP4 tensor
     // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC: 0 never, 1 on any card; LAMINA_INK_TC_MIN: tests')
@@ -1404,7 +1410,7 @@ struct Engine {
     }
 
     // ---- a chunk's attention (attn_tc_kernel): its blocks, and the segments its cells are scored in
-    int main_sms_ = 0, tc_segs = 0;   // (LAMINA_INK_TC_SEGS: that many segments, a test's)
+    int main_sms_ = 0, main_arch_ = 0, tc_segs = 0;   // (LAMINA_INK_TC_SEGS: that many segments, a test's)
     /// this card's SMs (called with it current)
     int main_sms() {
         if (main_sms_ == 0) {
@@ -1413,9 +1419,12 @@ struct Engine {
             CK(cudaGetDevice(&dev));
             CK(cudaGetDeviceProperties(&prop, dev));
             main_sms_ = std::max(1, prop.multiProcessorCount);
+            main_arch_ = prop.major;
         }
         return main_sms_;
     }
+    /// its compute capability's major number (8: RTX 30 and 40, 12: RTX 50)
+    int main_arch() { return main_sms(), main_arch_; }
     static constexpr int kTcWarps = 4;   // warps a block, 16 rows each (8 gained q8_0 cells a tenth on the RTX 3090
                                          // from 2,048 rows and lost as much on the RTX 5070 Ti)
     /// rows of partial sums the segments of a chunk write at most
@@ -1577,7 +1586,11 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_IL")) il_on = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
+            il_on = (std::atoi(r) & 1) != 0;
+            il_proj = (std::atoi(r) & 2) != 0;
+        }
+        if (const char* r = std::getenv("LAMINA_INK_ILP")) il_proj_min = std::max(2, std::atoi(r));
         tc_on = MMQ::built() && !MMQ::native_fp4(40);
         if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
@@ -1592,6 +1605,8 @@ struct Engine {
         make_rows(D, kMaxT, false);
         logits_h = halloc<float>((size_t) g.n_vocab);
         il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));   // (the drafter's start multiplies through the head)
+        for (void*& b : il_att) b = dzero<uint8_t>(K::native_q8_1_il_bytes((int) g.n_embd, kMaxT));
+        if (il_proj_min == 0) il_proj_min = main_arch() >= 10 ? 8 : 3;
         if (sp != nullptr) spark_init();
         if (const char* f = std::getenv("LAMINA_INK_ROUTE")) {
             route_f = std::fopen(f, "wb");
@@ -3279,6 +3294,8 @@ struct Engine {
             });
         }
         tick_part("inputs: the loop gates");
+        bool ilp = !batch && il_proj && fuse_products && T >= il_proj_min;   // the projections from interleaved columns
+        for (const Mat* W : {&L.wq, &L.wgate, &L.wrel, &L.wk, &L.wv}) ilp = ilp && W->type == 8 && W->n_in == N;
         {
             ik::NormIn a{};
             for (int c = 0; c < n_in; ++c) {
@@ -3286,9 +3303,16 @@ struct Engine {
                 a.w[c] = L.norm[c];
                 a.y[c] = R.nrm + (size_t) c * TN;
                 a.q[c] = batch ? nullptr : R.img + (size_t) c * TB;
+                if (ilp) {
+                    const K::Q81IlView v = K::native_q8_1_il_view(il_att[c], N, T);
+                    a.bm[c] = v.bm;
+                    a.pm[c] = v.pm;
+                    a.dl[c] = v.d;
+                }
             }
             a.n = n_in;
             a.N = N;
+            a.cp = K::native_q8_1_il_cp(T);
             a.eps = g.eps;
             run("a: norm", [&] { norm(a, T, n_in, batch); });
         }
@@ -3308,14 +3332,17 @@ struct Engine {
         } else {
             const ik::Q81 *iq = R.img, *ikk = R.img + (size_t) ki * TB, *iv = R.img + (size_t) vi * TB;
             // the five in one launch where their format has that kernel (the same values: a launch's own time once)
-            const K::MmvqJob five[5] = {{L.wq.d, iq, R.qraw, (int) L.wq.n_out},     {L.wgate.d, iq, R.graw, (int) L.wgate.n_out},
-                                        {L.wrel.d, iq, R.rraw, (int) L.wrel.n_out}, {L.wk.d, ikk, kraw, (int) L.wk.n_out},
-                                        {L.wv.d, iv, vraw, (int) L.wv.n_out}};
+            const void *lq = ilp ? il_att[0] : nullptr, *lk = ilp ? il_att[ki] : nullptr, *lv = ilp ? il_att[vi] : nullptr;
+            const K::MmvqJob five[5] = {{L.wq.d, iq, R.qraw, (int) L.wq.n_out, lq},     {L.wgate.d, iq, R.graw, (int) L.wgate.n_out, lq},
+                                        {L.wrel.d, iq, R.rraw, (int) L.wrel.n_out, lq}, {L.wk.d, ikk, kraw, (int) L.wk.n_out, lk},
+                                        {L.wv.d, iv, vraw, (int) L.wv.n_out, lv}};
             bool as_one = fuse_products;
             for (const Mat* W : {&L.wq, &L.wgate, &L.wrel, &L.wk, &L.wv}) as_one = as_one && W->type == L.wq.type && W->n_in == N;
             if (as_one) {
                 bool took = false;
-                run("a: the projections", [&] { took = K::native_mmvq_jobs((int) L.wq.type, five, 5, N, T, st); });
+                run("a: the projections", [&] {
+                    took = ilp ? K::native_mmvq_il_jobs(8, five, 5, N, T, st) : K::native_mmvq_jobs((int) L.wq.type, five, 5, N, T, st);
+                });
                 as_one = took;
             }
             if (!as_one) {

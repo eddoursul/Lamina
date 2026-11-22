@@ -97,8 +97,13 @@ struct MmvqJob {
     const void* x_q8_1;
     float* y;
     int n_out;
+    const void* x_il = nullptr;   // native_mmvq_il_jobs: the columns' interleaved copy
 };
 bool native_mmvq_jobs(int ggml_type, const MmvqJob* jobs, int n_jobs, int n_in, int ncols, void* stream);
+// native_mmvq_jobs for 2..8 columns read from each job's interleaved copy (x_il below; x_q8_1 is not read): the same
+// values bitwise, through native_mmvq_il's kernel with a warp two rows.  False, and nothing launched, for a format
+// without it (Q8_0 has it).
+bool native_mmvq_il_jobs(int ggml_type, const MmvqJob* jobs, int n_jobs, int n_in, int ncols, void* stream);
 
 // Plan v0.3 P6: 2..8 columns also INTERLEAVED, so one 16-byte load reads a position of every column: CP = 2 (2
 // columns), 4 (3-4) or 8 (5-8), zero-padded; nb = n_in / 32 blocks; int32 bm[nb][8][CP] (block-major), int32
@@ -110,6 +115,15 @@ void native_quantize_q8_1_il(const float* x, void* x_q8_1, void* x_il, int n_in,
 // The interleaved copy of a q8_1 image of 2 <= ncols <= 8 columns another kernel wrote (native_quantize_q8_1's layout):
 // native_quantize_q8_1_il's x_il for the same values.
 void native_q8_1_il_from(const void* x_q8_1, void* x_il, int n_in, int ncols, void* stream);
+// The copy's parts in a buffer of native_q8_1_il_bytes, for a kernel that writes the copy beside its own q8_1 image:
+// column c's int p (4 values) of block b at bm[(8 b + p) cp + c] and pm[(p nb + b) cp + c], the block's scale at
+// d[b cp + c] (the float of the image's half); cp = native_q8_1_il_cp(ncols), nb = n_in / 32.
+struct Q81IlView {
+    int* bm;
+    int* pm;
+    float* d;
+};
+Q81IlView native_q8_1_il_view(void* x_il, int n_in, int ncols);
 // native_mmvq for 1 column (x_il unused) or 2..8 quantized by native_quantize_q8_1_il: with `tensor_cores`, the
 // tensor-core kernels where their table takes the format, rows and columns (native_mma.hpp: native_mmvq's output to
 // float rounding); else, bitwise native_mmvq's output, kernels in which a warp takes 1, 2 or 4 rows, reading 2+ columns
