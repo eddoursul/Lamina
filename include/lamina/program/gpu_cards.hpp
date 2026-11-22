@@ -33,6 +33,7 @@ struct GpuCard {
     std::optional<uint64_t> vram_only;     ///< vram-only=SIZE: the profile's experts it holds there only, not in RAM
     std::optional<uint64_t> prefetch;      ///< prefetch=SIZE (a tier): a layer's likeliest experts copied ahead
     std::optional<std::string> clocks;     ///< clocks=MIN-MAX/MEM in MHz (a tier): locked while generating; 0: none
+    std::optional<std::pair<int, int>> layers;   ///< layers=A-B (a later card of Inkling 2's path): the layers it runs
     std::optional<double> sleep;           ///< sleep=TIME (a tier after the first): the CPU's time a layer below which
                                            ///< it sleeps
     bool has_cache() const { return cache_auto || cache_slots.has_value() || cache_bytes.has_value(); }

@@ -411,6 +411,12 @@ agrees with itself at 96.9-98.4% and 3.7e-3 to 1.5e-2. A prompt chunk's experts 
 this card (the FP16 tensor cores; llama.cpp and Lamina's shorter parts round them to 8 bits): a sum's error against
 exact arithmetic is 2,000 times smaller there.
 
+The layers over two cards (a later card's `layers=6-17`: the repeated layers, half of the weights, on the other RTX
+3090; both on 4 lanes): the logits are one card's to the bit. Through the API with drafts 167 / 177 / 314 tok/s for
+code / thinking / an edit (one card: 158 / 167 / 322 - each card works part of a token and stays under its power
+cap), prompts at 2,380 / 2,760 / 2,335 tok/s at 2.9K / 21K / 86K tokens (3,274 / 3,344 / 2,805), a context of
+610,304 tokens in FP16 on the two cards.
+
 A card smaller than the model: the RTX 5070 Ti (16 GB, the card the desktop draws on) alone with the same file (15.7
 GB). Lamina keeps the experts in RAM and the ones used most on the card (2,330 of the 3,072 at the start, fewer as
 the context grows; 2-5% of a token's routed experts are the CPU's); llama.cpp's fork as it fits the model by itself

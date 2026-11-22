@@ -121,7 +121,7 @@ std::string seconds_text(double seconds) {
 }
 
 const std::vector<std::string_view>& gpu_card_keys() {
-    static const std::vector<std::string_view> keys = {"cache", "reserve", "vram-only", "prefetch", "clocks", "sleep"};
+    static const std::vector<std::string_view> keys = {"cache", "reserve", "vram-only", "prefetch", "clocks", "sleep", "layers"};
     return keys;
 }
 
@@ -201,6 +201,14 @@ bool parse_gpu_card(std::string_view text, GpuCard& card, std::string& err) {
                     return false;
                 }
             card.clocks = std::string(value);
+        } else if (key == "layers") {
+            int a = -1, b = -1;
+            char rest = 0;
+            if (std::sscanf(std::string(value).c_str(), "%d-%d%c", &a, &b, &rest) != 2 || a < 0 || b < a) {
+                err = "layers=" + std::string(value) + ": the first and the last layer the card runs (6-17)";
+                return false;
+            }
+            card.layers = std::make_pair(a, b);
         } else {   // sleep
             double s = 0.0;
             if (!parse_seconds(value, s, e)) {
@@ -223,6 +231,7 @@ std::string gpu_card_text(const GpuCard& c) {
     else if (c.vram_only) out += ",vram-only=" + size_text(*c.vram_only);
     if (c.prefetch) out += ",prefetch=" + size_text(*c.prefetch);
     if (c.clocks) out += ",clocks=" + *c.clocks;
+    if (c.layers) out += ",layers=" + std::to_string(c.layers->first) + "-" + std::to_string(c.layers->second);
     if (c.sleep) out += ",sleep=" + seconds_text(*c.sleep);
     return out;
 }

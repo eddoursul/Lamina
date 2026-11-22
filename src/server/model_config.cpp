@@ -437,7 +437,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 const GpuInfo* g = i < 0 ? nullptr : gpu_by_index(gpus, i);
                 say("  " + (g != nullptr ? gpu_line(*g) : name) + ": " + replace_all(card.substr(comma + 1), ",", ", ") +
                     (flash ? "" : inkling ? " (this model's path takes the cards' order, the first card's cache= and reserve=, a "
-                                            "later card's clocks= and reserve=)"
+                                            "later card's clocks= and reserve=, and one later card's layers=)"
                                           : " (this model's path takes the cards' order alone)"));
             }
             // what it takes
@@ -475,10 +475,17 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 // (a card's reserve= in place of the VRAM it leaves free by its use: 0.7 GiB, 1.5 where it draws the
                 // desktop; ~1.5 GiB of buffers beside the model on the first card, ~1 GiB on another)
                 std::vector<std::pair<std::string, double>> kept;   // each card's reserve=, by its name in the config
+                int split_gpu = -1;   // the card a layer split runs layers on (layers=A-B), and those layers
+                std::string split_layers;
                 for (const std::string& card : engine_cards(c)) {
                     program::GpuCard gc;
                     std::string e;
-                    if (program::parse_gpu_card(card.c_str(), gc, e) && gc.reserve) kept.emplace_back(gc.name, (double) *gc.reserve);
+                    if (!program::parse_gpu_card(card.c_str(), gc, e)) continue;
+                    if (gc.reserve) kept.emplace_back(gc.name, (double) *gc.reserve);
+                    if (gc.layers && gc.name != "auto") {
+                        split_gpu = find_gpu(gc.name, gpus);
+                        split_layers = std::to_string(gc.layers->first) + "-" + std::to_string(gc.layers->second);
+                    }
                 }
                 auto keeps = [&](const GpuInfo& g, double by_use) {
                     for (const auto& [name, bytes] : kept)
@@ -502,7 +509,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi - beside_it(*main) -
                            keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
                 for (size_t i = 1; i < on.size(); ++i)
-                    if (const GpuInfo* g = gpu_by_index(gpus, on[i])) {
+                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]); g != nullptr && g->index != split_gpu) {
                         rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi - beside_it(*g) -
                                                             keeps(*g, (g->display ? 1.5 : 0.7) * gibi)));
                         others += rooms.back().second;
@@ -517,7 +524,13 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     for (const auto& [g, bytes] : rooms) say("    " + gpu_line(*g) + ": K and V of " + thousands(bytes));
                 };
                 const std::string cells = std::string(q8 ? "17" : "32") + " KiB a token, " + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" 17");
-                if (main != nullptr && room < (on.size() > 1 ? 16384.0 : 32768.0) * per) {
+                if (const GpuInfo* g = split_gpu < 0 ? nullptr : gpu_by_index(gpus, split_gpu)) {
+                    // A layer split: the model's weights are over the two cards, each with its layers' cells; what
+                    // context that leaves is the start's to say (it sizes both cards), and the cards after hold none.
+                    say("  VRAM: layers " + split_layers + " run on " + gpu_line(*g) + ", with their weights and the K and V of their "
+                        "full-attention applications; the others on " + (main != nullptr ? gpu_line(*main) : std::string("the first card")) +
+                        ". The context is what the fuller of the two holds: the engine's start says it");
+                } else if (main != nullptr && room < (on.size() > 1 ? 16384.0 : 32768.0) * per) {
                     // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
                     // those used most (fewer as the context grows); the ones RAM has no room for stay on the card.
                     const double experts = (double) m.expert_bytes, dense = (double) m.bytes - experts;

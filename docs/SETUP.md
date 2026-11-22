@@ -405,7 +405,11 @@ each card scores its cells for every token, and the context is what the cards ho
 1,048,576 tokens. A card's `clocks=` locks its clocks while it holds cells and a request runs (a card that idles
 between its scans answers late; the lock needs administrator rights), and its `reserve=SIZE` is the VRAM it leaves
 free (700 MiB, or 1,536 where the desktop draws on it). `lamina-server --check` says what each card holds: the
-model and K and V of how many tokens, in FP16 and in q8_0. Its options: `--kv fp16 | q8_0`;
+model and K and V of how many tokens, in FP16 and in q8_0. Where no card holds the model, one later card can run a
+run of its layers instead - `layers=A-B` (`{"id": "RTX 3060", "layers": "6-17"}`): the layers' weights and their
+part of the context are on it, and the answers are one card's to the bit. The run holds the layers that repeat
+(Inkling 2 Mini: 6-17, half of the weights) all or not at all, and leaves the first and the last layer on the
+first card. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
 32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise

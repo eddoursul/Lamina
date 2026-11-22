@@ -143,6 +143,18 @@ template <class T> T* halloc(size_t n) {   // pinned, zeroed (pages given back a
     return (T*) p;
 }
 
+/// Another card current while it lives (-1: the one that is)
+struct OnDev {
+    int was = 0;
+    explicit OnDev(int dev) {
+        CK(cudaGetDevice(&was));
+        if (dev >= 0 && dev != was) CK(cudaSetDevice(dev));
+    }
+    ~OnDev() { cudaSetDevice(was); }
+    OnDev(const OnDev&) = delete;
+    OnDev& operator=(const OnDev&) = delete;
+};
+
 constexpr int64_t kGrow = 4096;           // cells a full visit's storage grows by
 constexpr int64_t kContextFloor = 32768;  // a context not set is what fits, not under this
 // the vocabulary's message tokens: where a prompt's read places the cache's checkpoints
@@ -224,6 +236,12 @@ struct Model {
     uint64_t arena_bytes = 0, fixed_bytes = 0;
     uint64_t expert_cap = 0;                 // --expert-cache: the experts' VRAM at most (0: no limit)
     std::string ranking;                     // what the ranking is, for the log
+    // A layer split: the layers [sat_lo, sat_hi] - their weights, and in the engine their visits' cells and states -
+    // are on card sat_dev (-1: none).  The loop is whole among them or not at all, the first and the last layer are
+    // this card's: a forward crosses there once and back once, between two passes of nothing.
+    int sat_dev = -1, sat_lo = 0, sat_hi = -1;
+    double sat_gib = 0;
+    bool on_sat(int64_t l) const { return sat_dev >= 0 && l >= sat_lo && l <= sat_hi; }
 };
 
 /// What a start asks of the loader beside the file
@@ -237,6 +255,7 @@ struct LoadOpts {
     bool q8 = false, cache = false, cell_cards = false;
     int prefill = 1024;
     uint64_t ram_reserve = 0;    // the experts take no RAM below this much available to the system
+    int sat_dev = -1, sat_lo = 0, sat_hi = -1;   // --layer-split: the layers [sat_lo, sat_hi] on card sat_dev
 };
 
 struct Loader {
@@ -423,6 +442,26 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     }
     m.dense_gib = (double) dense / (double) (1ull << 30);
     m.expert_gib = (double) experts / (double) (1ull << 30);
+    uint64_t sat_bytes = 0;   // a split's weights on its card
+    if (o.sat_dev >= 0) {
+        const bool whole = o.sat_lo <= g.loop_start && o.sat_hi >= g.loop_end - 1;
+        const bool none = o.sat_hi < g.loop_start || o.sat_lo >= g.loop_end;
+        if (o.sat_lo < 1 || o.sat_hi > g.n_layers - 2 || o.sat_lo > o.sat_hi || (g.n_pass > 1 && !whole && !none)) {
+            err = "--layer-split: layers A-B among 1 .. " + std::to_string(g.n_layers - 2) + ", with the looped layers " +
+                  std::to_string(g.loop_start) + "-" + std::to_string(g.loop_end - 1) + " all among them or none";
+            return false;
+        }
+        m.sat_dev = o.sat_dev;
+        m.sat_lo = o.sat_lo;
+        m.sat_hi = o.sat_hi;
+        for (size_t s = 0; s < gm.size(); ++s)
+            for (const lamina::TensorInfo& t : gm.shard(s).tensors())
+                if (t.name.rfind("blk.", 0) == 0 && t.name.find("_exps.weight") == std::string::npos &&
+                    m.on_sat(std::atoll(t.name.c_str() + 4)))
+                    sat_bytes += lamina::tensor_payload_bytes(t) + kWeightPad;
+        for (int64_t l = o.sat_lo; l <= o.sat_hi; ++l) sat_bytes += (uint64_t) E * m.layers[(size_t) l].stride + kWeightPad;
+        m.sat_gib = (double) sat_bytes / (double) (1ull << 30);
+    }
     // The experts' place.  A card that holds the dense weights, every expert and what a context takes beside them -
     // its cells (the floor's; those of the context asked for where this card alone holds it), the window rings, the
     // rows of the decode and of a chunk at its fewest - has them all, each in its own slot.  Else they are in RAM
@@ -441,8 +480,26 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         const int64_t least = o.cell_cards ? 4 * kGrow : o.max_ctx > 0 ? std::min(o.max_ctx, kContextFloor) : kContextFloor;
         const int64_t asked = o.max_ctx > 0 && !o.cell_cards ? std::min(o.max_ctx, trained) : least;
         m.expert_cap = o.expert_vram;
-        const bool all = dense + experts + (uint64_t) asked * per_pos + beside + reserve <= fr &&
+        int64_t full_sat = 0;   // the full visits a split runs on its card
+        for (int64_t v = 0; v < g.n_visits(); ++v) full_sat += g.full(g.visit_layer(v)) && m.on_sat(g.visit_layer(v));
+        const uint64_t per_main = per_pos - (uint64_t) full_sat * 2 * cell;
+        const bool all = dense + experts - sat_bytes + (uint64_t) asked * per_main + beside + reserve <= fr &&
                          (o.expert_vram == 0 || o.expert_vram >= experts);
+        if (m.sat_dev >= 0) {   // each card holds its layers and its cells, or the start says which does not
+            const OnDev dv(m.sat_dev);
+            size_t fs = 0, ts = 0;
+            CK(cudaMemGetInfo(&fs, &ts));
+            const uint64_t need = sat_bytes + (uint64_t) asked * (uint64_t) full_sat * 2 * cell + beside + (700ull << 20);
+            if (!all || need > fs) {
+                char b[512];
+                std::snprintf(b, sizeof b, "--layer-split: %s holds its layers with the cells of %lld tokens (%.2f GiB of "
+                              "weights, %.2f GiB of VRAM free)", !all ? "the first card no more" : "the split's card no more",
+                              (long long) asked, !all ? m.dense_gib + m.expert_gib - m.sat_gib : m.sat_gib,
+                              (double) (!all ? fr : fs) / gib);
+                err = b;
+                return false;
+            }
+        }
         if (!all) {
             if (!lamina::core::vmm_available()) {
                 char b[512];
@@ -573,6 +630,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     m.head.n_out = (int) g.n_vocab;   // the padded rows are not computed
 
     for (int64_t l = 0; l < g.n_layers; ++l) {
+        const OnDev dv(m.on_sat(l) ? m.sat_dev : -1);
         Layer& y = m.layers[(size_t) l];
         const std::string p = "blk." + std::to_string(l) + ".";
         y.il = (int) l;
@@ -625,7 +683,8 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
 
     // the experts: every one in a slot of its layer, read in large pieces through a pinned stage
     uint8_t* stage = nullptr;
-    const bool stage_pinned = cudaHostAlloc((void**) &stage, stage_max, cudaHostAllocDefault) == cudaSuccess;
+    const bool stage_pinned = cudaHostAlloc((void**) &stage, stage_max, m.sat_dev >= 0 ? cudaHostAllocPortable
+                                                                                            : cudaHostAllocDefault) == cudaSuccess;
     std::unique_ptr<uint8_t[]> stage_heap;
     if (!stage_pinned) {
         (void) cudaGetLastError();
@@ -644,6 +703,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     std::vector<std::vector<int32_t>> by_rank((size_t) g.n_layers);   // (with experts in RAM: a layer's, the ranking's order)
     for (const auto& [l, e] : m.ranked) by_rank[(size_t) l].push_back(e);
     for (int64_t l = 0; l < g.n_layers; ++l) {
+        const OnDev dv(m.on_sat(l) ? m.sat_dev : -1);
         Layer& y = m.layers[(size_t) l];
         const std::string p = "blk." + std::to_string(l) + ".";
         size_t sg = 0, sd = 0;
@@ -724,6 +784,8 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                  "%lld experts a layer; %s, loaded in %.1f s\n",
                  g.arch.c_str(), (long long) g.n_layers, (long long) g.n_visits(), (long long) g.loop_start,
                  (long long) g.loop_end - 1, (long long) g.n_pass, (long long) E, where, m.load_s);
+    if (m.sat_dev >= 0)
+        std::fprintf(stderr, "lamina: layers %d-%d on GPU %d: %.2f GiB of the weights\n", m.sat_lo, m.sat_hi, m.sat_dev, m.sat_gib);
     return true;
 }
 
@@ -990,7 +1052,9 @@ struct Engine {
     int prefill = 1024;     // rows a prompt chunk takes (0: prompts through the decode's forwards)
     // A chunk grows to prefill_max rows for a part that long while the VRAM free above the reserve holds its larger
     // buffers beside the cells it will write (~0.75 MiB a row), and is back at prefill's when it does not, and after
-    // a request: the VRAM a request leaves is what it was.  Not with experts in RAM, which take free VRAM first.
+    // a request: the VRAM a request leaves is what it was.  With experts in RAM the larger buffers take the coldest
+    // experts' VRAM for a part of two such chunks or more, and those are back before the tokens after it (chunk_fit,
+    // chunk_back); with a layer split both cards take them.
     int prefill_max = 4096;
     int chunk_cap = 0;      // the rows the chunk's buffers hold now
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
@@ -1072,10 +1136,43 @@ struct Engine {
         int fi = -1;      // after it the cards score full visit `fi`
         ik::AttnIn at{};
         int moe = -1;     // after it the host computes visit `moe`'s routed experts that the card has no slot for
+        int cross = -1;   // after it the forward goes on on the split's card (1) or back on this one (0)
     };
     std::map<int, std::vector<Seg>> seg_graphs;   // by rows * 16 + head rows
     std::vector<Seg>* cur_segs = nullptr;         // the one being captured
     bool capturing = false;
+    // ---- a layer split (Model::sat_dev): the visits [v0, v1) run on another card, which has their layers' weights,
+    // their cells, rings and convolution states, and rows of its own.  The engine works on one card at a time
+    // (use_card): its stream and the buffers its helpers take are that card's, so a visit runs there as it does
+    // here.  Between two visits on different cards the forward crosses: the queued work ends (a graph's segment),
+    // the rows that carry the state are packed, copied to the other card and unpacked (the stream, and the block
+    // inputs made so far: carry_list).
+    struct Sat {
+        int dev = -1;
+        int v0 = 0, v1 = 0;
+        int w0 = 0, w1 = 0;                // the window visits among them, counted over all
+        Rows D, P;                         // its decode rows, and a chunk's (as large as this card's)
+        std::vector<void*> ck_dev, ck_pin; // the chunk's buffers there
+        float* cpin = nullptr;             // pinned: a chunk's rows on their way between the cards [kCarry][rows][N]
+        // what the engine swaps for its own while that card is the current one: st, il_buf, il_att, conv_all,
+        // win_raw, main_sms_, main_arch_, il_proj_min, blas, mmq, tc_on
+        cublasHandle_t blas = nullptr;
+        std::unique_ptr<MMQ::Context> mmq;
+        bool tc_on = false;
+        cudaStream_t st = nullptr;
+        void* il_buf = nullptr;
+        void* il_att[3] = {nullptr, nullptr, nullptr};
+        float *conv_all = nullptr, *win_raw = nullptr;
+        int sms = 0, arch = 0, il_proj_min = 0;
+        uint8_t* rings = nullptr;
+        float *pack = nullptr, *pack_main = nullptr;   // the rows on their way: there, and on this card,
+        float* pin = nullptr;                          // and in pinned memory between the two
+    };
+    std::unique_ptr<Sat> sat;
+    bool at_sat = false;
+    std::string sat_clocks;          // --layer-split-clocks: its lock while a request runs
+    bool on_sat(int v) const { return sat && v >= sat->v0 && v < sat->v1; }
+    Rows& sat_rows(Rows& R) { return &R == &P ? sat->P : sat->D; }
 
     // ---- the drafter (--dspark): its weights, a ring of context cells a layer (K and V of every position the target
     // ran, made from the target's states in that forward: positions as slots, so a block's own rows at the sequence's
@@ -1494,6 +1591,19 @@ struct Engine {
         chunk_cap = rows;
         if (!cards.empty()) chunk_parts();
         CK(cudaDeviceSynchronize());   // (the buffers' zeroing has run: the stream does not wait for it)
+        if (sat) {   // the split's card: the same rows there, and the pinned rows between the two
+            use_card(true);
+            const size_t s0 = g_owned ? g_owned->dev.size() : 0, p0 = g_owned ? g_owned->pinned.size() : 0;
+            sat->P = Rows{};
+            make_rows(sat->P, rows, true);
+            sat->cpin = halloc<float>((size_t) ik::kCarry * (size_t) rows * (size_t) m->g.n_embd);
+            if (g_owned) {
+                sat->ck_dev.assign(g_owned->dev.begin() + (long) s0, g_owned->dev.end());
+                sat->ck_pin.assign(g_owned->pinned.begin() + (long) p0, g_owned->pinned.end());
+            }
+            CK(cudaDeviceSynchronize());
+            use_card(false);
+        }
     }
     /// They are freed (the stream idle); a prompt's logits they held move to the decode rows' first
     void chunk_free() {
@@ -1519,6 +1629,24 @@ struct Engine {
         ck_pin.clear();
         P = Rows{};
         chunk_cap = 0;
+        if (sat) {
+            const OnDev dv(sat->dev);
+            CK(cudaDeviceSynchronize());
+            if (g_owned) {
+                std::lock_guard<std::mutex> lk(g_owned->mu);
+                for (std::vector<void*>* all : {&g_owned->dev, &g_owned->pinned})
+                    all->erase(std::remove_if(all->begin(), all->end(), [&](void* q) {
+                        return std::find(sat->ck_dev.begin(), sat->ck_dev.end(), q) != sat->ck_dev.end() ||
+                               std::find(sat->ck_pin.begin(), sat->ck_pin.end(), q) != sat->ck_pin.end();
+                    }), all->end());
+            }
+            for (void* q : sat->ck_dev) CK(cudaFree(q));
+            for (void* q : sat->ck_pin) CK(cudaFreeHost(q));
+            sat->ck_dev.clear();
+            sat->ck_pin.clear();
+            sat->P = Rows{};
+            sat->cpin = nullptr;
+        }
     }
     void chunk_set(int rows) {
         if (rows == chunk_cap) return;
@@ -1579,6 +1707,12 @@ struct Engine {
         const int64_t p0 = pos();
         auto fits = [&](int rows, bool keep) {   // the buffers of `rows` rows beside the cells of a chunk that long
             const int64_t more = (int64_t) chunk_bytes(rows) - (int64_t) chunk_bytes(chunk_cap);
+            if (sat && more > 0) {   // (the split's card takes the same buffers: above its cells' next step and 700 MiB)
+                const OnDev dv(sat->dev);
+                size_t fs = 0, ts = 0;
+                CK(cudaMemGetInfo(&fs, &ts));
+                if ((uint64_t) more + (1ull << 30) > fs) return false;
+            }
             return cells_fit(std::min<int64_t>(ctx, p0 + std::min<int64_t>(rows, left)), more > 0 ? more + (256ll << 20) : more, keep);
         };
         // a parked conversation's copy on the card gives way to a larger chunk for a part long enough to gain more
@@ -1660,12 +1794,44 @@ struct Engine {
         const size_t N = (size_t) g.n_embd, D_ = (size_t) g.head_dim, KV = (size_t) g.kv_width(), C = (size_t) g.n_conv;
         CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
         own(&Owned::streams, st);
+        CK(cudaGetDevice(&main_dev));
         cell_bytes = kv_q8 ? (size_t) g.n_head_kv * (D_ / 32) * 34 : KV * 2;
         make_rows(D, kMaxT, false);
         logits_h = halloc<float>((size_t) g.n_vocab);
         il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));   // (the drafter's start multiplies through the head)
         for (void*& b : il_att) b = dzero<uint8_t>(K::native_q8_1_il_bytes((int) g.n_embd, kMaxT));
         if (il_proj_min == 0) il_proj_min = main_arch() >= 10 ? 8 : 3;
+        if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
+            sat = std::make_unique<Sat>();
+            sat->dev = m->sat_dev;
+            const OnDev dv(sat->dev);
+            CK(cudaStreamCreateWithFlags(&sat->st, cudaStreamNonBlocking));
+            own(&Owned::streams, sat->st);
+            sat->il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));
+            for (void*& b : sat->il_att) b = dzero<uint8_t>(K::native_q8_1_il_bytes((int) g.n_embd, kMaxT));
+            cudaDeviceProp prop{};
+            CK(cudaGetDeviceProperties(&prop, sat->dev));
+            sat->sms = std::max(1, prop.multiProcessorCount);
+            sat->arch = prop.major;
+            sat->il_proj_min = std::getenv("LAMINA_INK_ILP") ? il_proj_min : prop.major >= 10 ? 8 : 3;
+            sat->pack = dzero<float>((size_t) ik::kCarry * kMaxT * N);
+            sat->tc_on = std::getenv("LAMINA_INK_TC") ? tc_on : MMQ::built() && !MMQ::native_fp4(40);
+            std::string why;
+            if (!sat_clocks.empty() && sat_clocks != "0" && !clocks.add(sat->dev, sat_clocks, why))
+                std::fprintf(stderr, "lamina: --layer-split-clocks %s: %s: GPU %d keeps the driver's clocks\n", sat_clocks.c_str(),
+                             why.c_str(), sat->dev);
+        }
+        if (sat && sp != nullptr && 1 + nblocks() + sp->n_layer + 1 > ik::kCarry) {
+            std::fprintf(stderr, "lamina: --layer-split: a drafter of %d layers passes the rows a crossing carries\n", sp->n_layer);
+            throw Fatal{1};
+        }
+        if (sat) {
+            sat->pack_main = dzero<float>((size_t) ik::kCarry * kMaxT * N);
+            sat->pin = halloc<float>((size_t) ik::kCarry * kMaxT * N);
+            use_card(true);   // (a rows' start-up work goes to the current card's stream)
+            make_rows(sat->D, kMaxT, false);
+            use_card(false);
+        }
         if (sp != nullptr) spark_init();
         if (const char* f = std::getenv("LAMINA_INK_ROUTE")) {
             route_f = std::fopen(f, "wb");
@@ -1754,6 +1920,14 @@ struct Engine {
                     std::fprintf(stderr, "lamina: cuBLAS could not start\n");
                     throw Fatal{1};
                 }
+                if (sat) {
+                    const OnDev dv(sat->dev);
+                    sat->mmq = std::make_unique<MMQ::Context>();
+                    if (cublasCreate(&sat->blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(sat->blas, sat->st) != CUBLAS_STATUS_SUCCESS) {
+                        std::fprintf(stderr, "lamina: cuBLAS could not start on the split's card\n");
+                        throw Fatal{1};
+                    }
+                }
                 chunk_alloc(prefill);
                 gemm(m->layers[0].router, (int) g.n_expert, (int) g.n_embd, P.nrm, 1, P.probs);   // cuBLAS's start, not a first prompt's
                 if (m->in_ram) {
@@ -1778,6 +1952,23 @@ struct Engine {
         for (int64_t v = 0; v < nv; ++v) n_win += !g.full(g.visit_layer(v));
         ring_bytes = (size_t) n_win * 2 * (size_t) ring_cap * cell_bytes;
         rings = dzero<uint8_t>(ring_bytes);
+        if (sat) {   // (a visit's place in the three arrays is the same on either card)
+            const OnDev dv(sat->dev);
+            sat->conv_all = dzero<float>((size_t) nv * conv_floats);
+            sat->win_raw = dzero<float>((size_t) nv * kMaxT * (size_t) (2 * KV + 2 * N));
+            sat->rings = dzero<uint8_t>(ring_bytes);
+            sat->v0 = (int) nv;
+            for (int64_t v = 0; v < nv; ++v)
+                if (m->on_sat(g.visit_layer(v))) {
+                    sat->v0 = std::min(sat->v0, (int) v);
+                    sat->v1 = (int) v + 1;
+                }
+            for (int64_t v = 0; v < nv; ++v) {
+                const int win = g.full(g.visit_layer(v)) ? 0 : 1;
+                sat->w0 += v < sat->v0 ? win : 0;
+                sat->w1 += v < sat->v1 ? win : 0;
+            }
+        }
         visits.resize((size_t) nv);
         if (m->in_ram) sent_rows.assign((size_t) nv, std::vector<int32_t>((size_t) g.n_expert, 0));
         int wi = 0;
@@ -1785,13 +1976,14 @@ struct Engine {
             Visit& V = visits[(size_t) v];
             V.layer = (int) g.visit_layer(v);
             V.pass = (int) g.visit_pass(v);
-            V.conv = conv_all + (size_t) v * conv_floats;
+            V.conv = (on_sat((int) v) ? sat->conv_all : conv_all) + (size_t) v * conv_floats;
             V.cells.q8 = kv_q8 ? 1 : 0;
             if (!g.full(V.layer)) {
+                uint8_t* const of = on_sat((int) v) ? sat->rings : rings;
                 V.cells.ring = 1;
                 V.cells.cap = ring_cap;
-                V.cells.k = rings + (size_t) (2 * wi) * (size_t) ring_cap * cell_bytes;
-                V.cells.v = rings + (size_t) (2 * wi + 1) * (size_t) ring_cap * cell_bytes;
+                V.cells.k = of + (size_t) (2 * wi) * (size_t) ring_cap * cell_bytes;
+                V.cells.v = of + (size_t) (2 * wi + 1) * (size_t) ring_cap * cell_bytes;
                 ++wi;
             }
         }
@@ -1807,7 +1999,9 @@ struct Engine {
 
         // the context: what was asked, else what the free VRAM holds of the trained one (the full visits' cells), on
         // this card and on the cell cards
-        const uint64_t per_pos = (uint64_t) g.n_full_visits() * 2 * cell_bytes;
+        int64_t full_sat = 0;   // the full visits a split runs on its card: their cells are there
+        for (int64_t v = 0; v < nv; ++v) full_sat += g.full(g.visit_layer(v)) && on_sat((int) v);
+        const uint64_t per_pos = (uint64_t) (g.n_full_visits() - full_sat) * 2 * cell_bytes;
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
         // (with experts in RAM what is free now is the cells' once every expert has given way: but a chunk's scratch
@@ -1826,6 +2020,16 @@ struct Engine {
             fr -= std::min(fr, x_most);
         }
         int64_t fits = (int64_t) ((fr > reserve ? fr - reserve : 0) / per_pos) / kGrow * kGrow;
+        if (sat) {   // the split's card: its rows' partial sums, and the cells its VRAM holds above 700 MiB
+            const OnDev dv(sat->dev);
+            sat->D.n_part = D.n_part;
+            sat->D.part = dzero<float>((size_t) kMaxT * (size_t) g.n_head * (size_t) D.n_part * (D_ + 2));
+            size_t fs = 0, ts = 0;
+            CK(cudaMemGetInfo(&fs, &ts));
+            const uint64_t keep = 700ull << 20;
+            if (full_sat > 0)
+                fits = std::min(fits, (int64_t) ((fs > keep ? fs - keep : 0) / ((uint64_t) full_sat * 2 * cell_bytes)) / kGrow * kGrow);
+        }
         grow = grow_cells && lamina::core::vmm_available();
         CK(cudaGetDevice(&main_dev));
         full_of.assign(visits.size(), -1);
@@ -1869,6 +2073,7 @@ struct Engine {
         }
         for (Visit& V : visits) {
             if (V.cells.ring) continue;
+            const OnDev dv(on_sat((int) (&V - visits.data())) ? sat->dev : -1);
             V.cells.cap = ctx;
             const uint64_t bytes = (uint64_t) ctx * cell_bytes;
             if (grow) {
@@ -2310,9 +2515,16 @@ struct Engine {
         const int64_t target = std::min<int64_t>(ctx, (n + kGrow - 1) / kGrow * kGrow);
         const uint64_t G = lamina::core::vmm_granularity();
         auto chunks = [&](int64_t cells) { return (int64_t) (((uint64_t) cells * cell_bytes + G - 1) / G); };
-        int64_t ranges = 0;
-        for (const Visit& V : visits) ranges += V.k_vm ? 2 : 0;
+        int64_t ranges = 0, ranges_sat = 0;
+        for (size_t v = 0; v < visits.size(); ++v)
+            if (visits[v].k_vm) (on_sat((int) v) ? ranges_sat : ranges) += 2;
         const int64_t need = (chunks(target) - chunks(mapped)) * ranges;
+        if (ranges_sat > 0) {   // (the split's card: what is free above 700 MiB)
+            const OnDev dv(sat->dev);
+            size_t fs = 0, ts = 0;
+            CK(cudaMemGetInfo(&fs, &ts));
+            if ((uint64_t) ((chunks(target) - chunks(mapped)) * ranges_sat) * G + (700ull << 20) > fs) return false;
+        }
         for (;;) {
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
@@ -2337,9 +2549,15 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         auto take = [&] { return take_spare(); };
         const int64_t from = (int64_t) ((uint64_t) lo * cell_bytes / G);
-        for (Visit& V : visits)
-            if (V.k_vm && (!V.k_vm->map_range(from, chunks(target), take) || !V.v_vm->map_range(from, chunks(target), take)))
+        for (Visit& V : visits) {
+            if (!V.k_vm) continue;
+            const bool there = on_sat((int) (&V - visits.data()));
+            const OnDev dv(there ? sat->dev : -1);
+            auto fresh = [] { return (lamina::core::VmmChunk) 0; };   // (the spare chunks are this card's)
+            if (there ? !V.k_vm->map_range(from, chunks(target), fresh) || !V.v_vm->map_range(from, chunks(target), fresh)
+                      : !V.k_vm->map_range(from, chunks(target), take) || !V.v_vm->map_range(from, chunks(target), take))
                 return false;
+        }
         mapped = target;
         return true;
     }
@@ -3042,9 +3260,11 @@ struct Engine {
     /// (`ld`: floats from one row of C to the next, m when not given)
     void gemm(const float* A, int m_, int k, const float* B, int T, float* C, int ld = 0) {
         const float one = 1.f, zero = 0.f;
-        if (cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m_, T, k, &one, A, k, B, k, &zero, C, ld > 0 ? ld : m_) !=
-            CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "lamina: a cuBLAS product failed\n");
+        if (const cublasStatus_t cs = cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m_, T, k, &one, A, k, B, k, &zero, C, ld > 0 ? ld : m_);
+            cs != CUBLAS_STATUS_SUCCESS) {
+            int dev = -1;
+            cudaGetDevice(&dev);
+            std::fprintf(stderr, "lamina: a cuBLAS product failed (status %d on GPU %d: %d x %d x %d)\n", (int) cs, dev, m_, T, k);
             throw Fatal{1};
         }
     }
@@ -4306,6 +4526,91 @@ struct Engine {
         R.step_h[R.cap + 3] = (int32_t) stretch_of(lo);
         R.step_h[R.cap + 4] = (int32_t) (T + m->g.n_swa - 1);
     }
+    /// The card the next visits run on: its stream and its buffers are the engine's from here
+    void use_card(bool there) {
+        if (!sat || there == at_sat) return;
+        std::swap(st, sat->st);
+        std::swap(il_buf, sat->il_buf);
+        for (int i = 0; i < 3; ++i) std::swap(il_att[i], sat->il_att[i]);
+        std::swap(conv_all, sat->conv_all);
+        std::swap(win_raw, sat->win_raw);
+        std::swap(main_sms_, sat->sms);
+        std::swap(main_arch_, sat->arch);
+        std::swap(il_proj_min, sat->il_proj_min);
+        std::swap(blas, sat->blas);
+        std::swap(mmq, sat->mmq);
+        std::swap(tc_on, sat->tc_on);
+        at_sat = there;
+        CK(cudaSetDevice(there ? sat->dev : main_dev));
+    }
+    /// The rows that carry the state into visit v, in `R`: the stream and the block inputs made before its layer
+    int carry_list(const Rows& R, int v, float** buf) const {
+        const Geometry& g = m->g;
+        const int l = visits[(size_t) v].layer, res = (int) g.res_block;
+        const int use_pass = l >= g.loop_end ? (int) g.n_pass - 1 : 0;
+        int n = 0;
+        buf[n++] = R.x;
+        for (int j = 0; j < (l + res - 1) / res; ++j) buf[n++] = blk_at(R, j, use_pass);
+        // (the drafter's mixes of the target's states, where a tap of the split's card adds to them and one has begun
+        // them: else they stay on this card)
+        bool taps_there = false;
+        for (size_t k = 0; sp != nullptr && k + 1 < sp->taps.size(); ++k) taps_there = taps_there || on_sat(sp->taps[k]);
+        if (taps_there && sp->taps.front() < v)
+            for (int r = 0; r <= sp->n_layer; ++r) buf[n++] = R.f_fused + (size_t) r * (size_t) R.cap * (size_t) m->g.n_embd;
+        return n;
+    }
+    /// The forward goes on at visit v on the other card: what is queued here ends (a graph's segment where one is
+    /// captured), the rows that carry the state are packed, copied over and unpacked there
+    void cross(Rows& R, int T, int v) {
+        const bool there = !at_sat;
+        const int N = (int) m->g.n_embd;
+        ik::CarryIn a{};
+        a.N = N;
+        a.T = T;
+        Rows& from = at_sat ? sat_rows(R) : R;
+        Rows& to = there ? sat_rows(R) : R;
+        if (R.batch) {   // a chunk's rows: each buffer through pinned memory as it lies
+            const size_t row = (size_t) T * (size_t) N;
+            const int nb = carry_list(from, v, a.buf);
+            for (int i = 0; i < nb; ++i) CK(cudaMemcpyAsync(sat->cpin + (size_t) i * row, a.buf[i], row * 4, cudaMemcpyDeviceToHost, st));
+            carry(there);
+            (void) carry_list(to, v, a.buf);
+            for (int i = 0; i < nb; ++i) CK(cudaMemcpyAsync(a.buf[i], sat->cpin + (size_t) i * row, row * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(to.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
+            return;
+        }
+        const int n = carry_list(from, v, a.buf);
+        a.pack = at_sat ? sat->pack : sat->pack_main;
+        const dim3 grid((unsigned) ((N / 4 + ik::kTB - 1) / ik::kTB), (unsigned) T, (unsigned) n);
+        ik::carry_kernel<true><<<grid, ik::kTB, 0, st>>>(a);
+        const size_t bytes = (size_t) n * (size_t) T * (size_t) N * 4;
+        CK(cudaMemcpyAsync(sat->pin, a.pack, bytes, cudaMemcpyDeviceToHost, st));
+        if (capturing) {
+            cudaGraph_t graph = nullptr;
+            Seg sg;
+            CK(cudaStreamEndCapture(st, &graph));
+            CK(cudaGraphInstantiate(&sg.exec, graph, 0));
+            CK(cudaGraphDestroy(graph));
+            own(&Owned::graphs, sg.exec);
+            sg.cross = there ? 1 : 0;
+            cur_segs->push_back(sg);
+            CK(cudaGraphLaunch(sg.exec, st));
+        }
+        carry(there);
+        if (capturing) CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
+        (void) carry_list(to, v, a.buf);
+        a.pack = there ? sat->pack : sat->pack_main;
+        CK(cudaMemcpyAsync(a.pack, sat->pin, bytes, cudaMemcpyHostToDevice, st));
+        ik::carry_kernel<false><<<grid, ik::kTB, 0, st>>>(a);
+        CK(cudaMemcpyAsync(to.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
+    }
+    /// The packed rows are in pinned memory once this card's stream is through; the other card is the current one
+    /// after, and its segment takes them from there (a copy between the cards' own memory took 1.1 ms a crossing
+    /// here, cudaMemcpyPeerAsync; outside the streams, cudaMemcpyPeer, it returned before the rows were there)
+    void carry(bool there) {
+        CK(cudaStreamSynchronize(st));
+        use_card(there);
+    }
     /// A forward's launches: the rows and the step record from their pinned copies, every visit, the head's rows; with
     /// `commit` the convolutions' states after a decode forward of several rows (without: keep() takes them)
     void launches(Rows& R, int T, int n_head, int64_t p0, bool commit) {
@@ -4313,7 +4618,14 @@ struct Engine {
         CK(cudaMemcpyAsync(R.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
         tick("embedding");
         if (sp != nullptr) CK(cudaMemcpyAsync(R.f_cs, R.f_cs_h, (size_t) T * (size_t) sp->D * 4, cudaMemcpyHostToDevice, st));
-        for (int v = 0; v < (int) visits.size(); ++v) visit(v, T, R, p0);
+        for (int v = 0; v < (int) visits.size(); ++v) {
+            if (sat && on_sat(v) != at_sat) {
+                // (a card's visits are through: its convolutions' states of a forward of several rows)
+                if (at_sat && commit && !R.batch && T > 1) run("states kept", [&] { conv_commit(T); });
+                cross(R, T, v);
+            }
+            visit(v, T, at_sat ? sat_rows(R) : R, p0);
+        }
         if (sp != nullptr) head_all(R, T, n_head);
         else if (n_head > 0) head(R, T - n_head, n_head);
         if (commit && !R.batch && T > 1) run("states kept", [&] { conv_commit(T); });
@@ -4328,7 +4640,14 @@ struct Engine {
     /// The window's first `a` rows stay: the sequence ends after them
     void keep(int a) {
         if (win_p0 < 0) return;
-        if (win_T > 1) conv_commit(a);
+        if (win_T > 1) {
+            conv_commit(a);
+            if (sat) {   // (the split's card: its visits' states)
+                use_card(true);
+                conv_commit(a);
+                use_card(false);
+            }
+        }
         n_pos = win_p0 + a;
         win_p0 = -1;
         if (sp != nullptr) {   // (the rows after: their context cells are written over by the next forward's)
@@ -4356,7 +4675,7 @@ struct Engine {
         if (!use_graphs) {
             launches(D, T, n_head, p0, !waits);
             prof_collect();
-        } else if (far_mode || moe_cuts) {   // cells on cards, experts in RAM: the graph in segments around their work
+        } else if (far_mode || moe_cuts || sat) {   // cells on cards, experts in RAM, a layer split: the graph in segments
             std::vector<Seg>& segs = seg_graphs[key + (far_mode ? 512 : 0) + (moe_cuts ? 1024 : 0)];
             if (segs.empty()) {
                 cur_segs = &segs;
@@ -4377,6 +4696,7 @@ struct Engine {
                     if (sg.moe >= 0) *bell_h = -1;
                     CK(cudaGraphLaunch(sg.exec, st));
                     if (sg.moe >= 0) moe_host(sg.moe, T);
+                    if (sg.cross >= 0) carry(sg.cross == 1);
                     if (sg.fi < 0) continue;
                     CK(cudaStreamSynchronize(st));
                     cards_scan(sg.fi, T);
@@ -4515,6 +4835,10 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         cards_clear();
         CK(cudaMemsetAsync(conv_all, 0, conv_bytes(), st));
+        if (sat) {
+            const OnDev dv(sat->dev);
+            CK(cudaMemset(sat->conv_all, 0, conv_bytes()));
+        }
         n_pos = 0;
         logits_held = false;
         sp_vlo = sp_vhi = sp_whi = 0;
@@ -4524,8 +4848,28 @@ struct Engine {
     /// left): into the image behind that work, then to `host` (state_bytes()) on the snapshot stream.  Nothing is
     /// waited for but an image still on its way, by the stream.  A `host` that is not pinned gets the image through
     /// snap_via (snap_wait).
+    /// A split's rings and convolution states between the two cards and `host`, now: this card's arrays whole, then
+    /// the bytes of the other card's visits
+    bool state_io(uint8_t* host, bool out) {
+        auto io = [&](uint8_t* h, void* d, size_t n) {
+            return n == 0 || soft(out ? cudaMemcpy(h, d, n, cudaMemcpyDeviceToHost) : cudaMemcpy(d, h, n, cudaMemcpyHostToDevice));
+        };
+        bool ok = soft(cudaStreamSynchronize(st)) && io(host, rings, ring_bytes) && io(host + ring_bytes, conv_all, conv_bytes());
+        const OnDev dv(sat->dev);
+        const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
+        const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4;
+        return ok && soft(cudaStreamSynchronize(sat->st)) && io(host + r0, sat->rings + r0, r1 - r0) &&
+               io(host + ring_bytes + c0, (uint8_t*) sat->conv_all + c0, c1 - c0);
+    }
     bool snap_state(uint8_t* host, bool pinned, bool end) {
         const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
+        if (sat) {   // (a split: the two cards' parts straight into the buffer, waited for)
+            bool ok = state_io(host, true);
+            if (end) ok = ok && soft(cudaMemcpy(host + body, lg_rows->logits, V4, cudaMemcpyDeviceToHost));
+            const int32_t held[2] = {end ? 1 : 0, 0};
+            std::memcpy(host + body + V4, held, 8);
+            return ok;
+        }
         if (!pinned) {
             if (snap_to != nullptr) snap_wait();   // (the one before is in its buffer first)
             snap_to = host;
@@ -4554,6 +4898,21 @@ struct Engine {
     /// its logits back (logits_held).
     bool state_copy(uint8_t* host, bool to_host) {
         const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
+        if (sat) {
+            if (to_host) {
+                const bool ok = state_io(host, true);
+                std::memset(host + body + V4, 0, 8);
+                return ok;
+            }
+            int32_t held = 0;
+            std::memcpy(&held, host + body + V4, 4);
+            bool ok = state_io(host, false);
+            if (held == 1)
+                ok = ok && soft(cudaMemcpy(D.logits, host + body, V4, cudaMemcpyHostToDevice)) && soft(cudaMemset(D.bad, 0, 4));
+            logits_held = ok && held == 1;
+            if (logits_held) lg_rows = &D;
+            return ok;
+        }
         if (to_host) {
             const bool ok = soft(cudaMemcpyAsync(host, rings, ring_bytes, cudaMemcpyDeviceToHost, st)) &&
                             soft(cudaMemcpyAsync(host + ring_bytes, conv_all, conv_bytes(), cudaMemcpyDeviceToHost, st));
@@ -4600,7 +4959,7 @@ struct Engine {
             const uint64_t bytes = kv_bytes(held);
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
-            if (stash_on && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + bytes + (256ull << 20)) {
+            if (stash_on && !sat && lo == 0 && !m->in_ram && cells == held && bytes > 0 && fr >= reserve + bytes + (256ull << 20)) {
                 void* dev = nullptr;
                 if (cudaMalloc(&dev, bytes) == cudaSuccess) {
                     if (on_card(static_cast<uint8_t*>(dev), true)) {
@@ -4623,12 +4982,16 @@ struct Engine {
             bool ok = true;
             for (Visit& V : visits) {
                 if (V.cells.ring) continue;
+                const bool there = on_sat((int) (&V - visits.data()));   // (a split: the visit's cells are its card's)
+                const OnDev dv(there ? sat->dev : -1);
+                const cudaStream_t s_ = there ? sat->st : st;
                 for (uint8_t* d : {V.cells.k, V.cells.v}) {
                     if (w > 0)
-                        ok = ok && soft(to_host ? cudaMemcpyAsync(host, d, w, cudaMemcpyDeviceToHost, st)
-                                                : cudaMemcpyAsync(d, host, w, cudaMemcpyHostToDevice, st));
+                        ok = ok && soft(to_host ? cudaMemcpyAsync(host, d, w, cudaMemcpyDeviceToHost, s_)
+                                                : cudaMemcpyAsync(d, host, w, cudaMemcpyHostToDevice, s_));
                     host += mine;
                 }
+                if (there) ok = soft(cudaStreamSynchronize(s_)) && ok;
             }
             return soft(cudaStreamSynchronize(st)) && ok;
         }
@@ -5101,11 +5464,11 @@ struct Serve {
             return;
         }
         stop.store(false);
-        if (E.lo > 0) E.clocks.hold();   // (cells on cards: their clocks, where they are locked for a request)
+        if (E.lo > 0 || E.sat) E.clocks.hold();   // (cells on cards, a split's card: their clocks, where locked for a request)
         struct Release {
             Engine& e;
             ~Release() {
-                if (e.lo > 0) e.clocks.release_after(e.clocks_hold);
+                if (e.lo > 0 || e.sat) e.clocks.release_after(e.clocks_hold);
             }
         } release{E};
         // ---- what the state continues from: with the cache the longest start of the prompt it holds (the
@@ -5322,7 +5685,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     bool serve = false, file_cache = true, kv_grow = true, graphs = true;
     int prefill = 1024, prefill_max = -1, park_vram = -1;
     std::optional<uint64_t> reserve;
-    std::string cell_gpus, cell_clocks, cell_keep;
+    std::string cell_gpus, cell_clocks, cell_keep, layer_split, split_clocks;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
     int lookup = 16, drafts = -1, cpu_threads = 0;
@@ -5372,6 +5735,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--load-threads") threads = std::max(1, std::atoi(next()));
         else if (a == "--vram-reserve-mib") reserve = (uint64_t) std::max(0, std::atoi(next())) << 20;
         else if (a == "--cell-gpus") cell_gpus = next();   // cards for the full visits' cells (CUDA ordinals)
+        else if (a == "--layer-split") layer_split = next();   // DEV:A-B: the layers A .. B on card DEV
+        else if (a == "--layer-split-clocks") split_clocks = next();   // that card's clocks locked while a request runs
         else if (a == "--cell-gpu-clocks") cell_clocks = next();   // their clocks locked while a request runs
         else if (a == "--cell-gpu-reserve-mib") cell_keep = next();   // the VRAM each leaves free ("-": by its use)
         else if (a == "--clocks-hold") clocks_hold = std::max(0.0, std::atof(next()));
@@ -5446,6 +5811,21 @@ int run_engine(int argc, char** argv, bool check_only) {
     lo.q8 = kv == "q8_0";
     lo.cache = serve && copt.chain > 0;
     lo.cell_cards = !cell_gpus.empty();
+    if (!layer_split.empty()) {
+        int dev = -1, a = 0, b = -1, n_dev = 0;
+        if (std::sscanf(layer_split.c_str(), "%d:%d-%d", &dev, &a, &b) != 3 || cudaGetDeviceCount(&n_dev) != cudaSuccess ||
+            dev < 0 || dev >= n_dev) {
+            std::fprintf(stderr, "lamina: --layer-split takes DEV:A-B, a card's CUDA ordinal and its layers\n");
+            return 2;
+        }
+        lo.sat_dev = dev;
+        lo.sat_lo = a;
+        lo.sat_hi = b;
+        if (!cell_gpus.empty()) {
+            std::fprintf(stderr, "lamina: --cell-gpus left out: with a layer split each card holds its own layers' cells\n");
+            cell_gpus.clear();
+        }
+    }
     lo.prefill = prefill;
     lo.ram_reserve = (uint64_t) copt.ram_reserve_mib << 20;
     if (!load(model, m, lo, err)) {
@@ -5501,6 +5881,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.main_limit = main_cells;
     E.spread = cell_spread;
     E.clocks_hold = clocks_hold;
+    E.sat_clocks = split_clocks;
     for (size_t at = 0; !cell_clocks.empty() && at <= cell_clocks.size();) {
         const size_t comma = std::min(cell_clocks.find(',', at), cell_clocks.size());
         E.cell_clocks.push_back(cell_clocks.substr(at, comma - at));

@@ -1709,6 +1709,7 @@ struct Qwen35Line {
     std::string skipped;   ///< --gpu cards whose settings this path has no use for
     std::vector<std::string> clocks;   ///< each later --gpu card's clocks= ("" where it gives none), as `second` lists them
     std::vector<std::optional<uint64_t>> reserves;   ///< and its reserve=SIZE
+    std::vector<std::optional<std::pair<int, int>>> layers;   ///< and its layers=A-B (Inkling 2's layer split)
     std::optional<uint64_t> main_cache, main_reserve;   ///< the first --gpu card's cache=SIZE and reserve=SIZE
     bool main_slots = false;                             ///< its cache=N (a number of slots)
     std::vector<char*> rest;
@@ -1751,6 +1752,7 @@ Qwen35Line qwen35_line(int argc, char** argv) {
             if (cards > 1) {
                 q.clocks.push_back(c.clocks.value_or(""));
                 q.reserves.push_back(c.reserve);
+                q.layers.push_back(c.layers);
             }
             continue;
         }
@@ -1919,7 +1921,8 @@ int hy4_switch(int argc, char** argv) {
 /// first --gpu card's), made current before its first CUDA call; the other cards hold the cells the main one has no
 /// room for: --cell-gpus (their order), their clocks= as --cell-gpu-clocks, their reserve= as
 /// --cell-gpu-reserve-mib.  The first card's cache=SIZE is the VRAM its experts take at most (--expert-cache), its
-/// reserve= what it leaves free (--vram-reserve-mib).
+/// reserve= what it leaves free (--vram-reserve-mib).  A later card with layers=A-B runs those layers (--layer-split,
+/// its clocks= as --layer-split-clocks) and holds no other cells than theirs.
 int inkling2_switch(int argc, char** argv) {
     Qwen35Line q = qwen35_line(argc, argv);
     if (!q.inkling2()) return kNotQwen35;
@@ -1940,7 +1943,23 @@ int inkling2_switch(int argc, char** argv) {
         return 2;
     }
     std::vector<int> which;
-    std::string list = ordinals(other_cards(q, gpus, dev, &which)), locks, keeps;
+    std::vector<int> others = other_cards(q, gpus, dev, &which);
+    std::string split, split_clocks;   // the card with layers=: the split's
+    for (size_t i = 0; i < others.size(); ++i) {
+        const int w = which[i];
+        if (w < 0 || (size_t) w >= q.layers.size() || !q.layers[(size_t) w]) continue;
+        if (!split.empty()) {
+            std::fprintf(stderr, "lamina: --gpu: one card takes layers= (this model's path splits its layers over two cards)\n");
+            return 2;
+        }
+        split = std::to_string(others[i]) + ":" + std::to_string(q.layers[(size_t) w]->first) + "-" +
+                std::to_string(q.layers[(size_t) w]->second);
+        if ((size_t) w < q.clocks.size()) split_clocks = q.clocks[(size_t) w];
+        others.erase(others.begin() + (long) i);
+        which.erase(which.begin() + (long) i);
+        --i;
+    }
+    std::string list = ordinals(others), locks, keeps;
     bool any = false, any_keep = false;
     for (const int w : which) {
         const std::string c = w >= 0 && (size_t) w < q.clocks.size() && !q.clocks[(size_t) w].empty() ? q.clocks[(size_t) w] : "0";
@@ -1970,6 +1989,15 @@ int inkling2_switch(int argc, char** argv) {
     if (q.main_slots)
         std::fprintf(stderr, "lamina: this model's path takes a card's cache= as a size (cache=6G), not a number of slots: "
                              "left out\n");
+    std::string f_split = "--layer-split", f_split_clocks = "--layer-split-clocks";
+    if (!split.empty() && !given("--layer-split")) {
+        q.rest.push_back(f_split.data());
+        q.rest.push_back(split.data());
+        if (!split_clocks.empty() && split_clocks != "0") {
+            q.rest.push_back(f_split_clocks.data());
+            q.rest.push_back(split_clocks.data());
+        }
+    }
     std::string f_gpus = "--cell-gpus", f_locks = "--cell-gpu-clocks", f_keeps = "--cell-gpu-reserve-mib";
     if (!list.empty()) {
         q.rest.push_back(f_gpus.data());

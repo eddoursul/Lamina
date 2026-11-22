@@ -242,6 +242,27 @@ __global__ void __launch_bounds__(kTB) ctrl_apply_kernel(CtrlIn a) {
     a.out[c][at] = (1.0f - tanhf(sf)) * a.u[c][at] + tanhf(sg) * a.m[c][at];
 }
 
+// ---------------------------------------------------------------------------------------------- a layer split
+/// The rows that carry a forward's state from a card to the next one: T rows of each of n buffers ([cap][N] each)
+/// packed in a row for the copy (OUT), and unpacked on the other side.  Grid (ceil(N / 4 / kTB), T, n).
+constexpr int kCarry = 9;
+struct CarryIn {
+    float* buf[kCarry];
+    float* pack;
+    int N, T;
+};
+template <bool OUT> __global__ void __launch_bounds__(kTB) carry_kernel(CarryIn a) {
+    const int i4 = blockIdx.x * kTB + threadIdx.x, t = blockIdx.y, s = blockIdx.z;
+    if (i4 >= a.N / 4) return;
+    float* b = a.buf[0];
+#pragma unroll
+    for (int i = 1; i < kCarry; ++i) b = s == i ? a.buf[i] : b;
+    float4* const row = reinterpret_cast<float4*>(b + (size_t) t * a.N);
+    float4* const packed = reinterpret_cast<float4*>(a.pack + ((size_t) s * a.T + t) * a.N);
+    if (OUT) packed[i4] = row[i4];
+    else row[i4] = packed[i4];
+}
+
 // ---------------------------------------------------------------------------------------------- norms
 /// y = x rsqrt(mean(x^2) + eps) w, and its q8_1 image (N / 32 blocks) where q is not null; n inputs a launch.  w null:
 /// no weight.  il: the image's blocks interleaved (q8_1_il16.hpp), as the experts' NVFP4 kernels read them.  bm, pm,
