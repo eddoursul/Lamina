@@ -415,15 +415,18 @@ The layers over two cards (a later card's `layers=6-17`: the repeated layers, ha
 quarters of a token's layer applications), through the API with drafts, against the RTX 3090 alone (158 / 167 / 322
 tok/s for code / thinking / an edit, prompts at 3,274 / 3,344 / 2,805 tok/s at 2.9K / 21K / 86K tokens):
 
-| The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 |
+| The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 on the two |
 |---|---|---|---|
-| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) | 176 / 193 / 374 | 2,940 / 3,402 / 2,961 | 221,184 |
-| RTX 5070 Ti, RTX 3090 | 175 / 189 / 350 | 2,791 / 3,107 / 2,604 | 499,712 |
-| RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 167 / 177 / 314 | 2,380 / 2,758 / 2,335 | 610,304 |
+| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) | 176 / 193 / 374 | 2,940 / 3,402 / 2,961 | 495,616 |
+| RTX 5070 Ti, RTX 3090 | 175 / 189 / 350 | 2,791 / 3,107 / 2,604 | 520,192 |
+| RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 167 / 177 / 314 | 2,380 / 2,758 / 2,335 | 786,432 |
 
-Each card works a part of a token and stays under its power cap; the context is what the fuller card holds beside
-its layers. Two cards of one generation give one card's logits to the bit; the 3090 and the 5070 Ti agree with
-llama.cpp as one card does (99.0-99.25% of the argmaxes after the edit prompt, one card 99.5%).
+Each card works a part of a token and stays under its power cap. The two hold the cells of as many tokens as the
+fuller one has room for beside its layers, and the other holds older cells in what it has free; cards after them
+hold more: with the other RTX 3090 for cells the first row's layout has the model's 1,048,576 tokens, reads 171K
+tokens at 2,385 tok/s (the 3090 alone with its cells over the other cards: 2,220) and 341K at 2,270 with 107 tok/s
+after it (2,008 and 100). Two cards of one generation give one card's logits to the bit; the 3090 and the 5070 Ti
+agree with llama.cpp as one card does (99.0-99.25% of the argmaxes after the edit prompt, one card 99.5%).
 
 A card smaller than the model: the RTX 5070 Ti (16 GB, the card the desktop draws on) alone with the same file (15.7
 GB). Lamina keeps the experts in RAM and the ones used most on the card (2,330 of the 3,072 at the start, fewer as

@@ -530,7 +530,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     // context that leaves is the start's to say (it sizes both cards), and the cards after hold none.
                     say("  VRAM: layers " + split_layers + " run on " + gpu_line(*g) + ", with their weights and the K and V of their "
                         "full-attention applications; the others on " + (main != nullptr ? gpu_line(*main) : std::string("the first card")) +
-                        ". The context is what the fuller of the two holds: the engine's start says it");
+                        ". The context is what the two hold between them (the fuller one's cells, and the older ones in what "
+                        "the other has free) and what the cards after them hold: the engine's start says how much");
                 } else if (main != nullptr && room < (on.size() > 1 ? 16384.0 : 32768.0) * per) {
                     // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
                     // those used most (fewer as the context grows); the ones RAM has no room for stay on the card.

@@ -410,8 +410,9 @@ run of its layers instead - `layers=A-B` (`{"id": "RTX 3060", "layers": "6-17"}`
 part of the context are on it, and the answers are one card's to the bit. The run holds the layers that repeat
 (Inkling 2 Mini: 6-17, half of the weights) all or not at all, and leaves the first and the last layer on the
 first card. Those layers are three quarters of a token's work: the faster card runs them best (an RTX 3090 with
-them on an RTX 5070 Ti generates 11-16% faster than the 3090 alone), and the context is what the fuller of the two
-cards holds beside its layers. Both cards take `clocks=` here (each works a part of a token and clocks down in the
+them on an RTX 5070 Ti generates 11-16% faster than the 3090 alone). The two hold the cells of as many tokens as
+the fuller one has room for beside its layers, the other holds older cells in what it has free, and cards after
+the two hold more, as without a split. Both cards take `clocks=` here (each works a part of a token and clocks down in the
 other's), the later one `reserve=`. Without `layers=` the engine does this by itself with the card after the first
 where the first would keep under 80% of the experts (two 12 GB cards: all the experts on cards instead of a third
 of them in RAM); `--layer-split 0` keeps the experts in RAM. Its options: `--kv fp16 | q8_0`;
