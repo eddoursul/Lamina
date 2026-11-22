@@ -414,7 +414,8 @@ them on an RTX 5070 Ti generates 15-25% faster than the 3090 alone), and a promp
 once (30-50% faster there; two cards on slow links gain less). The two hold the cells of as many tokens as
 the fuller one has room for beside its layers, the other holds older cells in what it has free, and cards after
 the two hold more, as without a split. Both cards take `clocks=` here (each works a part of a token and clocks down in the
-other's), the later one `reserve=`. Without `layers=` the engine does this by itself with the card after the first
+other's: an RTX 5070 Ti left to the driver ran at 2,150 or at 2,900 MHz, 5-8% apart in speed -
+`clocks=2900-3090/0` holds it), the later one `reserve=`. Without `layers=` the engine does this by itself with the card after the first
 where the first would keep under 80% of the experts (two 12 GB cards: all the experts on cards instead of a third
 of them in RAM); `--layer-split 0` keeps the experts in RAM. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under

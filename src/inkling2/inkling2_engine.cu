@@ -1253,6 +1253,10 @@ struct Engine {
         float *conv_all = nullptr, *win_raw = nullptr;
         int sms = 0, arch = 0, il_proj_min = 0;
         uint8_t* rings = nullptr;
+        // (a checkpoint's image of its visits' rings and states, its stream and events: as the engine's own)
+        uint8_t* snap = nullptr;
+        cudaStream_t st_snap = nullptr;
+        cudaEvent_t ev_snap = nullptr, ev_landed = nullptr;
         float *pack = nullptr, *pack_main = nullptr;   // the rows on their way: there, and on this card,
         float* pin = nullptr;                          // and in pinned memory between the two
     };
@@ -1433,6 +1437,7 @@ struct Engine {
     bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
     bool stages_apart = false;       // LAMINA_INK_STAGES=2 (a test's): the stretches as in stages, their chunks one card after the other
     bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
+    bool snap_sync = false;          // LAMINA_INK_SNAP_SYNC=1: a split's checkpoint image copied on the spot
     bool stage_log = false;          // LAMINA_INK_STAGE_LOG=1: a line a segment of a part (staged, or why not)
     bool staging = false;            // a staged run is under way
     std::mutex stage_mu;
@@ -2031,6 +2036,7 @@ struct Engine {
         }
         stage_log = std::getenv("LAMINA_INK_STAGE_LOG") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
+        snap_sync = std::getenv("LAMINA_INK_SNAP_SYNC") != nullptr;
         CK(cudaEventCreateWithFlags(&ev_q[0], cudaEventDisableTiming));
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
             sat = std::make_unique<Sat>();
@@ -2232,6 +2238,16 @@ struct Engine {
             CK(cudaEventCreateWithFlags(&ev_snap, cudaEventDisableTiming));
             CK(cudaEventCreateWithFlags(&ev_landed, cudaEventDisableTiming));
             CK(cudaEventRecord(ev_landed, st_snap));
+            if (sat) {   // (the split's card: its visits' part of the image)
+                const OnDev dv(sat->dev);
+                const size_t per = 2 * (size_t) ring_cap * cell_bytes;
+                sat->snap = dalloc<uint8_t>((size_t) (sat->w1 - sat->w0) * per + (size_t) (sat->v1 - sat->v0) * conv_floats * 4);
+                CK(cudaStreamCreateWithFlags(&sat->st_snap, cudaStreamNonBlocking));
+                own(&Owned::streams, sat->st_snap);
+                CK(cudaEventCreateWithFlags(&sat->ev_snap, cudaEventDisableTiming));
+                CK(cudaEventCreateWithFlags(&sat->ev_landed, cudaEventDisableTiming));
+                CK(cudaEventRecord(sat->ev_landed, sat->st_snap));
+            }
         }
 
         // the context: what was asked, else what the free VRAM holds of the trained one (the full visits' cells), on
@@ -5444,7 +5460,7 @@ struct Engine {
     }
     bool snap_state(uint8_t* host, bool pinned, bool end) {
         const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
-        if (sat) {   // (a split: the two cards' parts straight into the buffer, waited for)
+        if (sat && snap_sync) {   // (an A/B: the two cards' parts straight into the buffer, waited for)
             bool ok = state_io(host, true);
             if (end) ok = ok && soft(cudaMemcpy(host + body, lg_rows->logits, V4, cudaMemcpyDeviceToHost));
             const int32_t held[2] = {end ? 1 : 0, 0};
@@ -5455,6 +5471,36 @@ struct Engine {
             if (snap_to != nullptr) snap_wait();   // (the one before is in its buffer first)
             snap_to = host;
             host = snap_via;
+        }
+        if (sat) {
+            // A split: each card's visits' rings and states into that card's image behind its queued work, then to
+            // the buffer on that card's snapshot stream (this card's: the visits before and after the split's).
+            const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
+            const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
+            const uint8_t* const cv = (const uint8_t*) conv_all;
+            auto keep_ = [&](size_t at, const uint8_t* from, size_t n) {
+                return n == 0 || soft(cudaMemcpyAsync(snap + at, from, n, cudaMemcpyDeviceToDevice, st));
+            };
+            auto land = [&](size_t at, size_t n) {
+                return n == 0 || soft(cudaMemcpyAsync(host + at, snap + at, n, cudaMemcpyDeviceToHost, st_snap));
+            };
+            bool ok = soft(cudaStreamWaitEvent(st, ev_landed, 0)) && keep_(0, rings, r0) && keep_(r1, rings + r1, ring_bytes - r1) &&
+                      keep_(ring_bytes, cv, c0) && keep_(ring_bytes + c1, cv + c1, cb - c1);
+            if (end) ok = ok && keep_(body, (const uint8_t*) lg_rows->logits, V4);
+            const int32_t held[2] = {end ? 1 : 0, 0};
+            std::memcpy(host + body + V4, held, 8);
+            ok = ok && soft(cudaEventRecord(ev_snap, st)) && soft(cudaStreamWaitEvent(st_snap, ev_snap, 0)) && land(0, r0) &&
+                 land(r1, ring_bytes - r1) && land(ring_bytes, c0) && land(ring_bytes + c1, cb - c1) && (!end || land(body, V4)) &&
+                 soft(cudaEventRecord(ev_landed, st_snap));
+            const OnDev dv(sat->dev);
+            return ok && soft(cudaStreamWaitEvent(sat->st, sat->ev_landed, 0)) &&
+                   soft(cudaMemcpyAsync(sat->snap, sat->rings + r0, r1 - r0, cudaMemcpyDeviceToDevice, sat->st)) &&
+                   soft(cudaMemcpyAsync(sat->snap + (r1 - r0), (const uint8_t*) sat->conv_all + c0, c1 - c0, cudaMemcpyDeviceToDevice,
+                                        sat->st)) &&
+                   soft(cudaEventRecord(sat->ev_snap, sat->st)) && soft(cudaStreamWaitEvent(sat->st_snap, sat->ev_snap, 0)) &&
+                   soft(cudaMemcpyAsync(host + r0, sat->snap, r1 - r0, cudaMemcpyDeviceToHost, sat->st_snap)) &&
+                   soft(cudaMemcpyAsync(host + ring_bytes + c0, sat->snap + (r1 - r0), c1 - c0, cudaMemcpyDeviceToHost, sat->st_snap)) &&
+                   soft(cudaEventRecord(sat->ev_landed, sat->st_snap)) && (cudaStreamQuery(sat->st), true);
         }
         bool ok = soft(cudaStreamWaitEvent(st, ev_landed, 0)) &&
                   soft(cudaMemcpyAsync(snap, rings, ring_bytes, cudaMemcpyDeviceToDevice, st)) &&
@@ -5471,6 +5517,10 @@ struct Engine {
     void snap_wait() {
         if (snap == nullptr) return;
         (void) cudaStreamSynchronize(st_snap);
+        if (sat && sat->st_snap != nullptr) {
+            const OnDev dv(sat->dev);
+            (void) cudaStreamSynchronize(sat->st_snap);
+        }
         (void) cudaGetLastError();
         if (snap_to != nullptr) std::memcpy(snap_to, snap_via, state_bytes());
         snap_to = nullptr;

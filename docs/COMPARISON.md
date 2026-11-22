@@ -419,8 +419,9 @@ on 2026-11-22, against the RTX 3090 alone (158 / 167 / 322 tok/s for code / thin
 
 | The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 on the two |
 |---|---|---|---|
-| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free: this PC's config | 182 / 203 / 400 | 4,394 / 4,783 / 4,144 | 405,504 |
-| the same without that reserve | 182 / 203 / 400 | 4,387 / 4,798 / 4,285 | 487,424 |
+| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free and its clocks locked at 2,900 MHz: this PC's config | 182 / 203 / 400 | 4,483 / 4,894 / 4,192 | 405,504 |
+| the same at the driver's lower clock (~2,150 MHz: it picks either) | 175 / 193 / 371 | 3,858 / 4,626 / 3,999 | 405,504 |
+| without the reserve, at the higher clock | 182 / 203 / 400 | 4,387 / 4,798 / 4,285 | 487,424 |
 | RTX 5070 Ti, RTX 3090 | 178 / 195 / 361 | 3,289 / 3,572 / 3,039 | 462,848 |
 | RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 167 / 177 / 313 | 3,017 / 3,321 / 2,862 | 778,240 |
 
