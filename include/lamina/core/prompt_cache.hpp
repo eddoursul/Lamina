@@ -148,6 +148,10 @@ protected:
     /// A parked copy's buffer `host` is about to be freed: an engine whose kv_copy kept those cells elsewhere (on the
     /// device while its memory is free) forgets them.
     virtual void kv_drop(const uint8_t* host) { (void) host; }
+    /// The parked conversation whose copy is `host` leaves the park: the kv_copy to the device that follows, whole or
+    /// cut at a checkpoint, is its last (kv_drop comes after).  An engine that left the cells where they were hands
+    /// them over to the live sequence instead of copying them.
+    virtual void kv_take(const uint8_t* host) { (void) host; }
     /// An engine with several sessions: the hooks above act on session `s` from here.
     virtual void session_select(int s) { (void) s; }
     /// The first `cells` K/V cells of session `from` into the selected one's (a start lent by a conversation that

@@ -372,6 +372,7 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
     Seq chosen = parked_.take((size_t) st.from);
     use(st.session);
     vacate();
+    if (chosen.kv) kv_take(chosen.kv.get());
     if (!restore(chosen, best, !whole)) {
         release(chosen, -1);
         return zero();
