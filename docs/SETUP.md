@@ -416,8 +416,11 @@ neither is refused with the numbers). The card has the experts used most, in the
 the start by a ranking (the one built into the programs; `--expert-profile FILE` another), they give way as a
 conversation grows and come back after it. The CPU computes the experts a token routes that the card lacks
 (`--cpu-threads N`: its pool's threads, a worker a core by default), so the speed follows their share: 2-5% of them
-on a 16 GB card with UD-IQ4_XS (an RTX 5070 Ti: 123-313 tok/s through the API, llama.cpp 21), 11-21% with 6 GiB of
-experts on the card (97 tok/s in an agent's session where the whole model on an RTX 3090 gives 154). Which experts
+on a 16 GB card with UD-IQ4_XS (an RTX 5070 Ti: 135-319 tok/s through the API, llama.cpp 21), 11-21% with 6 GiB of
+experts on the card (106 tok/s in an agent's session where the whole model on an RTX 3090 gives 171). A prompt's
+chunk sends the RAM experts it routes to the card - the next layer application's while the card computes the
+current one's, as many as the card's link carries meanwhile: a prompt is read at the card's own speed on a fast
+link (PCIe 4.0 or 5.0 x16), at a third of it on four lanes with 6 GiB of experts on the card. Which experts
 are on the card follows the conversation, and `--expert-profile-save FILE` (the config's `expert_profile_save`,
 which `-m` sets; `--expert-profile-save-every MIN`, 1) keeps the ranking a run's routing makes for the next start.
 `--expert-cache SIZE` (the first card's `cache=SIZE`: `6G`) caps the experts' VRAM. With experts in RAM a request

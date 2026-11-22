@@ -1157,6 +1157,29 @@ struct Engine {
     std::vector<C::ExpertJobMulti> jobs;
     std::unique_ptr<lamina::core::VmmRange> x_vm;   // a chunk's scratch: a layer's RAM experts
     int64_t x_chunks = 0;            // its chunks mapped
+    // Uploads ahead.  A chunk's application sends the RAM experts it routes before its products can start.  Those
+    // of the next application go up meanwhile on a stream of their own: the ones the chunk before routed most
+    // first, then the layer's others, as many as the link carries in kAheadTime of the time the card takes for an
+    // application's products (the attention and the router pass meanwhile too).  A fast link takes a layer's whole
+    // set, and the products seldom wait for an upload; a slow one the few experts every chunk routes most - more
+    // of them there, and the link's work grows at the CPU's cost (the RTX 3090 on 4 lanes with 6 GiB of experts, a
+    // 21K-token prompt: 973 tok/s without, 1,046 / 1,094 / 1,077 / 928 at 0.75 / 1.2 / 2 / 4; the RTX 5070 Ti
+    // alone 2,915 without, 3,446 / 3,528 / 3,546 / 3,551).  The scratch holds both: an application's block lies at
+    // the scratch's start or at its end by its visit's parity, and the next one's experts go to the other end, into
+    // the room this block leaves.  The experts not sent ahead that an application routes follow as before (the
+    // CPU's, or sent before the products).
+    static constexpr double kAheadTime = 1.5;
+    bool ahead_on = true;            // (LAMINA_INK_AHEAD=0: none, a test's)
+    cudaStream_t st_up = nullptr;
+    cudaEvent_t up_ev[4] = {};       // the start and end of an application's own uploads (the link idle beside them:
+    double up_mb = 0;                // their megabytes while the time is not read, for the rate as the link is now),
+    bool gpu_timed = false;          // and of its products (2, 3) while their time is not read
+    std::vector<std::vector<int32_t>> sent_rows;   // [visit][expert]: the rows the chunk before routed to it, in RAM then
+    std::vector<int> ahead_exp;      // the experts sent ahead for visit ahead_v, in the scratch's order
+    int ahead_v = -1, ahead_ns = 0;  // (and the layer's experts on the card when they went up)
+    size_t blk_lo = 0, blk_hi = 0;   // the scratch's bytes the last application's block took
+    double gpu_ms = 0;               // the card's time for an application's products in a chunk (a running mean)
+    long long ck_ahead = 0, ck_hit = 0;   // experts sent ahead, and those of them their application routed
     // A chunk's RAM experts with the fewest rows are the CPU's while the others' blobs are on their way to the card:
     // as many as take the CPU no longer than the uploads left (the rates measured at the start)
     static constexpr int kChunkCpu = 1024;   // entries a visit at most
@@ -1591,6 +1614,7 @@ struct Engine {
             il_proj = (std::atoi(r) & 2) != 0;
         }
         if (const char* r = std::getenv("LAMINA_INK_ILP")) il_proj_min = std::max(2, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_AHEAD")) ahead_on = std::atoi(r) != 0;
         tc_on = MMQ::built() && !MMQ::native_fp4(40);
         if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
@@ -1651,6 +1675,9 @@ struct Engine {
                 std::fprintf(stderr, "lamina: the address range of a chunk's experts could not be reserved\n");
                 throw Fatal{1};
             }
+            CK(cudaStreamCreateWithFlags(&st_up, cudaStreamNonBlocking));
+            own(&Owned::streams, st_up);
+            for (cudaEvent_t& e : up_ev) CK(cudaEventCreateWithFlags(&e, cudaEventDefault));
             rates();
         }
         if (prefill > 0) {
@@ -1717,6 +1744,7 @@ struct Engine {
         ring_bytes = (size_t) n_win * 2 * (size_t) ring_cap * cell_bytes;
         rings = dzero<uint8_t>(ring_bytes);
         visits.resize((size_t) nv);
+        if (m->in_ram) sent_rows.assign((size_t) nv, std::vector<int32_t>((size_t) g.n_expert, 0));
         int wi = 0;
         for (int64_t v = 0; v < nv; ++v) {
             Visit& V = visits[(size_t) v];
@@ -2537,10 +2565,16 @@ struct Engine {
             void* d = nullptr;
             if (cudaMalloc(&d, (size_t) 64 << 20) == cudaSuccess) {
                 up_ms_mb = 1e9;
-                for (int i = 0; i < 4; ++i) {   // (the first: the driver's own start)
+                const auto first = Clock::now();
+                // (the first: the driver's own start; then until three in a row gain nothing - a link at rest takes
+                // its speed up under traffic - for 0.4 s at most)
+                for (int i = 0, flat = 0; i < 64 && flat < 3 && ms_since(first) < 400.0; ++i) {
                     const auto t0 = Clock::now();
                     CK(cudaMemcpy(d, m->arena, (size_t) 64 << 20, cudaMemcpyHostToDevice));
-                    if (i > 0) up_ms_mb = std::min(up_ms_mb, ms_since(t0) / 64.0);
+                    const double v = ms_since(t0) / 64.0;
+                    if (i == 0) continue;
+                    flat = v < 0.9 * up_ms_mb ? 0 : flat + 1;
+                    up_ms_mb = std::min(up_ms_mb, v);
                 }
                 cudaFree(d);
             }
@@ -2643,6 +2677,7 @@ struct Engine {
             const int64_t before = n_held;
             if (!chunks_room(want - x_chunks)) return false;
             if (n_held != before) continue;   // (the experts gave way: a layer may have more in RAM now)
+            ahead_drop();
             if (!x_vm->map_range(0, want, [&] { return take_spare(); })) return false;
             CK(cudaMemset(x_vm->base() + (size_t) x_chunks * G, 0, (size_t) (want - x_chunks) * G));
             x_chunks = want;
@@ -2664,6 +2699,7 @@ struct Engine {
         if (!m->in_ram) return;
         const uint64_t G = lamina::core::vmm_granularity();
         CK(cudaStreamSynchronize(st));
+        ahead_drop();
         if (grow && lo == 0) {
             const int64_t target = std::min<int64_t>(ctx, (pos() + 3 * kGrow - 1) / kGrow * kGrow);
             auto chunks = [&](int64_t cells) { return (int64_t) (((uint64_t) cells * cell_bytes + G - 1) / G); };
@@ -2693,10 +2729,11 @@ struct Engine {
         if (!m->in_ram) return {};
         char b[320];
         std::snprintf(b, sizeof b, "; %lld of %zu experts on the GPU, the CPU's %.1f%% of %lld entries (%.1f ms), %lld swaps; "
-                      "the chunks' %lld RAM entries: %.1f%% the CPU's, %lld experts sent",
+                      "the chunks' %lld RAM entries: %.1f%% the CPU's, %lld experts sent and %lld ahead (%.0f%% of those routed)",
                       (long long) n_held, m->ranked.size(), ex_entries ? 100.0 * (double) ex_ram / (double) ex_entries : 0.0,
-                      ex_entries, ex_ms, swaps, ck_entries, ck_entries ? 100.0 * (double) ck_cpu / (double) ck_entries : 0.0, ck_sent);
-        ex_entries = ex_ram = swaps = ck_entries = ck_cpu = ck_sent = 0;
+                      ex_entries, ex_ms, swaps, ck_entries, ck_entries ? 100.0 * (double) ck_cpu / (double) ck_entries : 0.0, ck_sent,
+                      ck_ahead, ck_ahead ? 100.0 * (double) ck_hit / (double) ck_ahead : 0.0);
+        ex_entries = ex_ram = swaps = ck_entries = ck_cpu = ck_sent = ck_ahead = ck_hit = 0;
         ex_ms = 0;
         return b;
     }
@@ -2984,14 +3021,80 @@ struct Engine {
         ik::conv_state_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>(state, raw, n, T, (int) m->g.n_conv);
     }
 
-    /// A chunk's routed entries through their experts: R.rows [T * top_k][N] without the down rows' scales
-    void experts_batch(Rows& R, const Layer& L, int T) {
+    /// No upload ahead is in flight or waits for its application (before the scratch moves, and between chunks)
+    void ahead_drop() {
+        if (st_up != nullptr) CK(cudaStreamSynchronize(st_up));
+        ahead_v = -1;
+        blk_lo = blk_hi = 0;
+    }
+    /// The last application's uploads and products are through.  From 24 MB (fewer are their start more than their
+    /// rate) the link's rate is the best of the uploads' and the start's - a link at rest is slow when the start
+    /// measures it; the products' time into its running mean.
+    void up_rate() {
+        float ms = 0;
+        if (up_mb >= 24.0 && cudaEventElapsedTime(&ms, up_ev[0], up_ev[1]) == cudaSuccess && ms > 0)
+            up_ms_mb = std::min(up_ms_mb, (double) ms / up_mb);
+        if (gpu_timed && cudaEventElapsedTime(&ms, up_ev[2], up_ev[3]) == cudaSuccess && ms > 0)
+            gpu_ms += (gpu_ms > 0 ? 0.25 : 1.0) * ((double) ms - gpu_ms);
+        (void) cudaGetLastError();
+        up_mb = 0;
+        gpu_timed = false;
+    }
+    /// The experts of a layer the scratch can take
+    size_t scratch_cap(const Layer& L) const {
+        const size_t have = (size_t) x_chunks * (size_t) lamina::core::vmm_granularity();
+        return have > kWeightPad ? (have - kWeightPad) / L.stride : 0;
+    }
+    /// Visit nv's RAM experts go up to its end of the scratch: the ones the chunk before routed most first, as many
+    /// as the link carries in kAheadTime of the card's time for an application's products and the current
+    /// application's block leaves room for
+    void ahead_send(int nv) {
+        const Layer& L = m->layers[(size_t) visits[(size_t) nv].layer];
+        const int E = (int) m->g.n_expert;
+        const int32_t* const at_of = slot_at[(size_t) L.il].data();
+        const std::vector<int32_t>& rows = sent_rows[(size_t) nv];
+        int cand[ik::kExpertMax], nc = 0;
+        for (int k = L.n_slots; k < E; ++k)   // (the ranking's order)
+            if (at_of[L.order[(size_t) k]] < 0) cand[nc++] = L.order[(size_t) k];
+        if (nc == 0 || gpu_ms <= 0) return;
+        const double link = kAheadTime * gpu_ms / (up_ms_mb * (double) L.stride / 1e6);
+        std::stable_sort(cand, cand + nc, [&](int a, int b) { return rows[(size_t) a] > rows[(size_t) b]; });
+        // (an odd visit's experts end at the scratch's end, past the current block; an even one's start at its start,
+        // before the current block - or anywhere where that block is empty)
+        const size_t cap = scratch_cap(L), used = (blk_hi + L.stride - 1) / L.stride;
+        const size_t room = nv & 1 ? (cap > used ? cap - used : 0) : blk_hi > blk_lo ? blk_lo / L.stride : cap;
+        const int n = (int) std::min<double>((double) std::min<size_t>((size_t) nc, room), link);
+        if (n == 0) return;
+        bool take[ik::kExpertMax] = {};
+        for (int i = 0; i < n; ++i) take[cand[i]] = true;
+        uint8_t* const at = x_vm->base() + (nv & 1 ? (cap - (size_t) n) * L.stride : 0);
+        ahead_exp.clear();
+        for (int k = L.n_slots; k < E;) {   // (runs of the order's experts: their blobs are in a row in RAM)
+            if (!take[L.order[(size_t) k]]) {
+                ++k;
+                continue;
+            }
+            const int k0 = k;
+            const size_t p0 = ahead_exp.size();
+            for (; k < E && take[L.order[(size_t) k]]; ++k) ahead_exp.push_back(L.order[(size_t) k]);
+            CK(cudaMemcpyAsync(at + p0 * L.stride, L.blob_h[(size_t) L.order[(size_t) k0]], (size_t) (k - k0) * L.stride,
+                               cudaMemcpyHostToDevice, st_up));
+        }
+        ahead_v = nv;
+        ahead_ns = on_card[(size_t) L.il];
+    }
+
+    /// A chunk's routed entries through their experts: R.rows [T * top_k][N] without the down rows' scales.  v: the
+    /// visit (its RAM experts sent ahead; the next visit's are sent from here).
+    void experts_batch(Rows& R, const Layer& L, int T, int v) {
         const Geometry& g = m->g;
         const int N = (int) g.n_embd, E = (int) g.n_expert, top_k = (int) g.top_k, F = (int) g.n_ff;
         const int n_ent = T * top_k;
         // the entries by expert, on the host: each expert's bounds, an entry's token row and its row of the output
         CK(cudaMemcpyAsync(R.ids_h, R.ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
+        tick_part("experts: the routing, to the host");
+        if (m->in_ram) up_rate();   // (the stream's last timed uploads and products are through)
         // The experts in the launches' order: the layer's slots (every expert's own where the card holds them all),
         // then, with experts in RAM, those of the others this chunk routes, their blobs sent to the scratch - slots in
         // a row in one copy (their blobs are in a row in RAM too).
@@ -3001,16 +3104,35 @@ struct Engine {
         int rows_of[ik::kExpertMax] = {}, place[ik::kExpertMax];
         for (int i = 0; i < n_ent; ++i) ++rows_of[R.ids_h[i]];
         for (int e = 0; e < E; ++e) place[e] = at_of[e];
-        // The CPU's of the RAM experts this chunk routes: those with the fewest rows, while their jobs take it no
-        // longer than the uploads of the others take the card.  The MoE's input rows go to the host for them.
+        // The experts sent ahead for this visit are in the scratch (most often: the products wait for the rest)
+        bool ahead[ik::kExpertMax] = {};
+        int n_ahead = 0, hit = 0;   // (and those of them this application routes)
+        if (ns < E) {
+            if (ahead_v == v && ahead_ns == ns) {
+                CK(cudaStreamSynchronize(st_up));
+                n_ahead = (int) ahead_exp.size();
+                for (const int e : ahead_exp) {
+                    ahead[e] = true;
+                    hit += rows_of[e] > 0;
+                    ck_entries += rows_of[e];
+                }
+                ck_ahead += n_ahead;
+                ck_hit += hit;
+            }
+            ahead_v = -1;
+            for (int e = 0; e < E; ++e) sent_rows[(size_t) v][(size_t) e] = at_of[e] < 0 ? rows_of[e] : 0;
+        }
+        // The CPU's of the other RAM experts this chunk routes: those with the fewest rows, while their jobs take it
+        // no longer than the uploads of the others take the link (those sent ahead among them: the link's time all
+        // the same).  The MoE's input rows go to the host for them.
         bool cpus[ik::kExpertMax] = {};
         int n_cpu = 0;   // their entries
         if (ns < E) {
             int cand[ik::kExpertMax], nc = 0;
-            double t_up = 0;
             const double up = up_ms_mb * (double) L.stride / 1e6;
+            double t_up = up * (double) hit;
             for (int e = 0; e < E; ++e)
-                if (place[e] < 0 && rows_of[e] > 0) {
+                if (place[e] < 0 && rows_of[e] > 0 && !ahead[e]) {
                     cand[nc++] = e;
                     t_up += up;
                     ck_entries += rows_of[e];
@@ -3033,12 +3155,26 @@ struct Engine {
                 CK(cudaMemcpyAsync(bell_h, R.ids, 4, cudaMemcpyDeviceToHost, st));
             }
         }
-        int n_place = ns;
-        uint8_t* const xs = x_vm ? x_vm->base() : nullptr;
+        // The visit's block of the scratch: the experts sent ahead and the ones sent now, in a row - from the
+        // scratch's start, those sent ahead first (an even visit), or up to its end, those sent ahead last
         auto sent = [&](int k) {
             const int e = k < E ? L.order[(size_t) k] : 0;
-            return k < E && place[e] < 0 && rows_of[e] > 0 && !cpus[e];
+            return k < E && place[e] < 0 && rows_of[e] > 0 && !cpus[e] && !ahead[e];
         };
+        int n_sent = 0;
+        for (int k = L.n_slots; ns < E && k < E; ++k) n_sent += sent(k);
+        const bool top = (v & 1) != 0;
+        const size_t x_cap = ns < E ? scratch_cap(L) : 0;
+        uint8_t* const xs = !x_vm ? nullptr : x_vm->base() + (top ? (x_cap - (size_t) (n_ahead + n_sent)) * L.stride : 0);
+        if (ns < E) {
+            blk_lo = (size_t) (xs - x_vm->base());
+            blk_hi = blk_lo + (size_t) (n_ahead + n_sent) * L.stride;
+            CK(cudaEventRecord(up_ev[0], st));
+        } else {
+            blk_lo = blk_hi = 0;   // (a layer with every expert on the card: no block)
+        }
+        for (int i = 0; i < n_ahead; ++i) place[ahead_exp[(size_t) i]] = ns + (top ? n_sent : 0) + i;
+        int n_place = ns + (top ? 0 : n_ahead);
         for (int k = L.n_slots; ns < E && k < E;) {   // (the order's experts after those in VRAM alone: their blobs' order)
             if (!sent(k)) {
                 ++k;
@@ -3050,6 +3186,13 @@ struct Engine {
                                (size_t) (k - k0) * L.stride, cudaMemcpyHostToDevice, st));
             ck_sent += k - k0;
         }
+        if (ns < E) {
+            CK(cudaEventRecord(up_ev[1], st));
+            up_mb = (double) n_sent * (double) L.stride / 1e6;
+            tick_part("experts: the uploads");
+        }
+        if (m->in_ram) CK(cudaEventRecord(up_ev[2], st));
+        n_place = ns + n_ahead + n_sent;
         const int n_gpu = n_place;   // the places the card's products take; the CPU's experts after them (no launch reads those)
         for (int e = 0; e < E; ++e)
             if (cpus[e]) place[e] = n_place++;
@@ -3175,6 +3318,12 @@ struct Engine {
             p.ld_dst = N;
             launch(L.gl.down_off);
         }
+        // the next visit's experts go up beside these products (and the CPU's work here)
+        if (m->in_ram) {
+            CK(cudaEventRecord(up_ev[3], st));
+            gpu_timed = true;
+        }
+        if (ahead_on && m->in_ram && !prof && v + 1 < (int) visits.size()) ahead_send(v + 1);
         if (n_cpu == 0) return;
         // the CPU's experts, while the card works: jobs of up to kMaxT of an expert's rows, their rows packed in the
         // jobs' order, then to their entries behind the card's own
@@ -3616,7 +3765,7 @@ struct Engine {
             tick("MoE input and router");
             probe("the MoE's input", R.nrm, (size_t) T, (size_t) N);
             probe("the router's weights", R.w, (size_t) T, (size_t) top_k);
-            experts_batch(R, L, T);
+            experts_batch(R, L, T, v);
             tick("experts");
             probe("the experts' gate/up rows", R.gu, (size_t) n_ent, (size_t) 2 * g.n_ff);
             probe("the experts' hidden rows", R.h, (size_t) n_ent, (size_t) g.n_ff);
@@ -4222,6 +4371,7 @@ struct Engine {
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
         if (m->in_ram && !scratch_fit()) return false;
         CK(cudaStreamSynchronize(st));
+        if (m->in_ram) ahead_drop();   // (nothing ahead across chunks: the experts may have given way between them)
         prof_start();
         embed(P, tok, T, p0);
         steps(P, p0, T);

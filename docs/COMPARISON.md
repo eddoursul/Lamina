@@ -38,7 +38,7 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   against 18 minutes).
 - [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): with the
   model's drafter in both, Lamina writes 2.3-3.3x as fast as unsloth's llama.cpp fork (158-322 tok/s against 62-98)
-  and reads prompts 3.4-3.8x as fast. On a 16 GB card, which the file does not fit, 141-312 tok/s against 21.
+  and reads prompts 3.4-3.8x as fast. On a 16 GB card, which the file does not fit, 135-319 tok/s against 21.
 
 ## The PC and the engines
 
@@ -419,14 +419,18 @@ requests, greedy, Lamina with its drafts:
 
 | | llama.cpp | llama.cpp, expert cache | Lamina |
 |---|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 21.6 | 20.6 | 141-156 |
-| Generation: thinking (3,000 tokens) | | | 158-205 |
-| Edit: prompt / generation (t/s) | 507-530 / 21.4 | 459-468 / 20.5 | 2,665-2,695 / 305-312 |
+| Generation: code, 31-token prompt (t/s) | 21.6 | 20.6 | 135-142 |
+| Generation: thinking (3,000 tokens) | | | 170-189 |
+| Edit: prompt / generation (t/s) | 507-530 / 21.4 | 459-468 / 20.5 | 3,638-3,676 / 306-319 |
+| 21K-token prompt / generation after it (t/s) | | | 3,575 / 191 |
+| 86K-token prompt (t/s) | | | 2,893 |
 
-An agent's session replayed there (20 requests, a context of up to 28.5K tokens): prompts at 2,050 tok/s, generation
-at 148 tok/s, 155 from the ranking of the experts a first run saved. With 6 GiB of the experts on a card (a 12 GB
-card's share, set on the RTX 3090 with `--expert-cache 6G`: 11-21% of the routed experts the CPU's) the session reads
-prompts at 791 tok/s and generates at 96.6; with every expert on that card 1,779 and 153.7. Agreement with llama.cpp
+The experts in RAM that a prompt's next layer application is to read go up to the card while it computes the
+current one's, so that card reads prompts as fast as the RTX 3090 that holds the whole file. An agent's session
+replayed there (20 requests, a context of up to 28.5K tokens): prompts at 2,854 tok/s, generation at 172-192 tok/s
+by the text written. With 6 GiB of the experts on a card (a 12 GB card's share, set on the RTX 3090 with
+`--expert-cache 6G`, on its 4 lanes: 11-21% of the routed experts the CPU's) the session reads prompts at 964 tok/s
+and generates at 106; with every expert on that card 2,644 and 171. Agreement with llama.cpp
 is the same with experts in RAM (98.5-99.75% of the argmaxes at 6 GiB, 98.5% / 99.25% at 2 GiB).
 
 ## Features
