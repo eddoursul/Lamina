@@ -344,12 +344,15 @@ std::string kernel_limits(const Geometry& g) {
     if (g.head_dim != 128) return no("a head of " + std::to_string(g.head_dim) + " values (its kernels take 128)");
     if (g.n_head / g.n_head_kv > ik::kQH) return no("more than 4 query heads a K/V head");
     if (g.n_rel > ik::kRelMax) return no("a distance bias of more than 32 values a head");
+    if (g.n_head > ik::kRingHeads || g.n_head * g.n_rel > ik::kRingRs) return no("that many heads");
     if (g.n_expert > ik::kExpertMax || g.top_k * kMaxT > ik::kTB) return no("that many experts a layer or a token");
     if (g.n_pass > 1 && (g.gate_rank > ik::kRankMax || ik::kTB % g.gate_rank != 0 || g.gate_rank % 16 != 0))
         return no("a loop gate of that rank");
     if ((g.n_layers + g.res_block - 1) / g.res_block > ik::kBlk) return no("more than 4 blocks of layers");
     if (g.n_embd % 256 != 0 || g.q_width() % 256 != 0) return no("rows that are no multiple of 256 values");
     if (g.n_embd > 4 * ik::kWide) return no("rows of more than 4,096 values");
+    if (g.rel_extent % ik::kTcCells != 0 || g.n_swa % ik::kTcCells != 0)
+        return no("a window or a table of distances that is no multiple of 32 cells");
     return {};
 }
 
@@ -938,7 +941,7 @@ struct Rows {
     // a chunk's window range's cells
     int32_t *step_d = nullptr, *pos_d = nullptr, *live_d = nullptr, *dyn_d = nullptr, *wlive_d = nullptr;
     // with cells on cards: -sink a row and head, the cards' sums [cards][T][H][D + 2], a chunk's own partial sums
-    float *ns = nullptr, *rpart = nullptr, *tpart = nullptr;
+    float *ns = nullptr, *rpart = nullptr, *tpart = nullptr, *spart = nullptr;
     int32_t *ids = nullptr, *grp_start = nullptr, *n_groups = nullptr, *n_miss = nullptr, *ent_dst = nullptr,
             *ent_tok = nullptr;
     unsigned long long* grp_ptr = nullptr;
@@ -1304,6 +1307,7 @@ struct Engine {
         R.emb_h = halloc<float>(T * N);
         R.step_h = halloc<int32_t>(T + 5);
         R.ns = dzero<float>(T * H);
+        if (batch) R.spart = dzero<float>((size_t) seg_cap() * H * (D_ + 2));
         if (!batch) {
             R.grp_ptr = dzero<unsigned long long>(n_ent + 1);
             R.grp_start = dzero<int32_t>(n_ent + 1);
@@ -1349,6 +1353,39 @@ struct Engine {
         R.pptr_h = halloc<unsigned long long>(E);
         R.tiles = dzero<int32_t>(n_tiles);
         R.tiles_h = halloc<int32_t>(n_tiles);
+    }
+
+    // ---- a chunk's attention (attn_tc_kernel): its blocks, and the segments its cells are scored in
+    int main_sms_ = 0, tc_segs = 0;   // (LAMINA_INK_TC_SEGS: that many segments, a test's)
+    /// this card's SMs (called with it current)
+    int main_sms() {
+        if (main_sms_ == 0) {
+            cudaDeviceProp prop{};
+            int dev = 0;
+            CK(cudaGetDevice(&dev));
+            CK(cudaGetDeviceProperties(&prop, dev));
+            main_sms_ = std::max(1, prop.multiProcessorCount);
+        }
+        return main_sms_;
+    }
+    static constexpr int kTcWarps = 4;   // warps a block, 16 rows each (8 gained q8_0 cells a tenth on the RTX 3090
+                                         // from 2,048 rows and lost as much on the RTX 5070 Ti)
+    /// rows of partial sums the segments of a chunk write at most
+    int seg_cap() { return 640 * main_sms() / (int) m->g.n_head + 64; }
+    /// The segments T rows' cells are scored in: more blocks than the rows and heads make, so that a few rows fill
+    /// the card too - five blocks an SM over 16,384 cells or more (the blocks end apart: the last ones alone would
+    /// leave SMs idle), one and a quarter over 4,096 or fewer (a block's start and end cost a short range more), a
+    /// segment eight tiles at least
+    int tc_segments(int T, long long cells) {
+        const int rows = 16 * kTcWarps, blocks = (T + rows - 1) / rows * (int) m->g.n_head;
+        const double fill = std::min(5.0, std::max(1.25, 5.0 * (double) cells / 16384.0));
+        const long long want = tc_segs > 0 ? tc_segs : ((long long) (fill * main_sms()) + blocks - 1) / blocks;
+        return (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, cells / (8 * ik::kTcCells), (long long) (seg_cap() / T)}));
+    }
+    void tc_launch(const ik::TcIn& a, int n_seg, cudaStream_t s) {
+        const dim3 grid((unsigned) ((a.T + 16 * kTcWarps - 1) / (16 * kTcWarps)), (unsigned) a.H, (unsigned) n_seg);
+        if (kv_q8) ik::attn_tc_kernel<kTcWarps, true><<<grid, 32 * kTcWarps, 0, s>>>(a);
+        else ik::attn_tc_kernel<kTcWarps, false><<<grid, 32 * kTcWarps, 0, s>>>(a);
     }
 
     bool elastic() const { return prefill > 0 && prefill_max > prefill && !m->in_ram; }
@@ -1485,6 +1522,7 @@ struct Engine {
         tc_on = MMQ::built() && !MMQ::native_fp4(40);
         if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_TC_SEGS")) tc_segs = std::max(0, std::atoi(r));
         if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
@@ -2062,10 +2100,9 @@ struct Engine {
             cc.v = c.v_vm[(size_t) fi]->base();
             cc.cap = c.cap;
             cc.q8 = kv_q8 ? 1 : 0;
-            ik::TcIn a{cc, c.cq, c.cns, nullptr, c.cpos, nullptr, T, H, HK, 0, 0, (long long) c.cells, c.csum, 1, 0};
-            const dim3 grid((unsigned) ((T + ik::kTcRows - 1) / ik::kTcRows), (unsigned) H);
-            if (kv_q8) ik::attn_tc_kernel<true><<<grid, 256, 0, c.st>>>(a);
-            else ik::attn_tc_kernel<false><<<grid, 256, 0, c.st>>>(a);
+            ik::TcIn a{cc, c.cq, nullptr, c.cns, nullptr, c.cpos, nullptr, T, H, HK, 0, 0, (long long) c.cells, c.csum, 1, 0,
+                       nullptr};
+            tc_launch(a, 1, c.st);
             CK(cudaMemcpyAsync(c.csum_h, c.csum, (size_t) T * H * (D_ + 2) * 4, cudaMemcpyDeviceToHost, c.st));
             CK(cudaEventRecord(c.ev, c.st));
             (void) cudaStreamQuery(c.st);
@@ -3225,25 +3262,29 @@ struct Engine {
         probe("the distance projection", R.rraw, (size_t) T, (size_t) H * Rr);
         probe("k's projection", kraw, (size_t) T, (size_t) KV);
         probe("v's projection", vraw, (size_t) T, (size_t) KV);
-        if (batch) {   // the table's products as one GEMM: r clipped in place, the sink taken off after
+        // a chunk's window visit scores a range in position order (the win - 1 cells before the chunk out of the ring,
+        // then the chunk's)
+        const bool slide = batch && V.cells.ring;
+        if (batch) {   // r clipped in place; the bias by cell of the range the rows score, and -sink
             run("a: q's clip", [&] {
                 ik::q_clip_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(
                     R.qraw, L.q_scale, L.full ? R.tau : nullptr, R.q, H, D_, g.qk_clip);
             });
             ik::r_clip_kernel<<<dim3((unsigned) T, (unsigned) H), 32, 0, st>>>(R.rraw, L.rel_scale, L.full ? R.tau : nullptr,
                                                                               R.rraw, H, Rr, g.rel_clip);
-            gemm(L.rel_table, L.ext, Rr, R.rraw, T * H, R.bias, L.ext + 1);
-            const long long cnt = (long long) T * H * (L.ext + 1);
-            ik::bias_fix_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.bias, R.sink, (long long) T * H, L.ext);
+            ik::RingIn rb{R.rraw, L.rel_table, R.sink, R.pos_d, R.bias, R.ns,
+                          slide ? (long long) p0 - (win - 1) : (long long) V.cells.first, H, Rr, L.ext};
+            run("a: bias by cell", [&] {
+                if (Rr == 16) ik::bias_ring_kernel<4><<<(unsigned) T, 256, 0, st>>>(rb);
+                else ik::bias_ring_kernel<0><<<(unsigned) T, 256, 0, st>>>(rb);
+            });
         } else {
             ik::QbIn a{R.qraw, L.q_scale, R.rraw, L.rel_scale, L.rel_table, L.sink, fq, R.pos_d, R.q, R.bias, H, D_, Rr, L.ext,
                        N, L.full ? 1 : 0, g.qk_clip, g.rel_clip, g.log_alpha, (float) g.log_floor};
             run("a: q, bias", [&] { ik::q_bias_kernel<<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a); });
         }
-        // the cells the rows attend: the visit's own, or for a chunk's window visit a range in position order (the
-        // win - 1 cells before the chunk out of the ring, then the chunk's)
+        // the cells the rows attend: the visit's own, or for a chunk's window visit the range
         ik::Cells cells = V.cells;
-        const bool slide = batch && V.cells.ring;
         {
             ik::KvIn a{};
             a.raw[0] = kraw;
@@ -3296,7 +3337,7 @@ struct Engine {
         xten("Vcur", v, R.vc, T, HK, D_);
         if (batch) xten("Rcur", v, R.rraw, T, H, Rr);
         probe("q", R.q, (size_t) T, (size_t) H * D_);
-        probe("the bias", R.bias, (size_t) T, (size_t) H * (L.ext + 1));
+        probe("the bias", R.bias, (size_t) T, (size_t) H * (L.ext + (batch ? 0 : 1)));
         probe("k", R.kc, (size_t) T, (size_t) KV);
         probe("v", R.vc, (size_t) T, (size_t) KV);
         // ---- attention over the cells
@@ -3312,23 +3353,25 @@ struct Engine {
         at.D = D_;
         at.ext = L.ext;
         at.win = L.full ? 0 : win;
-        if (batch) {   // on the tensor cores: 32 rows of a query head a block, over the cells its rows see
+        if (batch) {   // on the tensor cores: 64 rows of a query head a block, over the cells its rows see
             // cells on cards: the chunk's q and -sink go to them, each scores its cells while this card scores its
-            // own from `lo`, and the partial sums are joined
+            // own from `lo`, and the partial sums are joined; so are this card's own where it scores a few rows'
+            // cells in segments
             const bool carded = L.full && lo > 0;
             if (carded) {
-                ik::nsink_kernel<<<(unsigned) ((T * H + 255) / 256), 256, 0, st>>>(R.bias, R.ns, T * H, L.ext);
                 CK(cudaMemcpyAsync(pq_h, R.q, (size_t) T * H * D_ * 4, cudaMemcpyDeviceToHost, st));
                 CK(cudaMemcpyAsync(ps_h, R.ns, (size_t) T * H * 4, cudaMemcpyDeviceToHost, st));
                 CK(cudaStreamSynchronize(st));
                 cards_scan_chunk(full_of[(size_t) v], T);
             }
-            ik::TcIn a{cells, R.q, R.bias, R.graw, R.pos_d, R.aout, T, H, HK, L.ext, L.full ? 0 : win,
-                       slide ? (long long) (T + win - 1) : (long long) (p0 + T), carded ? R.tpart : nullptr, 0,
-                       L.full ? (long long) lo : 0LL};
-            const dim3 grid((unsigned) ((T + ik::kTcRows - 1) / ik::kTcRows), (unsigned) H);
-            if (kv_q8) ik::attn_tc_kernel<true><<<grid, 256, 0, st>>>(a);
-            else ik::attn_tc_kernel<false><<<grid, 256, 0, st>>>(a);
+            const long long in_use = slide ? (long long) (T + win - 1) : (long long) (p0 + T);
+            const long long from = L.full ? (long long) lo : 0LL;
+            const int n_seg = tc_segments(T, slide ? (long long) win : in_use - from);
+            float* const part = carded ? R.tpart : n_seg > 1 ? R.spart : nullptr;
+            float* const seg = n_seg > 1 ? R.spart + (carded ? 0 : (size_t) T * H * (D_ + 2)) : nullptr;
+            ik::TcIn a{cells, R.q, R.bias, R.ns, R.graw, R.pos_d, R.aout, T, H, HK, L.ext, L.full ? 0 : win, in_use, part, 0,
+                       from, seg};
+            tc_launch(a, n_seg, st);
             if (carded) {
                 (void) cudaStreamQuery(st);
                 cards_wait();
@@ -3338,7 +3381,9 @@ struct Engine {
                     if (cards[ci].cells > 0) CK(cudaMemcpyAsync(R.rpart + ci * one, cards[ci].csum_h, bytes, cudaMemcpyHostToDevice, st));
                     else CK(cudaMemsetAsync(R.rpart + ci * one, 0, bytes, st));
                 }
-                ik::TcMergeIn mg{R.tpart, R.rpart, R.graw, R.aout, H, D_, (int) cards.size(), R.cap};
+            }
+            if (part != nullptr) {
+                ik::TcMergeIn mg{part, R.rpart, seg, R.graw, R.aout, H, D_, carded ? (int) cards.size() : 0, R.cap, n_seg - 1, T};
                 ik::tc_merge_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(mg);
             }
         } else {

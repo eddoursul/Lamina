@@ -48,6 +48,10 @@ __device__ __forceinline__ void ldsm4t(unsigned (&r)[4], const void* s) {
 __device__ __forceinline__ void cp_async16(void* s, const void* g) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
 }
+/// 8 bytes (cp.async.ca: a source that is no multiple of 16 bytes into its buffer)
+__device__ __forceinline__ void cp_async8(void* s, const void* g) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
+}
 __device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
 /// waits until at most N committed groups are still in flight
 template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }

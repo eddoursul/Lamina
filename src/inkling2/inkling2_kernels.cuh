@@ -24,6 +24,10 @@ namespace ik {
 using lamina::kernels::q8_1_ds;
 using lamina::kernels::q8_1_finite;
 using lamina::kernels::q8_1_quant;
+using lamina::kernels::cp_async16;
+using lamina::kernels::cp_async8;
+using lamina::kernels::cp_commit;
+using lamina::kernels::cp_wait;
 using lamina::kernels::ldsm4;
 using lamina::kernels::ldsm4t;
 using lamina::kernels::warp_max;
@@ -442,8 +446,8 @@ __global__ void __launch_bounds__(kWide) bias_kernel(BiasIn a) {
     if (threadIdx.x == 0) b[a.ext] = -sink;
 }
 
-/// bias_kernel's two halves around a GEMM, for a prompt chunk.  r of T rows: the projection times the layer's scale,
-/// clipped to `clip` a head, times tau: rc [T][H][R].  A warp a row and head.
+/// r of a prompt chunk's rows, for bias_ring_kernel: the projection times the layer's scale, clipped to `clip` a
+/// head, times tau: rc [T][H][R].  A warp a row and head.
 __global__ void __launch_bounds__(32) r_clip_kernel(const float* __restrict__ raw, const float* __restrict__ scale,
                                                     const float* __restrict__ tau, float* __restrict__ rc, int H, int R,
                                                     float clip) {
@@ -453,13 +457,76 @@ __global__ void __launch_bounds__(32) r_clip_kernel(const float* __restrict__ ra
     const float f = fminf(1.0f, clip / (sqrtf(ss) + 1e-6f)) * (tau ? tau[t] : 1.0f);
     if (k < R) rc[((size_t) t * H + h) * R + k] = y * f;
 }
-/// The table's products [T * H][ext + 1] (the first ext of a row written) less the row's sink, the last value -sink
-__global__ void bias_fix_kernel(float* __restrict__ bias, const float* __restrict__ sink, long long rows, int ext) {
-    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= rows * (ext + 1)) return;
-    const long long r = i / (ext + 1);
-    const int d = (int) (i % (ext + 1));
-    bias[i] = (d < ext ? bias[i] : 0.f) - sink[r];
+/// A chunk's distance bias by cell, as attn_tc_kernel reads it: ring[t][h][(c - first) mod ext] = table[p - c] . r -
+/// sink for the ext cells c at and before the row's position p (r as r_clip_kernel leaves it), and far[t][h] = -sink,
+/// the bias of a cell further away.  The sums are bias_kernel's.  A block a row: a thread four cells, whose table
+/// rows it holds for every head (R4 quarters of a row's R values; R4 0: any R, the rows read a head).  ext a
+/// multiple of 4, H R <= kRingRs.
+struct RingIn {
+    const float* r;       // [T][H][R]
+    const float* table;   // [ext][R]
+    const float* sink;    // [T][H]
+    const int32_t* pos;   // [T]
+    float* ring;          // [T][H][ext]
+    float* far;           // [T][H]
+    long long first;      // the position of the cells' slot 0
+    int H, R, ext;
+};
+constexpr int kRingRs = 1024;    // a row's r values, every head's
+constexpr int kRingHeads = 64;
+template <int R4>
+__global__ void __launch_bounds__(256) bias_ring_kernel(RingIn a) {
+    const int t = blockIdx.x, i = threadIdx.x;
+    __shared__ float r[kRingRs];
+    __shared__ float sk[kRingHeads];
+    for (int k = i; k < a.H * a.R; k += (int) blockDim.x) r[k] = a.r[(size_t) t * a.H * a.R + k];
+    if (i < a.H) {
+        const float s = a.sink[(size_t) t * a.H + i];
+        sk[i] = s;
+        a.far[(size_t) t * a.H + i] = -s;
+    }
+    __syncthreads();
+    const int e = (int) ((((long long) a.pos[t] - a.first) % a.ext + a.ext) % a.ext);   // the row's own cell
+    for (int j4 = i; j4 < a.ext / 4; j4 += (int) blockDim.x) {
+        const float* tb[4];
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            int d = e - (4 * j4 + u);
+            if (d < 0) d += a.ext;
+            tb[u] = a.table + (size_t) d * a.R;
+        }
+        if constexpr (R4 > 0) {
+            float4 tv[4][R4];
+#pragma unroll
+            for (int u = 0; u < 4; ++u)
+#pragma unroll
+                for (int k = 0; k < R4; ++k) tv[u][k] = ld4(tb[u], k);
+            for (int h = 0; h < a.H; ++h) {
+                const float* rh = r + h * a.R;
+                float o[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+                for (int k = 0; k < R4; ++k) {
+                    const float r0 = rh[4 * k], r1 = rh[4 * k + 1], r2 = rh[4 * k + 2], r3 = rh[4 * k + 3];
+#pragma unroll
+                    for (int u = 0; u < 4; ++u) o[u] += tv[u][k].x * r0 + tv[u][k].y * r1 + tv[u][k].z * r2 + tv[u][k].w * r3;
+                }
+                const float s = sk[h];
+                st4(a.ring + ((size_t) t * a.H + h) * a.ext, j4, make_float4(o[0] - s, o[1] - s, o[2] - s, o[3] - s));
+            }
+        } else {
+            for (int h = 0; h < a.H; ++h) {
+                const float* rh = r + h * a.R;
+                float o[4];
+#pragma unroll
+                for (int u = 0; u < 4; ++u) {
+                    float s = 0.f;
+                    for (int k = 0; k < a.R; ++k) s += tb[u][k] * rh[k];
+                    o[u] = s - sk[h];
+                }
+                st4(a.ring + ((size_t) t * a.H + h) * a.ext, j4, make_float4(o[0], o[1], o[2], o[3]));
+            }
+        }
+    }
 }
 
 /// A decode forward's q and bias in one launch (the sink's product, q_clip_kernel, tau_kernel and bias_kernel): q =
@@ -1104,10 +1171,10 @@ __device__ __forceinline__ uint2 q8_widen4(uint32_t w, float d) {
                       h2((float) (int8_t) ((w >> 16) & 0xff) * d, (float) (int8_t) (w >> 24) * d));
 }
 
-constexpr int kTcRows = 32;    // token rows a block
 constexpr int kTcCells = 32;   // cells a tile
 constexpr int kTcPad = 136;    // a row of 128 halves in shared memory (272 bytes)
-constexpr int kTcPPad = 40;    // a probability row, halves (80 bytes)
+constexpr int kTcRows = 32;    // a decode forward's rows and query heads a block (attn_rows_kernel)
+constexpr int kTcPPad = 40;    // its probability row, halves (80 bytes)
 
 struct __align__(16) TcSmem {
     __half q[kTcRows * kTcPad];
@@ -1117,18 +1184,25 @@ struct __align__(16) TcSmem {
     float red[2][4][kTcRows];   // [max | sum][the cells' quarter][row]
 };
 
-/// A chunk's attention of one query head: block (b, h) takes rows 32 b .. of head h over the cells its rows can see,
-/// in tiles of 32 (K and V of the head's K/V head, halves, or with Q8 q8_0 blocks widened into halves as they are
-/// stashed).  The cells are a range in position order (c.first): a full visit's from position 0, a window visit's
-/// from win - 1 before the chunk; a row sees those at or before it, and within `win` of it.  logit = q . k /
-/// sqrt(D) + bias[min(distance, ext)]; an online softmax that starts from the zero sink (m = 0, l = 1); the output,
-/// divided by l and times sigmoid(gate), to out [T][H * D].  D is 128.  Warps: scores m-tile w & 1 x cells (w >> 1) *
-/// 8 .. +8; values m-tile w & 1 x dims (w >> 1) * 32 .. +32.  The next tile waits in registers through the current
-/// one's products.  Grid (ceil(T / 32), H), block 256.
+/// A chunk's attention of one query head on the tensor cores, a warp 16 rows: block (b, h, s) takes rows 16 NW b ..
+/// of head h over the cells its rows see, in tiles of 32 on the range's own grid (K and V of the head's K/V head as
+/// halves in shared memory; with Q8 the q8_0 blocks arrive as stored and are widened there).  A warp scores its rows
+/// against the tile (q in registers as the products' row operands, K through ldmatrix), turns the scores into
+/// probabilities where they stand - a product's sums lie in the lanes as the next one's row operand - and adds the
+/// tile's V rows.  Halves: the next tile arrives behind the products in the other of two buffers, one barrier a tile.
+/// The cells are a range in position order (c.first): a full visit's from position 0, a window visit's from win - 1
+/// before the chunk; a row sees those at or before it, and within `win` of it.  logit = q . k / sqrt(D) + the bias of
+/// the cell's distance: ring[slot mod ext] within ext of the row (bias_ring_kernel), `far` past it; a tile every row
+/// of the block sees whole and past the table takes neither a mask nor a load.  An online softmax that starts from
+/// the zero sink (m = 0, l = 1); the output, divided by l and times sigmoid(gate), to out [T][H * D].  With a grid of
+/// several segments (gridDim.z) a block takes its share of the tiles, for a few rows over many cells: more blocks
+/// than the rows and heads make, the segments' partial sums joined by tc_merge_kernel.  D is 128, ext a multiple of
+/// 32.  Grid (ceil(T / (16 NW)), H, segments), block 32 NW.
 struct TcIn {
     Cells c;
     const float* q;        // [T][H][D]
-    const float* bias;     // [T][H][ext + 1]
+    const float* ring;     // [T][H][ext]: the bias by cell; not read with ext 0
+    const float* far;      // [T][H]: the bias of a cell past the table (-sink)
     const float* gate;     // [T][H * D]
     const int32_t* pos;    // [T]
     float* out;            // [T][H * D]
@@ -1139,189 +1213,238 @@ struct TcIn {
                            // where others' are joined to it (tc_merge_kernel)
     int no_sink;           // the sums without the zero sink (a card's cells alone)
     long long lo;          // a full visit's first cell on this card (the cells before it are other cards')
+    float* seg;            // several segments: [segments - 1][T][H][D + 2], the sums of those after the first (the
+                           // first one's to `part`)
 };
-template <bool Q8>
-__global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
-    constexpr int D = 128;
-    __shared__ TcSmem sm;
-    const int t0 = blockIdx.x * kTcRows, h = blockIdx.y, g = h / (a.H / a.HK);
+constexpr int kTcSegs = 8;   // segments at most
+template <int NW, bool Q8>
+__global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
+    constexpr int D = 128, ROWS = 16 * NW, NT = 32 * NW;
+    constexpr int kRawCell = (D / 32) * 34;                                 // a cell's q8_0 blocks of one K/V head
+    __shared__ __align__(16) __half tile[Q8 ? 1 : 2][2][kTcCells * kTcPad];   // [buffer][K | V]
+    __shared__ __align__(16) uint8_t raw[2][Q8 ? kTcCells * kRawCell : 16];   // Q8: [K | V] as stored
+    const int t0 = blockIdx.x * ROWS, h = blockIdx.y, g = h / (a.H / a.HK);
     const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
     const int li = lane >> 3, lr = lane & 7, tig = lane & 3;
-    const int nrows = min(kTcRows, a.T - t0);
-    // the block's cells: slots [s_lo, s_lo + cnt) of the range
+    const int nrows = min(ROWS, a.T - t0);
     const long long p_first = a.pos[t0], p_last = a.pos[t0 + nrows - 1];
     const long long first = (long long) a.c.first;
-    const long long s_lo = max(max(0LL, (a.win ? max(0LL, p_first - a.win + 1) : 0LL) - first), a.lo);
+    // the block's cells: slots [s_true, s_lo + cnt) of the range, its tiles from the grid's slot s_lo at or before
+    const long long s_true = max(max(0LL, (a.win ? max(0LL, p_first - a.win + 1) : 0LL) - first), a.lo);
+    const long long s_lo = s_true / kTcCells * kTcCells;
+    const int c_min = (int) (s_true - s_lo);
     const int cnt = (int) (min(p_last - first + 1, a.cells) - s_lo);
     const size_t cbytes = cell_bytes(a.c, a.HK, D);
-    // the queries as halves
-    for (int i = tid; i < kTcRows * (D / 4); i += 256) {
-        const int r = i / (D / 4), c4 = i % (D / 4);
-        float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
-        if (r < nrows) v = *reinterpret_cast<const float4*>(a.q + ((size_t) (t0 + r) * a.H + h) * D + 4 * c4);
-        *reinterpret_cast<uint2*>(sm.q + r * kTcPad + 4 * c4) = make_uint2(h2(v.x, v.y), h2(v.z, v.w));
-    }
-    // a tile: 32 cells of K and of V.  Halves: 16 chunks of 16 bytes a cell and side, two a thread and side; Q8: 8
-    // pieces of 16 codes a cell and side (half a block, with its block's scale), one a thread and side
-    uint4 nk[2], nv[2];
-    [[maybe_unused]] float dk = 0.f, dv = 0.f;
-    auto fetch = [&](int base) {
-        if constexpr (Q8) {
-            const int c = tid / 8, pc = tid % 8;
-            nk[0] = nv[0] = make_uint4(0, 0, 0, 0);
-            dk = dv = 0.f;
-            if (base + c < cnt) {
-                const size_t at = (size_t) (s_lo + base + c) * cbytes + ((size_t) g * (D / 32) + pc / 2) * 34;
-                const uint8_t *kb = a.c.k + at, *vb = a.c.v + at;
-                dk = __half2float(*reinterpret_cast<const __half*>(kb));
-                dv = __half2float(*reinterpret_cast<const __half*>(vb));
-                memcpy(&nk[0], kb + 2 + (pc % 2) * 16, 16);
-                memcpy(&nv[0], vb + 2 + (pc % 2) * 16, 16);
+    const int n_all = (max(cnt, 0) + kTcCells - 1) / kTcCells, n_seg = (int) gridDim.z, sg = (int) blockIdx.z;
+    const int it0 = (int) ((long long) n_all * sg / n_seg), n_tiles = (int) ((long long) n_all * (sg + 1) / n_seg);
+    auto fetch = [&](int buf, int base) {
+        if constexpr (Q8) {   // 17 chunks of 8 bytes a cell and side
+            for (int i = tid; i < 2 * kTcCells * (kRawCell / 8); i += NT) {
+                const int side = i >= kTcCells * (kRawCell / 8), j = i - side * kTcCells * (kRawCell / 8);
+                const int c = j / (kRawCell / 8), ch = j % (kRawCell / 8);
+                uint8_t* d = raw[side] + c * kRawCell + ch * 8;
+                if (base + c < cnt)
+                    cp_async8(d, (side ? a.c.v : a.c.k) + (size_t) (s_lo + base + c) * cbytes + (size_t) g * kRawCell + ch * 8);
+                else
+                    *reinterpret_cast<unsigned long long*>(d) = 0ull;
             }
-        } else {
-#pragma unroll
-            for (int j = 0; j < 2; ++j) {
-                const int i = tid + 256 * j, c = i / 16, ch = i % 16;
+        } else {              // 16 chunks of 16 bytes a cell and side
+            for (int i = tid; i < kTcCells * 16; i += NT) {
+                const int c = i / 16, ch = i % 16;
+                __half* kd = tile[buf][0] + c * kTcPad + ch * 8;
+                __half* vd = tile[buf][1] + c * kTcPad + ch * 8;
                 if (base + c < cnt) {
                     const size_t at = (size_t) (s_lo + base + c) * cbytes + (size_t) g * D * 2 + ch * 16;
-                    nk[j] = *reinterpret_cast<const uint4*>(a.c.k + at);
-                    nv[j] = *reinterpret_cast<const uint4*>(a.c.v + at);
+                    cp_async16(kd, a.c.k + at);
+                    cp_async16(vd, a.c.v + at);
                 } else {
-                    nk[j] = nv[j] = make_uint4(0, 0, 0, 0);
+                    *reinterpret_cast<uint4*>(kd) = make_uint4(0, 0, 0, 0);
+                    *reinterpret_cast<uint4*>(vd) = make_uint4(0, 0, 0, 0);
                 }
             }
         }
+        cp_commit();
     };
-    auto stash = [&] {
-        if constexpr (Q8) {
-            const int c = tid / 8, pc = tid % 8;
-            const uint2 k0 = q8_widen4(nk[0].x, dk), k1 = q8_widen4(nk[0].y, dk), k2 = q8_widen4(nk[0].z, dk),
-                        k3 = q8_widen4(nk[0].w, dk);
-            const uint2 v0 = q8_widen4(nv[0].x, dv), v1 = q8_widen4(nv[0].y, dv), v2 = q8_widen4(nv[0].z, dv),
-                        v3 = q8_widen4(nv[0].w, dv);
-            uint4* kd = reinterpret_cast<uint4*>(sm.k + c * kTcPad + pc * 16);
-            uint4* vd = reinterpret_cast<uint4*>(sm.v + c * kTcPad + pc * 16);
-            kd[0] = make_uint4(k0.x, k0.y, k1.x, k1.y);
-            kd[1] = make_uint4(k2.x, k2.y, k3.x, k3.y);
-            vd[0] = make_uint4(v0.x, v0.y, v1.x, v1.y);
-            vd[1] = make_uint4(v2.x, v2.y, v3.x, v3.y);
-        } else {
+    if (it0 < n_tiles) fetch(0, it0 * kTcCells);
+    const int rA = w * 16 + (lane >> 2), rB = rA + 8;
+    const bool inA = rA < nrows, inB = rB < nrows;
+    const size_t hA = (size_t) (t0 + (inA ? rA : 0)) * a.H + h, hB = (size_t) (t0 + (inB ? rB : 0)) * a.H + h;
+    // q as the products' row operands: step ks is dims 16 ks .. +15
+    unsigned qa[8][4];
+    {
+        const float* qA = a.q + hA * D + 2 * tig;
+        const float* qB = a.q + hB * D + 2 * tig;
+        const float2 z = make_float2(0.f, 0.f);
 #pragma unroll
-            for (int j = 0; j < 2; ++j) {
-                const int i = tid + 256 * j, c = i / 16, ch = i % 16;
-                *reinterpret_cast<uint4*>(sm.k + c * kTcPad + ch * 8) = nk[j];
-                *reinterpret_cast<uint4*>(sm.v + c * kTcPad + ch * 8) = nv[j];
+        for (int ks = 0; ks < 8; ++ks) {
+            const float2 a0 = inA ? *reinterpret_cast<const float2*>(qA + 16 * ks) : z;
+            const float2 a1 = inB ? *reinterpret_cast<const float2*>(qB + 16 * ks) : z;
+            const float2 a2 = inA ? *reinterpret_cast<const float2*>(qA + 16 * ks + 8) : z;
+            const float2 a3 = inB ? *reinterpret_cast<const float2*>(qB + 16 * ks + 8) : z;
+            qa[ks][0] = h2(a0.x, a0.y);
+            qa[ks][1] = h2(a1.x, a1.y);
+            qa[ks][2] = h2(a2.x, a2.y);
+            qa[ks][3] = h2(a3.x, a3.y);
+        }
+    }
+    const float scale = rsqrtf((float) D);
+    // a row's own slot from s_lo (the first row's: the block's nearest), and the bias past the table
+    const int sA = inA ? (int) ((long long) a.pos[t0 + rA] - first - s_lo) : 0;
+    const int sB = inB ? (int) ((long long) a.pos[t0 + rB] - first - s_lo) : 0;
+    const int s_first = (int) (p_first - first - s_lo);
+    const float fA = inA ? a.far[hA] : -INFINITY, fB = inB ? a.far[hB] : -INFINITY;
+    const float* ringA = a.ring + hA * a.ext + 2 * tig;
+    const float* ringB = a.ring + hB * a.ext + 2 * tig;
+    int j0 = a.ext > 0 ? (int) ((s_lo + (long long) it0 * kTcCells) % a.ext) : 0;   // the tile's first slot in the ring
+    const bool sink = !a.no_sink && sg == 0;
+    float mA = sink ? 0.f : -1e30f, mB = mA, lA = sink ? 1.f : 0.f, lB = lA;
+    float o[16][4];
+#pragma unroll
+    for (int j = 0; j < 16; ++j) o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.f;
+    for (int it = it0; it < n_tiles; ++it) {
+        const int base = it * kTcCells;
+        cp_wait<0>();
+        __syncthreads();   // the tile has arrived, and the last one's cells were read
+        const __half *kt, *vt;
+        if constexpr (Q8) {   // the blocks into halves, eight values a step; then the next tile's on their way
+            for (int i = tid; i < 2 * kTcCells * 16; i += NT) {
+                const int side = i >= kTcCells * 16, j = i - side * kTcCells * 16, c = j / 16, u = j % 16, blk = u / 4;
+                const uint8_t* cell = raw[side] + c * kRawCell;
+                const float d = __half2float(*reinterpret_cast<const __half*>(cell + blk * 34));
+                const int at = blk * 34 + 2 + (u % 4) * 8;   // the codes: at a word, or two bytes into one
+                const uint32_t* wp = reinterpret_cast<const uint32_t*>(cell + (at & ~3));
+                uint32_t w0 = wp[0], w1 = wp[1];
+                if (at & 2) {
+                    const uint32_t w2 = wp[2];
+                    w0 = (w0 >> 16) | (w1 << 16);
+                    w1 = (w1 >> 16) | (w2 << 16);
+                }
+                const uint2 x0 = q8_widen4(w0, d), x1 = q8_widen4(w1, d);
+                *reinterpret_cast<uint4*>(tile[0][side] + c * kTcPad + u * 8) = make_uint4(x0.x, x0.y, x1.x, x1.y);
+            }
+            __syncthreads();
+            if (it + 1 < n_tiles) fetch(0, base + kTcCells);
+            kt = tile[0][0];
+            vt = tile[0][1];
+        } else {
+            if (it + 1 < n_tiles) fetch((it + 1 - it0) & 1, base + kTcCells);
+            kt = tile[(Q8 ? 0 : it - it0) & 1][0];
+            vt = tile[(Q8 ? 0 : it - it0) & 1][1];
+        }
+        // a tile every row of the block sees whole and past the table: no cell's distance to look at
+        const bool far = a.win == 0 && base >= c_min && base + kTcCells <= cnt && s_first - (base + kTcCells - 1) >= a.ext;
+        float2 gA[4], gB[4];
+#pragma unroll
+        for (int nt = 0; nt < 4; ++nt) gA[nt] = gB[nt] = make_float2(0.f, 0.f);
+        if (!far && a.ext > 0) {
+#pragma unroll
+            for (int nt = 0; nt < 4; ++nt) {
+                gA[nt] = *reinterpret_cast<const float2*>(ringA + j0 + 8 * nt);
+                gB[nt] = *reinterpret_cast<const float2*>(ringB + j0 + 8 * nt);
             }
         }
-    };
-    fetch(0);
-    stash();
-    const int mt = w & 1, nt = w >> 1;
-    const int rA = mt * 16 + (lane >> 2), rB = rA + 8;
-    const bool inA = rA < nrows, inB = rB < nrows;
-    const long long pA = inA ? a.pos[t0 + rA] : 0, pB = inB ? a.pos[t0 + rB] : 0;
-    const float* bA = a.bias + ((size_t) (t0 + (inA ? rA : 0)) * a.H + h) * (a.ext + 1);
-    const float* bB = a.bias + ((size_t) (t0 + (inB ? rB : 0)) * a.H + h) * (a.ext + 1);
-    const float scale = rsqrtf((float) D);
-    // the zero sink, or nothing yet (a largest logit that any real one passes, finite: no cell, no NaN)
-    float mA = a.no_sink ? -1e30f : 0.f, mB = mA, lA = a.no_sink ? 0.f : 1.f, lB = lA;
-    float o[4][4];
+        if (a.ext > 0) j0 = j0 + kTcCells >= a.ext ? j0 + kTcCells - a.ext : j0 + kTcCells;
+        float sc[4][4];
 #pragma unroll
-    for (int j = 0; j < 4; ++j) o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.f;
-    const __half* qrow = sm.q + (mt * 16 + ((li & 1) << 3) + lr) * kTcPad + (li >> 1) * 8;
-    const int n_tiles = (max(cnt, 0) + kTcCells - 1) / kTcCells;
-    for (int it = 0; it < n_tiles; ++it) {
-        const int base = it * kTcCells;
-        __syncthreads();   // the tile (and the queries) in shared memory
-        if (it + 1 < n_tiles) fetch(base + kTcCells);
-        float sc[4] = {0.f, 0.f, 0.f, 0.f};
-        const __half* krow = sm.k + (nt * 8 + lr) * kTcPad + li * 8;
+        for (int nt = 0; nt < 4; ++nt) sc[nt][0] = sc[nt][1] = sc[nt][2] = sc[nt][3] = 0.f;
 #pragma unroll
         for (int kk = 0; kk < D / 16; kk += 2) {
-            unsigned a0[4], a1[4], b[4];
-            ldsm4(a0, qrow + kk * 16);
-            ldsm4(a1, qrow + kk * 16 + 16);
-            ldsm4(b, krow + kk * 16);
-            mma16816(sc, a0, b[0], b[1]);
-            mma16816(sc, a1, b[2], b[3]);
+            unsigned b[4][4];
+#pragma unroll
+            for (int nt = 0; nt < 4; ++nt) ldsm4(b[nt], kt + (nt * 8 + lr) * kTcPad + li * 8 + kk * 16);
+#pragma unroll
+            for (int nt = 0; nt < 4; ++nt) mma16816(sc[nt], qa[kk], b[nt][0], b[nt][1]);
+#pragma unroll
+            for (int nt = 0; nt < 4; ++nt) mma16816(sc[nt], qa[kk + 1], b[nt][2], b[nt][3]);
         }
         float xA = -INFINITY, xB = -INFINITY;
+        if (far) {
 #pragma unroll
-        for (int e = 0; e < 2; ++e) {
-            const int col = base + nt * 8 + 2 * tig + e;
-            const long long cp = first + s_lo + col;
-            const long long dA = pA - cp, dB = pB - cp;
-            const bool okA = inA && col < cnt && dA >= 0 && (a.win == 0 || dA < a.win);
-            const bool okB = inB && col < cnt && dB >= 0 && (a.win == 0 || dB < a.win);
-            sc[e] = okA ? sc[e] * scale + bA[dA < a.ext ? dA : a.ext] : -INFINITY;
-            sc[2 + e] = okB ? sc[2 + e] * scale + bB[dB < a.ext ? dB : a.ext] : -INFINITY;
-            xA = fmaxf(xA, sc[e]);
-            xB = fmaxf(xB, sc[2 + e]);
+            for (int nt = 0; nt < 4; ++nt)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) {
+                    sc[nt][e] = sc[nt][e] * scale + fA;
+                    sc[nt][2 + e] = sc[nt][2 + e] * scale + fB;
+                    xA = fmaxf(xA, sc[nt][e]);
+                    xB = fmaxf(xB, sc[nt][2 + e]);
+                }
+        } else {
+#pragma unroll
+            for (int nt = 0; nt < 4; ++nt)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) {
+                    const int col = base + nt * 8 + 2 * tig + e;
+                    const int dA = sA - col, dB = sB - col;
+                    const bool in = col >= c_min && col < cnt;
+                    const bool okA = inA && in && dA >= 0 && (a.win == 0 || dA < a.win);
+                    const bool okB = inB && in && dB >= 0 && (a.win == 0 || dB < a.win);
+                    const float vA = dA < a.ext ? (e ? gA[nt].y : gA[nt].x) : fA;
+                    const float vB = dB < a.ext ? (e ? gB[nt].y : gB[nt].x) : fB;
+                    sc[nt][e] = okA ? sc[nt][e] * scale + vA : -INFINITY;
+                    sc[nt][2 + e] = okB ? sc[nt][2 + e] * scale + vB : -INFINITY;
+                    xA = fmaxf(xA, sc[nt][e]);
+                    xB = fmaxf(xB, sc[nt][2 + e]);
+                }
         }
         xA = fmaxf(xA, __shfl_xor_sync(0xffffffffu, xA, 1));
         xA = fmaxf(xA, __shfl_xor_sync(0xffffffffu, xA, 2));
         xB = fmaxf(xB, __shfl_xor_sync(0xffffffffu, xB, 1));
         xB = fmaxf(xB, __shfl_xor_sync(0xffffffffu, xB, 2));
-        if (tig == 0) {
-            sm.red[0][nt][rA] = xA;
-            sm.red[0][nt][rB] = xB;
-        }
-        __syncthreads();
-        const float nA = fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
-        const float nB = fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
+        const float nA = fmaxf(mA, xA), nB = fmaxf(mB, xB);
         const float aA = __expf(mA - nA), aB = __expf(mB - nB);
-        const float p0A = sc[0] == -INFINITY ? 0.f : __expf(sc[0] - nA), p1A = sc[1] == -INFINITY ? 0.f : __expf(sc[1] - nA);
-        const float p0B = sc[2] == -INFINITY ? 0.f : __expf(sc[2] - nB), p1B = sc[3] == -INFINITY ? 0.f : __expf(sc[3] - nB);
-        const int pc = nt * 8 + 2 * tig;
-        *reinterpret_cast<unsigned*>(sm.p + rA * kTcPPad + pc) = h2(p0A, p1A);
-        *reinterpret_cast<unsigned*>(sm.p + rB * kTcPPad + pc) = h2(p0B, p1B);
-        float sA = p0A + p1A, sB = p0B + p1B;
-        sA += __shfl_xor_sync(0xffffffffu, sA, 1);
-        sA += __shfl_xor_sync(0xffffffffu, sA, 2);
-        sB += __shfl_xor_sync(0xffffffffu, sB, 1);
-        sB += __shfl_xor_sync(0xffffffffu, sB, 2);
-        if (tig == 0) {
-            sm.red[1][nt][rA] = sA;
-            sm.red[1][nt][rB] = sB;
+        float sumA[4], sumB[4];
+#pragma unroll
+        for (int nt = 0; nt < 4; ++nt) {
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+                sc[nt][e] = sc[nt][e] == -INFINITY ? 0.f : __expf(sc[nt][e] - nA);
+                sc[nt][2 + e] = sc[nt][2 + e] == -INFINITY ? 0.f : __expf(sc[nt][2 + e] - nB);
+            }
+            sumA[nt] = sc[nt][0] + sc[nt][1];
+            sumB[nt] = sc[nt][2] + sc[nt][3];
+            sumA[nt] += __shfl_xor_sync(0xffffffffu, sumA[nt], 1);
+            sumA[nt] += __shfl_xor_sync(0xffffffffu, sumA[nt], 2);
+            sumB[nt] += __shfl_xor_sync(0xffffffffu, sumB[nt], 1);
+            sumB[nt] += __shfl_xor_sync(0xffffffffu, sumB[nt], 2);
         }
-        __syncthreads();
-        lA = lA * aA + ((sm.red[1][0][rA] + sm.red[1][1][rA]) + (sm.red[1][2][rA] + sm.red[1][3][rA]));
-        lB = lB * aB + ((sm.red[1][0][rB] + sm.red[1][1][rB]) + (sm.red[1][2][rB] + sm.red[1][3][rB]));
+        lA = lA * aA + ((sumA[0] + sumA[1]) + (sumA[2] + sumA[3]));
+        lB = lB * aB + ((sumB[0] + sumB[1]) + (sumB[2] + sumB[3]));
         mA = nA;
         mB = nB;
+        if (__any_sync(0xffffffffu, aA != 1.f || aB != 1.f)) {   // (a row's largest logit moved: rare past the start)
 #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            o[j][0] *= aA;
-            o[j][1] *= aA;
-            o[j][2] *= aB;
-            o[j][3] *= aB;
-        }
-#pragma unroll
-        for (int k = 0; k < 2; ++k) {
-            unsigned pa[4];
-            ldsm4(pa, sm.p + (mt * 16 + ((li & 1) << 3) + lr) * kTcPPad + (2 * k + (li >> 1)) * 8);
-            const __half* vrow = sm.v + (16 * k + ((li & 1) << 3) + lr) * kTcPad + nt * 32 + (li >> 1) * 8;
-#pragma unroll
-            for (int n2 = 0; n2 < 2; ++n2) {
-                unsigned b[4];
-                ldsm4t(b, vrow + n2 * 16);
-                mma16816(o[2 * n2], pa, b[0], b[1]);
-                mma16816(o[2 * n2 + 1], pa, b[2], b[3]);
+            for (int j = 0; j < 16; ++j) {
+                o[j][0] *= aA;
+                o[j][1] *= aA;
+                o[j][2] *= aB;
+                o[j][3] *= aB;
             }
         }
-        __syncthreads();   // the tile's cells and probabilities are read
-        if (it + 1 < n_tiles) stash();
+#pragma unroll
+        for (int k = 0; k < 2; ++k) {   // the tile's halves: the probabilities of 16 cells as a row operand
+            const unsigned pa[4] = {h2(sc[2 * k][0], sc[2 * k][1]), h2(sc[2 * k][2], sc[2 * k][3]),
+                                    h2(sc[2 * k + 1][0], sc[2 * k + 1][1]), h2(sc[2 * k + 1][2], sc[2 * k + 1][3])};
+            const __half* vrow = vt + (16 * k + ((li & 1) << 3) + lr) * kTcPad + (li >> 1) * 8;
+#pragma unroll
+            for (int n4 = 0; n4 < 8; ++n4) {
+                unsigned b[4];
+                ldsm4t(b, vrow + n4 * 16);
+                mma16816(o[2 * n4], pa, b[0], b[1]);
+                mma16816(o[2 * n4 + 1], pa, b[2], b[3]);
+            }
+        }
     }
-    if (a.part) {   // the partial sums: a row's m and l by one of its lanes, its values by each lane's eight
-        float* pA = a.part + ((size_t) (t0 + (inA ? rA : 0)) * a.H + h) * (D + 2);
-        float* pB = a.part + ((size_t) (t0 + (inB ? rB : 0)) * a.H + h) * (D + 2);
-        if (nt == 0 && tig == 0) {
+    if (a.part) {   // the partial sums: a row's m and l by one of its lanes, its values by each lane's
+        float* const to = sg == 0 ? a.part : a.seg + (size_t) (sg - 1) * a.T * a.H * (D + 2);
+        float* pA = to + hA * (D + 2);
+        float* pB = to + hB * (D + 2);
+        if (tig == 0) {
             if (inA) *reinterpret_cast<float2*>(pA) = make_float2(mA, lA);
             if (inB) *reinterpret_cast<float2*>(pB) = make_float2(mB, lB);
         }
 #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            const int d = nt * 32 + j * 8 + 2 * tig;
+        for (int j = 0; j < 16; ++j) {
+            const int d = j * 8 + 2 * tig;
             if (inA) *reinterpret_cast<float2*>(pA + 2 + d) = make_float2(o[j][0], o[j][1]);
             if (inB) *reinterpret_cast<float2*>(pB + 2 + d) = make_float2(o[j][2], o[j][3]);
         }
@@ -1329,16 +1452,16 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
     }
     const float iA = 1.f / lA, iB = 1.f / lB;
 #pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        const int d = nt * 32 + j * 8 + 2 * tig;
+    for (int j = 0; j < 16; ++j) {
+        const int d = j * 8 + 2 * tig;
         if (inA) {
-            const size_t at = ((size_t) (t0 + rA) * a.H + h) * D + d;
+            const size_t at = hA * D + d;
             const float2 gt = *reinterpret_cast<const float2*>(a.gate + at);
             *reinterpret_cast<float2*>(a.out + at) =
                 make_float2(o[j][0] * iA / (1.0f + __expf(-gt.x)), o[j][1] * iA / (1.0f + __expf(-gt.y)));
         }
         if (inB) {
-            const size_t at = ((size_t) (t0 + rB) * a.H + h) * D + d;
+            const size_t at = hB * D + d;
             const float2 gt = *reinterpret_cast<const float2*>(a.gate + at);
             *reinterpret_cast<float2*>(a.out + at) =
                 make_float2(o[j][2] * iB / (1.0f + __expf(-gt.x)), o[j][3] * iB / (1.0f + __expf(-gt.y)));
@@ -1346,15 +1469,18 @@ __global__ void __launch_bounds__(256, 1) attn_tc_kernel(TcIn a) {
     }
 }
 
-/// attn_tc_kernel for a decode forward's rows (1 .. kMaxT) over a stretch of a visit's cells: block (cb, g) takes the
+/// A decode forward's rows (1 .. kMaxT) over a stretch of a visit's cells, on the tensor cores: block (cb, g) takes the
 /// rows' query heads of K/V head g (row r: forward row r / QH, its head r % QH of g's; T QH <= 32) over stretch cb, in
-/// tiles of 32 cells, so a visit's cells are read once whatever the rows (a full visit's cells are the time of a token
-/// deep in a context).  A stretch's sums a row and head: m, the sum of exp(logit - m) and that-weighted V, no sink,
-/// into part [T][H][n_chunks][D + 2] (m = -1e30 and a sum of 0 where a row sees none of the cells).  A row's sums do
-/// not depend on the rows scored with it: a forward of several rows leaves what a row at a time leaves, to the bit.
-/// A ring's slot stands for the position last written there, and with `dyn` a ring's stretches start at slot dyn[2]
-/// and go on past its end to its start (the drafter's rings: the cells in use alone).  The arithmetic is the chunks':
-/// q and the probabilities as halves.  Grid (stretches, K/V heads), block 256.
+/// tiles of 32 cells (K and V of the K/V head, halves, or with Q8 q8_0 blocks widened into halves as they are
+/// stashed), so a visit's cells are read once whatever the rows (a full visit's cells are the time of a token deep in
+/// a context).  A stretch's sums a row and head: m, the sum of exp(logit - m) and that-weighted V, no sink, into part
+/// [T][H][n_chunks][D + 2] (m = -1e30 and a sum of 0 where a row sees none of the cells).  A row's sums do not depend
+/// on the rows scored with it: a forward of several rows leaves what a row at a time leaves, to the bit.  A ring's
+/// slot stands for the position last written there, and with `dyn` a ring's stretches start at slot dyn[2] and go on
+/// past its end to its start (the drafter's rings: the cells in use alone).  The arithmetic is the chunks': q and the
+/// probabilities as halves.  Warps: scores m-tile w & 1 x cells (w >> 1) * 8 .. +8; values m-tile w & 1 x dims
+/// (w >> 1) * 32 .. +32.  The next tile waits in registers through the current one's products.  Grid (stretches, K/V
+/// heads), block 256.
 template <bool Q8>
 __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     constexpr int D = 128;
@@ -1558,23 +1684,28 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
 /// divided by their sum and times sigmoid(gate): out [T][H * D].  A block a row and a query head; D threads.
 struct TcMergeIn {
     const float* part;    // [T][H][D + 2]
-    const float* extra;   // [n_extra][cap][H][D + 2]
+    const float* extra;   // [n_extra][cap][H][D + 2]: the cards'
+    const float* seg;     // [n_seg][T][H][D + 2]: this card's segments after the first
     const float* gate;    // [T][H * D]
     float* out;           // [T][H * D]
-    int H, D, n_extra, cap;
+    int H, D, n_extra, cap, n_seg, T;
 };
 __global__ void __launch_bounds__(128) tc_merge_kernel(TcMergeIn a) {
     const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
     const float* p = a.part + ((size_t) t * a.H + h) * (a.D + 2);
+    auto more = [&](int e) {   // the cards' sums, then the segments'
+        return e < a.n_extra ? a.extra + (((size_t) e * a.cap + t) * a.H + h) * (a.D + 2)
+                             : a.seg + (((size_t) (e - a.n_extra) * a.T + t) * a.H + h) * (a.D + 2);
+    };
     float mx = p[0];
-    for (int e = 0; e < a.n_extra; ++e) {
-        const float* pe = a.extra + (((size_t) e * a.cap + t) * a.H + h) * (a.D + 2);
+    for (int e = 0; e < a.n_extra + a.n_seg; ++e) {
+        const float* pe = more(e);
         if (pe[1] != 0.f) mx = fmaxf(mx, pe[0]);
     }
     const float w0 = __expf(p[0] - mx);
     float sum = w0 * p[1], acc = w0 * p[2 + i];
-    for (int e = 0; e < a.n_extra; ++e) {
-        const float* pe = a.extra + (((size_t) e * a.cap + t) * a.H + h) * (a.D + 2);
+    for (int e = 0; e < a.n_extra + a.n_seg; ++e) {
+        const float* pe = more(e);
         if (pe[1] == 0.f) continue;
         const float w = __expf(pe[0] - mx);
         sum += w * pe[1];
