@@ -1889,6 +1889,7 @@ struct Engine {
     int64_t snap_pos = -1;
     bool img_on = true;
     bool home_on = false;  // units_back (LAMINA_INK_HOME=1: on)
+    bool stage_room = false;   // chunk_fit: cells to the cell cards for a staged stretch's largest rows (LAMINA_INK_STAGE_ROOM=1)
     int img_take = -1;   // the lot whose image the next state_load may take (kv_copy's take)
     size_t img_here_bytes() const { return ring_bytes + conv_bytes(); }
     size_t img_there_bytes() const {
@@ -2828,6 +2829,15 @@ struct Engine {
         // 5070 Ti: 6% at 2,048 rows, 1% more at 4,096) for VRAM the cells do not get: 2,048 rows at most, for a
         // stretch of eight such chunks or more.
         if (whole) {   // (a size the second set exists at)
+            // (LAMINA_INK_STAGE_ROOM=1: where the split's card lacks the room for the largest set, the oldest cells go to
+            // the cell cards for it - as many units as it takes, while they take them)
+            const int big = std::min(prefill_max, kStageRows);
+            if (stage_room && sat && !cards.empty() && big > chunk_cap && left >= 8 * (int64_t) big) {
+                int moved = 0;
+                while (!fits(big) && moved < 64 && evict()) ++moved;
+                if (stage_log && moved > 0)
+                    std::fprintf(stderr, "lamina: stages: %d units to the cell cards for chunks of %d rows\n", moved, big);
+            }
             for (int rows = std::min(prefill_max, kStageRows); rows > prefill && want == prefill; rows /= 2)
                 if (left >= 8 * (int64_t) rows && (chunk_cap > kStageRows ? fits(rows) : holds(rows))) want = rows;
             if (chunk_cap > kStageRows || chunk_cap < want || !fits(chunk_cap)) chunk_set(want);
@@ -2903,6 +2913,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_STAGE_ROOM")) stage_room = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_FIXED")) ahead_fixed = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_NEXT")) ahead_across = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_HEAT_PROMPT")) heat_prompt = std::max(0.f, (float) std::atof(r));
