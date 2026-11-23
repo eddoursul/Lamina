@@ -55,6 +55,18 @@ bool read_blob(const char* path, long long index, std::vector<uint8_t>& out) {
     return got == out.size();
 }
 
+/// An expert without the pack: random codes with finite scales (fp16 in [2^-7, 2^-6)), another one an index.  The
+/// kernels and the pool's protocol are under test, not the model's weights.
+void synth_blob(long long index, std::vector<uint8_t>& out) {
+    out.assign(cpu::BLOB, 0);
+    std::mt19937 rng((uint32_t) (0x9E3779B9u * (uint32_t) (index + 1)));
+    for (auto& v : out) v = (uint8_t) rng();
+    for (size_t o = cpu::O_GU_SCALES; o + 2 <= cpu::BLOB; o += 2) {
+        const uint16_t h = (uint16_t) (0x2000 | (rng() & 0x3FF));
+        std::memcpy(out.data() + o, &h, 2);
+    }
+}
+
 /// The fp16 scale at a byte offset, decoded by the SAME rule the kernel uses.  Used only for the structural
 /// sanity check, so it is deliberately a second, independent transcription of the three lines in question.
 float f16_at(const std::vector<uint8_t>& b, size_t off) {
@@ -105,12 +117,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ---- a real blob out of the pack: layer stride is 512 experts
+    // ---- a real blob out of the pack (layer stride is 512 experts), or a synthetic one where the pack is not there
+    //      (upstream's setup made it; this fork computes its packs at load)
     const long long idx = layer * 512 + expert;
     std::vector<uint8_t> blob;
-    if (!read_blob(path, idx, blob)) {
-        std::fprintf(stderr, "cannot read expert %lld (layer %lld) from %s\n", expert, layer, path);
-        return 2;
+    const bool real = read_blob(path, idx, blob);
+    if (!real) {
+        synth_blob(idx, blob);
+        std::printf("  %-44s not here: a synthetic expert (random codes, finite scales)\n", path);
     }
 
     // ---- structural sanity, because the agreement checks below are self-consistent and would pass on the
@@ -132,7 +146,8 @@ int main(int argc, char** argv) {
     }
     {
         std::vector<uint8_t> other;
-        if (read_blob(path, (layer * 512 + expert) + 1, other)) {
+        if (!real) synth_blob(idx + 1, other);
+        if (!real || read_blob(path, (layer * 512 + expert) + 1, other)) {
             long long diff = 0;
             for (size_t i = 0; i < blob.size(); ++i) if (blob[i] != other[i]) ++diff;
             const double frac = (double) diff / (double) blob.size();

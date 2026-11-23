@@ -55,6 +55,18 @@ bool read_blob(const char* path, long long index, std::vector<uint8_t>& out) {
     std::fclose(f);
     return got == out.size();
 }
+
+/// An expert without the pack: random codes with finite scales (fp16 in [2^-7, 2^-6)), another one an index.  The
+/// kernels and the pool's protocol are under test, not the model's weights.
+void synth_blob(long long index, std::vector<uint8_t>& out) {
+    out.assign(cpu::BLOB, 0);
+    std::mt19937 rng((uint32_t) (0x9E3779B9u * (uint32_t) (index + 1)));
+    for (auto& v : out) v = (uint8_t) rng();
+    for (size_t o = cpu::O_GU_SCALES; o + 2 <= cpu::BLOB; o += 2) {
+        const uint16_t h = (uint16_t) (0x2000 | (rng() & 0x3FF));
+        std::memcpy(out.data() + o, &h, 2);
+    }
+}
 #endif
 
 double now_ms() {
@@ -313,11 +325,12 @@ int main(int argc, char** argv) {
     // ---- ten experts off one layer, which is exactly what a token uses
     const int NEXP = 10;
     std::vector<std::vector<uint8_t>> blobs((size_t) NEXP);
-    for (int e = 0; e < NEXP; ++e)
-        if (!read_blob(path, layer * 512 + e, blobs[(size_t) e])) {
-            std::fprintf(stderr, "cannot read expert %d of layer %lld from %s\n", e, layer, path);
-            return 2;
-        }
+    bool real = true;   // (the pack is upstream's setup's: without it, synthetic experts - the pool is under test)
+    for (int e = 0; e < NEXP && real; ++e) real = read_blob(path, layer * 512 + e, blobs[(size_t) e]);
+    if (!real) {
+        for (int e = 0; e < NEXP; ++e) synth_blob(layer * 512 + e, blobs[(size_t) e]);
+        std::printf("  %s is not here: synthetic experts (random codes, finite scales)\n", path);
+    }
 
     std::mt19937 rng(99);
     std::normal_distribution<float> gauss(0.0f, 1.0f);

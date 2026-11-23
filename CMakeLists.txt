@@ -827,8 +827,8 @@ if(LAMINA_BUILD_TESTS)
 
     add_executable(expert_parity src/kernels/cpu/expert_parity.cpp)
     target_link_libraries(expert_parity PRIVATE lamina_kernels_cpu)
-    # The pack is a REQUIRED input, not an optional one: this test compares against a real expert blob, and a
-    # missing file would otherwise be reported as a pass by a test that skipped everything.
+    # With upstream's pack (pack/full/experts.bin) a real expert blob; without it - this fork computes its packs at
+    # load - a synthetic one, which the test says: the kernel against its scalar oracle either way.
     add_test(NAME expert_parity COMMAND expert_parity --selftest
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   endif()
