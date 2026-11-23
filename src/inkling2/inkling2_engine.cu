@@ -1926,6 +1926,7 @@ struct Engine {
     }
     /// The cache's buffer `host` is gone, or written anew
     void parked_drop(const uint8_t* host) {
+        if (taking == host) taking = nullptr;   // (a conversation whose return did not come to its cells)
         for (size_t i = 0; i < parked.size(); ++i)
             if (parked[i].host == host) {
                 homes_sync();
