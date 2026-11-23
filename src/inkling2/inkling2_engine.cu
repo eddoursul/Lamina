@@ -1230,6 +1230,7 @@ struct Engine {
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
+    bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
     bool il_on = true;
@@ -2549,6 +2550,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
             il_proj = (std::atoi(r) & 2) != 0;
@@ -4790,14 +4792,15 @@ struct Engine {
                 else ik::bias_ring_kernel<0><<<(unsigned) T, 256, 0, st>>>(rb);
             });
             tick_part("q, k, v: the bias by cell");
-        } else {
-            ik::QbIn a{R.qraw, L.q_scale, R.rraw, L.rel_scale, L.rel_table, L.sink, fq, R.pos_d, R.q, R.bias, H, D_, Rr, L.ext,
-                       N, L.full ? 1 : 0, g.qk_clip, g.rel_clip, g.log_alpha, (float) g.log_floor};
-            run("a: q, bias", [&] {
-                if (Rr == 16) ik::q_bias_kernel<4><<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a);
-                else ik::q_bias_kernel<0><<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(a);
-            });
         }
+        // (a decode forward: q and the bias with the cells' store below, one launch where fuse_qkv)
+        const ik::QbIn qb{R.qraw, L.q_scale, R.rraw, L.rel_scale, L.rel_table, L.sink, fq, R.pos_d, R.q, R.bias, H, D_, Rr,
+                          L.ext, N, L.full ? 1 : 0, g.qk_clip, g.rel_clip, g.log_alpha, (float) g.log_floor};
+        if (!batch && !fuse_qkv)
+            run("a: q, bias", [&] {
+                if (Rr == 16) ik::q_bias_kernel<4><<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(qb);
+                else ik::q_bias_kernel<0><<<dim3((unsigned) T, (unsigned) H), ik::kWide, 0, st>>>(qb);
+            });
         // the cells the rows attend: the visit's own, or for a chunk's window visit the range
         ik::Cells cells = V.cells;
         {
@@ -4823,9 +4826,16 @@ struct Engine {
                 });
             } else {   // with the cells' store, and a forward of one row its states
                 ik::KvCellsIn b{a, {T == 1 ? ck : nullptr, T == 1 ? cv : nullptr}, cells, R.pos_d};
-                run("a: k, v convolved, stored", [&] {
-                    ik::kv_cells_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(b);
-                });
+                if (fuse_qkv)
+                    run("a: q, bias, k, v convolved, stored", [&] {
+                        const dim3 grid((unsigned) T, (unsigned) (H + 2 * HK));
+                        if (Rr == 16) ik::qkv_cells_kernel<4><<<grid, ik::kWide, 0, st>>>(qb, b);
+                        else ik::qkv_cells_kernel<0><<<grid, ik::kWide, 0, st>>>(qb, b);
+                    });
+                else
+                    run("a: k, v convolved, stored", [&] {
+                        ik::kv_cells_kernel<<<dim3((unsigned) T, 2, (unsigned) HK), (unsigned) D_, 0, st>>>(b);
+                    });
             }
         }
         tick_part("q, k, v: K and V convolved");

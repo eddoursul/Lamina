@@ -656,8 +656,8 @@ struct QbIn {
     float qclip, rclip, alpha, floor_;
 };
 template <int R4>
-__global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
-    const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
+__device__ __forceinline__ void q_bias_do(const QbIn& a, int t, int h) {
+    const int i = threadIdx.x;
     __shared__ float red[32][3];
     __shared__ float tot[3];
     __shared__ float r[kRelMax];
@@ -699,6 +699,10 @@ __global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
         b[d] = s - sink;
     }
     if (i == 0) b[a.ext] = -sink;
+}
+template <int R4>
+__global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
+    q_bias_do<R4>(a, blockIdx.x, blockIdx.y);
 }
 
 // ---------------------------------------------------------------------------------------------- the cells
@@ -750,9 +754,9 @@ struct KvCellsIn {
     Cells cells;
     const int32_t* pos;   // [T]
 };
-__global__ void __launch_bounds__(128) kv_cells_kernel(KvCellsIn b) {
+__device__ __forceinline__ void kv_cells_do(const KvCellsIn& b, int t, int side, int g) {
     const KvIn& a = b.kv;
-    const int t = blockIdx.x, side = blockIdx.y, g = blockIdx.z, i = threadIdx.x;
+    const int i = threadIdx.x;
     __shared__ float part[4];
     const int n = a.HK * a.D, ch = g * a.D + i;
     const float* raw = at2(a.raw, side);
@@ -789,6 +793,22 @@ __global__ void __launch_bounds__(128) kv_cells_kernel(KvCellsIn b) {
     } else {
         ((__half*) dst)[(size_t) g * a.D + i] = __float2half(val);
     }
+}
+__global__ void __launch_bounds__(128) kv_cells_kernel(KvCellsIn b) {
+    kv_cells_do(b, blockIdx.x, blockIdx.y, blockIdx.z);
+}
+/// q_bias_kernel's and kv_cells_kernel's work in one launch (the two read and write apart): block (t, y) with y < H
+/// is q and the bias of row t and head y on kWide threads, the others K and V - side (y - H) / HK, head (y - H) % HK -
+/// on the first 128 (the other warps leave at once).  Grid (T, H + 2 HK).
+template <int R4>
+__global__ void __launch_bounds__(kWide) qkv_cells_kernel(QbIn a, KvCellsIn b) {
+    const int y = (int) blockIdx.y;
+    if (y < a.H) {
+        q_bias_do<R4>(a, blockIdx.x, y);
+        return;
+    }
+    if (threadIdx.x >= 128) return;
+    kv_cells_do(b, blockIdx.x, (y - a.H) / b.kv.HK, (y - a.H) % b.kv.HK);
 }
 
 // ---------------------------------------------------------------------------------------------- the attention
