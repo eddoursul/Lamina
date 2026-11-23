@@ -118,8 +118,11 @@ struct MixIn {
 };
 /// A block a query and a row (a row's queries side by side in the grid: its values come from the cache for all but the
 /// first); a thread four values (N <= 4 x its threads), loaded once for the sums and the mix.
-__global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
-    const int c = blockIdx.x, t = blockIdx.y, i4 = threadIdx.x;
+/// mix_kernel's work for block (c, t), every thread through to the end: the thread's four values of the mix (zeros
+/// past N), stored into `out`, and the normed state into `cur_n`; with no query (nq 0) the state itself, raw, and
+/// cur_n alone stored.
+__device__ __forceinline__ float4 mix_do(const MixIn& a, int c, int t) {
+    const int i4 = threadIdx.x;
     __shared__ float red[32][kBlk + 2];
     __shared__ float tot[kBlk + 2];
     const bool on = i4 < a.N / 4;
@@ -147,7 +150,7 @@ __global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
     const float4 xn = mul4(x, inv);
     if (a.nq == 0) {
         if (on) st4(a.cur_n + (size_t) t * a.N, i4, xn);
-        return;
+        return x;
     }
     // softmax over the nb block inputs and the state (the state's term the last of the sum)
     const float sc = rsqrtf((float) a.N);
@@ -167,7 +170,6 @@ __global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
         }
     const float e_cur = __expf(s_cur - mx);
     sum += e_cur;
-    if (!on) return;
     const float r = 1.0f / sum;
     float4 y = mul4(xn, e_cur * r);
 #pragma unroll
@@ -176,8 +178,13 @@ __global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
             const float wj = s[j] * r;
             y = make_float4(y.x + wj * bl[j].x, y.y + wj * bl[j].y, y.z + wj * bl[j].z, y.w + wj * bl[j].w);
         }
+    if (!on) return y;
     st4(a.out + ((size_t) c * a.T + t) * a.N, i4, y);
     if (c == 0 && a.cur_n) st4(a.cur_n + (size_t) t * a.N, i4, xn);
+    return y;
+}
+__global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
+    (void) mix_do(a, blockIdx.x, blockIdx.y);
 }
 
 // ---------------------------------------------------------------------------------------------- the loop's gates
@@ -281,17 +288,15 @@ struct NormIn {
     float eps;
     bool il;
 };
-/// A block a row and an input; a thread four values, eight threads a q8_1 block.
-__global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
-    const int t = blockIdx.x, c = blockIdx.y, i4 = threadIdx.x;
+/// norm_kernel's work for row t of input c, the thread's four values in x (zeros past N)
+__device__ __forceinline__ void norm_do(const NormIn& a, int t, int c, float4 x) {
+    const int i4 = threadIdx.x;
     __shared__ float red[32][1];
     __shared__ float tot[1];
     const bool on = i4 < a.N / 4;
-    const float* const xc = at3(a.x, c);
     const float* const wc = at3(a.w, c);
     float* const yc = at3(a.y, c);
     Q81* const qc = at3(a.q, c);
-    const float4 x = on ? ld4(xc + (size_t) t * a.N, i4) : make_float4(0.f, 0.f, 0.f, 0.f);
     float v[1] = {dot4(x, x)};
     block_sums_wide<1>(v, red, tot);
     float4 y = mul4(x, rsqrtf(v[0] / (float) a.N + a.eps));
@@ -333,6 +338,18 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
         q->ds = ds;
         if (float* const dl = at3(a.dl, c)) dl[(size_t) (i4 / 8) * a.cp + t] = __low2float(ds);
     }
+}
+/// A block a row and an input; a thread four values, eight threads a q8_1 block.
+__global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
+    const int t = blockIdx.x, c = blockIdx.y;
+    const bool on = (int) threadIdx.x < a.N / 4;
+    norm_do(a, t, c, on ? ld4(at3(a.x, c) + (size_t) t * a.N, threadIdx.x) : make_float4(0.f, 0.f, 0.f, 0.f));
+}
+/// A sublayer's input without the loop's gate in one launch: block (c, t) mixes row t for query c (mix_kernel's) and
+/// norms the mix as input c (norm_kernel's: weight, rows, q8_1 image); with no query the state itself, raw, is normed.
+/// The same sums as the two launches.  Grid (max(nq, 1), T).
+__global__ void __launch_bounds__(kWide) mix_norm_kernel(MixIn m, NormIn a) {
+    norm_do(a, blockIdx.y, blockIdx.x, mix_do(m, blockIdx.x, blockIdx.y));
 }
 
 /// norm_kernel for a chunk's rows, its values to the bit (no q8_1 image): a warp a row, a block 8 rows, where a

@@ -1231,6 +1231,7 @@ struct Engine {
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
+    bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
     bool il_on = true;
@@ -2551,6 +2552,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
             il_proj = (std::atoi(r) & 2) != 0;
@@ -4232,8 +4234,10 @@ struct Engine {
         }
         mmq->run_dense(W.d, W.type, W.n_out, W.n_in, xq, T, y, W.n_out, st);
     }
+    /// (`with`: the norm of each query's mix as that input, in the same launch - a decode forward's sublayer without
+    /// the loop's gate)
     void mix(const float* const* blks, int nb, const float* cur, const float* queries, int nq, float* out, float* cur_n,
-             int T) {
+             int T, const ik::NormIn* with = nullptr) {
         ik::MixIn a{};
         for (int j = 0; j < nb; ++j) a.blk[j] = blks[j];
         a.cur = cur;
@@ -4244,7 +4248,8 @@ struct Engine {
         a.nq = nq;
         a.N = (int) m->g.n_embd;
         a.T = T;
-        ik::mix_kernel<<<dim3((unsigned) std::max(nq, 1), (unsigned) T), row4(), 0, st>>>(a);
+        if (with != nullptr) ik::mix_norm_kernel<<<dim3((unsigned) std::max(nq, 1), (unsigned) T), row4(), 0, st>>>(a, *with);
+        else ik::mix_kernel<<<dim3((unsigned) std::max(nq, 1), (unsigned) T), row4(), 0, st>>>(a);
     }
     /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
     /// (`ld`: floats from one row of C to the next, m when not given)
@@ -4657,16 +4662,17 @@ struct Engine {
             tick_part("inputs: the messages' mix");
         }
 
-        // ---- attention: its inputs
+        // ---- attention: its inputs (a decode forward without the loop's gate: the mix and the norm in one launch, below)
         const float* u[3];
+        const int n_in = msgs || L.full ? 3 : 1;
+        const bool mix_norm = fuse_mix && !batch && !msgs && (L.nq == 0 || L.nq == n_in);
         if (L.nq == 0) {
-            run("a: mix", [&] { mix(blks, nb, R.x, nullptr, 0, nullptr, newblk, T); });
+            if (!mix_norm) run("a: mix", [&] { mix(blks, nb, R.x, nullptr, 0, nullptr, newblk, T); });
             u[0] = u[1] = u[2] = R.x;
         } else {
-            run("a: mix", [&] { mix(blks, nb, R.x, L.attn_query, L.nq, R.mixed, newblk, T); });
+            if (!mix_norm) run("a: mix", [&] { mix(blks, nb, R.x, L.attn_query, L.nq, R.mixed, newblk, T); });
             for (int c = 0; c < 3; ++c) u[c] = R.mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
         }
-        const int n_in = msgs || L.full ? 3 : 1;
         tick_part("inputs: the mix");
         if (msgs && batch) {
             for (int c = 0; c < 3; ++c) {
@@ -4715,7 +4721,11 @@ struct Engine {
             a.N = N;
             a.cp = K::native_q8_1_il_cp(T);
             a.eps = g.eps;
-            run("a: norm", [&] { norm(a, T, n_in, batch); });
+            if (mix_norm)
+                run("a: mix, norm", [&] {
+                    mix(blks, nb, R.x, L.nq == 0 ? nullptr : L.attn_query, L.nq, L.nq == 0 ? nullptr : R.mixed, newblk, T, &a);
+                });
+            else run("a: norm", [&] { norm(a, T, n_in, batch); });
         }
         tick("attention inputs");
         nan_visit = v;
@@ -4980,7 +4990,8 @@ struct Engine {
         // ---- the MoE
         const int nb2 = l / res + 1;
         if (L.first) blks[nb2 - 1] = newblk;
-        run("f: mix", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T); });
+        const bool mix_norm_f = fuse_mix && !batch && !msgs;   // (the mix and the norm in one launch, below)
+        if (!mix_norm_f) run("f: mix", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T); });
         tick_part("MoE: the mix");
         const float* fu = R.mixed;
         if (msgs && batch) {
@@ -5015,7 +5026,8 @@ struct Engine {
             a.N = N;
             a.eps = g.eps;
             tick_part("MoE: the loop gate");
-            run("f: norm", [&] { norm(a, T, 1, batch); });
+            if (mix_norm_f) run("f: mix, norm", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T, &a); });
+            else run("f: norm", [&] { norm(a, T, 1, batch); });
             tick_part("MoE: the norm");
         }
         const int n_ent = T * top_k;
