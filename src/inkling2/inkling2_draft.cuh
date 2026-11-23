@@ -12,6 +12,7 @@
 #pragma once
 
 #include "inkling2_kernels.cuh"
+#include "lamina/kernels/sampler.hpp"
 
 namespace ik {
 
@@ -258,12 +259,35 @@ __global__ void __launch_bounds__(256) head_vocab_kernel(VocabIn a) {
     }
 }
 
+/// A sampled request's draft j (its probability q under the drafter, the draw u of the position it takes, the
+/// temperature T): its chance to be the token that row picks - sigmoid(c + d logit(q)), the same token as the row's
+/// likeliest, times sigmoid((a + b logit(q) - logit(u)) / w), u within that token's share (a = a0 + a1 / T,
+/// b = b0 + b1 / T, w = exp(w0 + w1 log T)): lamina/core/draft_pass.hpp's model, its constants this drafter's (fitted
+/// to 15,940 drafts of the model's DSpark block drafter in Q8_0 at temperatures 0.6-1.2, top_k 64, four prompts: the
+/// optimization repository's logs/inkling/hn_fit.py), a set for the first draft, the second, and the others.
+__device__ __forceinline__ float draft_chance(int j, float q, float u, float T) {
+    constexpr float k[3][8] = {{-0.1261f, 0.6805f, -1.2603f, 2.8356f, 0.5522f, 0.1070f, 0.3819f, -0.3074f},
+                               {-0.2878f, 0.5908f, -2.2398f, 3.7768f, 0.9437f, -0.1491f, 0.4883f, -0.5104f},
+                               {-0.4506f, 0.5293f, -1.3143f, 3.6593f, -0.6258f, 1.7322f, 0.5370f, -0.5615f}};
+    const float* c = k[min(j, 2)];
+    auto lg = [](float p) {
+        p = fminf(fmaxf(p, 1e-6f), 1.0f - 1e-6f);
+        return logf(p / (1.0f - p));
+    };
+    const float lq = lg(q), w = expf(c[6] + c[7] * logf(T));
+    const float same = 1.0f / (1.0f + expf(-(c[0] + c[1] * lq)));
+    const float share = 1.0f / (1.0f + expf(-((c[2] + c[3] / T + (c[4] + c[5] / T) * lq - lg(u)) / w)));
+    return same * share;
+}
+
 /// The blocks' parts joined: the position's token (the first of the largest logits) into out[0], its probability's
 /// bits into out[1], and the token into *prev for the next step.  The drafts' joint probability so far is in ctl[0]
 /// (float bits), the floor in ctl[1], and ctl[2] is set once the joint falls under the floor: the steps after do
-/// nothing, and their out[0] stays what it was (-1).  One block; a thread up to four parts.
+/// nothing, and their out[0] stays what it was (-1).  A sampled request (ctl[3]) joins each draft's chance to pass
+/// under its position's draw instead (draft_chance: Philox(seed ctl[4..5], the position ctl[6..7] + j), the
+/// temperature ctl[8]).  One block; a thread up to four parts.  j: the draft's step.
 __global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict__ part, int nb, int32_t* __restrict__ out,
-                                                         int32_t* __restrict__ prev, int32_t* __restrict__ ctl) {
+                                                         int32_t* __restrict__ prev, int32_t* __restrict__ ctl, int j) {
     if (ctl[2]) return;
     __shared__ float rv[32];
     __shared__ int ri[32];
@@ -308,7 +332,13 @@ __global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict
     if (i == 0) {
         float z = 0.f;
         for (int w = 0; w < 32; ++w) z += rv[w];
-        const float joint = __int_as_float(ctl[0]) / z;
+        float joint = __int_as_float(ctl[0]) / z;
+        if (ctl[3] != 0) {
+            const uint64_t seed = (uint64_t) (uint32_t) ctl[4] | (uint64_t) (uint32_t) ctl[5] << 32;
+            const uint64_t at = (uint64_t) (uint32_t) ctl[6] | (uint64_t) (uint32_t) ctl[7] << 32;
+            joint = __int_as_float(ctl[0]) *
+                    draft_chance(j, 1.0f / z, lamina::kernels::philox_uniform(seed, at + (uint64_t) j), __int_as_float(ctl[8]));
+        }
         if (!(joint >= __int_as_float(ctl[1]))) {
             ctl[2] = 1;
             return;

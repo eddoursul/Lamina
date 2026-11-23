@@ -1441,6 +1441,11 @@ struct Engine {
                                                 // 1 one product, 2 one where the first draft mostly goes on
     float sp_on = 0.5f;                         // how often it did, of late
     long long sp_blocks = 0, sp_went = 0, sp_whole_n = 0;
+    float sp_q[kMaxT] = {};   // the last block's drafts' probabilities under the drafter's head, each at its step
+    // A sampled request's drafter chain: by the drafts' joint chance to pass under their positions' draws, at this
+    // share of the floor (0.35 for the configs' 0.5: the best of 0.1-0.5 over recorded chains at temperatures 0.6-1.2)
+    static constexpr float kSampledFloor = 0.7f;
+    bool draw_rule = true;    // LAMINA_INK_DRAW_RULE=0: by the joint probability, as a greedy request's
     double sp_ms = 0;
 
     // ---- experts in RAM (Model::in_ram).  The card has n_held of them, a layer's in its first on_card[] slots: mapped
@@ -2559,6 +2564,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_GATE")) fuse_gate = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_GATE_RB")) gate_rb = std::atoi(r) == 1 ? 1 : 4;
+        if (const char* r = std::getenv("LAMINA_INK_DRAW_RULE")) draw_rule = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
             il_proj = (std::atoi(r) & 2) != 0;
@@ -5303,7 +5309,7 @@ struct Engine {
         b.c0 = dzero<float>(V);
         b.M8 = dzero<int8_t>(V * R_);
         b.mscale = dzero<float>(V);
-        b.n_step = 2 * (int) T + 5 + 3 * s.n_layer;
+        b.n_step = 2 * (int) T + 11 + 3 * s.n_layer;
         b.step = dzero<int32_t>((size_t) b.n_step);
         b.out = dzero<int32_t>(2 * T);
         b.emb_h = halloc<float>(N);
@@ -5435,7 +5441,7 @@ struct Engine {
             ik::head_step_kernel<<<1, 256, 0, st>>>(si);
             ik::VocabIn vi{b.base + (size_t) i * (size_t) V, b.c0, b.mscale, b.M8, b.lat, b.vpart, V, R_, s.cap, ctl + 2};
             ik::head_vocab_kernel<<<(unsigned) nb, 256, 0, st>>>(vi);
-            ik::head_pick_kernel<<<1, 1024, 0, st>>>(b.vpart, nb, b.out + 2 * (i - 1), prev, ctl);
+            ik::head_pick_kernel<<<1, 1024, 0, st>>>(b.vpart, nb, b.out + 2 * (i - 1), prev, ctl, i - 1);
         }
         tick("drafter: the head's steps");
         CK(cudaMemcpyAsync(b.out_h, b.out, (size_t) 2 * T * 4, cudaMemcpyDeviceToHost, st));
@@ -5555,8 +5561,18 @@ struct Engine {
             const float one = 1.0f;
             ctl[0] = x;
             std::memcpy(&ctl[1], &one, 4);
-            std::memcpy(&ctl[2], &min_p, 4);
+            // (a sampled request: the drafts' joint chance to pass under their positions' draws, its floor
+            // kSampledFloor of the configs' 0.5 - LAMINA_INK_DRAW_RULE=0: the joint probability as for greedy)
+            const bool by_draw = !smp.greedy && draw_rule;
+            const float floor = by_draw ? min_p * kSampledFloor : min_p;
+            std::memcpy(&ctl[2], &floor, 4);
             ctl[3] = 0;
+            ctl[4] = by_draw ? 1 : 0;
+            ctl[5] = (int32_t) (uint32_t) smp.seed;
+            ctl[6] = (int32_t) (uint32_t) (smp.seed >> 32);
+            ctl[7] = (int32_t) (uint32_t) (uint64_t) (P + 1);
+            ctl[8] = (int32_t) (uint32_t) ((uint64_t) (P + 1) >> 32);
+            std::memcpy(&ctl[9], &smp.temperature, 4);
         }
         // the layers and the first draft; the others (their rows of the target's head first) where it is at the floor
         auto issue = [&](cudaGraphExec_t& exec, const std::function<void()>& launches) {
@@ -5592,7 +5608,10 @@ struct Engine {
             sp_went += went;
         }
         sp_whi = std::max(sp_whi, P + T);
-        for (int i = 0; i < n && b.out_h[2 * i] >= 0 && b.out_h[2 * i] < s.V; ++i) out.push_back(b.out_h[2 * i]);
+        for (int i = 0; i < n && b.out_h[2 * i] >= 0 && b.out_h[2 * i] < s.V; ++i) {
+            out.push_back(b.out_h[2 * i]);
+            std::memcpy(&sp_q[i], &b.out_h[2 * i + 1], 4);
+        }
         ++sp_blocks;
         sp_ms += ms_since(t0);
         return out;
@@ -6614,6 +6633,7 @@ struct Drafts {
     size_t sfx_ok = 0;   // the lookup's history is the state's tokens, its first sfx_ok of them right
     // a run's count: windows, those with drafts, those from the lookup, the drafts offered and kept
     long long windows = 0, drafted = 0, looked = 0, offered = 0, kept = 0;
+    bool spark = false;   // the last drafts are the drafter's
     bool on() const { return lookup > 0 || fake > 0 || (E != nullptr && per_step > 0); }
     void init(int lookup_min, int64_t ctx) {
         lookup = lookup_min;
@@ -6632,6 +6652,7 @@ struct Drafts {
     std::vector<int32_t> propose(const std::vector<int32_t>& seq, int32_t x, int n) {
         std::vector<int32_t> out;
         ++windows;
+        spark = false;
         if (fake > 0) {
             out.assign((size_t) std::min(n, fake), x);
             offered += (long long) out.size();
@@ -6661,6 +6682,7 @@ struct Drafts {
             if (!out.empty()) {
                 ++drafted;
                 offered += (long long) out.size();
+                spark = true;
             }
         }
         return out;
@@ -6717,6 +6739,21 @@ const char* run_windows(Engine& E, Drafts& dr, std::vector<int32_t>& seq, std::v
         the_text(T);
         seq.push_back(x);
         if (stays) stays(x);
+        static FILE* dump = [] {   // (LAMINA_INK_DRAFT_DUMP: a test's - a sampled request's drafter drafts, one a line:
+            // its step, its probability under the drafter, the row's draw, the temperature, whether the row picked it)
+            const char* f = std::getenv("LAMINA_INK_DRAFT_DUMP");
+            return f != nullptr ? std::fopen(f, "a") : nullptr;
+        }();
+        if (dump != nullptr && dr.spark && !E.smp.greedy && fixed == nullptr) {
+            bool all = true;   // (every draft of the chain: whether it and those before it were picked)
+            for (int k = 0; k < (int) drafts.size(); ++k) {
+                const bool hit = all && picks[k] == drafts[(size_t) k];
+                all = hit;
+                std::fprintf(dump, "%d %.6g %.6g %.4g %d\n", k, E.sp_q[k],
+                             lamina::kernels::philox_uniform(E.smp.seed, (uint64_t) (p0 + 1 + k)), E.smp.temperature, hit ? 1 : 0);
+            }
+            std::fflush(dump);
+        }
         int rows = 1;   // the window's rows that stay
         bool ended = false;
         int32_t next = picks[0];
