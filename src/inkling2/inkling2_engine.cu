@@ -1804,6 +1804,120 @@ struct Engine {
     uint64_t park_stamp = 0, req_n = 0;   // (req_n: the requests so far, the server's count)
     bool lot_quick[kLots] = {};           // the conversation in a lot came back quickly the last time
     const uint8_t* taking = nullptr;   // the buffer of the conversation that leaves the park with the next kv_copy (kv_take)
+    // A parked conversation's last checkpoint image (the rings and the convolutions' states; what `snap` holds when
+    // it is parked) kept on the cards beside its lot - each card its own visits' part - for its return: a state the
+    // cache brings back from that checkpoint then comes from there instead of through the links
+    // (LAMINA_INK_LOT_IMAGE=0: through them).  Given up first where VRAM is short.
+    struct LotImage {
+        uint8_t *here = nullptr, *there = nullptr;   // this card's part, the split's card's
+        const uint8_t* host = nullptr;               // the conversation's buffer (kv_copy's)
+        const uint8_t* ck = nullptr;                 // the checkpoint's buffer
+        int64_t pos = -1;                            // its position (-1: none)
+    } lot_img[kLots];
+    const uint8_t* snap_dst = nullptr;   // the checkpoint buffer the last image in `snap` went to, and its position
+    int64_t snap_pos = -1;
+    bool img_on = true;
+    int img_take = -1;   // the lot whose image the next state_load may take (kv_copy's take)
+    size_t img_here_bytes() const { return ring_bytes + conv_bytes(); }
+    size_t img_there_bytes() const {
+        return sat ? (size_t) (sat->w1 - sat->w0) * 2 * (size_t) ring_cap * cell_bytes + (size_t) (sat->v1 - sat->v0) * conv_floats * 4 : 0;
+    }
+    /// The last checkpoint image, of the conversation parked in lot l now (its buffer `host`), into that lot's image
+    /// (where VRAM allows)
+    void image_keep(int l, const uint8_t* host) {
+        LotImage& im = lot_img[l];
+        im.pos = -1;
+        if (!img_on || m->in_ram || snap == nullptr || snap_dst == nullptr || snap_pos < 0) return;
+        auto room = [&](int dev, size_t bytes) {   // (what is free past the card's reserve)
+            const OnDev dv(dev);
+            size_t fr = 0, tot = 0;
+            if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) return false;
+            return fr > bytes + (dev == main_dev || dev < 0 ? reserve : sat_keep) + (256ull << 20);
+        };
+        auto none = [&](const char* why) {
+            if (stage_log) std::fprintf(stderr, "lamina: parked: no state image for lot %d (%s)\n", l, why);
+        };
+        if (im.here == nullptr) {
+            if (!room(-1, img_here_bytes()) || cudaMalloc(&im.here, img_here_bytes()) != cudaSuccess) {
+                (void) cudaGetLastError();
+                im.here = nullptr;
+                return none("this card's VRAM");
+            }
+        }
+        if (sat && im.there == nullptr) {
+            const OnDev dv(sat->dev);
+            if (!room(sat->dev, img_there_bytes()) || cudaMalloc(&im.there, img_there_bytes()) != cudaSuccess) {
+                (void) cudaGetLastError();
+                im.there = nullptr;
+                return none("the split's card's VRAM");
+            }
+        }
+        // (`snap`: this card's visits' rings and states, and in a split the other card's part in its own image)
+        bool ok = soft(cudaMemcpyAsync(im.here, snap, img_here_bytes(), cudaMemcpyDeviceToDevice, st));
+        if (sat) {
+            const OnDev dv(sat->dev);
+            ok = ok && soft(cudaMemcpyAsync(im.there, sat->snap, img_there_bytes(), cudaMemcpyDeviceToDevice, sat->st)) &&
+                 soft(cudaStreamSynchronize(sat->st));
+        }
+        ok = soft(cudaStreamSynchronize(st)) && ok;
+        if (!ok) return none("a copy");
+        im.pos = snap_pos;
+        im.ck = snap_dst;
+        im.host = host;
+        if (stage_log) std::fprintf(stderr, "lamina: parked: lot %d's state image at %lld\n", l, (long long) snap_pos);
+    }
+    /// A returning conversation's state at `pos` from its lot's image (the logits from its buffer's tail, as
+    /// state_copy brings them): false where it has none there (state_copy then).  The image is spent either way.
+    bool image_load(int64_t pos, const uint8_t* host) {
+        const int l = img_take;
+        img_take = -1;
+        if (l < 0) return false;
+        LotImage& im = lot_img[l];
+        const bool mine = im.pos == pos && im.ck == host && im.here != nullptr && (!sat || im.there != nullptr);
+        im.pos = -1;
+        if (!mine) return false;
+        const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
+        // (this card's: its visits' rings and states, where `snap` had them - a split's other part in there stale, unread)
+        bool ok = soft(cudaMemcpyAsync(rings, im.here, ring_bytes, cudaMemcpyDeviceToDevice, st)) &&
+                  soft(cudaMemcpyAsync(conv_all, im.here + ring_bytes, conv_bytes(), cudaMemcpyDeviceToDevice, st));
+        if (sat) {
+            const OnDev dv(sat->dev);
+            const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
+            const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4;
+            ok = ok && soft(cudaMemcpyAsync(sat->rings + r0, im.there, r1 - r0, cudaMemcpyDeviceToDevice, sat->st)) &&
+                 soft(cudaMemcpyAsync((uint8_t*) sat->conv_all + c0, im.there + (r1 - r0), c1 - c0, cudaMemcpyDeviceToDevice,
+                                      sat->st)) &&
+                 soft(cudaStreamSynchronize(sat->st));
+        }
+        int32_t held = 0;
+        std::memcpy(&held, host + body + V4, 4);
+        if (held == 1)
+            ok = ok && soft(cudaMemcpyAsync(D.logits, host + body, V4, cudaMemcpyHostToDevice, st)) &&
+                 soft(cudaMemsetAsync(D.bad, 0, 4, st));
+        ok = soft(cudaStreamSynchronize(st)) && ok;
+        logits_held = ok && held == 1;
+        if (logits_held) lg_rows = &D;
+        return ok;
+    }
+    /// The images' VRAM back to the driver (where the cells need it): true where there was some
+    bool image_give() {
+        bool any = false;
+        for (LotImage& im : lot_img) {
+            if (im.here != nullptr) {
+                (void) cudaFree(im.here);
+                im.here = nullptr;
+                any = true;
+            }
+            if (im.there != nullptr) {
+                const OnDev dv(sat->dev);
+                (void) cudaFree(im.there);
+                im.there = nullptr;
+                any = true;
+            }
+            im.pos = -1;
+        }
+        return any;
+    }
     bool park_here = true;
     Parked* parked_of(const uint8_t* host) {
         for (Parked& r : parked)
@@ -2193,6 +2307,8 @@ struct Engine {
     /// The cache's buffer `host` is gone, or written anew
     void parked_drop(const uint8_t* host) {
         if (taking == host) taking = nullptr;   // (a conversation whose return did not come to its cells)
+        for (LotImage& im : lot_img)
+            if (im.host == host) im.pos = -1;   // (its image too: the buffer may be another's next)
         for (size_t i = 0; i < parked.size(); ++i)
             if (parked[i].host == host) {
                 homes_sync();
@@ -2230,7 +2346,7 @@ struct Engine {
                 room = (uint64_t) (hs * ranges_sat) * G + sat_keep <= fs;
             }
             if (room) break;
-            if (!(chunk_give() || lot_give() || parked_room(but) || parked_room(but, true))) return false;
+            if (!(image_give() || chunk_give() || lot_give() || parked_room(but) || parked_room(but, true))) return false;
         }
         homes_sync();
         for (Visit& V : visits) {
@@ -2570,6 +2686,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA")) mma_q8 = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
@@ -3542,7 +3659,7 @@ struct Engine {
             // (a grown chunk's buffers go first, then a lot no conversation is in, then the newest cells of the parked
             // conversations not asked for lately; then this sequence's oldest cells go to the cell cards, and where
             // they take none, or it has none to give yet, the other parked conversations' cells go to RAM)
-            if ((!room || !room_sat) && (chunk_give() || lot_give() || parked_room())) continue;
+            if ((!room || !room_sat) && (image_give() || chunk_give() || lot_give() || parked_room())) continue;
             if (!evict()) {
                 if (evict_held) return false;   // (cells mapped ahead: this step is the sequence's own to take, later)
                 if ((!room || !room_sat) && parked_room(nullptr, true)) continue;
@@ -6444,6 +6561,7 @@ struct Engine {
                     parked_trim();
                     nl = lot_free();
                 }
+                image_keep(lot, host);   // (its last checkpoint's image, for its return)
                 parked.push_back({host, held, lot, lo, lo, held, std::max(mapped, held), unit_card, ++park_stamp, req_n, lot_quick[lot]});
                 lot_quick[nl] = false;
                 if (lo > 0) clocks.release_after(clocks_hold);
@@ -6466,6 +6584,7 @@ struct Engine {
             homes_sync();
             if (lo > 0) cards_clear();
             const Parked q = std::move(*r);
+            img_take = lot_img[q.lot].host == host && lot_img[q.lot].pos >= 0 ? q.lot : -1;
             parked.erase(parked.begin() + (r - parked.data()));
             lot_use(q.lot);   // (with its units' ranges on the cell cards)
             lot_quick[lot] = req_n - q.req <= kQuick;
@@ -6836,7 +6955,12 @@ protected:
     }
     bool state_load(int64_t pos, const void* host) override {
         E.snap_wait();
-        if (!E.state_copy(const_cast<uint8_t*>(static_cast<const uint8_t*>(host)), false)) return false;
+        const auto t0 = Clock::now();
+        const bool from_image = E.image_load(pos, static_cast<const uint8_t*>(host));
+        if (!from_image && !E.state_copy(const_cast<uint8_t*>(static_cast<const uint8_t*>(host)), false)) return false;
+        if (E.stage_log)
+            std::fprintf(stderr, "lamina: the state at %lld from %s in %.1f ms\n", (long long) pos,
+                         from_image ? "its lot's image" : "its buffer", ms_since(t0));
         E.cards_rewind(pos);
         E.n_pos = pos;
         return true;
@@ -7136,6 +7260,8 @@ struct Serve {
                 if (!end) cache->checkpoint(here);   // (copied now; an end without a buffer keeps no logits: none)
             } else if (E.snap_state(static_cast<uint8_t*>(h), !pageable, end)) {
                 cache->checkpoint(here, h, end);
+                E.snap_dst = static_cast<const uint8_t*>(h);   // (the image in `snap` is this checkpoint's)
+                E.snap_pos = here;
             }
         };
         int64_t done = 0;
