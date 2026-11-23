@@ -1855,11 +1855,13 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
 /// past its end to its start (the drafter's rings: the cells in use alone).  The arithmetic is the chunks': q and the
 /// probabilities as halves.  Warps: scores m-tile w & 1 x cells (w >> 1) * 8 .. +8; values m-tile w & 1 x dims
 /// (w >> 1) * 32 .. +32.  The next tile waits in registers through the current one's products.  Grid (stretches, K/V
-/// heads), block 256.
-template <bool Q8>
+/// heads), block 256.  FOLD (q8_0): K's codes as halves without their block's scale, which a block's products take in
+/// floats (each D-block of 32 a step of the scores' loop) - other bits than the halves' rounding of d q.
+template <bool Q8, bool FOLD = false>
 __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     constexpr int D = 128;
     __shared__ TcSmem sm;
+    [[maybe_unused]] __shared__ float ks[FOLD ? kTcCells * (D / 32) : 1];   // a tile's K scales [cell][block]
     const int cb = blockIdx.x, g = blockIdx.y;
     if (a.dyn && cb >= a.dyn[1]) return;
     const int QH = a.H / a.HK, NQ = T * QH;
@@ -1922,7 +1924,10 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     auto stash = [&] {
         if constexpr (Q8) {
             const int c = tid / 8, pc = tid % 8;
-            const __half2 dk2 = __halves2half2(dk, dk), dv2 = __halves2half2(dv, dv);
+            if constexpr (FOLD) {
+                if ((pc & 1) == 0) ks[c * (D / 32) + pc / 2] = __half2float(dk);
+            }
+            const __half2 dk2 = FOLD ? __float2half2_rn(1.0f) : __halves2half2(dk, dk), dv2 = __halves2half2(dv, dv);
             const uint2 k0 = q8_widen4(nk[0].x, dk2), k1 = q8_widen4(nk[0].y, dk2), k2 = q8_widen4(nk[0].z, dk2),
                         k3 = q8_widen4(nk[0].w, dk2);
             const uint2 v0 = q8_widen4(nv[0].x, dv2), v1 = q8_widen4(nv[0].y, dv2), v2 = q8_widen4(nv[0].z, dv2),
@@ -1971,8 +1976,20 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
             ldsm4(a0, qrow + kk * 16);
             ldsm4(a1, qrow + kk * 16 + 16);
             ldsm4(b, krow + kk * 16);
-            mma16816(sc, a0, b[0], b[1]);
-            mma16816(sc, a1, b[2], b[3]);
+            if constexpr (FOLD) {   // (this step's block of 32: its products, then each cell's scale of it)
+                float sb[4] = {0.f, 0.f, 0.f, 0.f};
+                mma16816(sb, a0, b[0], b[1]);
+                mma16816(sb, a1, b[2], b[3]);
+                const int c0 = nt * 8 + 2 * tig, blk = kk / 2;
+                const float s0 = ks[c0 * (D / 32) + blk], s1 = ks[(c0 + 1) * (D / 32) + blk];
+                sc[0] += sb[0] * s0;
+                sc[1] += sb[1] * s1;
+                sc[2] += sb[2] * s0;
+                sc[3] += sb[3] * s1;
+            } else {
+                mma16816(sc, a0, b[0], b[1]);
+                mma16816(sc, a1, b[2], b[3]);
+            }
         }
         float xA = -INFINITY, xB = -INFINITY;
 #pragma unroll
