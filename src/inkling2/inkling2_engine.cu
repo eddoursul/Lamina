@@ -15,6 +15,7 @@
 #include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
 #include "inkling2_rows_tc.cuh"
+#include "inkling2_dense.cuh"
 
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
@@ -1301,6 +1302,7 @@ struct Engine {
     bool q_half = true;          // a chunk's q to the cell cards as halves (LAMINA_INK_QHALF=0: as floats)
     bool rows_tc = false;        // the decode's attention in the chunk kernel's layout (LAMINA_INK_ROWS_TC=1)
     bool q8_fold = false;        // its q8_0 K scales folded into the scores (LAMINA_INK_Q8_FOLD=1)
+    bool dense_own = false;      // a chunk's dense Q8_0 products by inkling2_dense.cuh's kernel (LAMINA_INK_DENSE_OWN=1)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
     bool fuse_gate = false;      // and the messages' mix, the mix, the gate and the norm where it is (LAMINA_INK_GATE=1)
@@ -2915,6 +2917,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_ROWS_TC")) rows_tc = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_Q8_FOLD")) q8_fold = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_DENSE_OWN")) dense_own = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
@@ -4621,6 +4624,7 @@ struct Engine {
             MMQ::quantize(xf, nullptr, xq, W.type, W.n_in, W.n_in, T, st);
             R.have[input][lay] = true;
         }
+        if (dense_own && W.type == 8 && ik_dense::q8_gemm(W.d, (int) W.n_out, (int) W.n_in, xq, T, y, (size_t) W.n_out, st)) return;
         mmq->run_dense(W.d, W.type, W.n_out, W.n_in, xq, T, y, W.n_out, st);
     }
     /// (`with`: the norm of each query's mix as that input, in the same launch - a decode forward's sublayer without
