@@ -1135,6 +1135,10 @@ struct Engine {
     bool chunk_held = false;   // a part's chunks are under way: the buffers stay as they are
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
+    bool chunk_min_set = false;
+    /// The part's tokens a chunk takes at least: with cells on the cell cards a chunk's fixed part is their scans
+    /// too (behind 160K tokens 70 ms for 20 tokens where the forwards take 56, 77 against 81 for 32)
+    int chunk_least() const { return chunk_min_set || lo == 0 ? chunk_min : std::max(chunk_min, 28); }
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
@@ -2290,7 +2294,10 @@ struct Engine {
         nan_probe = std::getenv("LAMINA_INK_NAN") != nullptr;
         xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
-        if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) {
+            chunk_min = std::max(1, std::atoi(r));
+            chunk_min_set = true;
+        }
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
@@ -5690,7 +5697,7 @@ struct Engine {
                 explicit Hold(bool& h) : held(h) { held = true; }
                 ~Hold() { held = false; }
             };
-            if (const int64_t staged = prefill > 0 && left >= chunk_min ? stage_span(left) : 0; staged > 0) {
+            if (const int64_t staged = prefill > 0 && left >= chunk_least() ? stage_span(left) : 0; staged > 0) {
                 chunk_fit(staged, true);   // (the rows that fit beside the stretch's cells: those are mapped first)
                 const Hold hold(chunk_held);
                 // (whole chunks where the segment goes on past them, and as far as the cells are mapped ahead)
@@ -5712,7 +5719,7 @@ struct Engine {
                     continue;
                 }
             }
-            if (prefill > 0 && left >= chunk_min) {
+            if (prefill > 0 && left >= chunk_least()) {
                 chunk_fit(left);
                 const Hold hold(chunk_held);
                 T = (int) std::min<int64_t>(chunk_rows, left);
@@ -5809,26 +5816,29 @@ struct Engine {
     /// left): into the image behind that work, then to `host` (state_bytes()) on the snapshot stream.  Nothing is
     /// waited for but an image still on its way, by the stream.  A `host` that is not pinned gets the image through
     /// snap_via (snap_wait).
-    /// A split's rings and convolution states between the two cards and `host`, now: this card's arrays whole, then
-    /// the bytes of the other card's visits
+    /// A split's rings and convolution states between the two cards and `host`, now: each card's own visits' bytes,
+    /// the two cards' copies under way at once (the first card's arrays whole took the other's visits' three quarters
+    /// through its own link too: 30 ms an image on four lanes where its own part takes 8)
     bool state_io(uint8_t* host, bool out) {
-        auto io = [&](uint8_t* h, void* d, size_t n) {
-            return n == 0 || soft(out ? cudaMemcpy(h, d, n, cudaMemcpyDeviceToHost) : cudaMemcpy(d, h, n, cudaMemcpyHostToDevice));
+        auto io = [&](cudaStream_t s_, uint8_t* h, uint8_t* d, size_t n) {
+            return n == 0 || soft(out ? cudaMemcpyAsync(h, d, n, cudaMemcpyDeviceToHost, s_)
+                                      : cudaMemcpyAsync(d, h, n, cudaMemcpyHostToDevice, s_));
         };
         const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
-        const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4;
-        if (out && imaged) {   // (a staged run's image, the cards being past it: image_part)
-            bool ok = soft(cudaStreamSynchronize(st)) && io(host, snap, r0) && io(host + r1, snap + r1, ring_bytes - r1) &&
-                      io(host + ring_bytes, snap + ring_bytes, c0) &&
-                      io(host + ring_bytes + c1, snap + ring_bytes + c1, conv_bytes() - c1);
+        const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
+        const bool img = out && imaged;   // (a staged run's image, the cards being past it: image_part)
+        uint8_t* const rg = img ? snap : rings;
+        uint8_t* const cg = img ? snap + ring_bytes : (uint8_t*) conv_all;
+        bool ok = io(st, host, rg, r0) && io(st, host + r1, rg + r1, ring_bytes - r1) && io(st, host + ring_bytes, cg, c0) &&
+                  io(st, host + ring_bytes + c1, cg + c1, cb - c1);
+        {
             const OnDev dv(sat->dev);
-            return ok && soft(cudaStreamSynchronize(sat->st)) && io(host + r0, sat->snap, r1 - r0) &&
-                   io(host + ring_bytes + c0, sat->snap + (r1 - r0), c1 - c0);
+            uint8_t* const rs = img ? sat->snap : sat->rings + r0;
+            uint8_t* const cs = img ? sat->snap + (r1 - r0) : (uint8_t*) sat->conv_all + c0;
+            ok = ok && io(sat->st, host + r0, rs, r1 - r0) && io(sat->st, host + ring_bytes + c0, cs, c1 - c0);
+            ok = soft(cudaStreamSynchronize(sat->st)) && ok;
         }
-        bool ok = soft(cudaStreamSynchronize(st)) && io(host, rings, ring_bytes) && io(host + ring_bytes, conv_all, conv_bytes());
-        const OnDev dv(sat->dev);
-        return ok && soft(cudaStreamSynchronize(sat->st)) && io(host + r0, sat->rings + r0, r1 - r0) &&
-               io(host + ring_bytes + c0, (uint8_t*) sat->conv_all + c0, c1 - c0);
+        return soft(cudaStreamSynchronize(st)) && ok;
     }
     bool snap_state(uint8_t* host, bool pinned, bool end) {
         const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
@@ -6607,6 +6617,12 @@ struct Serve {
         // logits its read left.  Each is an image on the device, sent to the cache's buffer behind the run.
         std::vector<int64_t> marks, cuts;
         if (cache) marks = checkpoint_marks(ids, (int64_t) reuse);
+        if (E.stage_log) {
+            std::string at;
+            for (const int64_t mk : marks) at += " " + std::to_string(mk);
+            std::fprintf(stderr, "lamina: marks: %zu of a prompt of %zu tokens, %zu held:%s\n", marks.size(), ids.size(), reuse,
+                         at.empty() ? " none" : at.c_str());
+        }
         for (const int64_t at : marks) cuts.push_back(at - (int64_t) reuse);
         const int64_t rows = E.prefill > 0 ? E.prefill : kMaxT;
         const int64_t every = std::max<int64_t>(1, copt.every / rows) * rows;
