@@ -1135,10 +1135,6 @@ struct Engine {
     bool chunk_held = false;   // a part's chunks are under way: the buffers stay as they are
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
-    bool chunk_min_set = false;
-    /// The part's tokens a chunk takes at least: with cells on the cell cards a chunk's fixed part is their scans
-    /// too (behind 160K tokens 70 ms for 20 tokens where the forwards take 56, 77 against 81 for 32)
-    int chunk_least() const { return chunk_min_set || lo == 0 ? chunk_min : std::max(chunk_min, 28); }
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
@@ -1184,6 +1180,8 @@ struct Engine {
         int n_part = 0;                   // stretches its `part` holds a row and head
         float *q = nullptr, *ns = nullptr, *part = nullptr, *sum = nullptr;   // a decode forward's rows on the card
         float *cq = nullptr, *cns = nullptr, *csum = nullptr;                 // a chunk's
+        float *cseg = nullptr, *cseg2 = nullptr;   // its segments' sums after the first (a few rows over many cells)
+        int sms = 0, seg_rows = 0;                 // the card's SMs; rows of sums `cseg` holds
         int32_t* cpos = nullptr;          // its rows' positions (kFar)
         float* csum_h = nullptr;          // pinned
         // (a staged run: the split's card's driver has rows, sums and an event of its own here - `second`)
@@ -2294,10 +2292,7 @@ struct Engine {
         nan_probe = std::getenv("LAMINA_INK_NAN") != nullptr;
         xrow_on = std::getenv("LAMINA_INK_XROW") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
-        if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) {
-            chunk_min = std::max(1, std::atoi(r));
-            chunk_min_set = true;
-        }
+        if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
@@ -2706,6 +2701,10 @@ struct Engine {
                     c.cq = (float*) dev_alloc(prow * D_ * 4);
                     c.cns = (float*) dev_alloc(prow * 4);
                     c.csum = (float*) dev_alloc(prow * (D_ + 2) * 4);
+                    // (the segments a chunk of few rows scores the card's cells in: as the layers' cards', seg_cap)
+                    CK(cudaDeviceGetAttribute(&c.sms, cudaDevAttrMultiProcessorCount, c.dev));
+                    c.seg_rows = 640 * std::max(c.sms, 1) / (int) g.n_head + 64;
+                    c.cseg = (float*) dev_alloc((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
                     c.cpos = (int32_t*) dev_alloc((size_t) chunk_most() * 4);
                     const std::vector<int32_t> away((size_t) chunk_most(), kFar);
                     CK(cudaMemcpy(c.cpos, away.data(), away.size() * 4, cudaMemcpyHostToDevice));
@@ -2717,6 +2716,7 @@ struct Engine {
                         c.cq2 = (float*) dev_alloc(srow * D_ * 4);
                         c.cns2 = (float*) dev_alloc(srow * 4);
                         c.csum2 = (float*) dev_alloc(srow * (D_ + 2) * 4);
+                        c.cseg2 = (float*) dev_alloc((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
                         void* h2 = nullptr;
                         CK(cudaHostAlloc(&h2, srow * (D_ + 2) * 4, cudaHostAllocPortable));
                         c.host_mem.push_back(h2);
@@ -3084,9 +3084,21 @@ struct Engine {
             cc.v = c.v_vm[(size_t) fi]->base();
             cc.cap = c.cap;
             cc.q8 = kv_q8 ? 1 : 0;
+            // (a few rows over the card's cells: in segments, more blocks than the rows and heads make - tc_segments'
+            // rule with this card's SMs - their sums joined here)
+            const int rows = 16 * kTcWarps, blocks = (T + rows - 1) / rows * H;
+            const double fill = std::min(5.0, std::max(1.25, 5.0 * (double) c.cells / 16384.0));
+            const long long want = tc_segs > 0 ? tc_segs : ((long long) (fill * std::max(c.sms, 1)) + blocks - 1) / blocks;
+            const int n_seg = (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, (long long) c.cells / (8 * ik::kTcCells),
+                                                            (long long) (c.seg_rows / T)}));
+            float* const cseg = two ? c.cseg2 : c.cseg;
             ik::TcIn a{cc, cq, nullptr, cns, nullptr, c.cpos, nullptr, T, H, HK, 0, 0, (long long) c.cells, csum, 1, 0,
-                       nullptr};
-            tc_launch(a, 1, c.st);
+                       n_seg > 1 ? cseg : nullptr};
+            tc_launch(a, n_seg, c.st);
+            if (n_seg > 1) {
+                ik::SegJoinIn j{csum, cseg, H, D_, n_seg - 1, T};
+                ik::tc_join_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, c.st>>>(j);
+            }
             CK(cudaMemcpyAsync(two ? c.csum_h2 : c.csum_h, csum, (size_t) T * H * (D_ + 2) * 4, cudaMemcpyDeviceToHost, c.st));
             CK(cudaEventRecord(two ? c.ev2 : c.ev, c.st));
             (void) cudaStreamQuery(c.st);
@@ -5697,7 +5709,7 @@ struct Engine {
                 explicit Hold(bool& h) : held(h) { held = true; }
                 ~Hold() { held = false; }
             };
-            if (const int64_t staged = prefill > 0 && left >= chunk_least() ? stage_span(left) : 0; staged > 0) {
+            if (const int64_t staged = prefill > 0 && left >= chunk_min ? stage_span(left) : 0; staged > 0) {
                 chunk_fit(staged, true);   // (the rows that fit beside the stretch's cells: those are mapped first)
                 const Hold hold(chunk_held);
                 // (whole chunks where the segment goes on past them, and as far as the cells are mapped ahead)
@@ -5719,7 +5731,7 @@ struct Engine {
                     continue;
                 }
             }
-            if (prefill > 0 && left >= chunk_least()) {
+            if (prefill > 0 && left >= chunk_min) {
                 chunk_fit(left);
                 const Hold hold(chunk_held);
                 T = (int) std::min<int64_t>(chunk_rows, left);
@@ -5826,15 +5838,15 @@ struct Engine {
         };
         const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
         const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
-        const bool img = out && imaged;   // (a staged run's image, the cards being past it: image_part)
-        uint8_t* const rg = img ? snap : rings;
-        uint8_t* const cg = img ? snap + ring_bytes : (uint8_t*) conv_all;
+        const bool held = out && imaged;   // (a staged run's image, the cards being past it: image_part)
+        uint8_t* const rg = held ? snap : rings;
+        uint8_t* const cg = held ? snap + ring_bytes : (uint8_t*) conv_all;
         bool ok = io(st, host, rg, r0) && io(st, host + r1, rg + r1, ring_bytes - r1) && io(st, host + ring_bytes, cg, c0) &&
                   io(st, host + ring_bytes + c1, cg + c1, cb - c1);
         {
             const OnDev dv(sat->dev);
-            uint8_t* const rs = img ? sat->snap : sat->rings + r0;
-            uint8_t* const cs = img ? sat->snap + (r1 - r0) : (uint8_t*) sat->conv_all + c0;
+            uint8_t* const rs = held ? sat->snap : sat->rings + r0;
+            uint8_t* const cs = held ? sat->snap + (r1 - r0) : (uint8_t*) sat->conv_all + c0;
             ok = ok && io(sat->st, host + r0, rs, r1 - r0) && io(sat->st, host + ring_bytes + c0, cs, c1 - c0);
             ok = soft(cudaStreamSynchronize(sat->st)) && ok;
         }

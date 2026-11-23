@@ -897,6 +897,44 @@ __global__ void __launch_bounds__(128) attn_join_kernel(JoinIn a) {
     }
     o[2 + i] = acc;
 }
+/// A cell card's segments of a chunk joined into its one partial sum a row and head (attn_tc_kernel's `part` and
+/// `seg`), for the main card's tc_merge_kernel: the largest logit, the sum of exp(logit - it), that-weighted V, into
+/// `part`.  A block a row and a query head; D threads.
+struct SegJoinIn {
+    float* part;         // [T][H][D + 2]: the first segment's sums, and the joined ones
+    const float* seg;    // [n_seg][T][H][D + 2]: the segments after the first
+    int H, D, n_seg, T;
+};
+__global__ void __launch_bounds__(128) tc_join_kernel(SegJoinIn a) {
+    const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
+    float* p = a.part + ((size_t) t * a.H + h) * (a.D + 2);
+    auto more = [&](int e) { return a.seg + (((size_t) e * a.T + t) * a.H + h) * (a.D + 2); };
+    const float m0 = p[0], s0 = p[1], v0 = p[2 + i];
+    float mx = s0 != 0.f ? m0 : -FLT_MAX;
+    for (int e = 0; e < a.n_seg; ++e) {
+        const float* pe = more(e);
+        if (pe[1] != 0.f) mx = fmaxf(mx, pe[0]);
+    }
+    float sum = 0.f, acc = 0.f;
+    if (s0 != 0.f) {
+        const float w = __expf(m0 - mx);
+        sum = w * s0;
+        acc = w * v0;
+    }
+    for (int e = 0; e < a.n_seg; ++e) {
+        const float* pe = more(e);
+        if (pe[1] == 0.f) continue;
+        const float w = __expf(pe[0] - mx);
+        sum += w * pe[1];
+        acc += w * pe[2 + i];
+    }
+    __syncthreads();   // (every thread has read the block's first two values)
+    if (i == 0) {
+        p[0] = sum != 0.f ? mx : m0;
+        p[1] = sum;
+    }
+    p[2 + i] = acc;
+}
 /// -sink of each row and head out of its bias row (its last value): what a card's cells take for a bias
 __global__ void nsink_kernel(const float* __restrict__ bias, float* __restrict__ ns, int rows, int ext) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
