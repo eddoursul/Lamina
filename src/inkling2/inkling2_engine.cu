@@ -14,6 +14,7 @@
 //     scratch/q36/logits_to_parity.py); --serve: lamina-server's line protocol.
 #include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
+#include "inkling2_rows_tc.cuh"
 
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
@@ -1298,6 +1299,7 @@ struct Engine {
     bool mma_q8 = true;
     int mma_rows = 6;
     bool q_half = true;          // a chunk's q to the cell cards as halves (LAMINA_INK_QHALF=0: as floats)
+    bool rows_tc = false;        // the decode's attention in the chunk kernel's layout (LAMINA_INK_ROWS_TC=1)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
     bool fuse_gate = false;      // and the messages' mix, the mix, the gate and the norm where it is (LAMINA_INK_GATE=1)
@@ -2910,6 +2912,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA")) mma_q8 = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_ROWS_TC")) rows_tc = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
@@ -3852,6 +3855,11 @@ struct Engine {
     /// (attn_rows_kernel), each row's sums what they are when it is scored alone
     void scan(const ik::AttnIn& at, int T, cudaStream_t s) {
         const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK);
+        if (rows_tc && T * (at.H / at.HK) <= 64) {   // (LAMINA_INK_ROWS_TC=1: the chunk kernel's layout, four warps)
+            if (kv_q8) ik::attn_rows_tc_kernel<4, true><<<grid, 128, 0, s>>>(at, T);
+            else ik::attn_rows_tc_kernel<4, false><<<grid, 128, 0, s>>>(at, T);
+            return;
+        }
         if (kv_q8) ik::attn_rows_kernel<true><<<grid, 256, 0, s>>>(at, T);
         else ik::attn_rows_kernel<false><<<grid, 256, 0, s>>>(at, T);
     }
