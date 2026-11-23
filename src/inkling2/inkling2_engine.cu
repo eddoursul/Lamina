@@ -1817,6 +1817,7 @@ struct Engine {
     const uint8_t* snap_dst = nullptr;   // the checkpoint buffer the last image in `snap` went to, and its position
     int64_t snap_pos = -1;
     bool img_on = true;
+    bool home_on = false;  // units_back (LAMINA_INK_HOME=1: on)
     int img_take = -1;   // the lot whose image the next state_load may take (kv_copy's take)
     size_t img_here_bytes() const { return ring_bytes + conv_bytes(); }
     size_t img_there_bytes() const {
@@ -2298,23 +2299,40 @@ struct Engine {
             lo = lo_was;
             return false;
         }
+        // (an array's unit at a time through the two pinned halves: the cell card's copy into one beside the home card's
+        // copy out of the other, each half's copy home through before the card fills it again)
         bool ok = true;
+        int n = 0;
+        cudaStream_t last[2] = {nullptr, nullptr};   // the stream each half's copy home is on
+        int last_dev[2] = {-1, -1};
+        auto half_free = [&](int h) {
+            if (last[h] == nullptr) return true;
+            const OnDev dv(last_dev[h]);
+            const bool good = soft(cudaStreamSynchronize(last[h]));
+            last[h] = nullptr;
+            return good;
+        };
         for (size_t u = 0; ok && (int64_t) u * unit < back; ++u) {
             Card& c = cards[(size_t) unit_card[u]];
             const int64_t slot = unit_slot(u);
             const size_t bytes = (size_t) std::min<int64_t>(unit, back - (int64_t) u * unit) * cell_bytes;
-            for (size_t vi = 0; vi < visits.size(); ++vi) {
+            for (size_t vi = 0; vi < visits.size() && ok; ++vi) {
                 const Visit& V = visits[vi];
                 if (V.cells.ring) continue;
-                for (int side = 0; side < 2; ++side) {
-                    card_copy(c, (size_t) full_of[vi], side, slot, stage_h[0], bytes, true);
+                for (int side = 0; side < 2 && ok; ++side, ++n) {
+                    const int h = n & 1;
+                    ok = half_free(h);
+                    if (!ok) break;
+                    card_copy(c, (size_t) full_of[vi], side, slot, stage_h[h], bytes, true);
                     const OnDev dv(home_dev(vi));
-                    ok = ok && soft(cudaMemcpyAsync((side ? V.cells.v : V.cells.k) + u * (size_t) unit * cell_bytes, stage_h[0], bytes,
-                                                    cudaMemcpyHostToDevice, home_st(vi)));
-                    ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
+                    ok = soft(cudaMemcpyAsync((side ? V.cells.v : V.cells.k) + u * (size_t) unit * cell_bytes, stage_h[h], bytes,
+                                              cudaMemcpyHostToDevice, home_st(vi)));
+                    last[h] = home_st(vi);
+                    last_dev[h] = home_dev(vi);
                 }
             }
         }
+        ok = half_free(0) && half_free(1) && ok;
         if (!ok) {
             lo = lo_was;
             return false;
@@ -2332,9 +2350,36 @@ struct Engine {
             mapped = (int64_t) ((((uint64_t) back * cell_bytes + G - 1) / G) * G / cell_bytes);
             lot_release(lot, mapped);
         }
-        if (stage_log)
+        if (stage_log && cells < lo_was)
             std::fprintf(stderr, "lamina: parked: %lld cells back from the cell cards' units (a cut before their end)\n", (long long) back);
         return true;
+    }
+    /// A request's start: the live sequence's units on the cell cards come home where the layers' cards have the room
+    /// for every cell it holds and a growth step past them - made, where it is not there yet, by the lots no
+    /// conversation is in, the state images and the newest cells of the parked conversations that are not one of two
+    /// in turns (to RAM) - so its tokens no longer scan cells over the links (and the cell cards sleep).  Off unless
+    /// LAMINA_INK_HOME=1: the cell cards scan their cells beside the layers' cards, so a sequence of 82K tokens
+    /// generated 12-17% slower with its 28K-53K older cells home on this PC's config.
+    void units_back() {
+        if (!home_on || lo == 0 || cards.empty() || m->in_ram || pos() > lot_span) return;
+        const int64_t n = pos();
+        const uint64_t margin = 256ull << 20;
+        auto room = [&] {   // (what mapping the units' positions again takes on each layers' card)
+            size_t fr = 0, tot = 0;
+            CK(cudaMemGetInfo(&fr, &tot));
+            if ((uint64_t) fr < array_bytes(lo + kGrow, false) + reserve + margin) return false;
+            if (!sat) return true;
+            const OnDev dv(sat->dev);
+            CK(cudaMemGetInfo(&fr, &tot));
+            return (uint64_t) fr >= array_bytes(lo + kGrow, true) + sat_keep + margin;
+        };
+        while (!room())
+            if (!(lot_give() || image_give() || parked_room())) return;
+        homes_sync();
+        const int64_t back = lo;
+        if (units_home(n) && stage_log)
+            std::fprintf(stderr, "lamina: parked: the live sequence's %lld cells of the cell cards home at a request's start\n",
+                         (long long) back);
     }
     /// The cell cards are full: the units of the conversation parked the longest go to its buffer.  False: no parked
     /// conversation has any.
@@ -2786,6 +2831,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
+        if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
@@ -7306,6 +7352,7 @@ struct Serve {
             ++E.req_n;   // (a parked conversation's age: what it gives way to)
             const int64_t held = cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), {});
             reuse = (size_t) std::max<int64_t>(0, held);
+            if (held > 0) E.units_back();   // (the live sequence's units home where the room is)
             if (reuse == ids.size() && !E.logits_held) {   // (a whole prompt without its logits: read again)
                 cache->set(0, static_cast<const int32_t*>(nullptr), 0);
                 E.reset();
