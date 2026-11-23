@@ -267,10 +267,28 @@ struct Model {
     std::string ranking;                     // what the ranking is, for the log
     // A layer split: the layers [sat_lo, sat_hi] - their weights, and in the engine their visits' cells and states -
     // are on card sat_dev (-1: none).  The loop is whole among them or not at all, the first and the last layer are
-    // this card's: a forward crosses there once and back once, between two passes of nothing.
+    // this card's: a forward crosses there once and back once.  In a split that ends with the loop this card may run
+    // the loop's last sat_back applications (the split's card the others), with the weights of the layers they are a
+    // second time (twin): the forward comes back to it there.
     int sat_dev = -1, sat_lo = 0, sat_hi = -1;
-    double sat_gib = 0;
+    int64_t sat_back = 0;
+    double sat_gib = 0, twin_gib = 0;
+    std::vector<Layer> twin;   // [n_layers]: a looped layer's weights on this card, where it runs some of its visits
     bool on_sat(int64_t l) const { return sat_dev >= 0 && l >= sat_lo && l <= sat_hi; }
+    /// Visit v runs on the split's card
+    bool sat_visit(int64_t v) const {
+        const int64_t l = g.visit_layer(v);
+        return on_sat(l) && (!g.looped(l) || v < g.first_visit(g.loop_end) - sat_back);
+    }
+    /// The layer's weights are on this card too: a visit of it runs here though the layer is the split's
+    bool twin_layer(int64_t l) const {
+        return sat_back > 0 && on_sat(l) && g.looped(l) && (sat_back >= g.core() || l >= g.loop_end - sat_back);
+    }
+    /// The weights visit v reads: its layer's, or the twin's where it runs here while the layer is the split's
+    const Layer& layer_at(int64_t v) const {
+        const int64_t l = g.visit_layer(v);
+        return on_sat(l) && !sat_visit(v) ? twin[(size_t) l] : layers[(size_t) l];
+    }
 };
 
 /// What a start asks of the loader beside the file
@@ -285,6 +303,7 @@ struct LoadOpts {
     int prefill = 1024;
     uint64_t ram_reserve = 0;    // the experts take no RAM below this much available to the system
     int sat_dev = -1, sat_lo = 0, sat_hi = -1;   // --layer-split: the layers [sat_lo, sat_hi] on card sat_dev
+    int64_t sat_back = 0;        // --layer-split-back: the loop's last applications on this card instead
     int split_try = -1;          // the card the looped layers go to where this one would keep few of the experts, or -1
     bool more_cards = false;     // cell cards past a split's
     uint64_t sat_reserve = 700ull << 20;   // the VRAM a split's card leaves free
@@ -484,7 +503,11 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     }
     m.dense_gib = (double) dense / (double) (1ull << 30);
     m.expert_gib = (double) experts / (double) (1ull << 30);
-    uint64_t sat_bytes = 0;   // a split's weights on its card
+    uint64_t sat_bytes = 0, twin_bytes = 0;   // a split's weights on its card, and the looped layers' second copy here
+    const int64_t loop_n = g.n_pass * g.core();   // (the loop's applications: none where the layers run once)
+    const int64_t back = std::min<int64_t>(o.sat_back, std::max<int64_t>(0, loop_n - 1));
+    if (o.sat_back > 0 && loop_n == 0)
+        std::fprintf(stderr, "lamina: --layer-split-back: this model's layers run once a token: left out\n");
     if (o.sat_dev >= 0) {
         const bool whole = o.sat_lo <= g.loop_start && o.sat_hi >= g.loop_end - 1;
         const bool none = o.sat_hi < g.loop_start || o.sat_lo >= g.loop_end;
@@ -493,22 +516,34 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                   std::to_string(g.loop_start) + "-" + std::to_string(g.loop_end - 1) + " all among them or none";
             return false;
         }
+        if (back > 0 && o.sat_hi != g.loop_end - 1) {
+            err = "--layer-split-back: a split whose layers end with the loop's last, " + std::to_string(g.loop_end - 1);
+            return false;
+        }
         m.sat_dev = o.sat_dev;
         m.sat_lo = o.sat_lo;
         m.sat_hi = o.sat_hi;
     }
-    auto split_weights = [&] {   // the weights of m's split
+    m.sat_back = back;
+    auto layer_weights = [&](bool twin) {   // the weights of m's split (twin: of the layers this card has too)
+        auto in = [&](int64_t l) { return twin ? m.twin_layer(l) : m.on_sat(l); };
         uint64_t n = 0;
         for (size_t s = 0; s < gm.size(); ++s)
             for (const lamina::TensorInfo& t : gm.shard(s).tensors())
                 if (t.name.rfind("blk.", 0) == 0 && t.name.find("_exps.weight") == std::string::npos &&
-                    m.on_sat(std::atoll(t.name.c_str() + 4)))
+                    in(std::atoll(t.name.c_str() + 4)))
                     n += lamina::tensor_payload_bytes(t) + kWeightPad;
-        for (int64_t l = m.sat_lo; l <= m.sat_hi; ++l) n += (uint64_t) E * m.layers[(size_t) l].stride + kWeightPad;
+        for (int64_t l = 0; l < g.n_layers; ++l)
+            if (in(l)) n += (uint64_t) E * m.layers[(size_t) l].stride + kWeightPad;
         return n;
     };
-    if (m.sat_dev >= 0) sat_bytes = split_weights();
-    m.sat_gib = (double) sat_bytes / (double) (1ull << 30);
+    auto split_weights = [&] {
+        sat_bytes = layer_weights(false);
+        twin_bytes = layer_weights(true);
+        m.sat_gib = (double) sat_bytes / (double) (1ull << 30);
+        m.twin_gib = (double) twin_bytes / (double) (1ull << 30);
+    };
+    if (m.sat_dev >= 0) split_weights();
     // The experts' place.  A card that holds the dense weights, every expert and what a context takes beside them -
     // its cells (the floor's; those of the context asked for where this card alone holds it), the window rings, the
     // rows of the decode and of a chunk at its fewest - has them all, each in its own slot.  Else they are in RAM
@@ -532,9 +567,9 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         bool all = false;
         auto fit = [&] {   // whether this card holds its share (with a split: less its layers and their cells)
             full_sat = 0;
-            for (int64_t v = 0; v < g.n_visits(); ++v) full_sat += g.full(g.visit_layer(v)) && m.on_sat(g.visit_layer(v));
+            for (int64_t v = 0; v < g.n_visits(); ++v) full_sat += g.full(g.visit_layer(v)) && m.sat_visit(v);
             per_main = per_pos - (uint64_t) full_sat * 2 * cell;
-            all = dense + experts - sat_bytes + (uint64_t) asked * per_main + beside + reserve <= fr &&
+            all = dense + experts - sat_bytes + twin_bytes + (uint64_t) asked * per_main + beside + reserve <= fr &&
                   (o.expert_vram == 0 || o.expert_vram >= experts);
         };
         auto there = [&](size_t& fs) {   // whether the split's card holds its own
@@ -560,23 +595,22 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 m.sat_dev = o.split_try;
                 m.sat_lo = (int) g.loop_start;
                 m.sat_hi = (int) g.loop_end - 1;
-                sat_bytes = split_weights();
+                split_weights();
                 fit();
                 size_t fs = 0;
                 bool takes = all && there(fs);
                 if (takes && o.max_ctx > 0 && !o.more_cards) {   // (what the two have free past their layers, a chunk's growth apart)
-                    const uint64_t here = dense + experts - sat_bytes + beside + reserve, its = sat_bytes + beside + o.sat_reserve;
+                    const uint64_t here = dense + experts - sat_bytes + twin_bytes + beside + reserve, its = sat_bytes + beside + o.sat_reserve;
                     const uint64_t joint = (fr > here ? fr - here : 0) + (fs > its ? fs - its : 0);
                     takes = joint >= (uint64_t) std::min(o.max_ctx, trained) * per_pos + (o.prefill > 0 ? 3ull << 30 : 512ull << 20);
                 }
                 if (takes) {
-                    m.sat_gib = (double) sat_bytes / gib;
                     std::fprintf(stderr, "lamina: this GPU would keep %.0f%% of the experts beside the cells of %lld tokens: the "
                                  "looped layers run on GPU %d instead (a card's layers=A-B sets a split, --layer-split 0 keeps "
                                  "the experts in RAM)\n", 100.0 * share, (long long) with_cards, m.sat_dev);
                 } else {
                     m.sat_dev = -1;
-                    sat_bytes = 0;
+                    sat_bytes = twin_bytes = 0;
                     asked = with_cards;
                     fit();
                 }
@@ -589,7 +623,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 char b[512];
                 std::snprintf(b, sizeof b, "--layer-split: %s holds its layers with the cells of %lld tokens (%.2f GiB of "
                               "weights, %.2f GiB of VRAM free)", !all ? "the first card no more" : "the split's card no more",
-                              (long long) asked, !all ? m.dense_gib + m.expert_gib - m.sat_gib : m.sat_gib,
+                              (long long) asked, !all ? m.dense_gib + m.expert_gib - m.sat_gib + m.twin_gib : m.sat_gib,
                               (double) (!all ? fr : fs) / gib);
                 err = b;
                 return false;
@@ -724,9 +758,12 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     m.head = L.mat("output.weight");
     m.head.n_out = (int) g.n_vocab;   // the padded rows are not computed
 
-    for (int64_t l = 0; l < g.n_layers; ++l) {
-        const OnDev dv(m.on_sat(l) ? m.sat_dev : -1);
-        Layer& y = m.layers[(size_t) l];
+    // (a looped layer's second copy, on this card, where it runs some of the layer's visits: --layer-split-back)
+    const bool twins = m.sat_dev >= 0 && m.sat_back > 0;
+    int here_dev = 0;
+    CK(cudaGetDevice(&here_dev));
+    if (twins) m.twin.resize((size_t) g.n_layers);
+    auto dense_of = [&](Layer& y, int64_t l) {   // (on the current card)
         const std::string p = "blk." + std::to_string(l) + ".";
         y.il = (int) l;
         y.full = g.full(l);
@@ -774,6 +811,16 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             }
             y.msg_query = f32_dev(q);
         }
+    };
+    for (int64_t l = 0; l < g.n_layers; ++l) {
+        {
+            const OnDev dv(m.on_sat(l) ? m.sat_dev : -1);
+            dense_of(m.layers[(size_t) l], l);
+        }
+        if (m.twin_layer(l)) {
+            const OnDev dv(here_dev);
+            dense_of(m.twin[(size_t) l], l);
+        }
     }
 
     // the experts: every one in a slot of its layer, read in large pieces through a pinned stage
@@ -813,8 +860,10 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         // against zero activations: what they read there must be finite in the row's format)
         for (int64_t e = 0; e < E; ++e)
             std::memset(stage + (size_t) e * y.stride + y.gl.bytes, 0, y.stride - y.gl.bytes);
+        std::vector<float> sgu, sdn;   // (the experts' scales, where the layout has them)
         if (y.gl.scale_off) {
-            std::vector<float> sgu((size_t) E, 1.0f), sdn((size_t) E, 1.0f);
+            sgu.assign((size_t) E, 1.0f);
+            sdn.assign((size_t) E, 1.0f);
             if (L.has(p + "ffn_gate_up_exps.scale")) sgu = L.floats(p + "ffn_gate_up_exps.scale");
             if (L.has(p + "ffn_down_exps.scale")) sdn = L.floats(p + "ffn_down_exps.scale");
             for (int64_t e = 0; e < E; ++e) {
@@ -825,15 +874,18 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             y.d_scale = f32_dev(sdn);
         }
         std::vector<int32_t> so((size_t) E);
-        y.slot_of = dalloc<int32_t>((size_t) E);
-        if (!m.in_ram) {   // every expert in its own number's slot
-            y.n_slots = (int) E;
-            y.slots = dalloc<uint8_t>((size_t) E * y.stride + kWeightPad);
-            CK(cudaMemcpy(y.slots, stage, (size_t) E * y.stride, cudaMemcpyHostToDevice));
-            CK(cudaMemset(y.slots + (size_t) E * y.stride, 0, kWeightPad));
+        auto in_slots = [&](Layer& x) {   // every expert in its own number's slot, on the current card
+            x.n_slots = (int) E;
+            x.slots = dalloc<uint8_t>((size_t) E * x.stride + kWeightPad);
+            CK(cudaMemcpy(x.slots, stage, (size_t) E * x.stride, cudaMemcpyHostToDevice));
+            CK(cudaMemset(x.slots + (size_t) E * x.stride, 0, kWeightPad));
             for (int64_t e = 0; e < E; ++e) so[(size_t) e] = (int32_t) e;
-            y.order = so;
-            y.slot_at = so;
+            x.order = so;
+            x.slot_at = so;
+        };
+        y.slot_of = dalloc<int32_t>((size_t) E);
+        if (!m.in_ram) {
+            in_slots(y);
         } else {   // the slots in the ranking's order: the ones VRAM alone holds now, the others' blobs into RAM
             y.order = by_rank[(size_t) l];
             y.slot_at.assign((size_t) E, 0);
@@ -864,6 +916,19 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             for (int64_t e = 0; e < E; ++e) so[(size_t) e] = y.slot_at[(size_t) e] < y.n_slots ? y.slot_at[(size_t) e] : -1;
         }
         CK(cudaMemcpy(y.slot_of, so.data(), (size_t) E * 4, cudaMemcpyHostToDevice));
+        if (m.twin_layer(l)) {   // (its copy on this card: a split has no experts in RAM)
+            const OnDev dv(here_dev);
+            Layer& t = m.twin[(size_t) l];
+            t.gl = y.gl;
+            t.stride = y.stride;
+            if (y.gl.scale_off) {
+                t.gu_scale = f32_dev(sgu);
+                t.d_scale = f32_dev(sdn);
+            }
+            in_slots(t);
+            t.slot_of = dalloc<int32_t>((size_t) E);
+            CK(cudaMemcpy(t.slot_of, so.data(), (size_t) E * 4, cudaMemcpyHostToDevice));
+        }
     }
     m.load_s = ms_since(t0) / 1000.0;
     char where[320];
@@ -879,8 +944,16 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                  "%lld experts a layer; %s, loaded in %.1f s\n",
                  g.arch.c_str(), (long long) g.n_layers, (long long) g.n_visits(), (long long) g.loop_start,
                  (long long) g.loop_end - 1, (long long) g.n_pass, (long long) E, where, m.load_s);
-    if (m.sat_dev >= 0)
+    if (m.sat_dev >= 0 && twins)
+        std::fprintf(stderr, "lamina: layers %d-%d on GPU %d: %.2f GiB of the weights; the loop's last %lld of its %lld "
+                     "applications run on this GPU, with the weights of layers %lld-%lld a second time (%.2f GiB)\n", m.sat_lo,
+                     m.sat_hi, m.sat_dev, m.sat_gib, (long long) m.sat_back, (long long) loop_n,
+                     (long long) (m.sat_back >= g.core() ? g.loop_start : g.loop_end - m.sat_back), (long long) g.loop_end - 1,
+                     m.twin_gib);
+    else if (m.sat_dev >= 0)
         std::fprintf(stderr, "lamina: layers %d-%d on GPU %d: %.2f GiB of the weights\n", m.sat_lo, m.sat_hi, m.sat_dev, m.sat_gib);
+    else if (o.sat_back > 0)
+        std::fprintf(stderr, "lamina: --layer-split-back: no layer split: left out\n");
     return true;
 }
 
@@ -1295,6 +1368,7 @@ struct Engine {
     };
     std::unique_ptr<Sat> sat;
     bool at_sat = false;
+    int carry_n = 0;                 // the rows a crossing carries at most, a token's (carry_most)
     std::string sat_clocks;          // --layer-split-clocks: its lock while a request runs
     std::string main_clocks;         // --main-gpu-clocks: the first card's
     bool main_locked = false;        // (it has a lock: held through every request)
@@ -2233,7 +2307,7 @@ struct Engine {
                     }
                     CK(cudaFreeHost(q));
                 }
-                q = halloc<float>((size_t) ik::kCarry * (size_t) want * (size_t) m->g.n_embd);
+                q = halloc<float>((size_t) carry_n * (size_t) want * (size_t) m->g.n_embd);
                 have = want;
             };
             regrow(sat->cpin, sat->carry_rows, rows);
@@ -2508,6 +2582,12 @@ struct Engine {
             sat->sms = std::max(1, prop.multiProcessorCount);
             sat->arch = prop.major;
             sat->il_proj_min = std::getenv("LAMINA_INK_ILP") ? il_proj_min : prop.major >= 10 ? 8 : 3;
+            carry_n = carry_most();
+            if (carry_n > ik::kCarry) {
+                std::fprintf(stderr, "lamina: --layer-split: a crossing carries %d rows of each token, more than %d (a drafter "
+                             "of %d layers among them)\n", carry_n, ik::kCarry, sp != nullptr ? sp->n_layer : 0);
+                throw Fatal{1};
+            }
             sat->pack = dzero<float>((size_t) ik::kCarry * kMaxT * N);
             sat->tc_on = std::getenv("LAMINA_INK_TC") ? tc_on : MMQ::built() && !MMQ::native_fp4(40);
             std::string why;
@@ -2525,10 +2605,6 @@ struct Engine {
             if (!main_locked)
                 std::fprintf(stderr, "lamina: --main-gpu-clocks %s: %s: GPU %d keeps the driver's clocks\n", main_clocks.c_str(),
                              why.c_str(), here);
-        }
-        if (sat && sp != nullptr && 1 + nblocks() + sp->n_layer + 1 > ik::kCarry) {
-            std::fprintf(stderr, "lamina: --layer-split: a drafter of %d layers passes the rows a crossing carries\n", sp->n_layer);
-            throw Fatal{1};
         }
         if (sat) {
             sat->pack_main = dzero<float>((size_t) ik::kCarry * kMaxT * N);
@@ -2664,7 +2740,7 @@ struct Engine {
             sat->rings = dzero<uint8_t>(ring_bytes);
             sat->v0 = (int) nv;
             for (int64_t v = 0; v < nv; ++v)
-                if (m->on_sat(g.visit_layer(v))) {
+                if (m->sat_visit(v)) {
                     sat->v0 = std::min(sat->v0, (int) v);
                     sat->v1 = (int) v + 1;
                 }
@@ -4522,7 +4598,7 @@ struct Engine {
     void visit(int v, int T, Rows& R, int64_t p0) {
         const Geometry& g = m->g;
         Visit& V = visits[(size_t) v];
-        const Layer& L = m->layers[(size_t) V.layer];
+        const Layer& L = m->layer_at(v);
         const bool batch = R.batch;
         const int l = V.layer, pass = V.pass, res = (int) g.res_block;
         const int N = (int) g.n_embd, H = (int) g.n_head, HK = (int) g.n_head_kv, D_ = (int) g.head_dim, C = (int) g.n_conv;
@@ -5466,21 +5542,38 @@ struct Engine {
         at_sat = there;
         CK(cudaSetDevice(there ? sat->dev : main_dev));
     }
-    /// The rows that carry the state into visit v, in `R`: the stream and the block inputs made before its layer
+    /// The rows that carry the state into visit v, in `R`: the stream and the block inputs made before its layer, and
+    /// in the loop what its later visits read - the loop's input where a pass starts from it after this, and past the
+    /// first pass the pass before's block inputs and output (its messages')
     int carry_list(const Rows& R, int v, float** buf) const {
         const Geometry& g = m->g;
-        const int l = visits[(size_t) v].layer, res = (int) g.res_block;
-        const int use_pass = l >= g.loop_end ? (int) g.n_pass - 1 : 0;
+        const int l = (int) g.visit_layer(v), pass = (int) g.visit_pass(v), res = (int) g.res_block;
+        const bool looped = g.looped(l);
+        const int use_pass = l >= g.loop_end ? (int) g.n_pass - 1 : pass;
         int n = 0;
         buf[n++] = R.x;
         for (int j = 0; j < (l + res - 1) / res; ++j) buf[n++] = blk_at(R, j, use_pass);
+        if (looped && pass > 0) {
+            for (int b = 0; b < nblocks(); ++b)
+                if (varying(b)) buf[n++] = blk_at(R, b, pass - 1);
+            if (l > g.loop_start) buf[n++] = R.pass_out;
+        }
+        if (looped && (l == g.loop_start ? pass > 0 : pass + 1 < g.n_pass)) buf[n++] = R.prelude;
         // (the drafter's mixes of the target's states, where a tap of the split's card adds to them and one has begun
         // them: else they stay on this card)
         bool taps_there = false;
-        for (size_t k = 0; sp != nullptr && k + 1 < sp->taps.size(); ++k) taps_there = taps_there || on_sat(sp->taps[k]);
+        for (size_t k = 0; sp != nullptr && k + 1 < sp->taps.size(); ++k) taps_there = taps_there || m->sat_visit(sp->taps[k]);
         if (taps_there && sp->taps.front() < v)
             for (int r = 0; r <= sp->n_layer; ++r) buf[n++] = R.f_fused + (size_t) r * (size_t) R.cap * (size_t) m->g.n_embd;
         return n;
+    }
+    /// The rows a crossing carries at most (the buffers between the cards hold as many)
+    int carry_most() const {
+        float* buf[ik::kCarry + 16];
+        int most = 0;
+        for (int64_t v = 1; v < m->g.n_visits(); ++v)
+            if (m->sat_visit(v) != m->sat_visit(v - 1)) most = std::max(most, carry_list(D, (int) v, buf));
+        return most;
     }
     /// The forward goes on at visit v on the other card: what is queued here ends (a graph's segment where one is
     /// captured), the rows that carry the state are packed, copied over and unpacked there
@@ -7055,6 +7148,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     int64_t split_keep = -1;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
+    int64_t split_back = 0;
     int lookup = 16, drafts = -1, cpu_threads = 0;
     uint64_t expert_vram = 0;
     std::string expert_profile, expert_save;
@@ -7103,6 +7197,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--vram-reserve-mib") reserve = (uint64_t) std::max(0, std::atoi(next())) << 20;
         else if (a == "--cell-gpus") cell_gpus = next();   // cards for the full visits' cells (CUDA ordinals)
         else if (a == "--layer-split") layer_split = next();   // DEV:A-B: the layers A .. B on card DEV
+        else if (a == "--layer-split-back") split_back = std::max<int64_t>(0, std::atoll(next()));   // the loop's last applications here
         else if (a == "--layer-split-clocks") split_clocks = next();   // that card's clocks locked while a request runs
         else if (a == "--layer-split-reserve-mib") split_keep = std::max(0, std::atoi(next()));   // the VRAM it leaves free
         else if (a == "--main-gpu-clocks") main_clocks = next();   // this card's clocks locked while a request runs
@@ -7177,6 +7272,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     lo.q8 = kv == "q8_0";
     lo.cache = serve && copt.chain > 0;
     lo.cell_cards = !cell_gpus.empty();
+    lo.sat_back = split_back;
     if (layer_split.empty() && !cell_gpus.empty()) {
         // the next card: the loader's own split, where it comes to one (the card's clocks= and reserve= are then its)
         const std::vector<int32_t> ids = lamina::program::parse_ids(cell_gpus.c_str());

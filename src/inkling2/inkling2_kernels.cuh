@@ -246,7 +246,7 @@ __global__ void __launch_bounds__(kTB) ctrl_apply_kernel(CtrlIn a) {
 // ---------------------------------------------------------------------------------------------- a layer split
 /// The rows that carry a forward's state from a card to the next one: T rows of each of n buffers ([cap][N] each)
 /// packed in a row for the copy (OUT), and unpacked on the other side.  Grid (ceil(N / 4 / kTB), T, n).
-constexpr int kCarry = 9;
+constexpr int kCarry = 12;
 struct CarryIn {
     float* buf[kCarry];
     float* pack;
