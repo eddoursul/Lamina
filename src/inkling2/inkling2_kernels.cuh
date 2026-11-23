@@ -10,6 +10,7 @@
 
 #include "lamina/kernels/q8_1_finite.hpp"
 #include "lamina/kernels/q8_1_il16.hpp"
+#include "lamina/kernels/q8_halves.cuh"
 #include "lamina/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
@@ -1322,10 +1323,23 @@ __device__ __forceinline__ unsigned h2(float a, float b) {
     const __half2 v = __floats2half2_rn(a, b);
     return *reinterpret_cast<const unsigned*>(&v);
 }
-/// four q8_0 codes times their block's scale, as halves
-__device__ __forceinline__ uint2 q8_widen4(uint32_t w, float d) {
-    return make_uint2(h2((float) (int8_t) (w & 0xff) * d, (float) (int8_t) ((w >> 8) & 0xff) * d),
-                      h2((float) (int8_t) ((w >> 16) & 0xff) * d, (float) (int8_t) (w >> 24) * d));
+/// 16 bytes from `sh` bytes into the 8-byte words at p (sh 0, 2, 4 or 6: a q8_0 block's codes lie so in a K/V head's
+/// 136 bytes), read as whole words: three, or two where they start at one (nothing past them is read)
+__device__ __forceinline__ uint4 q8_codes16(const unsigned long long* __restrict__ p, int sh) {
+    const unsigned long long w0 = p[0], w1 = p[1];
+    unsigned long long lo = w0, hi = w1;
+    if (sh) {
+        const unsigned long long w2 = p[2];
+        lo = (w0 >> (8 * sh)) | (w1 << (64 - 8 * sh));
+        hi = (w1 >> (8 * sh)) | (w2 << (64 - 8 * sh));
+    }
+    return make_uint4((unsigned) lo, (unsigned) (lo >> 32), (unsigned) hi, (unsigned) (hi >> 32));
+}
+/// four q8_0 codes times their block's scale (twice in d), as halves
+__device__ __forceinline__ uint2 q8_widen4(uint32_t w, __half2 d) {
+    __half2 lo, hi;
+    lamina::kernels::q8_widen4(w, d, lo, hi);
+    return make_uint2(*reinterpret_cast<const unsigned*>(&lo), *reinterpret_cast<const unsigned*>(&hi));
 }
 
 constexpr int kTcCells = 32;   // cells a tile
@@ -1467,7 +1481,8 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
             for (int i = tid; i < 2 * kTcCells * 16; i += NT) {
                 const int side = i >= kTcCells * 16, j = i - side * kTcCells * 16, c = j / 16, u = j % 16, blk = u / 4;
                 const uint8_t* cell = raw[side] + c * kRawCell;
-                const float d = __half2float(*reinterpret_cast<const __half*>(cell + blk * 34));
+                const __half dh = *reinterpret_cast<const __half*>(cell + blk * 34);
+                const __half2 d = __halves2half2(dh, dh);
                 const int at = blk * 34 + 2 + (u % 4) * 8;   // the codes: at a word, or two bytes into one
                 const uint32_t* wp = reinterpret_cast<const uint32_t*>(cell + (at & ~3));
                 uint32_t w0 = wp[0], w1 = wp[1];
@@ -1672,19 +1687,20 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     }
     // a tile: 32 cells of K and of V (attn_tc_kernel's)
     uint4 nk[2], nv[2];
-    [[maybe_unused]] float dk = 0.f, dv = 0.f;
+    [[maybe_unused]] __half dk = __float2half(0.f), dv = dk;
     auto fetch = [&](int base) {
         if constexpr (Q8) {
             const int c = tid / 8, pc = tid % 8;
             nk[0] = nv[0] = make_uint4(0, 0, 0, 0);
-            dk = dv = 0.f;
-            if (base + c < cnt) {
-                const size_t at = (size_t) slot_of(base + c) * cbytes + ((size_t) g * (D / 32) + pc / 2) * 34;
-                const uint8_t *kb = a.c.k + at, *vb = a.c.v + at;
-                dk = __half2float(*reinterpret_cast<const __half*>(kb));
-                dv = __half2float(*reinterpret_cast<const __half*>(vb));
-                memcpy(&nk[0], kb + 2 + (pc % 2) * 16, 16);
-                memcpy(&nv[0], vb + 2 + (pc % 2) * 16, 16);
+            dk = dv = __float2half(0.f);
+            if (base + c < cnt) {   // (a head's 136 bytes start at a word; block j's codes 34 j + 2 bytes in)
+                const size_t head = (size_t) slot_of(base + c) * cbytes + (size_t) g * (D / 32) * 34;
+                const int o = (pc / 2) * 34 + 2 + (pc % 2) * 16;
+                const uint8_t *kb = a.c.k + head, *vb = a.c.v + head;
+                dk = *reinterpret_cast<const __half*>(kb + (pc / 2) * 34);
+                dv = *reinterpret_cast<const __half*>(vb + (pc / 2) * 34);
+                nk[0] = q8_codes16(reinterpret_cast<const unsigned long long*>(kb) + o / 8, o % 8);
+                nv[0] = q8_codes16(reinterpret_cast<const unsigned long long*>(vb) + o / 8, o % 8);
             }
         } else {
 #pragma unroll
@@ -1703,10 +1719,11 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     auto stash = [&] {
         if constexpr (Q8) {
             const int c = tid / 8, pc = tid % 8;
-            const uint2 k0 = q8_widen4(nk[0].x, dk), k1 = q8_widen4(nk[0].y, dk), k2 = q8_widen4(nk[0].z, dk),
-                        k3 = q8_widen4(nk[0].w, dk);
-            const uint2 v0 = q8_widen4(nv[0].x, dv), v1 = q8_widen4(nv[0].y, dv), v2 = q8_widen4(nv[0].z, dv),
-                        v3 = q8_widen4(nv[0].w, dv);
+            const __half2 dk2 = __halves2half2(dk, dk), dv2 = __halves2half2(dv, dv);
+            const uint2 k0 = q8_widen4(nk[0].x, dk2), k1 = q8_widen4(nk[0].y, dk2), k2 = q8_widen4(nk[0].z, dk2),
+                        k3 = q8_widen4(nk[0].w, dk2);
+            const uint2 v0 = q8_widen4(nv[0].x, dv2), v1 = q8_widen4(nv[0].y, dv2), v2 = q8_widen4(nv[0].z, dv2),
+                        v3 = q8_widen4(nv[0].w, dv2);
             uint4* kd = reinterpret_cast<uint4*>(sm.k + c * kTcPad + pc * 16);
             uint4* vd = reinterpret_cast<uint4*>(sm.v + c * kTcPad + pc * 16);
             kd[0] = make_uint4(k0.x, k0.y, k1.x, k1.y);

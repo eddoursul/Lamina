@@ -10,6 +10,7 @@
 #pragma once
 
 #include "lamina/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/q8_halves.cuh"
 #include "lamina/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
@@ -19,6 +20,7 @@
 
 namespace hy4k {
 
+using lamina::kernels::q8_widen4;
 using lamina::kernels::warp_max;
 using lamina::kernels::warp_sum;
 
@@ -32,17 +34,6 @@ constexpr int kLatent = 512;
 /// FP16's 1,152.  The attention widens a row into the halves it reads (d * q rounded to FP16).
 constexpr int kKvQ8Row = 624;
 static_assert(kKvRow + kKvRow / 32 * 2 <= kKvQ8Row && kKvQ8Row % 16 == 0, "the q8_0 row's bytes");
-
-/// Four int8 values of a q8_0 row (a word) times their block's scale d2 (its FP16 scale twice), as two half2: each q
-/// made a half exactly (the byte with its sign bit flipped permuted under 0x64, 1024 + q + 128, less 1152), then one
-/// rounding of d * q to FP16, as a float product rounded to FP16 would give.
-__device__ __forceinline__ void q8_widen4(uint32_t u, __half2 d2, __half2& lo, __half2& hi) {
-    const uint32_t x = u ^ 0x80808080u;
-    const uint32_t a = __byte_perm(x, 0x64646464u, 0x4140), b = __byte_perm(x, 0x64646464u, 0x4342);
-    const __half2 bias = __float2half2_rn(1152.f);
-    lo = __hmul2(__hsub2(*reinterpret_cast<const __half2*>(&a), bias), d2);
-    hi = __hmul2(__hsub2(*reinterpret_cast<const __half2*>(&b), bias), d2);
-}
 
 __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 __device__ __forceinline__ float silu(float v) { return v / (1.0f + expf(-v)); }
