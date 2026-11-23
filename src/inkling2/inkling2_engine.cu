@@ -266,6 +266,7 @@ struct Model {
     uint64_t arena_bytes = 0, fixed_bytes = 0;
     uint64_t expert_cap = 0;                 // --expert-cache: the experts' VRAM at most (0: no limit)
     std::string ranking;                     // what the ranking is, for the log
+    bool ranking_given = false;              // the ranking is a profile given (--expert-profile), not the built-in one
     // A layer split: the layers [sat_lo, sat_hi] - their weights, and in the engine their visits' cells and states -
     // are on card sat_dev (-1: none).  The loop is whole among them or not at all, the first and the last layer are
     // this card's: a forward crosses there once and back once.  In a split that ends with the loop this card may run
@@ -645,6 +646,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             int64_t slots = 0;
             std::string perr;
             m.ranking = o.profile.empty() ? "the built-in ranking" : o.profile;
+            m.ranking_given = !o.profile.empty();
             if (!lamina::core::read_expert_profile(o.profile.empty() ? lamina::core::kBuiltinExpertProfile : o.profile, g.n_layers,
                                                    E, m.ranked, slots, perr)) {
                 if (!o.profile.empty()) {
@@ -2950,9 +2952,12 @@ struct Engine {
                 slot_exp[l].assign(L.order.begin(), L.order.begin() + L.n_slots);
                 for (int k = 0; k < L.n_slots; ++k) slot_at[l][(size_t) L.order[(size_t) k]] = k;
             }
-            // (the start's heat: the ranking's order, a few entries' worth)
+            // (the start's heat: the ranking's order, a few entries' worth - more of a profile given (a learned one:
+            // the first request's routing then has to differ for longer before the experts move); LAMINA_INK_START_HEAT)
+            float h0 = m->ranking_given ? 64.f : 8.f;
+            if (const char* e = std::getenv("LAMINA_INK_START_HEAT")) h0 = std::max(0.f, (float) std::atof(e));
             for (size_t r = 0; r < m->ranked.size(); ++r)
-                heat[(size_t) m->ranked[r].first][(size_t) m->ranked[r].second] = 8.f * (1.f - (float) r / (float) m->ranked.size());
+                heat[(size_t) m->ranked[r].first][(size_t) m->ranked[r].second] = h0 * (1.f - (float) r / (float) m->ranked.size());
             n_held = m->n_fixed;
             swap_h = halloc<int32_t>(2 * kSwaps);
             pool = std::make_unique<C::ExpertPool>(cpu_threads);
