@@ -1517,6 +1517,10 @@ struct Engine {
     double ahead_k = kAheadTime;
     bool ahead_fixed = false, ahead_next = false, ahead_sent_next = false;
     bool ahead_across = true;        // (LAMINA_INK_AHEAD_NEXT=0: no chunk's first application sent ahead)
+    // The experts' heat counts the decode forwards' routing alone: a prompt routes other experts than the answer to it
+    // (LAMINA_INK_HEAT_PROMPT=w: a chunk's entries too, each w of a decode entry - more of the decode's entries to the
+    // CPU on this PC)
+    float heat_prompt = 0.f;
     bool ahead_on = true;            // (LAMINA_INK_AHEAD=0: none, a test's)
     cudaStream_t st_up = nullptr;
     cudaEvent_t up_ev[4] = {};       // the start and end of an application's own uploads (the link idle beside them:
@@ -2843,6 +2847,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_FIXED")) ahead_fixed = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_NEXT")) ahead_across = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_HEAT_PROMPT")) heat_prompt = std::max(0.f, (float) std::atof(r));
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
@@ -4692,6 +4697,10 @@ struct Engine {
         // then, with experts in RAM, those of the others this chunk routes, their blobs sent to the scratch - slots in
         // a row in one copy (their blobs are in a row in RAM too).
         route_dump(0, L.il, n_ent, R.ids_h);
+        if (m->in_ram && heat_prompt > 0.f) {   // (a prompt's routing in the experts' heat too, at its weight: a test's)
+            for (int i = 0; i < n_ent; ++i) heat[(size_t) L.il][(size_t) R.ids_h[i]] += heat_w * heat_prompt;
+            profile_new = true;
+        }
         const int ns = m->in_ram ? on_card[(size_t) L.il] : E;
         const int32_t* const at_of = m->in_ram ? slot_at[(size_t) L.il].data() : L.slot_at.data();
         int rows_of[ik::kExpertMax] = {}, place[ik::kExpertMax];
