@@ -201,24 +201,32 @@ struct CtrlIn {
     int n, N, R;
 };
 constexpr int kRankMax = 64;
-/// h: a block a row, an input and one of the R outputs; a thread four values of each half
+/// h: a block a row, an input and RB of the R outputs (grid (R / RB, T, n)); a thread four values of each half
+template <int RB>
 __global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
-    const int r = blockIdx.x, t = blockIdx.y, c = blockIdx.z, i4 = threadIdx.x;
-    __shared__ float red[32][4];
-    __shared__ float tot[4];
-    float v[4] = {0.f, 0.f, 0.f, 0.f};
+    const int r0 = blockIdx.x * RB, t = blockIdx.y, c = blockIdx.z, i4 = threadIdx.x;
+    __shared__ float red[32][2 + 2 * RB];
+    __shared__ float tot[2 + 2 * RB];
+    float v[2 + 2 * RB];
+#pragma unroll
+    for (int q = 0; q < 2 + 2 * RB; ++q) v[q] = 0.f;
     if (i4 < a.N / 4) {
         const float4 u = ld4(a.u[c] + (size_t) t * a.N, i4), m = ld4(a.m[c] + (size_t) t * a.N, i4);
-        const float* d = a.D[c] + (size_t) r * 2 * a.N;
         v[0] = dot4(u, u);
         v[1] = dot4(m, m);
-        v[2] = dot4(ld4(d, i4), u);
-        v[3] = dot4(ld4(d + a.N, i4), m);
+#pragma unroll
+        for (int q = 0; q < RB; ++q) {
+            const float* d = a.D[c] + (size_t) (r0 + q) * 2 * a.N;
+            v[2 + 2 * q] = dot4(ld4(d, i4), u);
+            v[3 + 2 * q] = dot4(ld4(d + a.N, i4), m);
+        }
     }
-    block_sums_wide<4>(v, red, tot);
+    block_sums_wide<2 + 2 * RB>(v, red, tot);
     if (threadIdx.x == 0)
-        a.h[((size_t) c * gridDim.y + t) * a.R + r] =
-            v[2] * rsqrtf(v[0] / (float) a.N + 1e-6f) + v[3] * rsqrtf(v[1] / (float) a.N + 1e-6f);
+#pragma unroll
+        for (int q = 0; q < RB; ++q)
+            a.h[((size_t) c * gridDim.y + t) * a.R + r0 + q] =
+                v[2 + 2 * q] * rsqrtf(v[0] / (float) a.N + 1e-6f) + v[3 + 2 * q] * rsqrtf(v[1] / (float) a.N + 1e-6f);
 }
 /// the gated rows: four threads an output, each a quarter of its R products in 16-byte loads (R a multiple of 16; a
 /// thread alone took as long as its 2 R loads in a row).  Grid (ceil(4 N / kTB), T, n).
@@ -350,6 +358,123 @@ __global__ void __launch_bounds__(kWide) norm_kernel(NormIn a) {
 /// The same sums as the two launches.  Grid (max(nq, 1), T).
 __global__ void __launch_bounds__(kWide) mix_norm_kernel(MixIn m, NormIn a) {
     norm_do(a, blockIdx.y, blockIdx.x, mix_do(m, blockIdx.x, blockIdx.y));
+}
+
+// ---------------------------------------------------------------------------------------------- a gated sublayer's input
+/// A decode forward's sublayer input through the loop's gate in one launch: the loop's messages' mix (nm queries, or
+/// none), the sublayer's mix (nq), the gate's h (R blocks a row and input) and its application (P blocks), and the norm
+/// of what it gives - mix_kernel's, ctrl_h_kernel's, ctrl_apply_kernel's and norm_kernel's work, the same sums.  The
+/// blocks take their places in that order as they start (a ticket: a block waits only on blocks begun before it), a
+/// row's mixes first: a block waits on its row's counter for the ones it reads, the last application block of a row
+/// and input norms it, and the last block of all sets the counters back to 0.  row4() threads a block; what other
+/// blocks wrote is read past the L1 (ldcg4).
+constexpr int kChainInts = kMaxT * 7 + 2;   // a row's mixes done [kMaxT], h's done [3 kMaxT], applications [3 kMaxT],
+                                            // blocks done, tickets
+constexpr int kChainRb = 4;   // the gate's h outputs a block (R a multiple)
+struct GateChainIn {
+    MixIn msg, mix;
+    CtrlIn ctrl;
+    NormIn norm;
+    int* ctr;   // [kChainInts], zero between launches
+    int T, n, nm, nq, P;
+};
+__device__ __forceinline__ float4 ldcg4(const float* p, int i4) { return __ldcg(reinterpret_cast<const float4*>(p) + i4); }
+/// the block on: `c` has reached `want`
+__device__ __forceinline__ void chain_wait(const int* c, int want) {
+    if (threadIdx.x == 0) {
+        while (*(volatile const int*) c < want) __nanosleep(32);
+        __threadfence();
+    }
+    __syncthreads();
+}
+/// the block's writes are out: `c` counts it (the old count back)
+__device__ __forceinline__ int chain_count(int* c) {
+    __shared__ int old;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        __threadfence();
+        old = atomicAdd(c, 1);
+    }
+    __syncthreads();
+    return old;
+}
+__global__ void __launch_bounds__(kWide) gate_chain_kernel(GateChainIn a) {
+    __shared__ int ticket;
+    if (threadIdx.x == 0) ticket = atomicAdd(a.ctr + kChainInts - 1, 1);
+    __syncthreads();
+    const int b = ticket, i4 = threadIdx.x, N = a.ctrl.N, R = a.ctrl.R;
+    const int A = a.T * (a.nm + a.nq), B = a.T * a.n * (R / kChainRb);
+    int* const mixes = a.ctr;
+    int* const hs = a.ctr + kMaxT;
+    int* const aps = a.ctr + 4 * kMaxT;
+    const bool on = i4 < N / 4;
+    if (b < A) {   // a mix: a query of the messages or of the sublayer
+        const int t = b / (a.nm + a.nq), j = b % (a.nm + a.nq);
+        if (j < a.nm) (void) mix_do(a.msg, j, t);
+        else (void) mix_do(a.mix, j - a.nm, t);
+        (void) chain_count(mixes + t);
+    } else if (b < A + B) {   // h[c][t][r] = D_c[r] . [u / rms(u); m / rms(m)] (ctrl_h_kernel's), kChainRb r a block
+        const int nr = R / kChainRb, b2 = b - A, t = b2 / (a.n * nr), c = (b2 / nr) % a.n, r0 = (b2 % nr) * kChainRb;
+        chain_wait(mixes + t, a.nm + a.nq);
+        __shared__ float red[32][2 + 2 * kChainRb];
+        __shared__ float tot[2 + 2 * kChainRb];
+        float v[2 + 2 * kChainRb];
+#pragma unroll
+        for (int q = 0; q < 2 + 2 * kChainRb; ++q) v[q] = 0.f;
+        if (on) {
+            const float4 u = ldcg4(at3(a.ctrl.u, c) + (size_t) t * N, i4), m = ldcg4(at3(a.ctrl.m, c) + (size_t) t * N, i4);
+            v[0] = dot4(u, u);
+            v[1] = dot4(m, m);
+#pragma unroll
+            for (int q = 0; q < kChainRb; ++q) {
+                const float* d = at3(a.ctrl.D, c) + (size_t) (r0 + q) * 2 * N;
+                v[2 + 2 * q] = dot4(ld4(d, i4), u);
+                v[3 + 2 * q] = dot4(ld4(d + N, i4), m);
+            }
+        }
+        block_sums_wide<2 + 2 * kChainRb>(v, red, tot);
+        if (threadIdx.x == 0)
+#pragma unroll
+            for (int q = 0; q < kChainRb; ++q)
+                a.ctrl.h[((size_t) c * a.T + t) * R + r0 + q] =
+                    v[2 + 2 * q] * rsqrtf(v[0] / (float) N + 1e-6f) + v[3 + 2 * q] * rsqrtf(v[1] / (float) N + 1e-6f);
+        (void) chain_count(hs + t * 3 + c);
+    } else {   // the gate applied, four threads an output (ctrl_apply_kernel's), and by the last block the norm
+        const int b3 = b - A - B, t = b3 / (a.n * a.P), c = (b3 / a.P) % a.n, p = b3 % a.P;
+        chain_wait(hs + t * 3 + c, R / kChainRb);
+        __shared__ float h[kRankMax];
+        if (threadIdx.x < R) h[threadIdx.x] = __ldcg(a.ctrl.h + ((size_t) c * a.T + t) * R + threadIdx.x);
+        __syncthreads();
+        const int i = (p * (int) blockDim.x + (int) threadIdx.x) >> 2, part = threadIdx.x & 3;
+        float sg = 0.f, sf = 0.f;
+        if (i < N) {
+            const int per = R / 4;
+            const float4* g = reinterpret_cast<const float4*>(at3(a.ctrl.G, c) + (size_t) i * R + part * per);
+            const float4* f = reinterpret_cast<const float4*>(at3(a.ctrl.F, c) + (size_t) i * R + part * per);
+            const float* hp = h + part * per;
+            for (int q = 0; q < per / 4; ++q) {
+                const float4 gv = g[q], fv = f[q];
+                const float h0 = hp[4 * q], h1 = hp[4 * q + 1], h2 = hp[4 * q + 2], h3 = hp[4 * q + 3];
+                sg += gv.x * h0 + gv.y * h1 + gv.z * h2 + gv.w * h3;
+                sf += fv.x * h0 + fv.y * h1 + fv.z * h2 + fv.w * h3;
+            }
+        }
+        sg += __shfl_xor_sync(0xffffffffu, sg, 1);
+        sg += __shfl_xor_sync(0xffffffffu, sg, 2);
+        sf += __shfl_xor_sync(0xffffffffu, sf, 1);
+        sf += __shfl_xor_sync(0xffffffffu, sf, 2);
+        if (i < N && part == 0) {
+            const size_t at = (size_t) t * N + i;
+            at3(a.ctrl.out, c)[at] = (1.0f - tanhf(sf)) * __ldcg(at3(a.ctrl.u, c) + at) + tanhf(sg) * __ldcg(at3(a.ctrl.m, c) + at);
+        }
+        if (chain_count(aps + t * 3 + c) == a.P - 1) {   // (the row's every output is out)
+            if (threadIdx.x == 0) __threadfence();
+            __syncthreads();
+            norm_do(a.norm, t, c, on ? ldcg4(at3(a.norm.x, c) + (size_t) t * N, i4) : make_float4(0.f, 0.f, 0.f, 0.f));
+        }
+    }
+    if (chain_count(a.ctr + kChainInts - 2) == (int) gridDim.x - 1)   // the last block: the counters back to 0
+        for (int j = threadIdx.x; j < kChainInts; j += (int) blockDim.x) a.ctr[j] = 0;
 }
 
 /// norm_kernel for a chunk's rows, its values to the bit (no q8_1 image): a warp a row, a block 8 rows, where a

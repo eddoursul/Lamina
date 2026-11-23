@@ -1166,6 +1166,7 @@ struct Rows {
           *dynk = nullptr, *dynv = nullptr, *tau = nullptr, *q = nullptr, *bias = nullptr, *kc = nullptr, *vc = nullptr,
           *part = nullptr, *aout = nullptr, *oraw = nullptr, *fraw = nullptr, *w = nullptr, *rows = nullptr,
           *logits = nullptr, *ctl_h = nullptr, *probs = nullptr;
+    int* chain = nullptr;   // a decode forward's gated sublayer inputs: gate_chain_kernel's counters
     float* crows = nullptr;   // with experts in RAM: the CPU's rows of a visit, packed in the entries' order
     // the step record: the rows' positions, then the cells in use, the full visits' {stretch, stretches in use} and
     // a chunk's window range's cells
@@ -1232,6 +1233,8 @@ struct Engine {
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
+    bool fuse_gate = false;      // and the messages' mix, the mix, the gate and the norm where it is (LAMINA_INK_GATE=1)
+    int gate_rb = 0;             // the gate's h outputs a block of ctrl_h_kernel (0: by the rows; LAMINA_INK_GATE_RB)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
     bool il_on = true;
@@ -1681,6 +1684,7 @@ struct Engine {
         R.rows = dzero<float>(n_ent * N);
         R.probs = dzero<float>(T * E);
         R.ctl_h = dzero<float>(3 * T * (size_t) std::max<int64_t>(g.gate_rank, 1));
+        if (!batch) R.chain = dzero<int>(ik::kChainInts);
         R.logits = dzero<float>(Th * (size_t) g.n_vocab);
         R.pick = dzero<int32_t>(2 * Th);
         R.bad = R.pick + Th;
@@ -2553,6 +2557,8 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_GATE")) fuse_gate = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_GATE_RB")) gate_rb = std::atoi(r) == 1 ? 1 : 4;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
             il_proj = (std::atoi(r) & 2) != 0;
@@ -4238,6 +4244,10 @@ struct Engine {
     /// the loop's gate)
     void mix(const float* const* blks, int nb, const float* cur, const float* queries, int nq, float* out, float* cur_n,
              int T, const ik::NormIn* with = nullptr) {
+        mix_launch(mix_in(blks, nb, cur, queries, nq, out, cur_n, T), with);
+    }
+    ik::MixIn mix_in(const float* const* blks, int nb, const float* cur, const float* queries, int nq, float* out, float* cur_n,
+                     int T) const {
         ik::MixIn a{};
         for (int j = 0; j < nb; ++j) a.blk[j] = blks[j];
         a.cur = cur;
@@ -4248,8 +4258,36 @@ struct Engine {
         a.nq = nq;
         a.N = (int) m->g.n_embd;
         a.T = T;
-        if (with != nullptr) ik::mix_norm_kernel<<<dim3((unsigned) std::max(nq, 1), (unsigned) T), row4(), 0, st>>>(a, *with);
-        else ik::mix_kernel<<<dim3((unsigned) std::max(nq, 1), (unsigned) T), row4(), 0, st>>>(a);
+        return a;
+    }
+    void mix_launch(const ik::MixIn& a, const ik::NormIn* with = nullptr) {
+        const dim3 grid((unsigned) std::max(a.nq, 1), (unsigned) a.T);
+        if (with != nullptr) ik::mix_norm_kernel<<<grid, row4(), 0, st>>>(a, *with);
+        else ik::mix_kernel<<<grid, row4(), 0, st>>>(a);
+    }
+    /// The loop gates' h of n inputs: a block four of a row's outputs where several rows run (a window of drafts:
+    /// 0.8% a window), one where a row is alone (four lose 0.4% there) - the same sums.  LAMINA_INK_GATE_RB=1 or 4: every
+    /// forward's.
+    void ctrl_h(const ik::CtrlIn& a, int T, int n) {
+        if ((gate_rb > 0 ? gate_rb == 4 : T > 1) && a.R % 4 == 0) ik::ctrl_h_kernel<4><<<dim3((unsigned) a.R / 4, (unsigned) T, (unsigned) n), row4(), 0, st>>>(a);
+        else ik::ctrl_h_kernel<1><<<dim3((unsigned) a.R, (unsigned) T, (unsigned) n), row4(), 0, st>>>(a);
+    }
+    /// A decode forward's gated sublayer input in one launch: [the messages' mix,] the mix, the loop gate of its
+    /// inputs and their norms (gate_chain_kernel)
+    void gate_chain(const ik::MixIn* msg, const ik::MixIn& mx, const ik::CtrlIn& gate, const ik::NormIn& nr, Rows& R, int T) {
+        ik::GateChainIn a{};
+        if (msg != nullptr) a.msg = *msg;
+        a.mix = mx;
+        a.ctrl = gate;
+        a.norm = nr;
+        a.ctr = R.chain;
+        a.T = T;
+        a.n = gate.n;
+        a.nm = msg != nullptr ? msg->nq : 0;
+        a.nq = mx.nq;
+        a.P = (int) ((4 * (unsigned) gate.N + row4() - 1) / row4());
+        const unsigned blocks = (unsigned) (T * (a.nm + a.nq) + T * a.n * (gate.R / ik::kChainRb) + T * a.n * a.P);
+        ik::gate_chain_kernel<<<blocks, row4(), 0, st>>>(a);
     }
     /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
     /// (`ld`: floats from one row of C to the next, m when not given)
@@ -4653,12 +4691,16 @@ struct Engine {
         const int nb = (l + res - 1) / res;
         for (int j = 0; j < nb; ++j) blks[j] = blk_at(R, j, use_pass);
         float* newblk = L.first ? blk_at(R, l / res, use_pass) : nullptr;
+        // (a decode forward's gated sublayer: the messages' mix, the mix, the gate and the norm in one launch below)
+        const bool chain = fuse_gate && !batch && msgs;
+        ik::MixIn mx_msg{};
         if (msgs) {
             const float* bank[ik::kBlk] = {};
             int nbank = 0;
             for (int b = 0; b < nblocks(); ++b)
                 if (varying(b)) bank[nbank++] = blk_at(R, b, pass - 1);
-            run("a: mix of the messages", [&] { mix(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T); });
+            mx_msg = mix_in(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T);
+            if (!chain) run("a: mix of the messages", [&] { mix_launch(mx_msg); });
             tick_part("inputs: the messages' mix");
         }
 
@@ -4666,14 +4708,14 @@ struct Engine {
         const float* u[3];
         const int n_in = msgs || L.full ? 3 : 1;
         const bool mix_norm = fuse_mix && !batch && !msgs && (L.nq == 0 || L.nq == n_in);
-        if (L.nq == 0) {
-            if (!mix_norm) run("a: mix", [&] { mix(blks, nb, R.x, nullptr, 0, nullptr, newblk, T); });
-            u[0] = u[1] = u[2] = R.x;
-        } else {
-            if (!mix_norm) run("a: mix", [&] { mix(blks, nb, R.x, L.attn_query, L.nq, R.mixed, newblk, T); });
+        const ik::MixIn mx = mix_in(blks, nb, R.x, L.nq == 0 ? nullptr : L.attn_query, L.nq, L.nq == 0 ? nullptr : R.mixed,
+                                    newblk, T);
+        if (L.nq == 0) u[0] = u[1] = u[2] = R.x;
+        else
             for (int c = 0; c < 3; ++c) u[c] = R.mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
-        }
+        if (!mix_norm && !chain) run("a: mix", [&] { mix_launch(mx); });
         tick_part("inputs: the mix");
+        ik::CtrlIn gate{};
         if (msgs && batch) {
             for (int c = 0; c < 3; ++c) {
                 float* out = R.ctl + (size_t) c * TN;
@@ -4681,7 +4723,7 @@ struct Engine {
                 u[c] = out;
             }
         } else if (msgs) {
-            ik::CtrlIn a{};
+            ik::CtrlIn& a = gate;
             for (int c = 0; c < 3; ++c) {
                 a.u[c] = u[c];
                 a.m[c] = R.msg + (size_t) c * TN;
@@ -4695,10 +4737,12 @@ struct Engine {
             a.n = 3;
             a.N = N;
             a.R = (int) g.gate_rank;
-            run("a: gates' h", [&] { ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 3), row4(), 0, st>>>(a); });
-            run("a: gates applied", [&] {
-                ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 3), ik::kTB, 0, st>>>(a);
-            });
+            if (!chain) {
+                run("a: gates' h", [&] { ctrl_h(a, T, 3); });
+                run("a: gates applied", [&] {
+                    ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 3), ik::kTB, 0, st>>>(a);
+                });
+            }
         }
         tick_part("inputs: the loop gates");
         bool ilp = !batch && il_proj && fuse_products && T >= il_proj_min;   // the projections from interleaved columns
@@ -4721,10 +4765,8 @@ struct Engine {
             a.N = N;
             a.cp = K::native_q8_1_il_cp(T);
             a.eps = g.eps;
-            if (mix_norm)
-                run("a: mix, norm", [&] {
-                    mix(blks, nb, R.x, L.nq == 0 ? nullptr : L.attn_query, L.nq, L.nq == 0 ? nullptr : R.mixed, newblk, T, &a);
-                });
+            if (chain) run("a: messages, mix, gates, norm", [&] { gate_chain(&mx_msg, mx, gate, a, R, T); });
+            else if (mix_norm) run("a: mix, norm", [&] { mix_launch(mx, &a); });
             else run("a: norm", [&] { norm(a, T, n_in, batch); });
         }
         tick("attention inputs");
@@ -4990,15 +5032,17 @@ struct Engine {
         // ---- the MoE
         const int nb2 = l / res + 1;
         if (L.first) blks[nb2 - 1] = newblk;
-        const bool mix_norm_f = fuse_mix && !batch && !msgs;   // (the mix and the norm in one launch, below)
-        if (!mix_norm_f) run("f: mix", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T); });
+        const bool mix_norm_f = fuse_mix && !batch && !msgs;   // (the mix and the norm in one launch, below; with the gate too)
+        const ik::MixIn mxf = mix_in(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T);
+        if (!mix_norm_f && !chain) run("f: mix", [&] { mix_launch(mxf); });
         tick_part("MoE: the mix");
         const float* fu = R.mixed;
+        ik::CtrlIn gate_f{};
         if (msgs && batch) {
             ctrl_batch(R, R.mixed, R.msg + (size_t) 3 * TN, L.cD[3], L.cG[3], L.cF[3], R.ctl, T);
             fu = R.ctl;
         } else if (msgs) {
-            ik::CtrlIn a{};
+            ik::CtrlIn& a = gate_f;
             a.u[0] = R.mixed;
             a.m[0] = R.msg + (size_t) 3 * TN;
             a.D[0] = L.cD[3];
@@ -5009,10 +5053,12 @@ struct Engine {
             a.n = 1;
             a.N = N;
             a.R = (int) g.gate_rank;
-            run("f: gate's h", [&] { ik::ctrl_h_kernel<<<dim3((unsigned) a.R, (unsigned) T, 1), row4(), 0, st>>>(a); });
-            run("f: gate applied", [&] {
-                ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 1), ik::kTB, 0, st>>>(a);
-            });
+            if (!chain) {
+                run("f: gate's h", [&] { ctrl_h(a, T, 1); });
+                run("f: gate applied", [&] {
+                    ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 1), ik::kTB, 0, st>>>(a);
+                });
+            }
             fu = R.ctl;
         }
         {
@@ -5026,7 +5072,8 @@ struct Engine {
             a.N = N;
             a.eps = g.eps;
             tick_part("MoE: the loop gate");
-            if (mix_norm_f) run("f: mix, norm", [&] { mix(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T, &a); });
+            if (chain) run("f: mix, gate, norm", [&] { gate_chain(nullptr, mxf, gate_f, a, R, T); });
+            else if (mix_norm_f) run("f: mix, norm", [&] { mix_launch(mxf, &a); });
             else run("f: norm", [&] { norm(a, T, 1, batch); });
             tick_part("MoE: the norm");
         }
