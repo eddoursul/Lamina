@@ -19,6 +19,12 @@ struct ModelFacts {
     int64_t n_embd = 0;                ///< <arch>.embedding_length: a projector made for it has that projection_dim
     uint64_t bytes = 0;                ///< the shards' size
     uint64_t expert_bytes = 0;         ///< its routed experts' tensors (blk.N.ffn_{gate,up,down,gate_up}_exps)
+    /// Inkling 2: a layer's tensors (blk.N.*), the full-attention applications it makes a token (0: a window layer;
+    /// a looped layer one a pass), an application's K and V a token in FP16, and the looped layers [first, last]
+    std::vector<uint64_t> layer_bytes;
+    std::vector<int> layer_full;
+    uint64_t cell_pair_bytes = 0;
+    int loop_first = -1, loop_last = -1;
     std::string unsupported;           ///< why the engine refuses the file ("" when it reads it)
 };
 /// `path`'s model (any of its shards names it); std::runtime_error when it is not a readable GGUF or a shard is missing

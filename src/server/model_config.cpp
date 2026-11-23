@@ -3,6 +3,7 @@
 
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/embedded.hpp"
+#include "lamina/inkling2/geometry.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
 #include "lamina/platform/memory.hpp"
 #include "lamina/program/gpu_cards.hpp"
@@ -88,9 +89,30 @@ ModelFacts read_model(const std::string& path) {
             m.unsupported = check_architecture(f);
         }
         m.bytes += f.file_size();
-        for (const TensorInfo& t : f.tensors())
+        for (const TensorInfo& t : f.tensors()) {
             if (expert_tensor(t.name)) m.expert_bytes += tensor_payload_bytes(t);
+            if (t.name.rfind("blk.", 0) == 0) {
+                const size_t l = (size_t) std::strtoull(t.name.c_str() + 4, nullptr, 10);
+                if (l < 4096) {
+                    if (m.layer_bytes.size() <= l) m.layer_bytes.resize(l + 1);
+                    m.layer_bytes[l] += tensor_payload_bytes(t);
+                }
+            }
+        }
+        if (s == m.path && (m.arch == "inkling2" || m.arch == "inkling2_loop")) {
+            inkling2::Geometry g;
+            if (inkling2::read_geometry(f, g).empty() && (size_t) g.n_layers == m.layer_bytes.size()) {
+                for (int64_t l = 0; l < g.n_layers; ++l)
+                    m.layer_full.push_back(!g.full(l) ? 0 : l >= g.loop_start && l < g.loop_end ? (int) g.n_pass : 1);
+                m.cell_pair_bytes = (uint64_t) g.kv_width() * 4;   // K and V, a half a value
+                if (g.n_pass > 1) {
+                    m.loop_first = (int) g.loop_start;
+                    m.loop_last = (int) g.loop_end - 1;
+                }
+            }
+        }
     }
+    if (m.layer_full.empty()) m.layer_bytes.clear();
     return m;
 }
 
@@ -477,6 +499,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 std::vector<std::pair<std::string, double>> kept;   // each card's reserve=, by its name in the config
                 int split_gpu = -1;   // the card a layer split runs layers on (layers=A-B), and those layers
                 std::string split_layers;
+                int split_lo = -1, split_hi = -1;
                 for (const std::string& card : engine_cards(c)) {
                     program::GpuCard gc;
                     std::string e;
@@ -485,6 +508,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     if (gc.layers && gc.name != "auto") {
                         split_gpu = find_gpu(gc.name, gpus);
                         split_layers = std::to_string(gc.layers->first) + "-" + std::to_string(gc.layers->second);
+                        split_lo = (int) gc.layers->first;
+                        split_hi = (int) gc.layers->second;
                     }
                 }
                 auto keeps = [&](const GpuInfo& g, double by_use) {
@@ -524,13 +549,53 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     for (const auto& [g, bytes] : rooms) say("    " + gpu_line(*g) + ": K and V of " + thousands(bytes));
                 };
                 const std::string cells = std::string(q8 ? "17" : "32") + " KiB a token, " + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" 17");
+                // A layer split's two shares: the layers' weights (the file's other tensors with the first card's) and
+                // their full-attention applications' K and V a token; ~2.3 GiB beside the first card's (a second set
+                // of a prompt chunk's rows with the rest), ~1.9 beside the other's.
+                auto shares = [&](int lo, int hi, double& w2, double& kv1, double& kv2) {
+                    w2 = kv1 = kv2 = 0;
+                    if (lo < 0 || hi < lo || (size_t) hi >= m.layer_bytes.size()) return false;
+                    const double pair = (double) m.cell_pair_bytes * (q8 ? 17.0 / 32.0 : 1.0);
+                    for (size_t l = 0; l < m.layer_bytes.size(); ++l) {
+                        const bool there = (int) l >= lo && (int) l <= hi;
+                        if (there) w2 += (double) m.layer_bytes[l];
+                        (there ? kv2 : kv1) += pair * m.layer_full[l];
+                    }
+                    return kv1 > 0 && kv2 > 0;
+                };
                 if (const GpuInfo* g = split_gpu < 0 ? nullptr : gpu_by_index(gpus, split_gpu)) {
-                    // A layer split: the model's weights are over the two cards, each with its layers' cells; what
-                    // context that leaves is the start's to say (it sizes both cards), and the cards after hold none.
-                    say("  VRAM: layers " + split_layers + " run on " + gpu_line(*g) + ", with their weights and the K and V of their "
-                        "full-attention applications; the others on " + (main != nullptr ? gpu_line(*main) : std::string("the first card")) +
-                        ". The context is what the two hold between them (the fuller one's cells, and the older ones in what "
-                        "the other has free) and what the cards after them hold: the engine's start says how much");
+                    // A layer split: the model's weights are over the two cards, each with its layers' cells.  The two
+                    // hold the cells of as many tokens as the fuller one has room for; the other holds older cells of
+                    // every application in what it has free (less the room a longer prompt's chunks take), and the
+                    // cards after them hold more.
+                    double w2 = 0, kv1 = 0, kv2 = 0;
+                    if (main != nullptr && shares(split_lo, split_hi, w2, kv1, kv2)) {
+                        const double r1 = (double) main->memory_mib * 1048576.0 - ((double) m.bytes - w2) - drafter - 2.3 * gibi -
+                                          beside_it(*main) - keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
+                        // (a card that draws the desktop and has a reserve= keeps that free beside the desktop's own)
+                        bool reserved = false;
+                        for (const auto& [name, bytes] : kept) reserved = reserved || (name != "auto" && find_gpu(name, gpus) == g->index);
+                        const double r2 = (double) g->memory_mib * 1048576.0 - w2 - 1.9 * gibi - beside_it(*g) -
+                                          keeps(*g, (g->display ? 1.5 : 0.7) * gibi) - (g->display && reserved ? 0.5 * gibi : 0.0);
+                        const double near_ = std::max(0.0, std::min(r1 / kv1, r2 / kv2));
+                        const bool first_spare = r1 - near_ * kv1 >= r2 - near_ * kv2;
+                        const double spare = std::max(0.0, (first_spare ? r1 - near_ * kv1 : r2 - near_ * kv2) - 2.6 * gibi) / per;
+                        const double tokens = std::min(1048576.0, near_ + spare + others / per);
+                        auto k = [](double t) { return std::to_string((long long) (t / 1000.0)); };
+                        say("  VRAM: layers " + split_layers + " (" + gib(w2) + " of weights, K and V " +
+                            std::to_string((long long) (kv2 / 1024.0)) + " KiB a token) run on " + gpu_line(*g) + "; the others (" +
+                            gib((double) m.bytes - w2) + ", " + std::to_string((long long) (kv1 / 1024.0)) + " KiB a token) on " +
+                            gpu_line(*main) + ". The two hold the K and V of about " + k(near_) + " thousand tokens beside their "
+                            "layers (" + (q8 ? "q8_0" : "FP16; \"kv\": \"q8_0\" about half the bytes") + "), " +
+                            (first_spare ? gpu_line(*main) : gpu_line(*g)) + " older cells of about " + k(spare) + " thousand more" +
+                            (others > 0 ? ", the cards after them " + k(others / per) + " thousand" : "") + ": room for about " +
+                            k(tokens) + " thousand tokens of the model's 1,048,576 (the engine's start says the cells each holds)");
+                    } else {
+                        say("  VRAM: layers " + split_layers + " run on " + gpu_line(*g) + ", with their weights and the K and V of their "
+                            "full-attention applications; the others on " + (main != nullptr ? gpu_line(*main) : std::string("the first card")) +
+                            ". The context is what the two hold between them (the fuller one's cells, and the older ones in what "
+                            "the other has free) and what the cards after them hold: the engine's start says how much");
+                    }
                 } else if (main != nullptr && room < (on.size() > 1 ? 16384.0 : 32768.0) * per) {
                     // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
                     // those used most (fewer as the context grows); the ones RAM has no room for stay on the card.
@@ -551,6 +616,19 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                         (alone > 0 ? ", the other " + gib(alone) + " on the GPU alone (no more RAM is free above the 6 GiB "
                                      "left to the system: \"ram-reserve-mib\")" : ", pinned"));
                     plan("the dense weights, the experts used most and K and V in turn, about " + gib(std::max(0.0, beside - alone)));
+                    // (the start's own split: the looped layers on the next card, where the first would keep under
+                    // four fifths of the experts and both cards hold their shares)
+                    double w2 = 0, kv1 = 0, kv2 = 0;
+                    const GpuInfo* next = on.size() > 1 ? gpu_by_index(gpus, on[1]) : nullptr;
+                    if (next != nullptr && first < 0.9 * experts && shares(m.loop_first, m.loop_last, w2, kv1, kv2) &&
+                        (double) next->memory_mib * 1048576.0 - w2 - 1.9 * gibi - keeps(*next, (next->display ? 1.5 : 0.7) * gibi) > 16384.0 * kv2 &&
+                        (double) main->memory_mib * 1048576.0 - ((double) m.bytes - w2) - drafter - 2.3 * gibi -
+                                keeps(*main, (main->display ? 1.5 : 0.7) * gibi) > 16384.0 * kv1)
+                        say("    where the engine's start finds under four fifths of the experts on the first card (by this "
+                            "estimate " + std::to_string((long long) (100.0 * first / std::max(1.0, experts))) + "%), it takes layers " +
+                            std::to_string(m.loop_first) + "-" + std::to_string(m.loop_last) + " (the looped ones, " + gib(w2) +
+                            ") to " + gpu_line(*next) + " instead, and no expert is in RAM then (its line says which; "
+                            "\"layer-split\": 0 keeps the experts in RAM, a card's \"layers\" sets the split)");
                     if (alone > first)
                         stops.push_back("the model's " + gib(experts) + " of experts fit neither " + gpu_line(*main) +
                                         " nor the RAM that is free: a smaller quant of the model");
