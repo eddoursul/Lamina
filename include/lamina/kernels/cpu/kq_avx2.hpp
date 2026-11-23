@@ -14,5 +14,7 @@ void kq256_gu_rows(int ggml_type, const uint8_t* blob, size_t gu_row, size_t up_
 /// out[t][r] = w_r . a[t], rows [r0, r1).
 void kq256_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
                 float* const* out, int r0, int r1);
+/// res[t] = row . a[t] for an NVFP4 row of n values against nt Q8_0 activations (ggml_vec_dot_nvfp4_q8_0's AVX2 bits)
+void nvfp4_dots(const uint8_t* row, int n, const void* const* act, int nt, float* res);
 
 }  // namespace lamina::kernels::cpu

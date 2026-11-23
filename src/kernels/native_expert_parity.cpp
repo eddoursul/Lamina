@@ -17,6 +17,7 @@
 #include "lamina/kernels/cpu/expert.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
 #include "lamina/kernels/cpu/iq_avx512.hpp"
+#include "lamina/kernels/cpu/kq_avx2.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 #include "ggml-cpu.h"
 #include "lamina/kernels/iq_kernels.hpp"
@@ -72,6 +73,63 @@ int q8_0_tie_fixture(cudaStream_t s) {
     cudaFree(dx);
     cudaFree(dy);
     return failures;
+}
+
+// NVFP4 rows of 1 to 8 tokens at once (kq_avx2.cpp's nvfp4_dots, Inkling 2's CPU experts) against ggml-cpu's
+// vec_dot a token: the same bits.  Random rows quantized by ggml (NVFP4), random Q8_0 activations.
+int nvfp4_mt_fixture() {
+#if LAMINA_X86
+    if (!lamina::kernels::cpu::cpu_avx2_ok()) {
+        std::printf("nvfp4_mt_fixture: no AVX2 here: skipped\n");
+        return 0;
+    }
+    constexpr int n = 2304, rows = 16, nt_max = 8;
+    std::mt19937 rng(7);
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<float> w((size_t) rows * n), x((size_t) nt_max * n);
+    for (int r = 0; r < rows; ++r)
+        for (int i = 0; i < n; ++i) w[(size_t) r * n + i] = 0.02f * (0.5f + (float) (r % 7) / 7.0f) * nd(rng);
+    for (float& v : x) v = nd(rng);
+    const size_t row_bytes = ggml_row_size(GGML_TYPE_NVFP4, n), act_bytes = ggml_row_size(GGML_TYPE_Q8_0, n);
+    std::vector<uint8_t> wq((size_t) rows * row_bytes), xq((size_t) nt_max * act_bytes);
+    ggml_quantize_chunk(GGML_TYPE_NVFP4, w.data(), wq.data(), 0, rows, n, nullptr);
+    const ggml_type_traits_cpu* q8 = ggml_get_type_traits_cpu(GGML_TYPE_Q8_0);
+    for (int t = 0; t < nt_max; ++t) q8->from_float(x.data() + (size_t) t * n, xq.data() + (size_t) t * act_bytes, n);
+    const ggml_vec_dot_t dot = ggml_get_type_traits_cpu(GGML_TYPE_NVFP4)->vec_dot;
+    int failures = 0, checked = 0;
+    for (int nt = 1; nt <= nt_max; ++nt) {
+        const void* act[nt_max];
+        for (int t = 0; t < nt; ++t) act[t] = xq.data() + (size_t) t * act_bytes;
+        for (int r = 0; r < rows; ++r) {
+            float got[nt_max];
+            lamina::kernels::cpu::nvfp4_dots(wq.data() + (size_t) r * row_bytes, n, act, nt, got);
+            for (int t = 0; t < nt; ++t) {
+                float want = 0.f;
+                dot(n, &want, 0, wq.data() + (size_t) r * row_bytes, 0, act[t], 0, 1);
+                failures += std::memcmp(&got[t], &want, 4) != 0;
+                ++checked;
+            }
+        }
+    }
+    std::printf("nvfp4_mt_fixture: %d of %d dots ggml's bits %s\n", checked - failures, checked, failures ? "FAIL" : "PASS");
+    for (const int nt : {2, 4, 8}) {   // (the time a row of nt tokens: ggml's dot a token against the kernel's)
+        const void* act[nt_max];
+        for (int t = 0; t < nt; ++t) act[t] = xq.data() + (size_t) t * act_bytes;
+        float out[nt_max];
+        constexpr int reps = 2000;
+        auto t0 = std::chrono::steady_clock::now();
+        for (int it = 0; it < reps; ++it)
+            for (int t = 0; t < nt; ++t) dot(n, &out[t], 0, wq.data() + (size_t) (it % rows) * row_bytes, 0, act[t], 0, 1);
+        const double a = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
+        t0 = std::chrono::steady_clock::now();
+        for (int it = 0; it < reps; ++it) lamina::kernels::cpu::nvfp4_dots(wq.data() + (size_t) (it % rows) * row_bytes, n, act, nt, out);
+        const double b = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
+        std::printf("  a row of %d tokens: ggml %.2f us, nvfp4_dots %.2f us\n", nt, a, b);
+    }
+    return failures != 0;
+#else
+    return 0;
+#endif
 }
 
 double us_since(std::chrono::steady_clock::time_point t0, int it) {
@@ -439,6 +497,7 @@ int main(int argc, char** argv) {
     std::printf("ggml's Q5_K mins: %s\n", q5k == 1 ? "one FMA" : q5k == 0 ? "a product, then a sum" : "UNKNOWN");
     if (q5k < 0) ++failures;
     failures += q8_0_tie_fixture(s);
+    failures += nvfp4_mt_fixture();
     if (std::string(argv[1]) == "--synthetic") {
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];

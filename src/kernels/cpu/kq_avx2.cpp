@@ -189,11 +189,63 @@ void q8_0_dot(const block_q8_0* x, int nb, const void* const* act, int nt, float
     for (int t = 0; t < nt; ++t) res[t] = hsum_float_8(acc[t]);
 }
 
+// ---- NVFP4 x Q8_0 (ggml_vec_dot_nvfp4_q8_0, __AVX2__): a block of 64 values in four sub-blocks of 16, each with a
+// UE4M3 scale (ggml_ue4m3_to_fp32: its table's values, half the E4M3 value), against two Q8_0 blocks.  The weights'
+// int8 values (kvalues_fp4 by nibble), their absolute values and the scales once a block; each token ggml's products,
+// its scales' products and its two fused adds in ggml's order.
+// (a table, as ggml-cpu's GGML_CPU_UE4M3_TO_FP32 on x86: ggml_ue4m3_to_fp32's values)
+struct Ue4m3 {
+    float v[256];
+    Ue4m3() {
+        for (int x = 0; x < 256; ++x) {
+            const int e = (x >> 3) & 0xF, m = x & 0x7;
+            const float raw = e == 0 ? ldexpf((float) m, -9) : ldexpf(1.0f + (float) m / 8.0f, e - 7);
+            v[x] = x == 0 || x == 0x7F ? 0.0f : raw * 0.5f;
+        }
+    }
+};
+const Ue4m3 k_ue4m3;
+inline float ue4m3(uint8_t x) { return k_ue4m3.v[x]; }
+void nvfp4_dot(const block_nvfp4* x, int nb, const void* const* act, int nt, float* res) {
+    const __m128i values128 = _mm_loadu_si128((const __m128i*) kvalues_fp4);
+    const __m128i m4b = _mm_set1_epi8(0x0f);
+    const __m256i mone = _mm256_set1_epi16(1);
+    __m256 acc[MAXT];
+    for (int t = 0; t < nt; ++t) acc[t] = _mm256_setzero_ps();
+    for (int ib = 0; ib < nb; ++ib) {
+        const __m128i q4bits_01 = _mm_loadu_si128((const __m128i*) (x[ib].qs + 0));
+        const __m128i q4bits_23 = _mm_loadu_si128((const __m128i*) (x[ib].qs + 16));
+        const __m128i q4_01_lo = _mm_shuffle_epi8(values128, _mm_and_si128(q4bits_01, m4b));
+        const __m128i q4_01_hi = _mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(q4bits_01, 4), m4b));
+        const __m128i q4_23_lo = _mm_shuffle_epi8(values128, _mm_and_si128(q4bits_23, m4b));
+        const __m128i q4_23_hi = _mm_shuffle_epi8(values128, _mm_and_si128(_mm_srli_epi16(q4bits_23, 4), m4b));
+        const __m256i q4_01 = _mm256_set_m128i(_mm_unpackhi_epi64(q4_01_lo, q4_01_hi), _mm_unpacklo_epi64(q4_01_lo, q4_01_hi));
+        const __m256i q4_23 = _mm256_set_m128i(_mm_unpackhi_epi64(q4_23_lo, q4_23_hi), _mm_unpacklo_epi64(q4_23_lo, q4_23_hi));
+        const __m256i a01 = _mm256_sign_epi8(q4_01, q4_01), a23 = _mm256_sign_epi8(q4_23, q4_23);
+        const float u0 = ue4m3(x[ib].d[0]), u1 = ue4m3(x[ib].d[1]), u2 = ue4m3(x[ib].d[2]), u3 = ue4m3(x[ib].d[3]);
+        for (int t = 0; t < nt; ++t) {
+            const block_q8_0* y = (const block_q8_0*) act[t] + 2 * ib;
+            const __m256i q8_01 = _mm256_loadu_si256((const __m256i*) y[0].qs);
+            const __m256i q8_23 = _mm256_loadu_si256((const __m256i*) y[1].qs);
+            const __m256i p_1 = _mm256_madd_epi16(_mm256_maddubs_epi16(a01, _mm256_sign_epi8(q8_01, q4_01)), mone);
+            const __m256i p_2 = _mm256_madd_epi16(_mm256_maddubs_epi16(a23, _mm256_sign_epi8(q8_23, q4_23)), mone);
+            const float dy0 = h2f(y[0].d), dy1 = h2f(y[1].d);
+            const float s0 = u0 * dy0, s1 = u1 * dy0, s2 = u2 * dy1, s3 = u3 * dy1;
+            const __m256 scales01 = _mm256_set_m128(_mm_set1_ps(s1), _mm_set1_ps(s0));
+            const __m256 scales23 = _mm256_set_m128(_mm_set1_ps(s3), _mm_set1_ps(s2));
+            acc[t] = _mm256_fmadd_ps(scales01, _mm256_cvtepi32_ps(p_1), acc[t]);
+            acc[t] = _mm256_fmadd_ps(scales23, _mm256_cvtepi32_ps(p_2), acc[t]);
+        }
+    }
+    for (int t = 0; t < nt; ++t) res[t] = hsum_float_8(acc[t]);
+}
+
 void dot_rows(int type, const uint8_t* row, int n, const void* const* act, int nt, float* res) {
     switch (type) {
         case 12: q4k_dot((const block_q4_K*) row, n / QK_K, act, nt, res); break;
         case 7: q5_1_dot((const block_q5_1*) row, n / QK5_1, act, nt, res); break;
         case 8: q8_0_dot((const block_q8_0*) row, n / QK8_0, act, nt, res); break;
+        case 40: nvfp4_dot((const block_nvfp4*) row, n / QK_NVFP4, act, nt, res); break;
         default: break;
     }
 }
@@ -214,6 +266,10 @@ void kq256_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, 
                 ff[t0 + t][r] = exact ? native_swiglu_exact(g[t], u[t]) : (g[t] / (1.f + std::exp(-g[t]))) * u[t];
         }
     }
+}
+
+void nvfp4_dots(const uint8_t* row, int n, const void* const* act, int nt, float* res) {
+    for (int t0 = 0; t0 < nt; t0 += MAXT) nvfp4_dot((const block_nvfp4*) row, n / QK_NVFP4, act + t0, nt - t0 < MAXT ? nt - t0 : MAXT, res + t0);
 }
 
 void kq256_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,

@@ -228,6 +228,17 @@ int native_gu_mt_min(int gu_type) {
     return iq3s_one && gu_type == 21 ? 1 : mt_min;
 }
 
+#if LAMINA_X86
+/// NVFP4 rows of several tokens through kq_avx2.cpp's kernel (each row decoded once for them, every token's bits
+/// ggml's); LAMINA_NVFP4_MT=0: ggml-cpu's dot a token
+bool nvfp4_mt() {
+    static const bool on = cpu_avx2_ok() && [] {
+        const char* e = std::getenv("LAMINA_NVFP4_MT");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return on;
+}
+#endif
 void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt, float* const* ff,
                     int r0, int r1) {
     if (f.act == 1) {   // Inkling 2: ggml-cpu's dots times the blob's gate/up scale, then its activation
@@ -236,6 +247,21 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         float sc = 1.f;
         if (f.scale_off) std::memcpy(&sc, blob + f.scale_off, 4);
         const float beta = f.act_beta, lbeta = f.act_lbeta;
+#if LAMINA_X86
+        // NVFP4 rows of several tokens: each row decoded once for them (kq_avx2.cpp: ggml's AVX2 dot, its bits)
+        if (f.gu_type == 40 && nt >= 2 && nvfp4_mt() && (int) f.n_embd % 64 == 0) {
+            std::vector<float> g((size_t) nt), u((size_t) nt);
+            for (int r = r0; r < r1; ++r) {
+                nvfp4_dots(blob + (size_t) r * f.gu_row, n, act, nt, g.data());
+                nvfp4_dots(blob + f.up_off + (size_t) r * f.gu_row, n, act, nt, u.data());
+                for (int t = 0; t < nt; ++t) {
+                    const float gs = g[(size_t) t] * sc, us = u[(size_t) t] * sc;
+                    ff[t][r] = beta * std::tanh(gs / beta) / (1.f + std::exp(-gs)) * (lbeta * std::tanh(us / lbeta));
+                }
+            }
+            return;
+        }
+#endif
         for (int r = r0; r < r1; ++r) {
             const uint8_t* gr = blob + (size_t) r * f.gu_row;
             const uint8_t* ur = blob + f.up_off + (size_t) r * f.gu_row;
@@ -354,6 +380,14 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     // rows above, where `avx512` tested cpu_avx512_ok() and `avx2` did not.
     if (cpu_avx2_ok() && kq && nt >= 2 && (f.d_type == 7 || f.d_type == 8)) {   // Q5_1 / Q8_0 down: bit-exact, any group size
         kq256_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        return;
+    }
+    if (cpu_avx2_ok() && nt >= 2 && f.d_type == 40 && nvfp4_mt() && f.n_ff % 64 == 0) {   // NVFP4 down: its bits, any group
+        std::vector<float> s((size_t) nt);
+        for (int r = r0; r < r1; ++r) {
+            nvfp4_dots(blob + f.down_off + (size_t) r * f.d_row, (int) f.n_ff, hq, nt, s.data());
+            for (int t = 0; t < nt; ++t) out[t][r] = s[(size_t) t];
+        }
         return;
     }
     if (cpu_avx2_ok() && nt >= mt_min && f.d_type == 20 && iq4nl_mt) {   // #152: the same rule as the gate/up rows
