@@ -217,6 +217,7 @@ struct Layer {
     // the loop: the messages' queries [4][N] (q, k, v, ffn) and each one's gate
     const float* msg_query = nullptr;
     const float *cD[4] = {}, *cG[4] = {}, *cF[4] = {};
+    const __half *hD[4] = {}, *hG[4] = {}, *hF[4] = {};   // (LAMINA_INK_GATES_HALF=1: as halves for a decode forward)
     // the MoE
     const float *router = nullptr, *route_bias = nullptr;
     K::NativeExpertLayout gl;
@@ -779,6 +780,8 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     int here_dev = 0;
     CK(cudaGetDevice(&here_dev));
     if (twins) m.twin.resize((size_t) g.n_layers);
+    const char* const gh_env = std::getenv("LAMINA_INK_GATES_HALF");   // (the loop gates as halves too: a test's)
+    const bool gates_half = gh_env != nullptr && std::atoi(gh_env) != 0;
     auto dense_of = [&](Layer& y, int64_t l) {   // (on the current card)
         const std::string p = "blk." + std::to_string(l) + ".";
         y.il = (int) l;
@@ -824,6 +827,19 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 y.cD[c] = L.f32(lamina::inkling2::ctrl_name(g, l, c, "down"));
                 y.cG[c] = L.f32(lamina::inkling2::ctrl_name(g, l, c, "gain"));
                 y.cF[c] = L.f32(lamina::inkling2::ctrl_name(g, l, c, "forget"));
+                if (gates_half) {   // (rounded to the nearest half)
+                    auto halves = [&](const std::string& name) {
+                        const std::vector<float> f = L.floats(name);
+                        std::vector<__half> h(f.size());
+                        for (size_t i = 0; i < f.size(); ++i) h[i] = __float2half_rn(f[i]);
+                        __half* d = dalloc<__half>(h.size());
+                        CK(cudaMemcpy(d, h.data(), h.size() * 2, cudaMemcpyHostToDevice));
+                        return (const __half*) d;
+                    };
+                    y.hD[c] = halves(lamina::inkling2::ctrl_name(g, l, c, "down"));
+                    y.hG[c] = halves(lamina::inkling2::ctrl_name(g, l, c, "gain"));
+                    y.hF[c] = halves(lamina::inkling2::ctrl_name(g, l, c, "forget"));
+                }
             }
             y.msg_query = f32_dev(q);
         }
@@ -4585,8 +4601,20 @@ struct Engine {
     /// 0.8% a window), one where a row is alone (four lose 0.4% there) - the same sums.  LAMINA_INK_GATE_RB=1 or 4: every
     /// forward's.
     void ctrl_h(const ik::CtrlIn& a, int T, int n) {
-        if ((gate_rb > 0 ? gate_rb == 4 : T > 1) && a.R % 4 == 0) ik::ctrl_h_kernel<4><<<dim3((unsigned) a.R / 4, (unsigned) T, (unsigned) n), row4(), 0, st>>>(a);
-        else ik::ctrl_h_kernel<1><<<dim3((unsigned) a.R, (unsigned) T, (unsigned) n), row4(), 0, st>>>(a);
+        const bool four = (gate_rb > 0 ? gate_rb == 4 : T > 1) && a.R % 4 == 0, h = a.Dh[0] != nullptr;
+        const dim3 grid((unsigned) (four ? a.R / 4 : a.R), (unsigned) T, (unsigned) n);
+        if (four) {
+            if (h) ik::ctrl_h_kernel<4, true><<<grid, row4(), 0, st>>>(a);
+            else ik::ctrl_h_kernel<4><<<grid, row4(), 0, st>>>(a);
+        } else {
+            if (h) ik::ctrl_h_kernel<1, true><<<grid, row4(), 0, st>>>(a);
+            else ik::ctrl_h_kernel<1><<<grid, row4(), 0, st>>>(a);
+        }
+    }
+    void ctrl_apply(const ik::CtrlIn& a, int T, int n) {
+        const dim3 grid((unsigned) ((4 * (unsigned) a.N + ik::kTB - 1) / ik::kTB), (unsigned) T, (unsigned) n);
+        if (a.Gh[0] != nullptr) ik::ctrl_apply_kernel<true><<<grid, ik::kTB, 0, st>>>(a);
+        else ik::ctrl_apply_kernel<><<<grid, ik::kTB, 0, st>>>(a);
     }
     /// A decode forward's gated sublayer input in one launch: [the messages' mix,] the mix, the loop gate of its
     /// inputs and their norms (gate_chain_kernel)
@@ -5059,6 +5087,9 @@ struct Engine {
                 a.D[c] = L.cD[c];
                 a.G[c] = L.cG[c];
                 a.F[c] = L.cF[c];
+                a.Dh[c] = L.hD[c];
+                a.Gh[c] = L.hG[c];
+                a.Fh[c] = L.hF[c];
                 a.out[c] = R.ctl + (size_t) c * TN;
                 u[c] = a.out[c];
             }
@@ -5068,9 +5099,7 @@ struct Engine {
             a.R = (int) g.gate_rank;
             if (!chain) {
                 run("a: gates' h", [&] { ctrl_h(a, T, 3); });
-                run("a: gates applied", [&] {
-                    ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 3), ik::kTB, 0, st>>>(a);
-                });
+                run("a: gates applied", [&] { ctrl_apply(a, T, 3); });
             }
         }
         tick_part("inputs: the loop gates");
@@ -5389,6 +5418,9 @@ struct Engine {
             a.D[0] = L.cD[3];
             a.G[0] = L.cG[3];
             a.F[0] = L.cF[3];
+            a.Dh[0] = L.hD[3];
+            a.Gh[0] = L.hG[3];
+            a.Fh[0] = L.hF[3];
             a.out[0] = R.ctl;
             a.h = R.ctl_h;
             a.n = 1;
@@ -5396,9 +5428,7 @@ struct Engine {
             a.R = (int) g.gate_rank;
             if (!chain) {
                 run("f: gate's h", [&] { ctrl_h(a, T, 1); });
-                run("f: gate applied", [&] {
-                    ik::ctrl_apply_kernel<<<dim3((unsigned) ((4 * N + ik::kTB - 1) / ik::kTB), (unsigned) T, 1), ik::kTB, 0, st>>>(a);
-                });
+                run("f: gate applied", [&] { ctrl_apply(a, T, 1); });
             }
             fu = R.ctl;
         }

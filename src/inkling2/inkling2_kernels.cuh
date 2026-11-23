@@ -199,10 +199,23 @@ struct CtrlIn {
     float* out[3];
     float* h;   // [n][T][R]
     int n, N, R;
+    const __half *Dh[3], *Gh[3], *Fh[3];   // the same matrices as halves (ctrl_*_kernel<true>), or null
 };
 constexpr int kRankMax = 64;
-/// h: a block a row, an input and RB of the R outputs (grid (R / RB, T, n)); a thread four values of each half
-template <int RB>
+/// four values of a row of floats or halves, as floats
+template <bool H> __device__ __forceinline__ float4 ld4m(const float* f, const __half* h, int i4) {
+    if constexpr (H) {
+        const uint2 w = reinterpret_cast<const uint2*>(h)[i4];
+        const float2 a = __half22float2(*reinterpret_cast<const __half2*>(&w.x));
+        const float2 b = __half22float2(*reinterpret_cast<const __half2*>(&w.y));
+        return make_float4(a.x, a.y, b.x, b.y);
+    } else {
+        return ld4(f, i4);
+    }
+}
+/// h: a block a row, an input and RB of the R outputs (grid (R / RB, T, n)); a thread four values of each half.  H:
+/// the matrices as halves (Dh, Gh, Fh)
+template <int RB, bool H = false>
 __global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
     const int r0 = blockIdx.x * RB, t = blockIdx.y, c = blockIdx.z, i4 = threadIdx.x;
     __shared__ float red[32][2 + 2 * RB];
@@ -216,9 +229,11 @@ __global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
         v[1] = dot4(m, m);
 #pragma unroll
         for (int q = 0; q < RB; ++q) {
-            const float* d = a.D[c] + (size_t) (r0 + q) * 2 * a.N;
-            v[2 + 2 * q] = dot4(ld4(d, i4), u);
-            v[3 + 2 * q] = dot4(ld4(d + a.N, i4), m);
+            const size_t at = (size_t) (r0 + q) * 2 * a.N;
+            const float* d = H ? nullptr : a.D[c] + at;
+            const __half* dh = H ? a.Dh[c] + at : nullptr;
+            v[2 + 2 * q] = dot4(ld4m<H>(d, dh, i4), u);
+            v[3 + 2 * q] = dot4(ld4m<H>(d ? d + a.N : nullptr, dh ? dh + a.N : nullptr, i4), m);
         }
     }
     block_sums_wide<2 + 2 * RB>(v, red, tot);
@@ -229,7 +244,8 @@ __global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
                 v[2 + 2 * q] * rsqrtf(v[0] / (float) a.N + 1e-6f) + v[3 + 2 * q] * rsqrtf(v[1] / (float) a.N + 1e-6f);
 }
 /// the gated rows: four threads an output, each a quarter of its R products in 16-byte loads (R a multiple of 16; a
-/// thread alone took as long as its 2 R loads in a row).  Grid (ceil(4 N / kTB), T, n).
+/// thread alone took as long as its 2 R loads in a row).  Grid (ceil(4 N / kTB), T, n).  H: the matrices as halves.
+template <bool H = false>
 __global__ void __launch_bounds__(kTB) ctrl_apply_kernel(CtrlIn a) {
     const int t = blockIdx.y, c = blockIdx.z;
     const int i = (blockIdx.x * kTB + threadIdx.x) >> 2, part = threadIdx.x & 3;
@@ -239,11 +255,14 @@ __global__ void __launch_bounds__(kTB) ctrl_apply_kernel(CtrlIn a) {
     float sg = 0.f, sf = 0.f;
     if (i < a.N) {
         const int per = a.R / 4;   // a thread's products
-        const float4* g = reinterpret_cast<const float4*>(a.G[c] + (size_t) i * a.R + part * per);
-        const float4* f = reinterpret_cast<const float4*>(a.F[c] + (size_t) i * a.R + part * per);
+        const size_t at = (size_t) i * a.R + part * per;
+        const float* g = H ? nullptr : a.G[c] + at;
+        const float* f = H ? nullptr : a.F[c] + at;
+        const __half* gh = H ? a.Gh[c] + at : nullptr;
+        const __half* fh = H ? a.Fh[c] + at : nullptr;
         const float* hp = h + part * per;
         for (int k = 0; k < per / 4; ++k) {
-            const float4 gv = g[k], fv = f[k];
+            const float4 gv = ld4m<H>(g, gh, k), fv = ld4m<H>(f, fh, k);
             const float h0 = hp[4 * k], h1 = hp[4 * k + 1], h2 = hp[4 * k + 2], h3 = hp[4 * k + 3];
             sg += gv.x * h0 + gv.y * h1 + gv.z * h2 + gv.w * h3;
             sf += fv.x * h0 + fv.y * h1 + fv.z * h2 + fv.w * h3;
