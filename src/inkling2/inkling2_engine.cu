@@ -1283,7 +1283,7 @@ struct Engine {
         float *q = nullptr, *ns = nullptr, *part = nullptr, *sum = nullptr;   // a decode forward's rows on the card
         float *cq = nullptr, *cns = nullptr, *csum = nullptr;                 // a chunk's
         float *cseg = nullptr, *cseg2 = nullptr;   // its segments' sums after the first (a few rows over many cells)
-        int sms = 0, seg_rows = 0;                 // the card's SMs; rows of sums `cseg` holds
+        int sms = 0, seg_rows = 0, arch = 0;       // the card's SMs; rows of sums `cseg` holds; its compute capability
         int32_t* cpos = nullptr;          // its rows' positions (kFar)
         float* csum_h = nullptr;          // pinned
         // (a staged run: the split's card's driver has rows, sums and an event of its own here - `second`)
@@ -1547,6 +1547,7 @@ struct Engine {
     // routing), so the two drivers take turns at the host's work: stage_mu is held by the one that runs, and let go
     // of only while it waits for its card's stream (stream_wait) or for the other driver.
     Rows P2;
+    int tc_warps_set = 0;            // LAMINA_INK_TC_WARPS (a test's): the chunk attention's warps a block, every launch
     bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
     bool stages_apart = false;       // LAMINA_INK_STAGES=2 (a test's): the stretches as in stages, their chunks one card after the other
     bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
@@ -2239,8 +2240,14 @@ struct Engine {
     }
     /// its compute capability's major number (8: RTX 30 and 40, 12: RTX 50)
     int main_arch() { return main_sms(), main_arch_; }
-    static constexpr int kTcWarps = 4;   // warps a block, 16 rows each (8 gained q8_0 cells a tenth on the RTX 3090
-                                         // from 2,048 rows and lost as much on the RTX 5070 Ti)
+    /// The chunk attention's warps a block (16 rows each) on a card of compute capability `arch`: eight for q8_0
+    /// cells on the cards before the RTX 50s from 2,048 rows (a tile widened serves twice the rows: an 86K-token
+    /// prompt 1.1% faster on an RTX 3090), four else - FP16 cells lose 0.3-1.1% with eight there, an RTX 50 a
+    /// tenth.  LAMINA_INK_TC_WARPS=4 or 8: a test's, every launch.
+    int tc_warps(int T, int arch) const {
+        if (tc_warps_set > 0) return tc_warps_set;
+        return kv_q8 && arch < 10 && T >= 2048 ? 8 : 4;
+    }
     /// rows of partial sums the segments of a chunk write at most
     int seg_cap() { return 640 * main_sms() / (int) m->g.n_head + 64; }
     /// The segments T rows' cells are scored in: more blocks than the rows and heads make, so that a few rows fill
@@ -2248,15 +2255,21 @@ struct Engine {
     /// leave SMs idle), one and a quarter over 4,096 or fewer (a block's start and end cost a short range more), a
     /// segment eight tiles at least
     int tc_segments(int T, long long cells) {
-        const int rows = 16 * kTcWarps, blocks = (T + rows - 1) / rows * (int) m->g.n_head;
+        const int rows = 16 * tc_warps(T, main_arch()), blocks = (T + rows - 1) / rows * (int) m->g.n_head;
         const double fill = std::min(5.0, std::max(1.25, 5.0 * (double) cells / 16384.0));
         const long long want = tc_segs > 0 ? tc_segs : ((long long) (fill * main_sms()) + blocks - 1) / blocks;
         return (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, cells / (8 * ik::kTcCells), (long long) (seg_cap() / T)}));
     }
-    void tc_launch(const ik::TcIn& a, int n_seg, cudaStream_t s) {
-        const dim3 grid((unsigned) ((a.T + 16 * kTcWarps - 1) / (16 * kTcWarps)), (unsigned) a.H, (unsigned) n_seg);
-        if (kv_q8) ik::attn_tc_kernel<kTcWarps, true><<<grid, 32 * kTcWarps, 0, s>>>(a);
-        else ik::attn_tc_kernel<kTcWarps, false><<<grid, 32 * kTcWarps, 0, s>>>(a);
+    void tc_launch(const ik::TcIn& a, int n_seg, cudaStream_t s, int arch) {
+        const int nw = tc_warps(a.T, arch);
+        const dim3 grid((unsigned) ((a.T + 16 * nw - 1) / (16 * nw)), (unsigned) a.H, (unsigned) n_seg);
+        if (nw == 8) {
+            if (kv_q8) ik::attn_tc_kernel<8, true><<<grid, 256, 0, s>>>(a);
+            else ik::attn_tc_kernel<8, false><<<grid, 256, 0, s>>>(a);
+        } else {
+            if (kv_q8) ik::attn_tc_kernel<4, true><<<grid, 128, 0, s>>>(a);
+            else ik::attn_tc_kernel<4, false><<<grid, 128, 0, s>>>(a);
+        }
     }
 
     bool elastic() const { return prefill > 0 && prefill_max > prefill; }
@@ -2546,6 +2559,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_TC")) tc_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_TC_SEGS")) tc_segs = std::max(0, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_TC_WARPS")) tc_warps_set = std::atoi(r) == 8 ? 8 : 4;
         if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
@@ -2997,6 +3011,7 @@ struct Engine {
                     c.csum = (float*) dev_alloc(prow * (D_ + 2) * 4);
                     // (the segments a chunk of few rows scores the card's cells in: as the layers' cards', seg_cap)
                     CK(cudaDeviceGetAttribute(&c.sms, cudaDevAttrMultiProcessorCount, c.dev));
+                    CK(cudaDeviceGetAttribute(&c.arch, cudaDevAttrComputeCapabilityMajor, c.dev));
                     c.seg_rows = 640 * std::max(c.sms, 1) / (int) g.n_head + 64;
                     c.cseg = (float*) dev_alloc((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
                     c.cpos = (int32_t*) dev_alloc((size_t) chunk_most() * 4);
@@ -3390,7 +3405,7 @@ struct Engine {
             cc.q8 = kv_q8 ? 1 : 0;
             // (a few rows over the card's cells: in segments, more blocks than the rows and heads make - tc_segments'
             // rule with this card's SMs - their sums joined here)
-            const int rows = 16 * kTcWarps, blocks = (T + rows - 1) / rows * H;
+            const int rows = 16 * tc_warps(T, c.arch), blocks = (T + rows - 1) / rows * H;
             const double fill = std::min(5.0, std::max(1.25, 5.0 * (double) c.cells / 16384.0));
             const long long want = tc_segs > 0 ? tc_segs : ((long long) (fill * std::max(c.sms, 1)) + blocks - 1) / blocks;
             const int n_seg = (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, (long long) c.cells / (8 * ik::kTcCells),
@@ -3398,7 +3413,7 @@ struct Engine {
             float* const cseg = two ? c.cseg2 : c.cseg;
             ik::TcIn a{cc, cq, nullptr, cns, nullptr, c.cpos, nullptr, T, H, HK, 0, 0, (long long) c.cells, csum, 1, 0,
                        n_seg > 1 ? cseg : nullptr};
-            tc_launch(a, n_seg, c.st);
+            tc_launch(a, n_seg, c.st, c.arch);
             if (n_seg > 1) {
                 ik::SegJoinIn j{csum, cseg, H, D_, n_seg - 1, T};
                 ik::tc_join_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, c.st>>>(j);
@@ -4874,7 +4889,7 @@ struct Engine {
             float* const seg = n_seg > 1 ? R.spart + (carded ? 0 : (size_t) T * H * (D_ + 2)) : nullptr;
             ik::TcIn a{cells, R.q, R.bias, R.ns, R.graw, R.pos_d, R.aout, T, H, HK, L.ext, L.full ? 0 : win, in_use, part, 0,
                        from, seg};
-            tc_launch(a, n_seg, st);
+            tc_launch(a, n_seg, st, main_arch());
             if (carded) {
                 (void) cudaStreamQuery(st);
                 cards_wait();
