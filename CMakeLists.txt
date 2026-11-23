@@ -529,11 +529,6 @@ target_link_libraries(pool_test PRIVATE lamina_kernels_cpu)
 # with -DLAMINA_GGML_DIR=..., otherwise third_party/llama.cpp at the pinned commit (cmake/lamina_llama.cmake
 # downloads it when it is not there).
 option(LAMINA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
-# a test's: the NVFP4 expert rows' magnitudes as one signed word, one dp4a a word (src/kernels/cuda/iq_dot.cuh)
-option(LAMINA_NVFP4_ONE_DP4A "NVFP4 expert rows through one dp4a a word (a test's)" OFF)
-if(LAMINA_NVFP4_ONE_DP4A AND TARGET lamina_kernels)
-  target_compile_definitions(lamina_kernels PRIVATE LAMINA_NVFP4_ONE_DP4A)
-endif()
 set(LAMINA_GGML_DIR "" CACHE PATH
     "llama.cpp checkout to take ggml from (empty: third_party/llama.cpp at the pinned commit, downloaded when missing)")
 if(LAMINA_NATIVE_EXPERTS)

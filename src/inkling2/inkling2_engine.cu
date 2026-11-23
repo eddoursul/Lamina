@@ -14,8 +14,6 @@
 //     scratch/q36/logits_to_parity.py); --serve: lamina-server's line protocol.
 #include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
-#include "inkling2_rows_tc.cuh"
-#include "inkling2_dense.cuh"
 
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
@@ -1229,7 +1227,6 @@ struct Rows {
           *dynk = nullptr, *dynv = nullptr, *tau = nullptr, *q = nullptr, *bias = nullptr, *kc = nullptr, *vc = nullptr,
           *part = nullptr, *aout = nullptr, *oraw = nullptr, *fraw = nullptr, *w = nullptr, *rows = nullptr,
           *logits = nullptr, *ctl_h = nullptr, *probs = nullptr;
-    int* chain = nullptr;   // a decode forward's gated sublayer inputs: gate_chain_kernel's counters
     __half* qh = nullptr;   // a chunk's q as halves, for the cell cards
     float* crows = nullptr;   // with experts in RAM: the CPU's rows of a visit, packed in the entries' order
     // the step record: the rows' positions, then the cells in use, the full visits' {stretch, stretches in use} and
@@ -1300,12 +1297,8 @@ struct Engine {
     bool mma_q8 = true;
     int mma_rows = 6;
     bool q_half = true;          // a chunk's q to the cell cards as halves (LAMINA_INK_QHALF=0: as floats)
-    bool rows_tc = false;        // the decode's attention in the chunk kernel's layout (LAMINA_INK_ROWS_TC=1)
-    bool q8_fold = false;        // its q8_0 K scales folded into the scores (LAMINA_INK_Q8_FOLD=1)
-    bool dense_own = false;      // a chunk's dense Q8_0 products by inkling2_dense.cuh's kernel (LAMINA_INK_DENSE_OWN=1)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
-    bool fuse_gate = false;      // and the messages' mix, the mix, the gate and the norm where it is (LAMINA_INK_GATE=1)
     int gate_rb = 0;             // the gate's h outputs a block of ctrl_h_kernel (0: by the rows; LAMINA_INK_GATE_RB)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
@@ -1580,10 +1573,6 @@ struct Engine {
     double ahead_k = kAheadTime;
     bool ahead_fixed = false, ahead_next = false, ahead_sent_next = false;
     bool ahead_across = true;        // (LAMINA_INK_AHEAD_NEXT=0: no chunk's first application sent ahead)
-    // The experts' heat counts the decode forwards' routing alone: a prompt routes other experts than the answer to it
-    // (LAMINA_INK_HEAT_PROMPT=w: a chunk's entries too, each w of a decode entry - more of the decode's entries to the
-    // CPU on this PC)
-    float heat_prompt = 0.f;
     bool ahead_on = true;            // (LAMINA_INK_AHEAD=0: none, a test's)
     cudaStream_t st_up = nullptr;
     cudaEvent_t up_ev[4] = {};       // the start and end of an application's own uploads (the link idle beside them:
@@ -1772,7 +1761,6 @@ struct Engine {
         R.rows = dzero<float>(n_ent * N);
         R.probs = dzero<float>(T * E);
         R.ctl_h = dzero<float>(3 * T * (size_t) std::max<int64_t>(g.gate_rank, 1));
-        if (!batch) R.chain = dzero<int>(ik::kChainInts);
         R.logits = dzero<float>(Th * (size_t) g.n_vocab);
         R.pick = dzero<int32_t>(2 * Th);
         R.bad = R.pick + Th;
@@ -1893,7 +1881,6 @@ struct Engine {
     const uint8_t* snap_dst = nullptr;   // the checkpoint buffer the last image in `snap` went to, and its position
     int64_t snap_pos = -1;
     bool img_on = true;
-    bool home_on = false;  // units_back (LAMINA_INK_HOME=1: on)
     bool stage_room = false;   // chunk_fit: cells to the cell cards for a staged stretch's largest rows (LAMINA_INK_STAGE_ROOM=1)
     int img_take = -1;   // the lot whose image the next state_load may take (kv_copy's take)
     size_t img_here_bytes() const { return ring_bytes + conv_bytes(); }
@@ -2427,36 +2414,9 @@ struct Engine {
             mapped = (int64_t) ((((uint64_t) back * cell_bytes + G - 1) / G) * G / cell_bytes);
             lot_release(lot, mapped);
         }
-        if (stage_log && cells < lo_was)
+        if (stage_log)
             std::fprintf(stderr, "lamina: parked: %lld cells back from the cell cards' units (a cut before their end)\n", (long long) back);
         return true;
-    }
-    /// A request's start: the live sequence's units on the cell cards come home where the layers' cards have the room
-    /// for every cell it holds and a growth step past them - made, where it is not there yet, by the lots no
-    /// conversation is in, the state images and the newest cells of the parked conversations that are not one of two
-    /// in turns (to RAM) - so its tokens no longer scan cells over the links (and the cell cards sleep).  Off unless
-    /// LAMINA_INK_HOME=1: the cell cards scan their cells beside the layers' cards, so a sequence of 82K tokens
-    /// generated 12-17% slower with its 28K-53K older cells home on this PC's config.
-    void units_back() {
-        if (!home_on || lo == 0 || cards.empty() || m->in_ram || pos() > lot_span) return;
-        const int64_t n = pos();
-        const uint64_t margin = 256ull << 20;
-        auto room = [&] {   // (what mapping the units' positions again takes on each layers' card)
-            size_t fr = 0, tot = 0;
-            CK(cudaMemGetInfo(&fr, &tot));
-            if ((uint64_t) fr < array_bytes(lo + kGrow, false) + reserve + margin) return false;
-            if (!sat) return true;
-            const OnDev dv(sat->dev);
-            CK(cudaMemGetInfo(&fr, &tot));
-            return (uint64_t) fr >= array_bytes(lo + kGrow, true) + sat_keep + margin;
-        };
-        while (!room())
-            if (!(lot_give() || image_give() || parked_room())) return;
-        homes_sync();
-        const int64_t back = lo;
-        if (units_home(n) && stage_log)
-            std::fprintf(stderr, "lamina: parked: the live sequence's %lld cells of the cell cards home at a request's start\n",
-                         (long long) back);
     }
     /// The cell cards are full: the units of the conversation parked the longest go to its buffer.  False: no parked
     /// conversation has any.
@@ -2915,20 +2875,14 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA")) mma_q8 = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_ROWS_TC")) rows_tc = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_Q8_FOLD")) q8_fold = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_DENSE_OWN")) dense_own = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
-        if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_STAGE_ROOM")) stage_room = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_FIXED")) ahead_fixed = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_NEXT")) ahead_across = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_HEAT_PROMPT")) heat_prompt = std::max(0.f, (float) std::atof(r));
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_GATE")) fuse_gate = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_GATE_RB")) gate_rb = std::atoi(r) == 1 ? 1 : 4;
         if (const char* r = std::getenv("LAMINA_INK_DRAW_RULE")) draw_rule = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
@@ -3860,13 +3814,7 @@ struct Engine {
     /// (attn_rows_kernel), each row's sums what they are when it is scored alone
     void scan(const ik::AttnIn& at, int T, cudaStream_t s) {
         const dim3 grid((unsigned) at.n_chunks, (unsigned) at.HK);
-        if (rows_tc && T * (at.H / at.HK) <= 64) {   // (LAMINA_INK_ROWS_TC=1: the chunk kernel's layout, four warps)
-            if (kv_q8) ik::attn_rows_tc_kernel<4, true><<<grid, 128, 0, s>>>(at, T);
-            else ik::attn_rows_tc_kernel<4, false><<<grid, 128, 0, s>>>(at, T);
-            return;
-        }
-        if (kv_q8 && q8_fold) ik::attn_rows_kernel<true, true><<<grid, 256, 0, s>>>(at, T);
-        else if (kv_q8) ik::attn_rows_kernel<true><<<grid, 256, 0, s>>>(at, T);
+        if (kv_q8) ik::attn_rows_kernel<true><<<grid, 256, 0, s>>>(at, T);
         else ik::attn_rows_kernel<false><<<grid, 256, 0, s>>>(at, T);
     }
     /// The cards' sums are in pinned memory: the next segment takes them
@@ -4624,7 +4572,6 @@ struct Engine {
             MMQ::quantize(xf, nullptr, xq, W.type, W.n_in, W.n_in, T, st);
             R.have[input][lay] = true;
         }
-        if (dense_own && W.type == 8 && ik_dense::q8_gemm(W.d, (int) W.n_out, (int) W.n_in, xq, T, y, (size_t) W.n_out, st)) return;
         mmq->run_dense(W.d, W.type, W.n_out, W.n_in, xq, T, y, W.n_out, st);
     }
     /// (`with`: the norm of each query's mix as that input, in the same launch - a decode forward's sublayer without
@@ -4670,23 +4617,6 @@ struct Engine {
         const dim3 grid((unsigned) ((4 * (unsigned) a.N + ik::kTB - 1) / ik::kTB), (unsigned) T, (unsigned) n);
         if (a.Gh[0] != nullptr) ik::ctrl_apply_kernel<true><<<grid, ik::kTB, 0, st>>>(a);
         else ik::ctrl_apply_kernel<><<<grid, ik::kTB, 0, st>>>(a);
-    }
-    /// A decode forward's gated sublayer input in one launch: [the messages' mix,] the mix, the loop gate of its
-    /// inputs and their norms (gate_chain_kernel)
-    void gate_chain(const ik::MixIn* msg, const ik::MixIn& mx, const ik::CtrlIn& gate, const ik::NormIn& nr, Rows& R, int T) {
-        ik::GateChainIn a{};
-        if (msg != nullptr) a.msg = *msg;
-        a.mix = mx;
-        a.ctrl = gate;
-        a.norm = nr;
-        a.ctr = R.chain;
-        a.T = T;
-        a.n = gate.n;
-        a.nm = msg != nullptr ? msg->nq : 0;
-        a.nq = mx.nq;
-        a.P = (int) ((4 * (unsigned) gate.N + row4() - 1) / row4());
-        const unsigned blocks = (unsigned) (T * (a.nm + a.nq) + T * a.n * (gate.R / ik::kChainRb) + T * a.n * a.P);
-        ik::gate_chain_kernel<<<blocks, row4(), 0, st>>>(a);
     }
     /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
     /// (`ld`: floats from one row of C to the next, m when not given)
@@ -4793,10 +4723,6 @@ struct Engine {
         // then, with experts in RAM, those of the others this chunk routes, their blobs sent to the scratch - slots in
         // a row in one copy (their blobs are in a row in RAM too).
         route_dump(0, L.il, n_ent, R.ids_h);
-        if (m->in_ram && heat_prompt > 0.f) {   // (a prompt's routing in the experts' heat too, at its weight: a test's)
-            for (int i = 0; i < n_ent; ++i) heat[(size_t) L.il][(size_t) R.ids_h[i]] += heat_w * heat_prompt;
-            profile_new = true;
-        }
         const int ns = m->in_ram ? on_card[(size_t) L.il] : E;
         const int32_t* const at_of = m->in_ram ? slot_at[(size_t) L.il].data() : L.slot_at.data();
         int rows_of[ik::kExpertMax] = {}, place[ik::kExpertMax];
@@ -5103,8 +5029,6 @@ struct Engine {
         const int nb = (l + res - 1) / res;
         for (int j = 0; j < nb; ++j) blks[j] = blk_at(R, j, use_pass);
         float* newblk = L.first ? blk_at(R, l / res, use_pass) : nullptr;
-        // (a decode forward's gated sublayer: the messages' mix, the mix, the gate and the norm in one launch below)
-        const bool chain = fuse_gate && !batch && msgs;
         ik::MixIn mx_msg{};
         if (msgs) {
             const float* bank[ik::kBlk] = {};
@@ -5112,7 +5036,7 @@ struct Engine {
             for (int b = 0; b < nblocks(); ++b)
                 if (varying(b)) bank[nbank++] = blk_at(R, b, pass - 1);
             mx_msg = mix_in(bank, nbank, R.pass_out, L.msg_query, 4, R.msg, nullptr, T);
-            if (!chain) run("a: mix of the messages", [&] { mix_launch(mx_msg); });
+            run("a: mix of the messages", [&] { mix_launch(mx_msg); });
             tick_part("inputs: the messages' mix");
         }
 
@@ -5125,7 +5049,7 @@ struct Engine {
         if (L.nq == 0) u[0] = u[1] = u[2] = R.x;
         else
             for (int c = 0; c < 3; ++c) u[c] = R.mixed + (size_t) (L.nq == 3 ? c : 0) * TN;
-        if (!mix_norm && !chain) run("a: mix", [&] { mix_launch(mx); });
+        if (!mix_norm) run("a: mix", [&] { mix_launch(mx); });
         tick_part("inputs: the mix");
         ik::CtrlIn gate{};
         if (msgs && batch) {
@@ -5152,10 +5076,8 @@ struct Engine {
             a.n = 3;
             a.N = N;
             a.R = (int) g.gate_rank;
-            if (!chain) {
-                run("a: gates' h", [&] { ctrl_h(a, T, 3); });
-                run("a: gates applied", [&] { ctrl_apply(a, T, 3); });
-            }
+            run("a: gates' h", [&] { ctrl_h(a, T, 3); });
+            run("a: gates applied", [&] { ctrl_apply(a, T, 3); });
         }
         tick_part("inputs: the loop gates");
         bool ilp = !batch && il_proj && fuse_products && T >= il_proj_min;   // the projections from interleaved columns
@@ -5178,8 +5100,7 @@ struct Engine {
             a.N = N;
             a.cp = K::native_q8_1_il_cp(T);
             a.eps = g.eps;
-            if (chain) run("a: messages, mix, gates, norm", [&] { gate_chain(&mx_msg, mx, gate, a, R, T); });
-            else if (mix_norm) run("a: mix, norm", [&] { mix_launch(mx, &a); });
+            if (mix_norm) run("a: mix, norm", [&] { mix_launch(mx, &a); });
             else run("a: norm", [&] { norm(a, T, n_in, batch); });
         }
         tick("attention inputs");
@@ -5457,9 +5378,9 @@ struct Engine {
         // ---- the MoE
         const int nb2 = l / res + 1;
         if (L.first) blks[nb2 - 1] = newblk;
-        const bool mix_norm_f = fuse_mix && !batch && !msgs;   // (the mix and the norm in one launch, below; with the gate too)
+        const bool mix_norm_f = fuse_mix && !batch && !msgs;   // (the mix and the norm in one launch, below)
         const ik::MixIn mxf = mix_in(blks, nb2, R.x, L.ffn_query, 1, R.mixed, nullptr, T);
-        if (!mix_norm_f && !chain) run("f: mix", [&] { mix_launch(mxf); });
+        if (!mix_norm_f) run("f: mix", [&] { mix_launch(mxf); });
         tick_part("MoE: the mix");
         const float* fu = R.mixed;
         ik::CtrlIn gate_f{};
@@ -5481,10 +5402,8 @@ struct Engine {
             a.n = 1;
             a.N = N;
             a.R = (int) g.gate_rank;
-            if (!chain) {
-                run("f: gate's h", [&] { ctrl_h(a, T, 1); });
-                run("f: gate applied", [&] { ctrl_apply(a, T, 1); });
-            }
+            run("f: gate's h", [&] { ctrl_h(a, T, 1); });
+            run("f: gate applied", [&] { ctrl_apply(a, T, 1); });
             fu = R.ctl;
         }
         {
@@ -5498,8 +5417,7 @@ struct Engine {
             a.N = N;
             a.eps = g.eps;
             tick_part("MoE: the loop gate");
-            if (chain) run("f: mix, gate, norm", [&] { gate_chain(nullptr, mxf, gate_f, a, R, T); });
-            else if (mix_norm_f) run("f: mix, norm", [&] { mix_launch(mxf, &a); });
+            if (mix_norm_f) run("f: mix, norm", [&] { mix_launch(mxf, &a); });
             else run("f: norm", [&] { norm(a, T, 1, batch); });
             tick_part("MoE: the norm");
         }
@@ -7492,7 +7410,6 @@ struct Serve {
             ++E.req_n;   // (a parked conversation's age: what it gives way to)
             const int64_t held = cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), {});
             reuse = (size_t) std::max<int64_t>(0, held);
-            if (held > 0) E.units_back();   // (the live sequence's units home where the room is)
             if (reuse == ids.size() && !E.logits_held) {   // (a whole prompt without its logits: read again)
                 cache->set(0, static_cast<const int32_t*>(nullptr), 0);
                 E.reset();
