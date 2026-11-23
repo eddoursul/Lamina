@@ -411,7 +411,10 @@ part of the context are on it, and the answers are one card's to the bit. The ru
 (Inkling 2 Mini: 6-17, half of the weights) all or not at all, and leaves the first and the last layer on the
 first card. Those layers are three quarters of a token's work: the faster card runs them best (an RTX 3090 with
 them on an RTX 5070 Ti generates 15-25% faster than the 3090 alone), and a prompt is read on the two cards at
-once (30-50% faster there; two cards on slow links gain less). The two hold the cells of as many tokens as
+once (30-50% faster there; two cards on slow links gain less). `"layer-split-back": N` gives the loop's last N
+applications back to the first card (with their layers' weights a second time there): where the later card is the
+slower one, both prompts and generation gain; where the first card is (an RTX 3090 before an RTX 5070 Ti), prompts
+of 21K-86K tokens gain 20-28% at N = 8 and an agent's session loses 11%. The two hold the cells of as many tokens as
 the fuller one has room for beside its layers, the other holds older cells in what it has free, and cards after
 the two hold more, as without a split. Both cards take `clocks=` here (each works a part of a token and clocks down in the
 other's: an RTX 5070 Ti left to the driver ran at 2,150 or at 2,900 MHz, 5-8% apart in speed -
