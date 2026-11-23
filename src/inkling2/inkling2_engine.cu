@@ -19,7 +19,6 @@
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
-#include "lamina/core/pinned.hpp"
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/inkling2/engine.hpp"
@@ -217,7 +216,6 @@ struct Layer {
     // the loop: the messages' queries [4][N] (q, k, v, ffn) and each one's gate
     const float* msg_query = nullptr;
     const float *cD[4] = {}, *cG[4] = {}, *cF[4] = {};
-    const __half *hD[4] = {}, *hG[4] = {}, *hF[4] = {};   // (LAMINA_INK_GATES_HALF=1: as halves for a decode forward)
     // the MoE
     const float *router = nullptr, *route_bias = nullptr;
     K::NativeExpertLayout gl;
@@ -265,7 +263,6 @@ struct Model {
     int64_t n_fixed = 0;
     uint8_t* arena = nullptr;
     std::unique_ptr<uint8_t[]> arena_heap;   // (where the driver did not pin it)
-    std::unique_ptr<lamina::core::PinnedArena> arena_big;   // (LAMINA_INK_LARGE_PAGES=1: in large pages where the account may)
     uint64_t arena_bytes = 0, fixed_bytes = 0;
     uint64_t expert_cap = 0;                 // --expert-cache: the experts' VRAM at most (0: no limit)
     std::string ranking;                     // what the ranking is, for the log
@@ -735,18 +732,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 return false;
             }
             m.in_ram = true;
-            if (m.arena_bytes > 0 && std::getenv("LAMINA_INK_LARGE_PAGES") != nullptr &&
-                std::atoi(std::getenv("LAMINA_INK_LARGE_PAGES")) != 0) {
-                // (large pages first - SeLockMemoryPrivilege - registered with CUDA: core's arena; its note says what it got)
-                m.arena_big = std::make_unique<lamina::core::PinnedArena>(m.arena_bytes);
-                if (m.arena_big->valid()) {
-                    m.arena = m.arena_big->data();
-                    std::fprintf(stderr, "lamina: the experts' RAM: %s\n", m.arena_big->note.c_str());
-                } else {
-                    m.arena_big.reset();
-                }
-            }
-            if (m.arena_bytes > 0 && m.arena == nullptr) {
+            if (m.arena_bytes > 0) {
                 if (cudaHostAlloc((void**) &m.arena, m.arena_bytes, cudaHostAllocPortable) == cudaSuccess) {
                     own(&Owned::pinned, m.arena);
                 } else {
@@ -795,8 +781,6 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     int here_dev = 0;
     CK(cudaGetDevice(&here_dev));
     if (twins) m.twin.resize((size_t) g.n_layers);
-    const char* const gh_env = std::getenv("LAMINA_INK_GATES_HALF");   // (the loop gates as halves too: a test's)
-    const bool gates_half = gh_env != nullptr && std::atoi(gh_env) != 0;
     auto dense_of = [&](Layer& y, int64_t l) {   // (on the current card)
         const std::string p = "blk." + std::to_string(l) + ".";
         y.il = (int) l;
@@ -842,19 +826,6 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 y.cD[c] = L.f32(lamina::inkling2::ctrl_name(g, l, c, "down"));
                 y.cG[c] = L.f32(lamina::inkling2::ctrl_name(g, l, c, "gain"));
                 y.cF[c] = L.f32(lamina::inkling2::ctrl_name(g, l, c, "forget"));
-                if (gates_half) {   // (rounded to the nearest half)
-                    auto halves = [&](const std::string& name) {
-                        const std::vector<float> f = L.floats(name);
-                        std::vector<__half> h(f.size());
-                        for (size_t i = 0; i < f.size(); ++i) h[i] = __float2half_rn(f[i]);
-                        __half* d = dalloc<__half>(h.size());
-                        CK(cudaMemcpy(d, h.data(), h.size() * 2, cudaMemcpyHostToDevice));
-                        return (const __half*) d;
-                    };
-                    y.hD[c] = halves(lamina::inkling2::ctrl_name(g, l, c, "down"));
-                    y.hG[c] = halves(lamina::inkling2::ctrl_name(g, l, c, "gain"));
-                    y.hF[c] = halves(lamina::inkling2::ctrl_name(g, l, c, "forget"));
-                }
             }
             y.msg_query = f32_dev(q);
         }
@@ -1881,7 +1852,6 @@ struct Engine {
     const uint8_t* snap_dst = nullptr;   // the checkpoint buffer the last image in `snap` went to, and its position
     int64_t snap_pos = -1;
     bool img_on = true;
-    bool stage_room = false;   // chunk_fit: cells to the cell cards for a staged stretch's largest rows (LAMINA_INK_STAGE_ROOM=1)
     int img_take = -1;   // the lot whose image the next state_load may take (kv_copy's take)
     size_t img_here_bytes() const { return ring_bytes + conv_bytes(); }
     size_t img_there_bytes() const {
@@ -2794,15 +2764,6 @@ struct Engine {
         // 5070 Ti: 6% at 2,048 rows, 1% more at 4,096) for VRAM the cells do not get: 2,048 rows at most, for a
         // stretch of eight such chunks or more.
         if (whole) {   // (a size the second set exists at)
-            // (LAMINA_INK_STAGE_ROOM=1: where the split's card lacks the room for the largest set, the oldest cells go to
-            // the cell cards for it - as many units as it takes, while they take them)
-            const int big = std::min(prefill_max, kStageRows);
-            if (stage_room && sat && !cards.empty() && big > chunk_cap && left >= 8 * (int64_t) big) {
-                int moved = 0;
-                while (!fits(big) && moved < 64 && evict()) ++moved;
-                if (stage_log && moved > 0)
-                    std::fprintf(stderr, "lamina: stages: %d units to the cell cards for chunks of %d rows\n", moved, big);
-            }
             for (int rows = std::min(prefill_max, kStageRows); rows > prefill && want == prefill; rows /= 2)
                 if (left >= 8 * (int64_t) rows && (chunk_cap > kStageRows ? fits(rows) : holds(rows))) want = rows;
             if (chunk_cap > kStageRows || chunk_cap < want || !fits(chunk_cap)) chunk_set(want);
@@ -2877,7 +2838,6 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
-        if (const char* r = std::getenv("LAMINA_INK_STAGE_ROOM")) stage_room = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_FIXED")) ahead_fixed = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_NEXT")) ahead_across = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
@@ -4603,20 +4563,14 @@ struct Engine {
     /// 0.8% a window), one where a row is alone (four lose 0.4% there) - the same sums.  LAMINA_INK_GATE_RB=1 or 4: every
     /// forward's.
     void ctrl_h(const ik::CtrlIn& a, int T, int n) {
-        const bool four = (gate_rb > 0 ? gate_rb == 4 : T > 1) && a.R % 4 == 0, h = a.Dh[0] != nullptr;
+        const bool four = (gate_rb > 0 ? gate_rb == 4 : T > 1) && a.R % 4 == 0;
         const dim3 grid((unsigned) (four ? a.R / 4 : a.R), (unsigned) T, (unsigned) n);
-        if (four) {
-            if (h) ik::ctrl_h_kernel<4, true><<<grid, row4(), 0, st>>>(a);
-            else ik::ctrl_h_kernel<4><<<grid, row4(), 0, st>>>(a);
-        } else {
-            if (h) ik::ctrl_h_kernel<1, true><<<grid, row4(), 0, st>>>(a);
-            else ik::ctrl_h_kernel<1><<<grid, row4(), 0, st>>>(a);
-        }
+        if (four) ik::ctrl_h_kernel<4><<<grid, row4(), 0, st>>>(a);
+        else ik::ctrl_h_kernel<1><<<grid, row4(), 0, st>>>(a);
     }
     void ctrl_apply(const ik::CtrlIn& a, int T, int n) {
         const dim3 grid((unsigned) ((4 * (unsigned) a.N + ik::kTB - 1) / ik::kTB), (unsigned) T, (unsigned) n);
-        if (a.Gh[0] != nullptr) ik::ctrl_apply_kernel<true><<<grid, ik::kTB, 0, st>>>(a);
-        else ik::ctrl_apply_kernel<><<<grid, ik::kTB, 0, st>>>(a);
+        ik::ctrl_apply_kernel<<<grid, ik::kTB, 0, st>>>(a);
     }
     /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
     /// (`ld`: floats from one row of C to the next, m when not given)
@@ -5066,9 +5020,6 @@ struct Engine {
                 a.D[c] = L.cD[c];
                 a.G[c] = L.cG[c];
                 a.F[c] = L.cF[c];
-                a.Dh[c] = L.hD[c];
-                a.Gh[c] = L.hG[c];
-                a.Fh[c] = L.hF[c];
                 a.out[c] = R.ctl + (size_t) c * TN;
                 u[c] = a.out[c];
             }
@@ -5394,9 +5345,6 @@ struct Engine {
             a.D[0] = L.cD[3];
             a.G[0] = L.cG[3];
             a.F[0] = L.cF[3];
-            a.Dh[0] = L.hD[3];
-            a.Gh[0] = L.hG[3];
-            a.Fh[0] = L.hF[3];
             a.out[0] = R.ctl;
             a.h = R.ctl_h;
             a.n = 1;
