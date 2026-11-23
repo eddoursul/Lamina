@@ -467,10 +467,10 @@ llama.cpp's do. The prompt cache keeps conversations as on the other paths (`--p
 `--conversation-cache-mib`, `--conversation-cache-slots`, `--conversation-cache-min-tokens`, `--ram-reserve-mib`):
 a checkpoint holds the window layers' last cells and the convolutions' state (169 MiB in FP16, 92 in q8_0) and
 leaves through an image of that size in VRAM; a conversation another request replaces is parked with its K and V -
-which stay on the card where they are: the cells the next conversation writes over are set aside on the card
-while its VRAM is free above the reserve, in RAM otherwise, and the rest are neither copied nor moved (two
-conversations of 82K and 8K tokens in turns take 0.1 s a switch where the way to RAM and back takes 0.5;
-`--park-vram 0`: in RAM at once).
+which stay on the cards in address ranges of their own (up to three conversations beside the live one), neither
+copied nor moved, and go to RAM only when the cards need the VRAM: two conversations in turns switch in the time
+of their state images, a few tens of ms, where the way to RAM and back takes 0.5 s (two long ones on cards with a
+cell card beside them too, after their first turns; `--park-vram 0`: in RAM at once).
 
 Its chat form is its own: a reply is blocks of thinking, text and tool calls between special tokens, a call's
 arguments JSON. The server reads them as such (a call's arguments are streamed as the model writes them) and writes
