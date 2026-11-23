@@ -155,6 +155,25 @@ struct OnDev {
     OnDev& operator=(const OnDev&) = delete;
 };
 
+/// A full visit's K or V in one lot: the addresses of a window of the context's positions (the whole context where no
+/// other card takes the older cells) and the memory mapped into it, in chunks named by their place in the whole
+/// context.  The kernels index a cell by its position from `ptr`: the window's first address less what lies before
+/// the window.
+struct CellRange {
+    lamina::core::VmmRange vm;
+    int64_t base = 0;   // the context's chunks before the window
+    uint8_t* ptr() const { return vm.base() - (size_t) base * (size_t) lamina::core::vmm_granularity(); }
+    int64_t span() const { return vm.chunks(); }
+    int64_t chunks() const { return base + vm.chunks(); }   // the chunk past the window's last
+    bool mapped(int64_t i) const { return vm.mapped(i - base); }
+    int64_t mapped_count() const { return vm.mapped_count(); }
+    /// (the chunks are the window's: false where they are not, nothing mapped)
+    template <class Take> bool map_range(int64_t lo, int64_t hi, Take take) {
+        return lo >= base && hi <= chunks() && vm.map_range(lo - base, hi - base, take);
+    }
+    lamina::core::VmmChunk unmap(int64_t i) { return i >= base && i < chunks() ? vm.unmap(i - base) : 0; }
+};
+
 /// The VRAM a card leaves free where nothing sets it: more on one the desktop draws on
 uint64_t card_keep(int dev) {
     bool known = false, desktop = false;
@@ -1124,7 +1143,7 @@ struct Engine {
                             // steps with their parts apart (tick_part)
     int prof_level = 0;
     bool use_graphs = true; // a forward of T rows replayed from its captured graph
-    std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows
+    std::map<int, cudaGraphExec_t> graphs;   // by rows * 16 + head rows, and the lot (a graph holds its arrays' addresses)
     int prefill = 1024;     // rows a prompt chunk takes (0: prompts through the decode's forwards)
     // A chunk grows to prefill_max rows for a part that long while the VRAM free above the reserve holds its larger
     // buffers beside the cells it will write (~0.75 MiB a row), and is back at prefill's when it does not, and after
@@ -1156,11 +1175,14 @@ struct Engine {
     int feed_rows = kMaxT;                  // rows a decode forward of a prompt part takes (LAMINA_INK_ROWS: fewer, a test's)
 
     // a visit: one application of a layer
+    static constexpr int kLots = 4;   // the lots a full visit's arrays have at most: the live sequence's, three parked ones'
+    static constexpr uint64_t kLotSpare = 6ull << 30;   // addresses a card keeps to spare beside its lots
     struct Visit {
         int layer = 0, pass = 0;
         float* conv = nullptr;   // [C - 1] rows of: K's projection | V's | the attention's output | the MoE's
         ik::Cells cells{};
-        std::unique_ptr<lamina::core::VmmRange> k_vm, v_vm;
+        CellRange *k_vm = nullptr, *v_vm = nullptr;        // a full visit's K and V: the live lot's
+        std::unique_ptr<CellRange> k_lot[kLots], v_lot[kLots];
     };
     std::vector<Visit> visits;
     float* conv_all = nullptr;       // every visit's convolution state
@@ -1177,8 +1199,13 @@ struct Engine {
         std::string name;
         cudaStream_t st = nullptr;
         cudaEvent_t ev = nullptr;         // behind its queued scan
-        std::vector<std::unique_ptr<lamina::core::VmmRange>> k_vm, v_vm;   // a full visit each
-        int64_t cap = 0, cells = 0;       // cells it has room for, and holds
+        std::vector<std::unique_ptr<lamina::core::VmmRange>> k_vm, v_vm;   // a full visit each: the live lot's units
+        int64_t cap = 0, cells = 0;       // cells it has room for (every lot's), and the live lot's it holds
+        int64_t slots = 0;                // cells the live lot's ranges have addresses for (they grow: card_slots)
+        struct Park {                     // a lot the live sequence is not in: its ranges and cells
+            std::vector<std::unique_ptr<lamina::core::VmmRange>> k_vm, v_vm;
+            int64_t slots = 0, cells = 0;
+        } park[kLots];
         int n_part = 0;                   // stretches its `part` holds a row and head
         float *q = nullptr, *ns = nullptr, *part = nullptr, *sum = nullptr;   // a decode forward's rows on the card
         float *cq = nullptr, *cns = nullptr, *csum = nullptr;                 // a chunk's
@@ -1484,6 +1511,10 @@ struct Engine {
             (void) cudaStreamSynchronize(c.st);
             c.k_vm.clear();
             c.v_vm.clear();
+            for (Card::Park& q : c.park) {
+                q.k_vm.clear();
+                q.v_vm.clear();
+            }
             for (void* d : c.dev_mem) cudaFree(d);
             for (void* h : c.host_mem) cudaFreeHost(h);
             cudaEventDestroy(c.ev);
@@ -1645,292 +1676,425 @@ struct Engine {
     }
 
     // ---- parked conversations left on the cards: the prompt cache's copy of a conversation's cells (kv_copy) is not
-    // made while the cells can stay where they are - the full visits' arrays past the live sequence's end, whose
-    // memory stays mapped as far as the longest sequence went, and the cell cards' units.  The cells the live
-    // sequence is about to write over (displace: from ensure, a step at a time) are set aside in blocks on the cards
-    // while their VRAM is free above the reserve, and reach the cache's buffer in RAM when it is asked for (more
-    // cells, a larger chunk) or was not there; a conversation that comes back takes its cells from wherever they
-    // are.  So the cells no other sequence reached are neither copied nor moved, and conversations that take turns
-    // copy what they share the positions of, on the cards.
-    // A sequence parked with cells on the cell cards leaves those units there and takes its bookkeeping with it (its
-    // first cell on the layers' cards, each unit's card): the next sequence starts with none on the cards, the
-    // layers' cards' VRAM it needs comes from the parked one's newest cells (parked_room: to the buffer a unit at a
-    // time, their memory given back), and the parked one takes its units and their account back when it leaves the
-    // park (kv_take: whole, or cut at a checkpoint); a start it lends is copied from the units.  One such
-    // conversation at a time; it reaches its buffer when the live sequence moves cells to the cards itself.  Not
-    // with experts in RAM (--park-vram 0: every copy to RAM at once).
-    struct Side {         // a run of a parked conversation's cells set aside
-        int64_t at, n;    // the cells [at, at + n)
-        uint8_t* dev;     // this card's full visits' K, then V, each n cells (null: it has none)
-        uint8_t* dev2;    // a split's card's
-    };
+    // made while the cells can stay where they are.  The full visits' arrays are several address ranges each (lots:
+    // addresses alone, their memory mapped as a sequence grows): the live sequence writes one, and a conversation
+    // that is parked keeps its lot - its cells neither copied nor moved - while the next sequence goes on in a free
+    // one.  A conversation that leaves the park (kv_take) is the live sequence in its own lot again; one that lends
+    // a start has it copied from its lot to the live one, on the cards.  The cell cards hold a lot's units in ranges
+    // of that lot too, so a sequence parked with cells there leaves them with its account of them (its first cell on
+    // the layers' cards, each unit's card) and has them back as they are.
+    // A lot's ranges are a window of the context where cell cards take the older cells (CellRange: the whole
+    // context's addresses a lot do not fit an RTX 3090's process at 1,048,576 tokens), which follows the sequence.
+    // Who gives way where the layers' cards' VRAM is short (ensure): a lot no conversation is in; the newest cells of
+    // the parked conversations that are not one of two in turns (stale: to the cache's buffer in RAM a unit at a
+    // time, the one parked the longest first); the live sequence's own oldest cells, to the cell cards; and where
+    // they take none, any parked conversation's.  Where every lot holds a conversation, the one parked the longest
+    // goes to its buffer whole; where the cell cards are full, its units do.  Not with experts in RAM (--park-vram
+    // 0: every copy to RAM at once).
     struct Parked {
         const uint8_t* host;   // the cache's buffer it stands for: a visit's K, then its V, each `held` cells long
         int64_t held;          // the conversation's cells
+        int lot;               // the lot its cells are in
         int64_t ncard;         // the cells [0, ncard) are on the cell cards (`units`),
-        int64_t in_host;       // [ncard, in_host) in the buffer,
-        int64_t from;          // [in_host, from) in `side`,
-        int64_t upto;          // [from, upto) in the arrays, and [upto, held) in the buffer
-        int64_t top;           // (the arrays have memory as far as this for it)
-        std::vector<Side> side;
+        int64_t from;          // [ncard, from) in the buffer,
+        int64_t upto;          // [from, upto) in its lot, and [upto, held) in the buffer
+        int64_t top;           // (its lot has memory as far as this)
         std::vector<int> units;   // unit u -> its card: the sequence's unit_card when it was parked
+        uint64_t stamp;        // the parkings before it
+        uint64_t req;          // the request it was parked in
+        bool quick;            // it came back within kQuick requests the last time it was parked
     };
     std::vector<Parked> parked;
-    int64_t parked_from = INT64_MAX;   // the first cell of the arrays that is a parked conversation's
+    int lots = 1, lot = 0;             // the lots the arrays have, and the live sequence's
+    int64_t lot_span = 0;              // the positions a lot's ranges have addresses for
+    uint64_t park_stamp = 0, req_n = 0;   // (req_n: the requests so far, the server's count)
+    bool lot_quick[kLots] = {};           // the conversation in a lot came back quickly the last time
     const uint8_t* taking = nullptr;   // the buffer of the conversation that leaves the park with the next kv_copy (kv_take)
     bool park_here = true;
-    int64_t park_room = -1;   // LAMINA_INK_PARK_ROOM=MiB: the VRAM the blocks take at most (a test's: the paths to the buffer)
-    static constexpr int64_t kParkStep = 8192;   // cells a parked conversation gives up at a time
     Parked* parked_of(const uint8_t* host) {
         for (Parked& r : parked)
             if (r.host == host) return &r;
         return nullptr;
     }
-    void parked_note() {
-        parked_from = INT64_MAX;
-        for (const Parked& r : parked)
-            if (r.from < r.upto) parked_from = std::min(parked_from, r.from);
-    }
     /// The bytes of `n` cells of every full visit on this card (`there`: on a split's card)
-    uint64_t side_cells(int64_t n, bool there) const {
+    uint64_t array_bytes(int64_t n, bool there) const {
         uint64_t arrays = 0;
         for (size_t vi = 0; vi < visits.size(); ++vi) arrays += !visits[vi].cells.ring && on_sat((int) vi) == there ? 2 : 0;
         return arrays * (uint64_t) n * (uint64_t) cell_bytes;
     }
-    uint64_t side_bytes(bool there = false) const {   // (what the blocks hold of this card's VRAM)
+    /// No conversation is in lot l
+    bool lot_idle(int l) const {
+        if (l == lot) return false;
+        for (const Parked& r : parked)
+            if (r.lot == l) return false;
+        return true;
+    }
+    int lot_free() const {
+        for (int l = 0; l < lots; ++l)
+            if (lot_idle(l)) return l;
+        return -1;
+    }
+    static constexpr int64_t kCardSlots = 65536;   // cells a lot's ranges on a cell card start with addresses for
+    /// The cells every lot holds on a card
+    int64_t card_held(const Card& c) const {
+        int64_t n = c.cells;
+        for (const Card::Park& q : c.park) n += q.cells;
+        return n;
+    }
+    /// The live lot's ranges on the card have addresses for `slots` cells: where they do not, ranges of twice the
+    /// size (no more than the card holds) with their memory moved into them, 72 us a chunk.  False: none reserved.
+    bool card_slots(Card& c, int64_t slots) {
+        if (slots <= c.slots) return true;
+        int64_t want = std::max<int64_t>(c.slots, kCardSlots);
+        while (want < slots) want *= 2;
+        want = std::max(slots, std::min(want, c.cap));
+        const OnDev dv(c.dev);
+        const size_t nf = (size_t) m->g.n_full_visits();
+        std::vector<std::unique_ptr<lamina::core::VmmRange>> nk, nv;
+        for (size_t i = 0; i < 2 * nf; ++i) {
+            auto r = std::make_unique<lamina::core::VmmRange>();
+            if (!r->reserve((uint64_t) want * cell_bytes)) return false;
+            (i < nf ? nk : nv).push_back(std::move(r));
+        }
+        CK(cudaStreamSynchronize(c.st));
+        for (size_t i = 0; i < c.k_vm.size(); ++i)
+            for (int side = 0; side < 2; ++side) {
+                lamina::core::VmmRange &was = side ? *c.v_vm[i] : *c.k_vm[i], &now = side ? *nv[i] : *nk[i];
+                for (int64_t j = 0; j < was.chunks(); ++j) {
+                    if (!was.mapped(j)) continue;
+                    const lamina::core::VmmChunk h = was.unmap(j);
+                    if (!now.map_range(j, j + 1, [&] { return h; })) {
+                        std::fprintf(stderr, "lamina: a cell card's cells did not move to their larger range\n");
+                        throw Fatal{1};
+                    }
+                }
+            }
+        c.k_vm = std::move(nk);
+        c.v_vm = std::move(nv);
+        c.slots = want;
+        return true;
+    }
+    /// The memory of the cells past `keep` in a lot's ranges on a card goes back to the driver
+    void card_free(Card& c, std::vector<std::unique_ptr<lamina::core::VmmRange>>& k, std::vector<std::unique_ptr<lamina::core::VmmRange>>& v,
+                   int64_t keep) {
+        const uint64_t G = lamina::core::vmm_granularity();
+        const int64_t c0 = (int64_t) (((uint64_t) keep * cell_bytes + G - 1) / G);
+        const OnDev dv(c.dev);
+        CK(cudaStreamSynchronize(c.st));
+        for (size_t i = 0; i < k.size(); ++i)
+            for (int64_t j = c0; j < k[i]->chunks(); ++j) {
+                if (!k[i]->mapped(j)) continue;
+                lamina::core::vmm_chunk_free(k[i]->unmap(j));
+                lamina::core::vmm_chunk_free(v[i]->unmap(j));
+            }
+    }
+    /// The live sequence writes lot l from here: the arrays the kernels read and the memory calls map, and on the
+    /// cell cards the ranges of that lot's units
+    void lot_use(int l) {
+        for (Card& c : cards) {
+            if (l == lot) break;
+            Card::Park& out = c.park[lot];
+            Card::Park& in = c.park[l];
+            out.k_vm = std::move(c.k_vm);
+            out.v_vm = std::move(c.v_vm);
+            out.slots = c.slots;
+            out.cells = c.cells;
+            c.k_vm = std::move(in.k_vm);
+            c.v_vm = std::move(in.v_vm);
+            c.slots = in.slots;
+            c.cells = in.cells;
+            in.k_vm.clear();
+            in.v_vm.clear();
+            in.slots = in.cells = 0;
+            if (c.cells == 0) card_empty(c);
+            card_lock(c);
+        }
+        lot = l;
+        for (Visit& V : visits) {
+            if (!V.k_lot[0]) continue;
+            V.k_vm = V.k_lot[l].get();
+            V.v_vm = V.v_lot[l].get();
+            V.cells.k = V.k_vm->ptr();
+            V.cells.v = V.v_vm->ptr();
+        }
+    }
+    /// The live lot's window starts at chunk `b` from here: its memory keeps its place in the context (moved in the
+    /// ranges: 72 us a chunk), the kernels' pointers follow, and the graphs captured on the old ones are gone
+    void window_to(int64_t b) {
+        homes_sync();
+        for (size_t vi = 0; vi < visits.size(); ++vi) {
+            Visit& V = visits[vi];
+            if (!V.k_vm) continue;
+            const OnDev dv(home_dev(vi));
+            for (CellRange* r : {V.k_vm, V.v_vm}) {
+                std::vector<std::pair<int64_t, lamina::core::VmmChunk>> held;   // (its place, its memory)
+                for (int64_t i = r->base; i < r->chunks(); ++i)
+                    if (r->mapped(i)) held.push_back({i, r->unmap(i)});
+                r->base = b;
+                for (size_t j = 0; j < held.size();) {   // (a run of neighbours a call: its access is set once)
+                    if (held[j].first < b || held[j].first >= r->chunks()) {   // (no cell of the window's: no one's)
+                        lamina::core::vmm_chunk_free(held[j++].second);
+                        continue;
+                    }
+                    size_t e = j + 1;
+                    while (e < held.size() && held[e].first == held[e - 1].first + 1 && held[e].first < r->chunks()) ++e;
+                    size_t at = j;
+                    if (!r->map_range(held[j].first, held[e - 1].first + 1, [&] { return held[at++].second; })) {
+                        std::fprintf(stderr, "lamina: the cells' memory did not move with their window\n");
+                        throw Fatal{1};
+                    }
+                    j = e;
+                }
+            }
+            V.cells.k = V.k_vm->ptr();
+            V.cells.v = V.v_vm->ptr();
+        }
+        for (auto it = graphs.begin(); it != graphs.end();) it = it->first / 4096 == lot ? graphs.erase(it) : std::next(it);
+        for (auto it = seg_graphs.begin(); it != seg_graphs.end();) it = it->first / 4096 == lot ? seg_graphs.erase(it) : std::next(it);
+        if (stage_log) std::fprintf(stderr, "lamina: parked: lot %d's window from cell %lld\n", lot,
+                                    (long long) ((uint64_t) b * lamina::core::vmm_granularity() / cell_bytes));
+    }
+    /// The live lot's window holds the cells [a, b): where it does not, it moves to start a quarter of its span before
+    /// `a`.  False: they are more than a window.
+    bool window_for(int64_t a, int64_t b) {
+        const CellRange* r = nullptr;
+        for (const Visit& V : visits)
+            if (V.k_vm) r = V.k_vm;
+        if (r == nullptr || a >= b) return true;
+        const uint64_t G = lamina::core::vmm_granularity();
+        const int64_t ca = (int64_t) ((uint64_t) a * cell_bytes / G), cb = (int64_t) (((uint64_t) b * cell_bytes + G - 1) / G);
+        if (ca >= r->base && cb <= r->chunks()) return true;
+        if (cb - ca > r->span()) return false;
+        const int64_t first = std::max<int64_t>(0, a - lot_span / 4) / unit * unit;
+        int64_t to = std::min((int64_t) ((uint64_t) first * cell_bytes / G), ca);
+        if (cb > to + r->span()) to = cb - r->span();
+        window_to(to);
+        return true;
+    }
+    /// The VRAM lot l has mapped on this card
+    uint64_t lot_mapped(int l, bool there) const {
         uint64_t n = 0;
-        for (const Parked& r : parked)
-            for (const Side& b : r.side) n += side_cells(b.n, there);
-        return n;
+        for (size_t vi = 0; vi < visits.size(); ++vi)
+            if (visits[vi].k_lot[0] && on_sat((int) vi) == there) n += 2 * (uint64_t) visits[vi].k_lot[l]->mapped_count();
+        return n * lamina::core::vmm_granularity();
     }
-    /// The parked conversations' cells in the arrays that parked_room can send to their buffers: the ones outside the
-    /// live sequence's range
-    int64_t room_cells() const {
-        int64_t n = 0;
-        for (const Parked& r : parked)
-            if (r.from < r.upto) n += r.upto <= lo ? r.upto - r.from : std::max<int64_t>(0, r.upto - std::max(r.from, mapped));
-        return n;
+    uint64_t lot_mapped(int l) const { return lot_mapped(l, false) + (sat ? lot_mapped(l, true) : 0); }
+    /// Lot l's memory from the first chunk that starts at or after cell `a` on goes back to the driver
+    void lot_release(int l, int64_t a) {
+        const uint64_t G = lamina::core::vmm_granularity();
+        const int64_t c0 = (int64_t) (((uint64_t) a * cell_bytes + G - 1) / G);
+        for (size_t vi = 0; vi < visits.size(); ++vi) {
+            Visit& V = visits[vi];
+            if (!V.k_lot[0]) continue;
+            const OnDev dv(home_dev(vi));
+            CellRange &k = *V.k_lot[l], &v = *V.v_lot[l];
+            for (int64_t i = std::max(c0, k.base); i < k.chunks(); ++i) {
+                if (!k.mapped(i)) continue;
+                lamina::core::vmm_chunk_free(k.unmap(i));
+                lamina::core::vmm_chunk_free(v.unmap(i));
+            }
+        }
     }
-    /// The chunks the full visits' arrays lack in [c0, c1) on this card (every array of a card has the same ones)
+    /// This card's VRAM that gives way to the live sequence: what the lots no conversation is in have mapped, and the
+    /// parked conversations' cells in theirs
+    uint64_t room_bytes(bool there) const {
+        uint64_t n = 0;
+        for (int l = 0; l < lots; ++l)
+            if (lot_idle(l)) n += lot_mapped(l, there);
+        int64_t cells = 0;
+        for (const Parked& r : parked)
+            if (stale(r) || cards.empty()) cells += std::max<int64_t>(0, r.upto - r.from);   // (the others: the cell cards first)
+        return n + array_bytes(cells, there);
+    }
+    /// The chunks the live lot's arrays lack in [c0, c1) on this card (every array of a card has the same ones)
     int64_t holes(int64_t c0, int64_t c1, bool there) const {
         for (size_t vi = 0; vi < visits.size(); ++vi) {
             if (!visits[vi].k_vm || on_sat((int) vi) != there) continue;
             int64_t n = 0;
-            for (int64_t i = c0; i < c1 && i < visits[vi].k_vm->chunks(); ++i) n += !visits[vi].k_vm->mapped(i);
+            for (int64_t i = c0; i < c1; ++i) n += !visits[vi].k_vm->mapped(i);   // (past the window: none either)
             return n;
         }
         return 0;
     }
-    /// The cells [at, at + n) of every full visit between the arrays and a block (`in`: into the arrays), or `host`,
-    /// a buffer of `held` cells an array
-    bool side_copy(int64_t at, int64_t n, const Side* blk, uint8_t* host, int64_t held, bool in) {
+    /// The cells [at, at + n) of every full visit between lot l and `host`, a buffer of `held` cells an array (`in`:
+    /// into the lot); or, with `to`, from lot l to that lot on the cards
+    bool lot_copy(int l, int64_t at, int64_t n, uint8_t* host, int64_t held, bool in, int to = -1) {
         if (n <= 0) return true;
         const size_t w = (size_t) n * cell_bytes, mine = (size_t) held * cell_bytes;
-        const size_t stride = blk ? (size_t) blk->n * cell_bytes : 0;   // (a block's arrays: each its own n cells)
-        const int64_t skip = blk ? at - blk->at : 0;                    // (the copy's first cell in them)
-        uint8_t *q = blk ? blk->dev : nullptr, *q2 = blk ? blk->dev2 : nullptr;
         bool ok = true;
         for (size_t vi = 0; vi < visits.size(); ++vi) {
             const Visit& V = visits[vi];
-            if (V.cells.ring) continue;
+            if (!V.k_lot[0]) continue;
             const OnDev dv(home_dev(vi));
-            uint8_t*& b = on_sat((int) vi) ? q2 : q;
             for (int side = 0; side < 2; ++side) {
-                uint8_t* const d = (side ? V.cells.v : V.cells.k) + (size_t) at * cell_bytes;
-                uint8_t* const o = blk ? b + (size_t) skip * cell_bytes
-                                       : host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) at * cell_bytes;
-                const cudaMemcpyKind kind = blk ? cudaMemcpyDeviceToDevice : in ? cudaMemcpyHostToDevice : cudaMemcpyDeviceToHost;
-                ok = ok && soft(in ? cudaMemcpyAsync(d, o, w, kind, home_st(vi)) : cudaMemcpyAsync(o, d, w, kind, home_st(vi)));
-                if (blk) b += stride;
+                uint8_t* const d = (side ? V.v_lot[l] : V.k_lot[l])->ptr() + (size_t) at * cell_bytes;
+                if (to >= 0) {
+                    ok = ok && soft(cudaMemcpyAsync((side ? V.v_lot[to] : V.k_lot[to])->ptr() + (size_t) at * cell_bytes, d, w,
+                                                    cudaMemcpyDeviceToDevice, home_st(vi)));
+                } else {
+                    uint8_t* const o = host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) at * cell_bytes;
+                    ok = ok && soft(in ? cudaMemcpyAsync(d, o, w, cudaMemcpyHostToDevice, home_st(vi))
+                                       : cudaMemcpyAsync(o, d, w, cudaMemcpyDeviceToHost, home_st(vi)));
+                }
             }
             ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
         }
         return ok;
     }
-    void side_free(const Side& b) {
-        if (b.dev != nullptr) CK(cudaFree(b.dev));
-        if (b.dev2 != nullptr) {
-            const OnDev dv(sat->dev);
-            CK(cudaFree(b.dev2));
-        }
-    }
-    /// A parked conversation's blocks to the cache's buffer
-    void side_out(Parked& r) {
-        for (const Side& b : r.side) {
-            const size_t mine = (size_t) r.held * cell_bytes, w = (size_t) b.n * cell_bytes;
-            const uint8_t *q = b.dev, *q2 = b.dev2;
-            for (size_t vi = 0; vi < visits.size(); ++vi) {
-                if (visits[vi].cells.ring) continue;
-                const OnDev dv(home_dev(vi));
-                const uint8_t*& from_ = on_sat((int) vi) ? q2 : q;
-                for (int side = 0; side < 2; ++side, from_ += w)
-                    CK(cudaMemcpy(const_cast<uint8_t*>(r.host) + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) b.at * cell_bytes,
-                                  from_, w, cudaMemcpyDeviceToHost));
-            }
-            side_free(b);
-        }
-        r.side.clear();
-        r.in_host = r.from;
-    }
-    /// The blocks of the conversation that holds the most give their VRAM back (`but`: not this one's); false: none
-    /// holds any
-    bool side_give(const uint8_t* but = nullptr) {
-        Parked* most = nullptr;
-        uint64_t held_most = 0;
-        for (Parked& r : parked) {
-            uint64_t n = 0;
-            for (const Side& b : r.side) n += (uint64_t) b.n;
-            if (r.host != but && n > held_most) {
-                held_most = n;
-                most = &r;
-            }
-        }
-        if (most == nullptr) return false;
-        homes_sync();
-        side_out(*most);
-        parked_trim();
-        return true;
-    }
     [[noreturn]] void parked_lost() {
         std::fprintf(stderr, "lamina: a parked conversation's cells did not reach its buffer\n");
         throw Fatal{1};
     }
-    /// The arrays' memory for the cells [a, b) goes back to the driver, where neither the live sequence's range nor
-    /// a parked conversation's cells (`but`'s aside) are in it
-    void cells_release(int64_t a, int64_t b, const Parked* but) {
-        const uint64_t G = lamina::core::vmm_granularity();
-        auto up = [&](int64_t cells) { return (int64_t) (((uint64_t) cells * cell_bytes + G - 1) / G); };
-        auto down = [&](int64_t cells) { return (int64_t) ((uint64_t) cells * cell_bytes / G); };
-        for (int64_t i = up(a); i < up(b); ++i) {
-            if (i >= down(lo) && i < up(mapped)) continue;
-            bool used = false;
-            for (const Parked& r : parked) used = used || (&r != but && r.from < r.upto && i >= down(r.from) && i < up(r.upto));
-            if (used) continue;
-            for (size_t vi = 0; vi < visits.size(); ++vi) {
-                Visit& V = visits[vi];
-                if (!V.k_vm || !V.k_vm->mapped(i)) continue;
-                const OnDev dv(home_dev(vi));
-                lamina::core::vmm_chunk_free(V.k_vm->unmap(i));
-                lamina::core::vmm_chunk_free(V.v_vm->unmap(i));
-            }
-        }
-    }
-    /// A parked conversation's cells [r.from, to) out of the arrays: to a block where the cards have the VRAM free
-    /// above their reserves, else to the cache's buffer (its blocks first: the buffer holds a start of the cells)
-    void parked_out(Parked& r, int64_t to) {
-        const int64_t n = to - r.from;
-        const uint64_t b1 = side_cells(n, false), b2 = sat ? side_cells(n, true) : 0;
-        size_t fr = 0, tot = 0;
-        CK(cudaMemGetInfo(&fr, &tot));
-        bool room = park_room != 0 && fr >= reserve + b1 + (256ull << 20);
-        if (room && b2 > 0) {
-            const OnDev dv(sat->dev);
-            size_t fs = 0, ts = 0;
-            CK(cudaMemGetInfo(&fs, &ts));
-            room = fs >= sat_keep + b2 + (256ull << 20);
-        }
-        if (room) {
-            Side b{r.from, n, nullptr, nullptr};
-            void* q = nullptr;
-            bool got = b1 == 0 || cudaMalloc(&q, b1) == cudaSuccess;
-            b.dev = static_cast<uint8_t*>(q);
-            if (got && b2 > 0) {
-                const OnDev dv(sat->dev);
-                q = nullptr;
-                got = cudaMalloc(&q, b2) == cudaSuccess;
-                b.dev2 = static_cast<uint8_t*>(q);
-            }
-            if (got && side_copy(r.from, n, &b, nullptr, r.held, false)) {
-                r.side.push_back(b);
-                const int64_t was = r.from;
-                r.from = to;
-                cells_release(was, to, nullptr);   // (their memory, where it is no sequence's)
-                if (stage_log) std::fprintf(stderr, "lamina: parked: %lld cells set aside on the cards\n", (long long) n);
-                return;
-            }
-            (void) cudaGetLastError();
-            side_free(b);
-        }
-        side_out(r);
-        if (!side_copy(r.from, n, nullptr, const_cast<uint8_t*>(r.host), r.held, false)) parked_lost();
-        const int64_t was = r.from;
-        r.from = r.in_host = to;
-        cells_release(was, to, nullptr);
-        if (stage_log) std::fprintf(stderr, "lamina: parked: %lld cells to their buffer (no room for a block)\n", (long long) n);
-    }
-    /// A parked conversation's cells [a, r.upto) out of the arrays, to the cache's buffer; their memory, and what the
-    /// arrays had past them for it, goes back where nothing else is in it
+    /// A parked conversation's cells [a, r.upto) out of its lot, to the cache's buffer; their memory goes back
     void parked_top(Parked& r, int64_t a) {
-        if (!side_copy(a, r.upto - a, nullptr, const_cast<uint8_t*>(r.host), r.held, false)) parked_lost();
+        if (!lot_copy(r.lot, a, r.upto - a, const_cast<uint8_t*>(r.host), r.held, false)) parked_lost();
         if (stage_log) std::fprintf(stderr, "lamina: parked: %lld cells from a conversation's end to their buffer\n", (long long) (r.upto - a));
         r.upto = a;
-        cells_release(a, r.top, nullptr);
+        lot_release(r.lot, a);
         r.top = std::min(r.top, a);
     }
-    /// A parked conversation's cells all to the cache's buffer: the cell cards' units, the blocks, the arrays'
-    void parked_all(Parked& r) {
+    /// A parked conversation's units of the cell cards to the cache's buffer (units_copy: a copy of them); their
+    /// memory on the cards goes back
+    void units_out(Parked& r) {
+        units_copy(r);
+        if (stage_log && !r.units.empty())
+            std::fprintf(stderr, "lamina: parked: %zu units of the cell cards to their buffer\n", r.units.size());
+        for (Card& c : cards) {
+            Card::Park& q = c.park[r.lot];
+            card_free(c, q.k_vm, q.v_vm, 0);
+            q.cells = 0;
+        }
+        r.units.clear();
+        r.ncard = 0;
+    }
+    void units_copy(const Parked& r) {
         const size_t mine = (size_t) r.held * cell_bytes, bytes = (size_t) unit * cell_bytes;
         for (size_t u = 0; u < r.units.size(); ++u) {
             Card& c = cards[(size_t) r.units[u]];
+            Card::Park& q = c.park[r.lot];
             int64_t slot = 0;
             for (size_t i = 0; i < u; ++i) slot += r.units[i] == r.units[u];
             for (size_t vi = 0; vi < visits.size(); ++vi)
                 if (!visits[vi].cells.ring)
                     for (int side = 0; side < 2; ++side)
-                        card_copy(c, (size_t) full_of[vi], side, slot * unit,
+                        card_copy(c, *(side ? q.v_vm : q.k_vm)[(size_t) full_of[vi]], slot * unit,
                                   const_cast<uint8_t*>(r.host) + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + u * bytes, bytes, true);
         }
-        r.units.clear();
-        r.ncard = 0;
-        side_out(r);
-        if (r.from < r.upto) parked_top(r, r.from);
-        r.in_host = r.from = r.upto = r.held;
     }
-    /// The conversations whose cells are all in their buffers are the cache's alone again
+    /// The live sequence goes on from a cut at `cells`, before its units' end: the layers' cards hold its cells from
+    /// the first, as a sequence that grew to there would (the layout the same text read anew has), the cell cards'
+    /// units copied back and given up.  False: the layers' cards have no room for them (the units stay).
+    bool units_home(int64_t cells) {
+        const int64_t lo_was = lo, back = std::min(cells, lo_was);
+        if (!window_for(0, std::max(cells, back))) return false;
+        lo = 0;
+        if (!cells_map(0, back, nullptr)) {
+            lo = lo_was;
+            return false;
+        }
+        bool ok = true;
+        for (size_t u = 0; ok && (int64_t) u * unit < back; ++u) {
+            Card& c = cards[(size_t) unit_card[u]];
+            const int64_t slot = unit_slot(u);
+            const size_t bytes = (size_t) std::min<int64_t>(unit, back - (int64_t) u * unit) * cell_bytes;
+            for (size_t vi = 0; vi < visits.size(); ++vi) {
+                const Visit& V = visits[vi];
+                if (V.cells.ring) continue;
+                for (int side = 0; side < 2; ++side) {
+                    card_copy(c, (size_t) full_of[vi], side, slot, stage_h[0], bytes, true);
+                    const OnDev dv(home_dev(vi));
+                    ok = ok && soft(cudaMemcpyAsync((side ? V.cells.v : V.cells.k) + u * (size_t) unit * cell_bytes, stage_h[0], bytes,
+                                                    cudaMemcpyHostToDevice, home_st(vi)));
+                    ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
+                }
+            }
+        }
+        if (!ok) {
+            lo = lo_was;
+            return false;
+        }
+        for (Card& c : cards) {
+            c.cells = 0;
+            card_free(c, c.k_vm, c.v_vm, 0);
+            card_empty(c);
+            card_lock(c);
+        }
+        unit_card.clear();
+        clocks.release_after(clocks_hold);
+        if (cells <= lo_was) {   // (what the lot has past the cut is no sequence's)
+            const uint64_t G = lamina::core::vmm_granularity();
+            mapped = (int64_t) ((((uint64_t) back * cell_bytes + G - 1) / G) * G / cell_bytes);
+            lot_release(lot, mapped);
+        }
+        if (stage_log)
+            std::fprintf(stderr, "lamina: parked: %lld cells back from the cell cards' units (a cut before their end)\n", (long long) back);
+        return true;
+    }
+    /// The cell cards are full: the units of the conversation parked the longest go to its buffer.  False: no parked
+    /// conversation has any.
+    bool units_give() {
+        Parked* old = nullptr;
+        for (Parked& r : parked)
+            if (r.ncard > 0 && (old == nullptr || r.stamp < old->stamp)) old = &r;
+        if (old == nullptr) return false;
+        homes_sync();
+        units_out(*old);
+        parked_trim();
+        return true;
+    }
+    /// A parked conversation keeps its cells on the layers' cards, and the live sequence moves its own oldest ones to
+    /// the cell cards for the room, while it is one of two that take turns: it came back within kQuick requests the
+    /// last time, and was parked no more than kStale requests ago.  Any other gives its newest cells way to RAM first
+    /// (a session that ended, a subagent's parent: a sequence's cells on the cell cards stay there for its life -
+    /// their scan's round trip a token, the card's clocks - which a few switches do not pay for).
+    static constexpr uint64_t kQuick = 2, kStale = 4;
+    bool stale(const Parked& r) const { return !r.quick || req_n - r.req >= kStale; }
+    /// A parked conversation's cells all to the cache's buffer: the cell cards' units, its lot's
+    void parked_all(Parked& r) {
+        units_out(r);
+        if (r.from < r.upto) parked_top(r, r.from);
+        r.from = r.upto = r.held;
+    }
+    /// The conversations whose cells are all in their buffers are the cache's alone again: their lots are free
     void parked_trim() {
         for (size_t i = 0; i < parked.size();)
-            if (parked[i].ncard == 0 && parked[i].side.empty() && parked[i].from >= parked[i].upto) parked.erase(parked.begin() + (std::ptrdiff_t) i);
-            else ++i;
-        parked_note();
+            if (parked[i].ncard == 0 && parked[i].from >= parked[i].upto) {
+                lot_release(parked[i].lot, 0);
+                parked.erase(parked.begin() + (std::ptrdiff_t) i);
+            } else {
+                ++i;
+            }
     }
-    /// The cells [a, b) are about to be written (the live sequence's, or a conversation's own coming back): the
-    /// parked conversations' cells there leave the arrays first (`but`: not this one's) - from a conversation's start
-    /// on to a block or its buffer, from its end back to the buffer
-    void displace_range(int64_t a, int64_t b, const uint8_t* but = nullptr) {
-        if (a >= b) return;
-        const int64_t upto = (b + kParkStep - 1) / kParkStep * kParkStep;
-        for (Parked& r : parked) {
-            if (r.host == but || r.from >= r.upto || r.upto <= a || r.from >= b) continue;
-            if (r.from >= a) parked_out(r, std::min(upto, r.upto));
-            else parked_top(r, a);
-        }
-        parked_trim();
-        while (park_room > 0 && (int64_t) ((side_bytes() + side_bytes(true)) >> 20) > park_room && side_give()) {}
-    }
-    void displace(int64_t n, const uint8_t* but = nullptr) { displace_range(0, n, but); }
-    /// The layers' cards' VRAM a parked conversation's cells hold outside the live sequence's range: a unit of them,
-    /// the newest, to the cache's buffer.  False: no such cells (`but`: not this conversation's).
-    bool parked_room(const uint8_t* but = nullptr) {
-        for (Parked& r : parked) {
-            if (r.host == but || r.from >= r.upto) continue;
-            const int64_t step = (r.upto - 1) / unit * unit;   // (its last unit's first cell)
-            const int64_t a = r.upto <= lo ? std::max(r.from, step) : std::max({r.from, mapped, step});
-            if (a >= r.upto) continue;
-            homes_sync();
-            parked_top(r, a);
-            parked_trim();
-            return true;
-        }
-        return false;
-    }
-    /// Every parked conversation's cells to its buffer (the live sequence is about to move cells to the cards: their
-    /// units, and the arrays' ranges, are its own from there)
-    void parked_flush() {
-        if (parked.empty()) return;
+    /// The layers' cards' VRAM the parked conversations' cells hold: a unit of them, the newest of the conversation
+    /// parked the longest, to the cache's buffer - of those not asked for lately, or with `fresh` of any.  False: no
+    /// such cells (`but`: not this conversation's).
+    bool parked_room(const uint8_t* but = nullptr, bool fresh = false) {
+        Parked* old = nullptr;
+        for (Parked& r : parked)
+            if (r.host != but && r.from < r.upto && (fresh || stale(r)) && (old == nullptr || r.stamp < old->stamp)) old = &r;
+        if (old == nullptr) return false;
         homes_sync();
-        for (Parked& r : parked) parked_all(r);
-        parked.clear();
-        parked_from = INT64_MAX;
+        parked_top(*old, std::max(old->from, (old->upto - 1) / unit * unit));
+        parked_trim();
+        return true;
+    }
+    /// A lot no conversation is in gives its memory back.  False: none has any.
+    /// LAMINA_INK_STAGE_LOG: the lots after a conversation left or took one - the MiB each has mapped on the layers'
+    /// cards, the live one starred
+    void lots_say(const char* what, int64_t cells) {
+        if (!stage_log) return;
+        std::string t;
+        for (int l = 0; l < lots; ++l) t += (l ? " " : "") + std::to_string(lot_mapped(l) >> 20) + (l == lot ? "*" : "");
+        std::fprintf(stderr, "lamina: parked: %s, %lld cells; the lots' MiB: %s\n", what, (long long) cells, t.c_str());
+    }
+    bool lot_give() {
+        for (int l = 0; l < lots; ++l)
+            if (lot_idle(l) && lot_mapped(l) > 0) {
+                homes_sync();
+                lot_release(l, 0);
+                return true;
+            }
+        return false;
     }
     /// The cache's buffer `host` is gone, or written anew
     void parked_drop(const uint8_t* host) {
@@ -1938,18 +2102,22 @@ struct Engine {
         for (size_t i = 0; i < parked.size(); ++i)
             if (parked[i].host == host) {
                 homes_sync();
-                Parked r = std::move(parked[i]);
+                lot_release(parked[i].lot, 0);
+                for (Card& c : cards) {
+                    Card::Park& q = c.park[parked[i].lot];
+                    card_free(c, q.k_vm, q.v_vm, 0);
+                    q.cells = 0;
+                }
                 parked.erase(parked.begin() + (std::ptrdiff_t) i);
-                for (const Side& b : r.side) side_free(b);
-                if (r.from < r.upto) cells_release(r.from, r.top, nullptr);
                 break;
             }
-        parked_note();
     }
-    /// Memory for the cells [a, b) of every full visit where they have none (a conversation's own, coming back from
-    /// its buffer): the VRAM as ensure_mapped finds it, short of moving cells to the cards.  False: there is none.
+    /// Memory for the live lot's cells [a, b) of every full visit where they have none (a conversation's own, coming
+    /// back from its buffer, or a start it lends): the VRAM as ensure_mapped finds it, short of moving cells to the
+    /// cards.  False: there is none.
     bool cells_map(int64_t a, int64_t b, const uint8_t* but) {
         if (a >= b) return true;
+        if (!window_for(std::min(a, lo), b)) return false;
         const uint64_t G = lamina::core::vmm_granularity();
         const int64_t c0 = (int64_t) ((uint64_t) a * cell_bytes / G), c1 = (int64_t) (((uint64_t) b * cell_bytes + G - 1) / G);
         int64_t ranges = 0, ranges_sat = 0;
@@ -1968,7 +2136,7 @@ struct Engine {
                 room = (uint64_t) (hs * ranges_sat) * G + sat_keep <= fs;
             }
             if (room) break;
-            if (!(chunk_give() || side_give(but) || parked_room(but))) return false;
+            if (!(chunk_give() || lot_give() || parked_room(but) || parked_room(but, true))) return false;
         }
         homes_sync();
         for (Visit& V : visits) {
@@ -2133,17 +2301,17 @@ struct Engine {
         const auto t0 = std::chrono::steady_clock::now();
         const int was = chunk_cap;
         chunk_free();
-        for (;;) {   // (the parked conversations' blocks give way to a larger chunk's buffers)
+        for (;;) {   // (the parked conversations' newest cells give way to a larger chunk's buffers)
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
             bool room = fr >= reserve + chunk_bytes_here(rows) + (256ull << 20);
-            if (room && sat && side_bytes(true) > 0) {
+            if (room && sat && room_bytes(true) > 0) {
                 const OnDev dv(sat->dev);
                 size_t fs = 0, ts = 0;
                 CK(cudaMemGetInfo(&fs, &ts));
                 room = fs >= sat_keep + chunk_bytes(rows) + (256ull << 20);
             }
-            if (room || !(side_give() || parked_room())) break;
+            if (room || !(lot_give() || parked_room())) break;
         }
         chunk_alloc(rows);
         if (stage_log)
@@ -2151,7 +2319,7 @@ struct Engine {
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
     /// ensure(n) would find its VRAM on this card with `extra` more bytes of it taken (fewer: freed)
-    bool cells_fit(int64_t n, int64_t extra, bool keep = false) {
+    bool cells_fit(int64_t n, int64_t extra) {
         const int64_t G = (int64_t) lamina::core::vmm_granularity();
         auto chunks = [&](int64_t cells) { return ((int64_t) ((uint64_t) cells * cell_bytes) + G - 1) / G; };
         int64_t need = 0;
@@ -2162,9 +2330,8 @@ struct Engine {
         }
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
-        // (the parked conversations' blocks here go, unless `keep`, and their cells outside the live range)
-        const int64_t above = (int64_t) fr + (keep ? 0 : (int64_t) side_bytes()) + (int64_t) side_cells(room_cells(), false) -
-                              (int64_t) reserve - extra;
+        // (the parked conversations' cells give way, and a lot no conversation is in)
+        const int64_t above = (int64_t) fr + (int64_t) room_bytes(false) - (int64_t) reserve - extra;
         return above >= 0 && need <= (int64_t) spare.size() + above / G;
     }
     /// `bytes` of this card's VRAM free above the reserve, with experts in RAM: the spare chunks go back to the
@@ -2199,7 +2366,7 @@ struct Engine {
             return;
         }
         const int64_t p0 = pos();
-        auto fits = [&](int rows, bool keep = false) {   // the buffers of `rows` rows beside the cells of a chunk that long
+        auto fits = [&](int rows) {   // the buffers of `rows` rows beside the cells of a chunk that long
             const int64_t more = (int64_t) chunk_bytes(rows) - (int64_t) chunk_bytes(chunk_cap);
             const int64_t n = std::min<int64_t>(ctx, p0 + (whole ? left : std::min<int64_t>(rows, left)));
             if (sat) {   // (the split's card takes the same buffers: beside its cells' next step, above what it leaves free)
@@ -2211,27 +2378,22 @@ struct Engine {
                 const OnDev dv(sat->dev);
                 size_t fs = 0, ts = 0;
                 CK(cudaMemGetInfo(&fs, &ts));
-                if ((int64_t) fs + (keep ? 0 : (int64_t) side_bytes(true)) + (int64_t) side_cells(room_cells(), true) <
-                    need + (int64_t) sat_keep + (more > 0 ? more + (256ll << 20) : more))
+                if ((int64_t) fs + (int64_t) room_bytes(true) < need + (int64_t) sat_keep + (more > 0 ? more + (256ll << 20) : more))
                     return false;
             }
             const int64_t here = (int64_t) chunk_bytes_here(rows) - (int64_t) chunk_bytes_here(chunk_cap);
-            return cells_fit(n, here > 0 ? here + (256ll << 20) : here, keep);
+            return cells_fit(n, here > 0 ? here + (256ll << 20) : here);
         };
-        // the parked conversations' blocks on the cards give way to a larger chunk for a part long enough to gain more
-        // than their way to RAM and back takes: 8 tokens a MiB (a larger chunk reads ~55 us a token sooner, the link
-        // carries ~5 GB/s)
-        const bool keep = left <= (int64_t) ((side_bytes() + side_bytes(true)) >> 20) * 8;
         // The rows a chunk takes follow the part; buffers that hold more stay while the cells fit beside them (a
         // resize takes 100-200 ms, what 20K tokens gain: the next long part, or request, finds them made).
-        auto holds = [&](int rows) { return (rows <= chunk_cap && fits(chunk_cap, keep)) || fits(rows, keep); };
+        auto holds = [&](int rows) { return (rows <= chunk_cap && fits(chunk_cap)) || fits(rows); };
         int want = prefill;
         // In stages the cards overlap whatever the rows, and a larger chunk gains little (the RTX 3090 with an RTX
         // 5070 Ti: 6% at 2,048 rows, 1% more at 4,096) for VRAM the cells do not get: 2,048 rows at most, for a
         // stretch of eight such chunks or more.
         if (whole) {   // (a size the second set exists at)
             for (int rows = std::min(prefill_max, kStageRows); rows > prefill && want == prefill; rows /= 2)
-                if (left >= 8 * (int64_t) rows && (chunk_cap > kStageRows ? fits(rows, keep) : holds(rows))) want = rows;
+                if (left >= 8 * (int64_t) rows && (chunk_cap > kStageRows ? fits(rows) : holds(rows))) want = rows;
             if (chunk_cap > kStageRows || chunk_cap < want || !fits(chunk_cap)) chunk_set(want);
             chunk_rows = want;
             return;
@@ -2330,7 +2492,6 @@ struct Engine {
         stage_log = std::getenv("LAMINA_INK_STAGE_LOG") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
         snap_sync = std::getenv("LAMINA_INK_SNAP_SYNC") != nullptr;
-        if (const char* r = std::getenv("LAMINA_INK_PARK_ROOM")) park_room = std::atoll(r);
         CK(cudaEventCreateWithFlags(&ev_q[0], cudaEventDisableTiming));
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
             sat = std::make_unique<Sat>();
@@ -2642,25 +2803,76 @@ struct Engine {
                 throw Fatal{1};
             }
         }
+        // A lot's ranges: the whole context where no cell card takes the older cells; else a window the layers' cards'
+        // cells have room to move in - twice what the cards hold - that follows the sequence (window_for).  The
+        // context's addresses a lot would not fit an RTX 3090's process at 1,048,576 tokens.
+        lot_span = cards.empty() ? ctx : std::min<int64_t>(ctx, (2 * near_cap + 4 * unit + unit - 1) / unit * unit);
+        if (const char* e = std::getenv("LAMINA_INK_LOT_SPAN"); e != nullptr && !cards.empty())   // (a test's: the window's moves)
+            lot_span = std::min<int64_t>(ctx, std::max<int64_t>(4 * unit, std::atoll(e) / unit * unit));
         for (Visit& V : visits) {
             if (V.cells.ring) continue;
             const OnDev dv(on_sat((int) (&V - visits.data())) ? sat->dev : -1);
             V.cells.cap = ctx;
             const uint64_t bytes = (uint64_t) ctx * cell_bytes;
             if (grow) {
-                V.k_vm = std::make_unique<lamina::core::VmmRange>();
-                V.v_vm = std::make_unique<lamina::core::VmmRange>();
-                if (!V.k_vm->reserve(bytes) || !V.v_vm->reserve(bytes)) {
+                V.k_lot[0] = std::make_unique<CellRange>();
+                V.v_lot[0] = std::make_unique<CellRange>();
+                if (!V.k_lot[0]->vm.reserve((uint64_t) lot_span * cell_bytes) || !V.v_lot[0]->vm.reserve((uint64_t) lot_span * cell_bytes)) {
                     std::fprintf(stderr, "lamina: the cells' address range could not be reserved\n");
                     throw Fatal{1};
                 }
-                V.cells.k = V.k_vm->base();
-                V.cells.v = V.v_vm->base();
+                V.k_vm = V.k_lot[0].get();
+                V.v_vm = V.v_lot[0].get();
+                V.cells.k = V.k_vm->ptr();
+                V.cells.v = V.v_vm->ptr();
             } else {
                 V.cells.k = dalloc<uint8_t>(bytes);
                 V.cells.v = dalloc<uint8_t>(bytes);
             }
         }
+        // The lots after the first (the conversations parked on the cards): addresses alone, of which a card has a
+        // bound - an RTX 3090 under Windows reports its free VRAM less by what a process reserves past ~130 GiB with
+        // its pinned host memory.  A lot stays where each card's free VRAM is what it was with kLotSpare of addresses
+        // to spare (the pinned buffers made later: checkpoints).
+        lots = 1;
+        int lots_most = kLots;   // (LAMINA_INK_LOTS: a test's - 1: no conversation stays on the cards; 2: one beside the live)
+        if (const char* e = std::getenv("LAMINA_INK_LOTS")) lots_most = std::max(1, std::min(kLots, std::atoi(e)));
+        for (int l = 1; grow && l < lots_most; ++l) {
+            auto free_on = [&](bool there) {
+                const OnDev dv(there ? sat->dev : -1);
+                size_t fr = 0, tot = 0;
+                CK(cudaMemGetInfo(&fr, &tot));
+                return fr;
+            };
+            const size_t f0 = free_on(false), f1 = sat ? free_on(true) : 0;
+            bool ok = true;
+            for (Visit& V : visits) {
+                if (V.cells.ring) continue;
+                const OnDev dv(on_sat((int) (&V - visits.data())) ? sat->dev : -1);
+                V.k_lot[l] = std::make_unique<CellRange>();
+                V.v_lot[l] = std::make_unique<CellRange>();
+                ok = ok && V.k_lot[l]->vm.reserve((uint64_t) lot_span * cell_bytes) &&
+                     V.v_lot[l]->vm.reserve((uint64_t) lot_span * cell_bytes);
+            }
+            for (int there = 0; ok && there < (sat ? 2 : 1); ++there) {
+                const OnDev dv(there ? sat->dev : -1);
+                lamina::core::VmmRange spare_addr;
+                size_t fr = 0, tot = 0;
+                ok = spare_addr.reserve(kLotSpare) && cudaMemGetInfo(&fr, &tot) == cudaSuccess &&
+                     fr + (64ull << 20) >= (there ? f1 : f0);
+            }
+            if (!ok) {
+                for (Visit& V : visits) {
+                    if (V.cells.ring) continue;
+                    const OnDev dv(on_sat((int) (&V - visits.data())) ? sat->dev : -1);
+                    V.k_lot[l].reset();
+                    V.v_lot[l].reset();
+                }
+                break;
+            }
+            lots = l + 1;
+        }
+        if (stage_log) std::fprintf(stderr, "lamina: parked: %d lots of the cells' addresses\n", lots);
         if (!cards.empty()) {
             for (const Card& c : cards) card_lock(c);   // (every lock is known by now: none is added after the first of these)
             const size_t rows = (size_t) kMaxT * (size_t) g.n_head;
@@ -2807,13 +3019,9 @@ struct Engine {
                 std::fprintf(stderr, "lamina: --cell-gpu-clocks %s: %s: GPU %d keeps the driver's clocks\n", spec.c_str(),
                              why.c_str(), dev);
         }
-        for (int64_t i = 0; i < g.n_full_visits(); ++i) {
-            c.k_vm.push_back(std::make_unique<lamina::core::VmmRange>());
-            c.v_vm.push_back(std::make_unique<lamina::core::VmmRange>());
-            if (!c.k_vm.back()->reserve((uint64_t) c.cap * cell_bytes) || !c.v_vm.back()->reserve((uint64_t) c.cap * cell_bytes)) {
-                std::fprintf(stderr, "lamina: --cell-gpus: GPU %d: the cells' address range could not be reserved\n", dev);
-                throw Fatal{1};
-            }
+        if (!card_slots(c, std::min<int64_t>(c.cap, kCardSlots))) {   // (the first lot's ranges: they grow with its units)
+            std::fprintf(stderr, "lamina: --cell-gpus: GPU %d: the cells' address range could not be reserved\n", dev);
+            throw Fatal{1};
         }
         auto dev_alloc = [&](size_t bytes) {
             void* p = nullptr;
@@ -2861,9 +3069,8 @@ struct Engine {
         }
         int best = -1;
         for (size_t i = 0; i < cards.size(); ++i)
-            if (cards[i].cells + unit <= cards[i].cap && (best < 0 || cards[i].cells < cards[(size_t) best].cells)) best = (int) i;
-        if (best < 0) return false;
-        parked_flush();   // (the arrays' ranges move with the cards' units from here)
+            if (card_held(cards[i]) + unit <= cards[i].cap && (best < 0 || cards[i].cells < cards[(size_t) best].cells)) best = (int) i;
+        if (best < 0) return units_give() && evict();   // (the cards are full: a parked conversation's units to its buffer)
         Card& c = cards[(size_t) best];
         const uint64_t G = lamina::core::vmm_granularity();
         const uint64_t bytes = (uint64_t) unit * cell_bytes;
@@ -2872,12 +3079,13 @@ struct Engine {
         homes_sync();
         auto none = [] { return (lamina::core::VmmChunk) 0; };
         bool ok = true;
+        ok = card_slots(c, c.cells + unit);
         {
             const OnDev dv(c.dev);
             for (size_t i = 0; i < c.k_vm.size() && ok; ++i) ok = c.k_vm[i]->map_range(c0, c1, none) && c.v_vm[i]->map_range(c0, c1, none);
         }
         if (!ok) {   // (its VRAM went elsewhere since the start: it takes no more)
-            c.cap = c.cells;
+            c.cap = card_held(c);
             return evict();
         }
         const int64_t m0 = (int64_t) ((uint64_t) lo * cell_bytes / G), m1 = (int64_t) (((uint64_t) lo * cell_bytes + bytes) / G);
@@ -2933,9 +3141,13 @@ struct Engine {
         for (size_t i = 0; i < u; ++i) n += unit_card[i] == unit_card[u];
         return n * unit;
     }
-    /// `bytes` of one array between a card's range (at `cell`) and pinned or pageable host memory, waited for
+    /// `bytes` of one array between a card's range (at `cell`: the live lot's, or the one given) and pinned or pageable
+    /// host memory, waited for
     void card_copy(Card& c, size_t fi, int side, int64_t cell, uint8_t* host, size_t bytes, bool to_host) {
-        uint8_t* const d = (side ? c.v_vm[fi] : c.k_vm[fi])->base() + (size_t) cell * cell_bytes;
+        card_copy(c, *(side ? c.v_vm[fi] : c.k_vm[fi]), cell, host, bytes, to_host);
+    }
+    void card_copy(Card& c, lamina::core::VmmRange& range, int64_t cell, uint8_t* host, size_t bytes, bool to_host) {
+        uint8_t* const d = range.base() + (size_t) cell * cell_bytes;
         const OnDev dv(c.dev);
         if (to_host) CK(cudaMemcpyAsync(host, d, bytes, cudaMemcpyDeviceToHost, c.st));
         else CK(cudaMemcpyAsync(d, host, bytes, cudaMemcpyHostToDevice, c.st));
@@ -2949,21 +3161,29 @@ struct Engine {
         if (lo == 0 || pos - reach >= lo) return;
         const int64_t u0 = std::max<int64_t>(0, pos - reach) / unit;   // the first unit the layers' cards hold after
         homes_sync();
-        if (parked_from < lo) displace(lo);   // (a parked conversation's cells where the units come back)
         const uint64_t G = lamina::core::vmm_granularity();
         const size_t bytes = (size_t) unit * cell_bytes;
-        for (size_t vi = 0; vi < visits.size(); ++vi) {   // the layers' cards' own cells: all past `pos`
+        // The layers' cards' own cells past `pos` are no sequence's: their memory goes back.  The ones before it stay
+        // (a state restored within the bias table's reach above the first of them has cells on both sides of it).
+        const int64_t keep = (int64_t) (((uint64_t) std::max(pos, lo) * cell_bytes + G - 1) / G);   // the first chunk past them
+        const int64_t kept = pos > lo ? std::min(mapped, (int64_t) ((uint64_t) keep * G / cell_bytes)) : 0;   // their end
+        for (size_t vi = 0; vi < visits.size(); ++vi) {
             Visit& V = visits[vi];
             if (V.cells.ring) continue;
             const OnDev dv(home_dev(vi));
-            for (int64_t i = (int64_t) ((uint64_t) lo * cell_bytes / G); i < V.k_vm->chunks() && V.k_vm->mapped(i); ++i) {
+            for (int64_t i = keep; i < V.k_vm->chunks() && V.k_vm->mapped(i); ++i) {
                 lamina::core::vmm_chunk_free(V.k_vm->unmap(i));
                 lamina::core::vmm_chunk_free(V.v_vm->unmap(i));
             }
         }
-        const int64_t top = lo;
+        // the units that come back: up to `pos`, a unit's end (the cards drop the later ones)
+        const int64_t top = std::min(lo, (pos + unit - 1) / unit * unit);
         lo = u0 * unit;
         mapped = lo;
+        if (!window_for(lo, std::max(top, kept))) {
+            std::fprintf(stderr, "lamina: no addresses for the cells a restored state brings back from the cards\n");
+            throw Fatal{1};
+        }
         auto none = [] { return (lamina::core::VmmChunk) 0; };
         const int64_t c0 = (int64_t) ((uint64_t) lo * cell_bytes / G), c1 = (int64_t) ((uint64_t) top * cell_bytes / G);
         for (size_t vi = 0; vi < visits.size(); ++vi) {
@@ -2975,7 +3195,7 @@ struct Engine {
                 throw Fatal{1};
             }
         }
-        mapped = top;
+        mapped = std::max(top, kept);
         while ((int64_t) unit_card.size() > u0) {   // the cards' last units, the newest first
             const size_t u = unit_card.size() - 1;
             Card& c = cards[(size_t) unit_card[u]];
@@ -2993,6 +3213,7 @@ struct Engine {
                         CK(cudaStreamSynchronize(home_st(vi)));
                     }
                 }
+            card_free(c, c.k_vm, c.v_vm, c.cells);   // (the card's room is every lot's)
             if (c.cells == 0) card_empty(c);
             card_lock(c);
             unit_card.pop_back();
@@ -3016,6 +3237,7 @@ struct Engine {
         }
         for (Card& c : cards) {
             c.cells = 0;
+            card_free(c, c.k_vm, c.v_vm, 0);
             card_empty(c);
             card_lock(c);
         }
@@ -3171,15 +3393,9 @@ struct Engine {
         if (capturing) CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeGlobal));
     }
 
-    /// The cells before position n are about to be written: a parked conversation's cells there go to its buffer
-    /// (displace), and the full visits have memory for them (ensure_mapped)
+    /// Memory for the full visits' cells up to position n, in the live sequence's lot: where the main card has none
+    /// left above its reserve, its oldest cells move to a card first.  False: neither holds them.
     bool ensure(int64_t n) {
-        if (n > parked_from) displace_range(lo, n);   // (the cells before `lo` are the cell cards': not written here)
-        return ensure_mapped(n);
-    }
-    /// Memory for the full visits' cells up to position n: where the main card has none left above its reserve, its
-    /// oldest cells move to a card first.  False: neither holds them.
-    bool ensure_mapped(int64_t n) {
         if (n <= mapped) return true;
         if (n > ctx) return false;
         const int64_t target = std::min<int64_t>(ctx, (n + kGrow - 1) / kGrow * kGrow);
@@ -3190,7 +3406,7 @@ struct Engine {
             if (visits[v].k_vm) (on_sat((int) v) ? ranges_sat : ranges) += 2;
         int64_t need = 0;
         for (;;) {
-            // (the chunks the arrays lack from the first cell on: a parked conversation's cells past it have theirs)
+            // (the chunks the lot lacks from the first cell on: what a sequence before left mapped is this one's)
             const int64_t c_lo = (int64_t) ((uint64_t) lo * cell_bytes / G);
             need = holes(c_lo, chunks(target), false) * ranges;
             size_t fr = 0, tot = 0;
@@ -3205,11 +3421,13 @@ struct Engine {
                 room_sat = (uint64_t) (holes(c_lo, chunks(target), true) * ranges_sat) * G + sat_keep <= fs;
             }
             if (room && room_sat && (main_limit <= 0 || target - lo <= std::max(3 * unit, main_limit))) break;
-            // (a grown chunk's buffers go first, then the parked conversations' blocks, then their cells outside
-            // this sequence's range)
-            if ((!room || !room_sat) && (chunk_give() || side_give() || parked_room())) continue;
+            // (a grown chunk's buffers go first, then a lot no conversation is in, then the newest cells of the parked
+            // conversations not asked for lately; then this sequence's oldest cells go to the cell cards, and where
+            // they take none, or it has none to give yet, the other parked conversations' cells go to RAM)
+            if ((!room || !room_sat) && (chunk_give() || lot_give() || parked_room())) continue;
             if (!evict()) {
                 if (evict_held) return false;   // (cells mapped ahead: this step is the sequence's own to take, later)
+                if ((!room || !room_sat) && parked_room(nullptr, true)) continue;
                 if (room && room_sat) break;   // (the test's limit alone: the cards have the VRAM)
                 if (room_sat && m->in_ram && give_way(need - have)) continue;   // (the experts the ranking puts last)
                 return false;
@@ -3220,10 +3438,11 @@ struct Engine {
             for (int i = 0; i < kBalance; ++i) {
                 int64_t least = INT64_MAX;
                 for (const Card& c : cards)
-                    if (c.cells + unit <= c.cap) least = std::min(least, c.cells);
+                    if (card_held(c) + unit <= c.cap) least = std::min(least, c.cells);
                 if (least == INT64_MAX || pos() - lo - unit < least + unit || !evict()) break;
             }
         if (evict_held) return false;
+        if (!window_for(lo, target)) return false;
         CK(cudaStreamSynchronize(st));
         auto take = [&] { return take_spare(); };
         const int64_t from = (int64_t) ((uint64_t) lo * cell_bytes / G);
@@ -5331,7 +5550,6 @@ struct Engine {
     /// finds no VRAM: `mapped` says how far it came.
     void ensure_ahead(int64_t n) {
         const int64_t real = n_pos, end = std::min(ctx, real + n);
-        if (end > parked_from) displace_range(lo, end);   // (the stretch's cells may have their memory already)
         evict_end = real;
         evict_held = false;
         while (mapped < end) {
@@ -5608,7 +5826,7 @@ struct Engine {
         // whatever the forwards' rows)
         if (p0 + T > ctx || !ensure(std::min<int64_t>(p0 + kMaxT, ctx))) return false;
         const bool waits = window && T > 1;   // (a window of one row: its states as any forward's)
-        const int key = T * 16 + n_head + (waits ? 256 : 0);
+        const int key = T * 16 + n_head + (waits ? 256 : 0) + lot * 4096;
         CK(cudaStreamSynchronize(st));   // the last forward has read the pinned rows
         prof_start();
         embed(D, tok, T, p0);
@@ -5988,125 +6206,127 @@ struct Engine {
     /// The full visits' first `cells` cells between the device and `host`, a copy of `held` >= cells cells (a visit's
     /// K, then its V, each `held` cells long)
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
-        const size_t mine = (size_t) held * cell_bytes;
         if (to_host) {
             parked_drop(host);
-            // left where they are: the cells reach a block or the buffer when a sequence is about to write over them
-            // (the live sequence wrote every cell it holds, so no other parked conversation's are among them)
-            if (park_here && !m->in_ram && cells == held && cells > 0) {
-                if (lo > 0) {
-                    // cells on the cards: the units stay there with this sequence's account of them, and the next
-                    // sequence starts with none (one such conversation at a time: the one before to its buffer)
-                    homes_sync();
-                    for (size_t i = 0; i < parked.size();)
-                        if (parked[i].ncard > 0) {
-                            parked_all(parked[i]);
-                            parked.erase(parked.begin() + (std::ptrdiff_t) i);
-                        } else {
-                            ++i;
-                        }
-                    parked.push_back({host, held, lo, lo, lo, held, std::max(mapped, held), {}, unit_card});
-                    unit_card.clear();
-                    for (Card& c : cards) {
-                        c.cells = 0;
-                        card_empty(c);
-                        card_lock(c);
-                    }
-                    clocks.release_after(clocks_hold);
-                    lo = 0;
-                    mapped = 0;
-                } else {
-                    parked.push_back({host, held, 0, 0, 0, held, std::max(mapped, held), {}, {}});
+            // left where they are, in the lot the sequence wrote; the next one goes on in a free lot
+            if (park_here && lots > 1 && !m->in_ram && cells == held && cells > 0) {
+                homes_sync();
+                int nl = lot_free();
+                if (nl < 0) {   // (every lot holds a conversation: the one parked the longest to its buffer)
+                    size_t old = 0;
+                    for (size_t i = 1; i < parked.size(); ++i)
+                        if (parked[i].stamp < parked[old].stamp) old = i;
+                    parked_all(parked[old]);
+                    parked_trim();
+                    nl = lot_free();
                 }
-                parked_note();
+                parked.push_back({host, held, lot, lo, lo, held, std::max(mapped, held), unit_card, ++park_stamp, req_n, lot_quick[lot]});
+                lot_quick[nl] = false;
+                if (lo > 0) clocks.release_after(clocks_hold);
+                unit_card.clear();
+                lo = 0;
+                mapped = 0;
+                if (lot_mapped(nl) > 0) lot_release(nl, 0);   // (what a sequence no one kept left there)
+                lot_use(nl);   // (its units stay on the cell cards, in its lot's ranges there)
+                lots_say("a conversation stays in its lot", held);
                 return true;
             }
-        } else {
-            // The conversation's cells come from wherever they are - its buffer, its blocks, the arrays (those in
-            // place), the cell cards' units - once the cells other parked conversations have at the positions written
-            // are out of the arrays.  One that leaves the park (kv_take) to go on from within its own near cells
-            // takes its units and their account with it, as the live sequence would have gone on; cut before them,
-            // or lending a start, the cells are copied from the units and the layers' cards hold them all - through
-            // the buffer where those have no room for that (a sequence that grows moves cells to the cards).
-            const bool take = taking == host;
-            taking = nullptr;
-            Parked* r = parked_of(host);
-            bool here = r != nullptr;
-            if (here && r->ncard > 0 && (lo != 0 || !unit_card.empty())) here = false;   // (the live sequence has units of its own)
-            if (here) {
-                const int64_t reach = std::max(m->g.rel_extent, m->g.n_swa);
-                const bool mine = take && r->ncard > 0 && cells - reach >= r->ncard;
-                const int64_t low = mine ? r->ncard : 0;   // the arrays' first cell of the sequence
-                displace_range(low, std::min(cells, r->from), host);
-                if (cells > r->upto) displace_range(r->upto, cells, host);
+            return kv_plain(cells, held, host, true);
+        }
+        const bool take = taking == host;
+        taking = nullptr;
+        Parked* r = parked_of(host);
+        if (r != nullptr && take && r->from == r->ncard) {
+            // It leaves the park: the live sequence in its own lot again, with its units of the cell cards and their
+            // account, as it would have gone on (cut at a checkpoint: cards_rewind brings back what the cut needs).
+            homes_sync();
+            if (lo > 0) cards_clear();
+            const Parked q = std::move(*r);
+            parked.erase(parked.begin() + (r - parked.data()));
+            lot_use(q.lot);   // (with its units' ranges on the cell cards)
+            lot_quick[lot] = req_n - q.req <= kQuick;
+            lo = q.ncard;
+            mapped = q.top;
+            unit_card = q.units;
+            if (lo > 0) clocks.hold();
+            bool ok = true;
+            if (cells > q.upto) {   // (its newest cells had given way: from the buffer, as a sequence that grows)
+                const int64_t was = n_pos;
+                n_pos = q.upto;
+                ok = ensure(cells) && lot_copy(lot, q.upto, cells - q.upto, host, held, true);
+                n_pos = was;
+            }
+            if (ok && lo > 0 && cells - std::max(m->g.rel_extent, m->g.n_swa) < lo) ok = units_home(cells);
+            if (!ok) {   // (no VRAM for them: through the buffer, the cells before the cut)
+                if (!kv_plain(std::min({q.upto, held, cells}), held, host, true)) return false;
+                return kv_plain(cells, held, host, false);
+            }
+            if (sat && !cards.empty()) n_pos = cells;   // (as the copy through the cards leaves it)
+            lots_say("a conversation is the live one in its lot again", cells);
+            return true;
+        }
+        if (r != nullptr && !take) {
+            // A start it lends: copied to the live lot - from its lot on the cards, from the cell cards' units, from
+            // the buffer what had given way - where the layers' cards hold it (a lender's own newest cells may go
+            // to its buffer for the room).
+            homes_sync();
+            if (lo > 0) cards_clear();
+            if (cells_map(0, cells, nullptr)) {
                 r = parked_of(host);
-                // (the VRAM for the cells that come back: a lender's own newest cells may go to its buffer for it)
-                if (!cells_map(low, cells, take ? host : nullptr)) {
-                    r = parked_of(host);
-                    if (mine || r == nullptr || r->ncard == 0) return false;
-                    here = false;   // (the layers' cards do not hold them all)
+                bool ok = true;
+                if (r == nullptr) {   // (every cell of the lender reached its buffer for the room)
+                    ok = lot_copy(lot, 0, cells, host, held, true);
                 } else {
-                    r = parked_of(host);
-                    if (mine) {
-                        lo = low;
-                        mapped = std::max(low, mapped);
-                        unit_card = std::move(r->units);
-                        r->units.clear();
-                        r->ncard = 0;
-                        for (const int ci : unit_card) cards[(size_t) ci].cells += unit;
-                        for (Card& c : cards) card_lock(c);
-                        clocks.hold();
-                    }
-                    bool ok = true;
-                    if (r == nullptr) {   // (every cell of the lender reached its buffer for the room)
-                        ok = side_copy(low, cells - low, nullptr, host, held, true);
-                    } else {
-                        const int64_t carded = std::min(cells, r->ncard);   // the cells copied from the cell cards
-                        for (int64_t c0 = 0; ok && c0 < carded; c0 += unit) {
-                            const size_t u = (size_t) (c0 / unit), bytes = (size_t) std::min(unit, carded - c0) * cell_bytes;
-                            Card& c = cards[(size_t) r->units[u]];
-                            int64_t slot = 0;
-                            for (size_t i = 0; i < u; ++i) slot += r->units[i] == r->units[u];
-                            for (size_t vi = 0; vi < visits.size(); ++vi) {
-                                const Visit& V = visits[vi];
-                                if (V.cells.ring) continue;
-                                for (int side = 0; side < 2; ++side) {
-                                    card_copy(c, (size_t) full_of[vi], side, slot * unit, stage_h[0], bytes, true);
-                                    const OnDev dv(home_dev(vi));
-                                    ok = ok && soft(cudaMemcpyAsync((side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes, stage_h[0],
-                                                                    bytes, cudaMemcpyHostToDevice, home_st(vi)));
-                                    ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
-                                }
+                    const int64_t carded = std::min(cells, r->ncard);
+                    for (int64_t c0 = 0; ok && c0 < carded; c0 += unit) {
+                        const size_t u = (size_t) (c0 / unit), bytes = (size_t) std::min(unit, carded - c0) * cell_bytes;
+                        Card& c = cards[(size_t) r->units[u]];
+                        int64_t slot = 0;
+                        for (size_t i = 0; i < u; ++i) slot += r->units[i] == r->units[u];
+                        for (size_t vi = 0; vi < visits.size(); ++vi) {
+                            const Visit& V = visits[vi];
+                            if (V.cells.ring) continue;
+                            for (int side = 0; side < 2; ++side) {
+                                Card::Park& q = c.park[r->lot];
+                                card_copy(c, *(side ? q.v_vm : q.k_vm)[(size_t) full_of[vi]], slot * unit, stage_h[0], bytes, true);
+                                const OnDev dv(home_dev(vi));
+                                ok = ok && soft(cudaMemcpyAsync((side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes, stage_h[0],
+                                                                bytes, cudaMemcpyHostToDevice, home_st(vi)));
+                                ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
                             }
                         }
-                        const int64_t h0 = std::max(low, r->ncard), n0 = std::min(cells, r->from), a1 = std::min(cells, r->upto);
-                        ok = ok && side_copy(h0, std::min(n0, r->in_host) - h0, nullptr, host, held, true);
-                        for (const Side& b : r->side)
-                            if (b.at < n0) ok = ok && side_copy(b.at, std::min(b.n, n0 - b.at), &b, nullptr, held, true);
-                        if (cells > a1) ok = ok && side_copy(a1, cells - a1, nullptr, host, held, true);
                     }
-                    if (ok) mapped = std::max(mapped, cells);
-                    if (take && r != nullptr) {   // (it is the live sequence now: nothing of it stays parked)
-                        const int64_t top = r->top;
-                        for (const Side& b : r->side) side_free(b);
-                        parked.erase(parked.begin() + (r - parked.data()));
-                        homes_sync();
-                        cells_release(mapped, top, nullptr);   // (what the arrays had for the cells cut off, past the sequence's)
-                    }
-                    parked_note();
-                    if (ok && sat && !cards.empty()) n_pos = cells;   // (as the copy through the cards leaves it)
-                    return ok;
+                    const int64_t n0 = std::min(cells, r->from), a1 = std::min(cells, r->upto);
+                    ok = ok && lot_copy(lot, carded, n0 - carded, host, held, true);
+                    ok = ok && lot_copy(r->lot, n0, a1 - n0, nullptr, held, false, lot);
+                    ok = ok && lot_copy(lot, a1, cells - a1, host, held, true);
                 }
+                if (ok) mapped = std::max(mapped, cells);
+                if (ok && sat && !cards.empty()) n_pos = cells;   // (as the copy through the cards leaves it)
+                lots_say("a start copied from a parked conversation's lot", cells);
+                return ok;
             }
-            if (r != nullptr) {   // through the buffer, below
-                homes_sync();
+            r = parked_of(host);
+        }
+        if (r != nullptr) {   // through the buffer, as a sequence that grows
+            homes_sync();
+            if (take) {
                 parked_all(*r);
                 parked_trim();
+            } else {   // (a lender stays on the cards: its buffer gets a copy of what they hold of the start)
+                units_copy(*r);
+                if (!lot_copy(r->lot, r->from, std::min(cells, r->upto) - r->from, host, held, false)) parked_lost();
             }
-            if (cells > parked_from) displace(cells);   // (the copy below writes the cells before `cells`)
         }
+        lots_say("a conversation through its buffer", cells);
+        return kv_plain(cells, held, host, false);
+    }
+    /// The same through the buffer alone: every cell copied
+    bool kv_plain(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
+        const size_t mine = (size_t) held * cell_bytes;
         if (cards.empty()) {
             const size_t w = (size_t) cells * cell_bytes;
+            if (!to_host && !ensure(cells)) return false;
             bool ok = true;
             for (Visit& V : visits) {
                 if (V.cells.ring) continue;
@@ -6416,9 +6636,9 @@ struct Serve {
         cache = std::make_unique<Cache>(E, copt);
         cache->whole_prompt = true;   // (a prompt's end is a checkpoint with its logits)
         cache->keep_ends = true;      // (and a turn's end: it stays when the next prompt's comes)
-        // (with cell cards a restored conversation finds its room a unit at a time: Engine::kv_copy)
-        // (the memory alone: the cells a parked conversation left in place are not written over by its own return)
-        cache->ensure_kv = [this](int64_t cells) { return E.cards.empty() ? E.ensure_mapped(cells) : cells <= E.ctx; };
+        // (a conversation that comes back finds its memory in Engine::kv_copy: its own lot's, or the live lot's as it
+        // is written - mapped here it would be the lot's the live sequence is in before the return)
+        cache->ensure_kv = [this](int64_t cells) { return cells <= E.ctx; };
         uint64_t ram_now = 0;
         const bool ram_known = copt.ram_reserve_mib > 0 && lamina::platform::available_ram(ram_now);
         if (ram_known)
@@ -6620,6 +6840,7 @@ struct Serve {
                 cache->clear();
                 poisoned = false;
             }
+            ++E.req_n;   // (a parked conversation's age: what it gives way to)
             const int64_t held = cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), {});
             reuse = (size_t) std::max<int64_t>(0, held);
             if (reuse == ids.size() && !E.logits_held) {   // (a whole prompt without its logits: read again)
