@@ -1293,6 +1293,7 @@ struct Engine {
     // end go in after them and are written over by the rows that stay), the block's buffers, the head's product.
     const Spark* sp = nullptr;
     int64_t sp_reach = 32768;        // context cells a layer without a window keeps (--dspark-reach)
+    int64_t sp_stretch = 0;          // LAMINA_INK_SPARK_STRETCH=<cells>: a scan's stretch (a test's; 0: by the cells in use)
     static constexpr int64_t kSparkSlack = 4096;   // cells a ring keeps past its layer's: a state may step back that far
     struct SparkRing {
         ik::Cells cells{};
@@ -4844,6 +4845,7 @@ struct Engine {
         // the rings: a layer's cells, the block's after them, and the slack; whole stretches of whole tiles
         sp_ring.resize((size_t) s.n_layer);
         int max_ch = 1;
+        if (const char* e = std::getenv("LAMINA_INK_SPARK_STRETCH")) sp_stretch = std::max<int64_t>(0, std::atoll(e));
         for (int l = 0; l < s.n_layer; ++l) {
             SparkRing& r = sp_ring[(size_t) l];
             r.see = s.layers[(size_t) l].window ? s.n_swa : std::max<int64_t>(sp_reach, s.n_swa);
@@ -4851,6 +4853,7 @@ struct Engine {
             r.chunk = (int) std::max<int64_t>(3, std::min<int64_t>(30, (r.see + (int64_t) T + 64 * ik::kTcCells - 1) / (64 * ik::kTcCells))) *
                       ik::kTcCells;
             r.n_chunks = (int) ((r.see + T + r.chunk - 1) / r.chunk);
+            if (sp_stretch > 0) r.n_chunks = (int) std::min<int64_t>(512, (r.see + T + sp_stretch - 1) / sp_stretch + 1);
             r.cells.ring = 1;
             r.cells.q8 = 0;
             r.cells.cap = (r.see + (int64_t) T + kSparkSlack + 2 * r.chunk - 1) / r.chunk * r.chunk;
@@ -5128,9 +5131,17 @@ struct Engine {
             const SparkRing& r = sp_ring[(size_t) l];
             // the context cells in use: within the layer's reach, of the text the rings hold, not yet written over
             const int64_t lo = std::min(P, std::max({(int64_t) 0, P - r.see, sp_vlo, sp_whi - r.cells.cap + r.chunk}));
+            // (the stretches by the cells in use: whole tiles, three at least, about 64 stretches while the ring's
+            // largest allows - a short context is not left to a few blocks of a long reach's stretches)
+            const int64_t used = P + T - lo;
+            int64_t c = std::max<int64_t>(3, (used + 64 * ik::kTcCells - 1) / (64 * ik::kTcCells)) * ik::kTcCells;
+            if (sp_stretch > 0) c = sp_stretch;
+            c = std::min<int64_t>(c, r.chunk);
+            c = std::max<int64_t>(c, (used + r.n_chunks - 1) / r.n_chunks);   // (the grid's blocks hold them)
+            c = (c + ik::kTcCells - 1) / ik::kTcCells * ik::kTcCells;
             int32_t* d = b.step_h + 2 * T + 1 + 3 * l;
-            d[0] = r.chunk;
-            d[1] = (int32_t) ((P + T - lo + r.chunk - 1) / r.chunk);
+            d[0] = (int32_t) c;
+            d[1] = (int32_t) ((used + c - 1) / c);
             d[2] = (int32_t) (lo % r.cells.cap);
         }
         {
@@ -6780,7 +6791,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     double expert_save_every = 1.0;
     float spec_min_p = 0.5f;
     std::string dspark;
-    int64_t dspark_reach = 32768;
+    int64_t dspark_reach = -1;   // (not set: 131,072 cells, 32,768 with experts in RAM, no more than a set context)
     lamina::program::Sampling gen_smp;   // generate mode's sampling (greedy)
     CacheOpts copt;
     for (int i = 1; i < argc; ++i) {
@@ -6853,7 +6864,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--cpu-threads" || a == "--pool-workers") cpu_threads = std::max(0, std::atoi(next()));
         else if (a == "--drafts-per-step") drafts = std::max(0, std::min(kMaxT - 1, std::atoi(next())));
         else if (a == "--spec-min-p") spec_min_p = (float) std::atof(next());
-        else if (a == "--dspark-reach") dspark_reach = std::max<int64_t>(0, std::atoll(next()));
+        else if (a == "--dspark-reach") dspark_reach = std::max<int64_t>(0, std::atoll(next()));   // context cells the drafter's layer without a window keeps
         else if (a == "--temperature") gen_smp.temperature = (float) std::atof(next());
         else if (a == "--top-p") gen_smp.top_p = (float) std::atof(next());
         else if (a == "--top-k") gen_smp.top_k = std::atoi(next());
@@ -6983,7 +6994,11 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.profile_save = expert_save;
     E.profile_every = expert_save_every > 0 ? expert_save_every * 60.0 : 1e18;
     if (!spark.layers.empty()) E.sp = &spark;
-    E.sp_reach = dspark_reach;
+    // The drafter's reach over the context: a conversation of 86K tokens keeps 3.54 tokens a block's window with
+    // 131,072 cells where 32,768 keep 3.20 (4.5 KiB a cell: 590 MiB against 148); with experts in RAM the VRAM is
+    // theirs, and a context set lower needs no more than itself.
+    E.sp_reach = dspark_reach >= 0 ? dspark_reach : m.in_ram ? 32768 : 131072;
+    if (dspark_reach < 0 && max_ctx > 0) E.sp_reach = std::min<int64_t>(E.sp_reach, std::max<int64_t>(max_ctx, 32768));
     E.use_graphs = graphs;
     E.cache_on = serve && copt.chain > 0;
     for (const int d : lamina::program::parse_ids(cell_gpus.c_str())) E.cell_devs.push_back(d);
