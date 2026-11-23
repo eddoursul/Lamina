@@ -1508,7 +1508,13 @@ struct Engine {
     // the scratch's start or at its end by its visit's parity, and the next one's experts go to the other end, into
     // the room this block leaves.  The experts not sent ahead that an application routes follow as before (the
     // CPU's, or sent before the products).
+    // The budget is the card's own: kAheadTime to start, less where an application's products waited for what went
+    // ahead (the link is short), more where they did not (LAMINA_INK_AHEAD_FIXED=1: kAheadTime throughout).  And the
+    // next chunk's first application's experts go up during this chunk's last one (ahead_next: a chunk follows).
     static constexpr double kAheadTime = 1.5;
+    double ahead_k = kAheadTime;
+    bool ahead_fixed = false, ahead_next = false, ahead_sent_next = false;
+    bool ahead_across = true;        // (LAMINA_INK_AHEAD_NEXT=0: no chunk's first application sent ahead)
     bool ahead_on = true;            // (LAMINA_INK_AHEAD=0: none, a test's)
     cudaStream_t st_up = nullptr;
     cudaEvent_t up_ev[4] = {};       // the start and end of an application's own uploads (the link idle beside them:
@@ -2833,6 +2839,8 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_HOME")) home_on = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_AHEAD_FIXED")) ahead_fixed = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_AHEAD_NEXT")) ahead_across = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
@@ -4637,7 +4645,7 @@ struct Engine {
         for (int k = L.n_slots; k < E; ++k)   // (the ranking's order)
             if (at_of[L.order[(size_t) k]] < 0) cand[nc++] = L.order[(size_t) k];
         if (nc == 0 || gpu_ms <= 0) return;
-        const double link = kAheadTime * gpu_ms / (up_ms_mb * (double) L.stride / 1e6);
+        const double link = (ahead_fixed ? kAheadTime : ahead_k) * gpu_ms / (up_ms_mb * (double) L.stride / 1e6);
         std::stable_sort(cand, cand + nc, [&](int a, int b) { return rows[(size_t) a] > rows[(size_t) b]; });
         // (an odd visit's experts end at the scratch's end, past the current block; an even one's start at its start,
         // before the current block - or anywhere where that block is empty)
@@ -4689,7 +4697,10 @@ struct Engine {
         int n_ahead = 0, hit = 0;   // (and those of them this application routes)
         if (ns < E) {
             if (ahead_v == v && ahead_ns == ns) {
+                const auto tw = Clock::now();
                 CK(cudaStreamSynchronize(st_up));
+                // (the products waited for what went ahead: the budget a tenth less; else a twentieth more)
+                ahead_k = std::clamp(ms_since(tw) > 0.2 ? ahead_k * 0.9 : ahead_k * 1.05, 0.5, 4.0);
                 n_ahead = (int) ahead_exp.size();
                 for (const int e : ahead_exp) {
                     ahead[e] = true;
@@ -4903,7 +4914,13 @@ struct Engine {
             CK(cudaEventRecord(up_ev[3], st));
             gpu_timed = true;
         }
-        if (ahead_on && m->in_ram && !prof && v + 1 < (int) visits.size()) ahead_send(v + 1);
+        if (ahead_on && m->in_ram && !prof) {
+            if (v + 1 < (int) visits.size()) ahead_send(v + 1);
+            else if (ahead_next) {   // (the next chunk's first application)
+                ahead_send(0);
+                ahead_sent_next = ahead_v == 0;
+            }
+        }
         if (n_cpu == 0) return;
         // the CPU's experts, while the card works: jobs of up to kMaxT of an expert's rows, their rows packed in the
         // jobs' order, then to their entries behind the card's own
@@ -6408,7 +6425,10 @@ struct Engine {
         if (p0 + T > ctx || !ensure(p0 + T)) return false;
         if (m->in_ram && !scratch_fit()) return false;
         CK(cudaStreamSynchronize(st));
-        if (m->in_ram) ahead_drop();   // (nothing ahead across chunks: the experts may have given way between them)
+        // (what went ahead for its first application stays: a scratch that moved dropped it, experts that gave way in
+        // that layer make it another layer's set - experts_batch checks)
+        if (m->in_ram && !(ahead_sent_next && ahead_v == 0)) ahead_drop();
+        ahead_sent_next = false;
         prof_start();
         embed(P, tok, T, p0);
         steps(P, p0, T);
@@ -6465,7 +6485,9 @@ struct Engine {
                 chunk_fit(left);
                 const Hold hold(chunk_held);
                 T = (int) std::min<int64_t>(chunk_rows, left);
+                ahead_next = ahead_across && at + T < n;   // (another chunk follows this one)
                 ok = chunk(tok + at, T, at + T == n);
+                ahead_next = false;
             } else {
                 T = (int) std::min<int64_t>(feed_rows, left);
                 ok = forward(tok + at, T, at + T == n ? 1 : 0);
