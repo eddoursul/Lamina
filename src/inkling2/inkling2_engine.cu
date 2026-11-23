@@ -19,6 +19,7 @@
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/core/pinned.hpp"
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/inkling2/engine.hpp"
@@ -263,6 +264,7 @@ struct Model {
     int64_t n_fixed = 0;
     uint8_t* arena = nullptr;
     std::unique_ptr<uint8_t[]> arena_heap;   // (where the driver did not pin it)
+    std::unique_ptr<lamina::core::PinnedArena> arena_big;   // (LAMINA_INK_LARGE_PAGES=1: in large pages where the account may)
     uint64_t arena_bytes = 0, fixed_bytes = 0;
     uint64_t expert_cap = 0;                 // --expert-cache: the experts' VRAM at most (0: no limit)
     std::string ranking;                     // what the ranking is, for the log
@@ -717,7 +719,18 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 return false;
             }
             m.in_ram = true;
-            if (m.arena_bytes > 0) {
+            if (m.arena_bytes > 0 && std::getenv("LAMINA_INK_LARGE_PAGES") != nullptr &&
+                std::atoi(std::getenv("LAMINA_INK_LARGE_PAGES")) != 0) {
+                // (large pages first - SeLockMemoryPrivilege - registered with CUDA: core's arena; its note says what it got)
+                m.arena_big = std::make_unique<lamina::core::PinnedArena>(m.arena_bytes);
+                if (m.arena_big->valid()) {
+                    m.arena = m.arena_big->data();
+                    std::fprintf(stderr, "lamina: the experts' RAM: %s\n", m.arena_big->note.c_str());
+                } else {
+                    m.arena_big.reset();
+                }
+            }
+            if (m.arena_bytes > 0 && m.arena == nullptr) {
                 if (cudaHostAlloc((void**) &m.arena, m.arena_bytes, cudaHostAllocPortable) == cudaSuccess) {
                     own(&Owned::pinned, m.arena);
                 } else {
