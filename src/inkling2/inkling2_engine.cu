@@ -27,6 +27,7 @@
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/native_mma.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/nvfp4_gemm.hpp"
 #include "lamina/kernels/sampler.hpp"
@@ -1231,6 +1232,10 @@ struct Engine {
     std::vector<void*> ck_dev, ck_pin;   // those buffers (in the run's lists too)
     int chunk_min = 17;     // a shorter prompt part goes through the decode's forwards (LAMINA_INK_CHUNK_MIN: a test's)
     bool fuse_products = true;   // a decode forward's five attention projections in one launch (LAMINA_INK_FUSE=0: apart)
+    // A window's Q8_0 products from mma_rows rows on the int8 tensor cores (LAMINA_INK_MMA=0: the dp4a kernels;
+    // LAMINA_INK_MMA_ROWS=N: from N rows, 2-8)
+    bool mma_q8 = true;
+    int mma_rows = 6;
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
     bool fuse_gate = false;      // and the messages' mix, the mix, the gate and the norm where it is (LAMINA_INK_GATE=1)
@@ -2560,6 +2565,8 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_ROWS")) feed_rows = std::max(1, std::min(kMaxT, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_MMA")) mma_q8 = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_GATE")) fuse_gate = std::atoi(r) != 0;
@@ -4219,6 +4226,11 @@ struct Engine {
     void mm(const Mat& W, const ik::Q81* xq, const float* xf, float* y, int T) {
         if (W.type == 30) {
             K::bf16_gemv_fp32_mmvf_multi(xf, (const uint16_t*) W.d, y, W.n_in, W.n_out, T, st);
+        } else if (mma_q8 && W.type == 8 && T >= mma_rows && W.n_in <= kIlIn) {   // (Q8_0 of a window on the int8 tensor cores)
+            K::native_q8_1_il_from(xq, il_buf, (int) W.n_in, T, st);
+            const K::MmaJob j{W.d, il_buf, y, (int) W.n_out};
+            if (!K::native_mma_q8_0(&j, 1, (int) W.n_in, T, st))
+                K::native_mmvq_il(W.type, W.d, xq, il_buf, y, (int) W.n_in, (int) W.n_out, T, st, false);
         } else if (il_on && T >= (W.n_out >= 16384 ? 2 : 4) && W.n_in <= kIlIn &&
                    K::native_mmvq_il_takes(W.type, (int) W.n_out, T)) {   // (the copy is a launch: a small product pays it from 4 rows)
             K::native_q8_1_il_from(xq, il_buf, (int) W.n_in, T, st);
@@ -4800,7 +4812,13 @@ struct Engine {
             if (as_one) {
                 bool took = false;
                 run("a: the projections", [&] {
-                    took = ilp ? K::native_mmvq_il_jobs(8, five, 5, N, T, st) : K::native_mmvq_jobs((int) L.wq.type, five, 5, N, T, st);
+                    if (ilp && mma_q8 && T >= mma_rows) {   // (a window's five on the int8 tensor cores)
+                        K::MmaJob jobs[5];
+                        for (int i = 0; i < 5; ++i) jobs[i] = {five[i].weights, five[i].x_il, five[i].y, five[i].n_out};
+                        took = K::native_mma_q8_0(jobs, 5, N, T, st);
+                    }
+                    if (!took)
+                        took = ilp ? K::native_mmvq_il_jobs(8, five, 5, N, T, st) : K::native_mmvq_jobs((int) L.wq.type, five, 5, N, T, st);
                 });
                 as_one = took;
             }

@@ -291,18 +291,59 @@ struct IQ4XS {
     }
 };
 
-// TM tiles of 16 rows a CTA, F::UPT warps a tile (a unit each a stage), ST stages in flight
+// ---------------------------------------------------------------- Q8_0: 34 bytes a 32 values
+// d (half), qs[32]. A stage holds UPT * NK blocks (a multiple of 8: its bytes a multiple of 16, so a row's stages all
+// start at the row's own 16-byte offset); unit u: NK blocks, one m16n8k32 each. Block j's codes start 34 j + 2 bytes
+// in: at a word for odd j, two bytes past one for even j; its scale is the low half of the word at 34 j (even j) or
+// the high half of the word two bytes before (odd j). Stages of 24 blocks, 4 warps of 6 (scratch/inkling/kern/
+// q8_bench.cu in the optimization repository: the fastest of three layouts on the RTX 3090, within 3% of the best on
+// the RTX 5070 Ti).
+struct Q80 {
+    static constexpr int VALUES = 32, BLOCK = 34, UPT = 4, NK = 6, SB = UPT * NK, PITCH = 848;
+    static_assert(NK % 2 == 0 && SB % 8 == 0, "whole words");
+    __device__ __forceinline__ static int kb0(int s, int u) { return SB * s + NK * u; }
+    __device__ __forceinline__ static void unit(const uint8_t* r0, const uint8_t* r1, int u, int t, const Pre<NK>& x,
+                                                float (&acc)[4]) {
+        const uint8_t* p[2] = {r0 + 34 * NK * u, r1 + 34 * NK * u};
+#pragma unroll
+        for (int k = 0; k < NK; ++k) {
+            int a[2][2];
+            float dw[2];
+#pragma unroll
+            for (int r = 0; r < 2; ++r) {
+                const uint8_t* b = p[r] + 34 * k;
+                if (k & 1) {
+                    a[r][0] = rd<true>(b + 2 + 4 * t);
+                    a[r][1] = rd<true>(b + 18 + 4 * t);
+                    dw[r] = half_hi(rd<true>(b - 2));
+                } else {
+                    a[r][0] = rd<false>(b + 2 + 4 * t);
+                    a[r][1] = rd<false>(b + 18 + 4 * t);
+                    dw[r] = half_lo(rd<true>(b));
+                }
+            }
+            int c[4] = {0, 0, 0, 0};
+            mma32(c, a[0][0], a[1][0], a[0][1], a[1][1], x.b[k][0], x.b[k][1]);
+            const float2 d = x.d[k];
+            acc[0] += (dw[0] * d.x) * (float) c[0];
+            acc[1] += (dw[0] * d.y) * (float) c[1];
+            acc[2] += (dw[1] * d.x) * (float) c[2];
+            acc[3] += (dw[1] * d.y) * (float) c[3];
+        }
+    }
+};
+
+// TM tiles of 16 rows a CTA, F::UPT warps a tile (a unit each a stage), ST stages in flight: block `block`'s rows
 template <class F, int TM, int ST>
-__launch_bounds__(TM * F::UPT * 32)
-__global__ void native_mma_kernel(const uint8_t* __restrict__ w, Acts acts, float* __restrict__ y, int n_in,
-                                  int n_out, int ncols) {
+__device__ __forceinline__ void mma_rows(const uint8_t* __restrict__ w, const Acts& acts, float* __restrict__ y, int n_in,
+                                         int n_out, int ncols, int block) {
     constexpr int UPT = F::UPT, W = UPT * TM, ROWS = 16 * TM, PITCH = F::PITCH, BYTES = F::SB * F::BLOCK;
     constexpr int CH = PITCH / 16, NCP = (ROWS * CH + W * 32 - 1) / (W * 32);
     extern __shared__ __align__(16) uint8_t smem[];
     float* red = reinterpret_cast<float*>(smem + ST * ROWS * PITCH);   // [W][16][8]
     const int lane = (int) threadIdx.x & 31, warp = (int) threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
     const int tile = warp % TM, u = warp / TM;
-    const int row0 = (int) blockIdx.x * ROWS;
+    const int row0 = block * ROWS;
     const size_t row_bytes = (size_t) n_in / F::VALUES * F::BLOCK;
     const int stages = n_in / (F::SB * F::VALUES);
     const uint8_t* end = w + row_bytes * (size_t) n_out;
@@ -372,6 +413,26 @@ __global__ void native_mma_kernel(const uint8_t* __restrict__ w, Acts acts, floa
         if (c < ncols && row < n_out) y[(size_t) c * n_out + row] = sum;
     }
 }
+template <class F, int TM, int ST>
+__launch_bounds__(TM * F::UPT * 32)
+__global__ void native_mma_kernel(const uint8_t* __restrict__ w, Acts acts, float* __restrict__ y, int n_in,
+                                  int n_out, int ncols) {
+    mma_rows<F, TM, ST>(w, acts, y, n_in, n_out, ncols, (int) blockIdx.x);
+}
+// several matrices of one n_in: job blockIdx.y, its tiles up to its rows
+struct Jobs {
+    const uint8_t* w[5];
+    Acts a[5];
+    float* y[5];
+    int n_out[5];
+};
+template <class F, int TM, int ST>
+__launch_bounds__(TM * F::UPT * 32)
+__global__ void native_mma_jobs_kernel(Jobs j, int n_in, int ncols) {
+    const int k = (int) blockIdx.y;
+    if ((int) blockIdx.x * 16 * TM >= j.n_out[k]) return;
+    mma_rows<F, TM, ST>(j.w[k], j.a[k], j.y[k], n_in, j.n_out[k], ncols, (int) blockIdx.x);
+}
 
 template <class F, int TM, int ST>
 void launch(const void* w, const Acts& a, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
@@ -430,6 +491,26 @@ bool native_mma(int ggml_type, const void* weights, const void* x_il, float* y, 
     case 23: return run<IQ4XS>(*r, weights, a, y, n_in, n_out, ncols, s);
     default: return false;
     }
+}
+
+bool native_mma_q8_0(const MmaJob* jobs, int n_jobs, int n_in, int ncols, void* stream) {
+    constexpr int TM = 1, ST = 2, smem = ST * 16 * TM * Q80::PITCH + Q80::UPT * TM * 512;
+    static_assert(smem <= 48 * 1024, "within the default dynamic shared memory");
+    if (ncols < 2 || ncols > 8 || n_jobs < 1 || n_jobs > 5 || n_in % (Q80::SB * Q80::VALUES) != 0) return false;
+    Jobs j{};
+    int most = 0;
+    for (int i = 0; i < n_jobs; ++i) {
+        if ((uintptr_t) jobs[i].weights % 16 != 0) return false;
+        const Q81IlParts parts = q8_1_il_parts(jobs[i].x_il, n_in, ncols);
+        j.w[i] = static_cast<const uint8_t*>(jobs[i].weights);
+        j.a[i] = Acts{parts.bm, parts.d, native_q8_1_il_cp(ncols)};
+        j.y[i] = jobs[i].y;
+        j.n_out[i] = jobs[i].n_out;
+        most = most > jobs[i].n_out ? most : jobs[i].n_out;
+    }
+    native_mma_jobs_kernel<Q80, TM, ST><<<dim3((unsigned) ((most + 16 * TM - 1) / (16 * TM)), (unsigned) n_jobs),
+                                          TM * Q80::UPT * 32, smem, static_cast<cudaStream_t>(stream)>>>(j, n_in, ncols);
+    return true;
 }
 
 }  // namespace lamina::kernels
