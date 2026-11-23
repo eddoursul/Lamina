@@ -29,8 +29,9 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
     // fails with ERROR_PRIVILEGE_NOT_HELD.  That is the EXPECTED outcome on a desktop, not an error.
     SIZE_T large = GetLargePageMinimum();
     if (large > 0) {
-        void* p = VirtualAlloc(nullptr, (SIZE_T) bytes, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES,
-                               PAGE_READWRITE);
+        // (the size a multiple of the large page: VirtualAlloc refuses any other, ERROR_INVALID_PARAMETER)
+        const SIZE_T whole = ((SIZE_T) bytes + large - 1) / large * large;
+        void* p = VirtualAlloc(nullptr, whole, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
         if (p) {
             got = PageBacking::LargePages;
             note = "large pages (" + std::to_string((unsigned long long) large) + " B)";
