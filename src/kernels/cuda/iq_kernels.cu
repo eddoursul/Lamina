@@ -405,9 +405,12 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_sub_kernel(const 
 // native_gus_kernel<40> and native_down_kernel<40> with the weights decoded once (Split<40>) against activations whose
 // q8_1 blocks are interleaved (NativeExpertLayout::x_il), the values bitwise theirs: G lanes take a column of h (its
 // gate and up rows of NS calls), a block of G warps one q8_1 block of it, which it writes interleaved for the down
-// rows; two entries a pass.  At Inkling 2 Mini's shape (72 and 36 calls) 8 lanes a column and 4 a down row: a token's
+// rows; P entries a pass.  At Inkling 2 Mini's shape (72 and 36 calls) 8 lanes a column and 4 a down row: a token's
 // 8 experts in 54 us where the kernels above take 63, a window's 49 experts in 350 against 430 (RTX 3090; with the
-// loads alone the layout takes 53; 16 lanes a column or 8 a row within 2% of it).
+// loads alone the layout takes 53; 16 lanes a column or 8 a row within 2% of it).  P is 4 on the cards before the
+// RTX 50s - an expert routed by three or four of a window's rows is read once: the window's 49 experts in 338 us, a
+// token's 8 as before - and 2 on an RTX 50, where four entries a pass left the window's time as it was (272 us) and
+// took a token's 8 experts 2% longer (49.0 us against 48.0): il_pass().
 template<int G, int NS, int NE>
 __device__ __forceinline__ void gus_il_pass(const uint8_t* wg, const uint8_t* wu, const block_q8_1* __restrict__ xq,
                                             const int32_t* __restrict__ tok, int t, float (*sh)[32], int col, float sc,
@@ -423,7 +426,7 @@ __device__ __forceinline__ void gus_il_pass(const uint8_t* wg, const uint8_t* wu
         for (int c = 0; c < NE; ++c) sh[c][col] = expert_act(v[0][c] * sc, v[1][c] * sc, L);
 }
 
-template<int G, int NS>
+template<int G, int NS, int P>
 __global__ void __launch_bounds__(G * 32) native_gus_il_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                                const int32_t* __restrict__ grp_start,
                                                                const int32_t* __restrict__ n_groups,
@@ -443,9 +446,20 @@ __global__ void __launch_bounds__(G * 32) native_gus_il_kernel(const unsigned lo
     const float sc = blob_scale(grp_ptr[g], L, 0);
     for (int b0 = e0; b0 < e1; b0 += GUS_BATCH) {
         const int b1 = min(e1, b0 + GUS_BATCH);
-        for (int e = b0; e < b1; e += 2) {
-            if (b1 - e == 1) gus_il_pass<G, NS, 1>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
-            else gus_il_pass<G, NS, 2>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+        if constexpr (P == 4) {
+            for (int e = b0; e < b1;) {
+                const int n = b1 - e;
+                if (n >= 4) gus_il_pass<G, NS, 4>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+                else if (n == 3) gus_il_pass<G, NS, 3>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+                else if (n == 2) gus_il_pass<G, NS, 2>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+                else gus_il_pass<G, NS, 1>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+                e += n >= 4 ? 4 : n;
+            }
+        } else {
+            for (int e = b0; e < b1; e += 2) {
+                if (b1 - e == 1) gus_il_pass<G, NS, 1>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+                else gus_il_pass<G, NS, 2>(wg, wu, xq, ent_tok + e, t, sh + (e - b0), col, sc, L);
+            }
         }
         __syncthreads();
         for (int e = b0 + warp; e < b1; e += G) {   // an entry's block of h, as native_gus_kernel, interleaved
@@ -481,7 +495,7 @@ __device__ __forceinline__ void down_il_pass(const uint8_t* wr, const block_q8_1
         for (int c = 0; c < NE; ++c) out[(size_t) ent_dst[e + c] * n_embd + r] = v[0][c] * sc;
 }
 
-template<int G, int NS>
+template<int G, int NS, int P>
 __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_il_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                                          const int32_t* __restrict__ grp_start,
                                                                          const int32_t* __restrict__ n_groups,
@@ -496,12 +510,34 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_il_kernel(const u
     __builtin_assume(__isGlobal(wr));
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     const float sc = blob_scale(grp_ptr[g], L, 1);
-    for (int e = e0; e < e1; e += 2) {
-        if (e1 - e == 1) down_il_pass<G, NS, 1>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
-        else down_il_pass<G, NS, 2>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+    if constexpr (P == 4) {
+        for (int e = e0; e < e1;) {
+            const int n = e1 - e;
+            if (n >= 4) down_il_pass<G, NS, 4>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+            else if (n == 3) down_il_pass<G, NS, 3>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+            else if (n == 2) down_il_pass<G, NS, 2>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+            else down_il_pass<G, NS, 1>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+            e += n >= 4 ? 4 : n;
+        }
+    } else {
+        for (int e = e0; e < e1; e += 2) {
+            if (e1 - e == 1) down_il_pass<G, NS, 1>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+            else down_il_pass<G, NS, 2>(wr, hq, e, t, ent_dst, L.n_embd, r, sc, out);
+        }
     }
 }
 constexpr int IL_GU_G = 8, IL_GU_NS = 72, IL_DOWN_G = 4, IL_DOWN_NS = 36;
+/// The entries a pass of the interleaved kernels on the current card: 4, and 2 on an RTX 50 (see above)
+int il_pass() {
+    static int8_t of_device[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return 2;
+    if (of_device[dev] == 0) {
+        int major = 0;
+        of_device[dev] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major < 12 ? 4 : 2;
+    }
+    return of_device[dev];
+}
 
 // ---------------------------------------------------------------- Hadamard-folded experts (hadamard.hpp)
 // h is rotated over 128 of its n_ff values at a time, more than a block of the kernels above holds, so a layer takes three
@@ -1509,11 +1545,17 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
             std::fprintf(stderr, "native_expert_grouped: interleaved activations for a layout without their kernels\n");
             std::exit(1);
         }
-        native_gus_il_kernel<IL_GU_G, IL_GU_NS><<<ggu, IL_GU_G * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+        const bool four = il_pass() == 4;
+        if (four) native_gus_il_kernel<IL_GU_G, IL_GU_NS, 4><<<ggu, IL_GU_G * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+        else native_gus_il_kernel<IL_GU_G, IL_GU_NS, 2><<<ggu, IL_GU_G * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
         check("native_expert_grouped/gu");
         const dim3 gdi((unsigned) (L.n_embd / (DOWN_WARPS * 32 / IL_DOWN_G)), (unsigned) cap_groups);
-        native_down_il_kernel<IL_DOWN_G, IL_DOWN_NS><<<gdi, DOWN_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst,
-                                                                                   hq, L, out);
+        if (four)
+            native_down_il_kernel<IL_DOWN_G, IL_DOWN_NS, 4><<<gdi, DOWN_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst,
+                                                                                          hq, L, out);
+        else
+            native_down_il_kernel<IL_DOWN_G, IL_DOWN_NS, 2><<<gdi, DOWN_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst,
+                                                                                          hq, L, out);
         check("native_expert_grouped/down");
         return;
     }

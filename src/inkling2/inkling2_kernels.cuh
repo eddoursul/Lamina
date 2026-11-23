@@ -1192,9 +1192,11 @@ __global__ void __launch_bounds__(32) pick_kernel(PickIn a) {
         sel[e] = prob[e] + (a.bias ? a.bias[e] : 0.f);
     }
     __syncwarp();
+    // (the picks go to their place as they are made, the weights scaled there after: arrays of them indexed by the
+    // step would be a frame on every thread's stack, 256 bytes a thread of a chunk's every row)
     float sum = 0.f;
-    float pw[kTopMax];
-    int pid[kTopMax];
+    int32_t* const ids = a.ids + (size_t) t * a.top_k;
+    float* const w = a.w + (size_t) t * a.top_k;
     for (int k = 0; k < a.top_k; ++k) {
         float best = -FLT_MAX;
         int bi = 0;
@@ -1213,19 +1215,17 @@ __global__ void __launch_bounds__(32) pick_kernel(PickIn a) {
             }
         }
         if (lane == 0) {
-            pid[k] = bi;
+            const float pk = prob[bi];
+            ids[k] = bi;
             sel[bi] = -FLT_MAX;
-            pw[k] = prob[bi];
-            sum += pw[k];
+            w[k] = pk;
+            sum += pk;
         }
         __syncwarp();
     }
     if (lane == 0) {
         const float r = a.scale / (sum + 1e-20f);
-        for (int k = 0; k < a.top_k; ++k) {
-            a.ids[(size_t) t * a.top_k + k] = pid[k];
-            a.w[(size_t) t * a.top_k + k] = pw[k] * r;
-        }
+        for (int k = 0; k < a.top_k; ++k) w[k] = w[k] * r;
     }
 }
 
