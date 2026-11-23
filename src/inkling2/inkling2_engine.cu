@@ -2130,6 +2130,7 @@ struct Engine {
         if (n <= 0) return true;
         const size_t w = (size_t) n * cell_bytes, mine = (size_t) held * cell_bytes;
         bool ok = true;
+        std::vector<Xfer> jobs;
         for (size_t vi = 0; vi < visits.size(); ++vi) {
             const Visit& V = visits[vi];
             if (!V.k_lot[0]) continue;
@@ -2139,15 +2140,112 @@ struct Engine {
                 if (to >= 0) {
                     ok = ok && soft(cudaMemcpyAsync((side ? V.v_lot[to] : V.k_lot[to])->ptr() + (size_t) at * cell_bytes, d, w,
                                                     cudaMemcpyDeviceToDevice, home_st(vi)));
-                } else {
-                    uint8_t* const o = host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) at * cell_bytes;
-                    ok = ok && soft(in ? cudaMemcpyAsync(d, o, w, cudaMemcpyHostToDevice, home_st(vi))
-                                       : cudaMemcpyAsync(o, d, w, cudaMemcpyDeviceToHost, home_st(vi)));
+                } else {   // (the copies to and from the buffer: every card's at once, below)
+                    jobs.push_back({home_dev(vi) < 0 ? main_dev : home_dev(vi), home_st(vi), d,
+                                    host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) at * cell_bytes, w, !in});
                 }
             }
-            ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
+            if (to >= 0) ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
         }
-        return ok;
+        return host_xfer(jobs) && ok;
+    }
+    // ---- copies between the cards and host buffers in RAM (a parked conversation's): each card's on a thread of its
+    // own, all at once - a copy from pageable memory holds the thread that issues it - and through a pinned stage of
+    // two halves where xfer_stage, the card's copy of one half beside the host's of the other (LAMINA_INK_XFER=0: one
+    // copy after the other on this thread; =1: the threads without the stage)
+    struct Xfer {
+        int dev;
+        cudaStream_t s;
+        uint8_t* d;
+        uint8_t* h;
+        size_t n;
+        bool to_host;
+    };
+    static constexpr size_t kXferHalf = 8ull << 20;
+    int xfer_mode = 2;
+    std::map<int, uint8_t*> xfer_pin;   // a card's stage: two halves of kXferHalf, pinned
+    bool host_xfer(const std::vector<Xfer>& jobs) {
+        if (jobs.empty()) return true;
+        if (xfer_mode == 0) {
+            bool ok = true;
+            for (const Xfer& j : jobs) {
+                const OnDev dv(j.dev);
+                ok = ok && soft(j.to_host ? cudaMemcpyAsync(j.h, j.d, j.n, cudaMemcpyDeviceToHost, j.s)
+                                          : cudaMemcpyAsync(j.d, j.h, j.n, cudaMemcpyHostToDevice, j.s)) &&
+                     soft(cudaStreamSynchronize(j.s));
+            }
+            return ok;
+        }
+        std::map<int, std::vector<const Xfer*>> by;
+        for (const Xfer& j : jobs) by[j.dev].push_back(&j);
+        if (xfer_mode == 2)
+            for (const auto& [dev, list] : by)
+                if (xfer_pin.count(dev) == 0) {
+                    void* p = nullptr;
+                    if (cudaHostAlloc(&p, 2 * kXferHalf, cudaHostAllocPortable) != cudaSuccess) {
+                        (void) cudaGetLastError();
+                        p = nullptr;
+                    }
+                    xfer_pin[dev] = static_cast<uint8_t*>(p);
+                    if (p != nullptr) own(&Owned::pinned, p);
+                }
+        std::atomic<bool> ok{true};
+        auto work = [&](int dev, const std::vector<const Xfer*>& list, uint8_t* pin) {
+            if (cudaSetDevice(dev) != cudaSuccess) {
+                ok = false;
+                return;
+            }
+            cudaEvent_t ev[2] = {nullptr, nullptr};   // (a half's copy to the card: through before the host fills it again)
+            if (pin != nullptr)
+                for (cudaEvent_t& e : ev)
+                    if (cudaEventCreateWithFlags(&e, cudaEventDisableTiming) != cudaSuccess) {
+                        (void) cudaGetLastError();
+                        pin = nullptr;
+                    }
+            for (const Xfer* j : list) {
+                if (pin == nullptr) {   // (pageable: the copy holds this thread)
+                    if (!soft(j->to_host ? cudaMemcpyAsync(j->h, j->d, j->n, cudaMemcpyDeviceToHost, j->s)
+                                         : cudaMemcpyAsync(j->d, j->h, j->n, cudaMemcpyHostToDevice, j->s)) ||
+                        !soft(cudaStreamSynchronize(j->s)))
+                        ok = false;
+                    continue;
+                }
+                // halves in turn: out, the card fills one while the host empties the other; in, the host fills one while
+                // the card takes the other
+                const size_t parts = (j->n + kXferHalf - 1) / kXferHalf;
+                if (j->to_host) {
+                    auto dma = [&](size_t k) {
+                        const size_t at = k * kXferHalf, n = std::min(kXferHalf, j->n - at);
+                        return soft(cudaMemcpyAsync(pin + (k & 1) * kXferHalf, j->d + at, n, cudaMemcpyDeviceToHost, j->s));
+                    };
+                    bool good = dma(0);
+                    for (size_t k = 0; k < parts && good; ++k) {
+                        good = soft(cudaStreamSynchronize(j->s));
+                        if (good && k + 1 < parts) good = dma(k + 1);
+                        const size_t at = k * kXferHalf, n = std::min(kXferHalf, j->n - at);
+                        if (good) std::memcpy(j->h + at, pin + (k & 1) * kXferHalf, n);
+                    }
+                    if (!good || !soft(cudaStreamSynchronize(j->s))) ok = false;
+                } else {
+                    bool good = true;
+                    for (size_t k = 0; k < parts && good; ++k) {
+                        const size_t at = k * kXferHalf, n = std::min(kXferHalf, j->n - at);
+                        if (k >= 2) good = soft(cudaEventSynchronize(ev[k & 1]));   // (the half's copy before is through)
+                        if (!good) break;
+                        std::memcpy(pin + (k & 1) * kXferHalf, j->h + at, n);
+                        good = soft(cudaMemcpyAsync(j->d + at, pin + (k & 1) * kXferHalf, n, cudaMemcpyHostToDevice, j->s)) &&
+                               soft(cudaEventRecord(ev[k & 1], j->s));
+                    }
+                    if (!good || !soft(cudaStreamSynchronize(j->s))) ok = false;
+                }
+            }
+            for (cudaEvent_t e : ev)
+                if (e != nullptr) (void) cudaEventDestroy(e);
+        };
+        std::vector<std::thread> th;
+        for (const auto& [dev, list] : by) th.emplace_back(work, dev, std::cref(list), xfer_mode == 2 ? xfer_pin[dev] : nullptr);
+        for (std::thread& t : th) t.join();
+        return ok.load();
     }
     [[noreturn]] void parked_lost() {
         std::fprintf(stderr, "lamina: a parked conversation's cells did not reach its buffer\n");
@@ -2687,6 +2785,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_MMA")) mma_q8 = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
@@ -6702,19 +6801,17 @@ struct Engine {
                         for (int side = 0; side < 2; ++side)
                             card_copy(c, (size_t) full_of[vi], side, slot, array(vi, side) + (size_t) u * unit * cell_bytes, n, true);
             }
-            bool ok = true;
+            std::vector<Xfer> jobs;
             if (cells > lo)
                 for (size_t vi = 0; vi < visits.size(); ++vi) {
                     const Visit& V = visits[vi];
                     if (V.cells.ring) continue;
-                    const OnDev dv(home_dev(vi));
                     for (int side = 0; side < 2; ++side)
-                        ok = ok && soft(cudaMemcpyAsync(array(vi, side) + (size_t) lo * cell_bytes,
-                                                        (side ? V.cells.v : V.cells.k) + (size_t) lo * cell_bytes,
-                                                        (size_t) (cells - lo) * cell_bytes, cudaMemcpyDeviceToHost, home_st(vi)));
-                    ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
+                        jobs.push_back({home_dev(vi) < 0 ? main_dev : home_dev(vi), home_st(vi),
+                                        (side ? V.cells.v : V.cells.k) + (size_t) lo * cell_bytes,
+                                        array(vi, side) + (size_t) lo * cell_bytes, (size_t) (cells - lo) * cell_bytes, true});
                 }
-            return ok;
+            return host_xfer(jobs);
         }
         cards_clear();
         const int64_t was = n_pos;
@@ -6723,16 +6820,16 @@ struct Engine {
             const int64_t n = std::min<int64_t>(unit, cells - c0);
             n_pos = c0;
             ok = ensure(c0 + n);
+            std::vector<Xfer> jobs;
             for (size_t vi = 0; vi < visits.size() && ok; ++vi) {
                 const Visit& V = visits[vi];
                 if (V.cells.ring) continue;
-                const OnDev dv(home_dev(vi));
                 for (int side = 0; side < 2; ++side)
-                    ok = ok && soft(cudaMemcpyAsync((side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes,
-                                                    array(vi, side) + (size_t) c0 * cell_bytes, (size_t) n * cell_bytes,
-                                                    cudaMemcpyHostToDevice, home_st(vi)));
-                ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
+                    jobs.push_back({home_dev(vi) < 0 ? main_dev : home_dev(vi), home_st(vi),
+                                    (side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes,
+                                    array(vi, side) + (size_t) c0 * cell_bytes, (size_t) n * cell_bytes, false});
             }
+            ok = ok && host_xfer(jobs);
         }
         n_pos = ok ? cells : was;
         return ok;
