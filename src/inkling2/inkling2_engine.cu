@@ -170,6 +170,8 @@ constexpr int32_t kMsgFirst = 200000, kMsgLast = 200003;   // <|message_user|> .
 constexpr int32_t kEndMessage = 200010;                    // <|end_message|>
 constexpr int kRingSub = ik::kTcCells;    // a window visit's ring: a multiple of an attention tile's cells
 constexpr int32_t kFar = 1 << 30;         // a row's position as a card sees it: every cell there is before it
+constexpr float kSparkWhole = 0.35f;      // the drafter's head in one product from this share of blocks whose first draft
+                                          // goes on (the two products' 0.5 + 0.75 p ms against one's 0.7)
 
 // ------------------------------------------------------------------------------------------------ the model
 constexpr size_t kWeightPad = 4096;       // zero bytes after each weight: a kernel may read past a short last row
@@ -1328,7 +1330,11 @@ struct Engine {
     } sb;
     cudaGraphExec_t sp_graph = nullptr;         // a block's layers and its first draft
     std::map<int, cudaGraphExec_t> sp_graphs;   // the drafts after the first: by their count
-    long long sp_blocks = 0;
+    std::map<int, cudaGraphExec_t> sp_whole;    // a block's layers and every draft, the head read once: by their count
+    int sp_head = 2;                            // LAMINA_INK_SPARK_HEAD: 0 the first draft's product and the others',
+                                                // 1 one product, 2 one where the first draft mostly goes on
+    float sp_on = 0.5f;                         // how often it did, of late
+    long long sp_blocks = 0, sp_went = 0, sp_whole_n = 0;
     double sp_ms = 0;
 
     // ---- experts in RAM (Model::in_ram).  The card has n_held of them, a layer's in its first on_card[] slots: mapped
@@ -4866,6 +4872,7 @@ struct Engine {
         sp_ring.resize((size_t) s.n_layer);
         int max_ch = 1;
         if (const char* e = std::getenv("LAMINA_INK_SPARK_STRETCH")) sp_stretch = std::max<int64_t>(0, std::atoll(e));
+        if (const char* e = std::getenv("LAMINA_INK_SPARK_HEAD")) sp_head = std::max(0, std::min(2, std::atoi(e)));
         for (int l = 0; l < s.n_layer; ++l) {
             SparkRing& r = sp_ring[(size_t) l];
             r.see = s.layers[(size_t) l].window ? s.n_swa : std::max<int64_t>(sp_reach, s.n_swa);
@@ -5054,8 +5061,8 @@ struct Engine {
         tick("drafter: the head's steps");
         CK(cudaMemcpyAsync(b.out_h, b.out, (size_t) 2 * T * 4, cudaMemcpyDeviceToHost, st));
     }
-    /// A block's launches: [the token, masks] through the layers, then the first draft
-    void spark_launches() {
+    /// A block's launches: [the token, masks] through the layers, then the first draft, or the first `n1`
+    void spark_launches(int n1 = 1) {
         const Spark& s = *sp;
         SparkBlock& b = sb;
         const int T = kMaxT, N = s.N, F = s.F, R_ = s.R;
@@ -5122,7 +5129,7 @@ struct Engine {
         norm(b.x, s.out_norm, b.hn, b.hnimg);
         ik::JointPreIn jp{s.joint_w, s.joint_b, b.hn, b.ctx, b.pre, 2 * R_, N, T, 3 * R_};
         ik::joint_pre_kernel<<<(unsigned) (3 * R_), ik::kTB, 0, st>>>(jp);
-        spark_steps(1, 1);
+        spark_steps(1, n1);
     }
     /// Up to `n` drafts after x, the token the state does not hold yet (at pos()): a block through the drafter, a draft
     /// while the drafts' joint probability under its head stays at or above `min_p`.  None where the rings do not hold
@@ -5190,8 +5197,21 @@ struct Engine {
             }
             CK(cudaStreamSynchronize(st));
         };
-        issue(sp_graph, [&] { spark_launches(); });
-        if (n > 1 && b.out_h[0] >= 0) issue(sp_graphs[n], [&] { spark_steps(2, n); });
+        // (the head is its bytes: one product of the block's rows reads them once, 0.7 ms where the first row's takes
+        // 0.5 and the others' 0.7 - which a block that ends at its first draft does not pay)
+        const bool whole = n > 1 && (sp_head == 1 || (sp_head == 2 && sp_on >= kSparkWhole));
+        if (whole) {
+            issue(sp_whole[n], [&] { spark_launches(n); });
+            ++sp_whole_n;
+        } else {
+            issue(sp_graph, [&] { spark_launches(); });
+            if (n > 1 && b.out_h[0] >= 0) issue(sp_graphs[n], [&] { spark_steps(2, n); });
+        }
+        if (n > 1) {
+            const bool went = b.out_h[0] >= 0;   // (a first draft at the floor: the others' rows are scored)
+            sp_on += 0.05f * ((went ? 1.f : 0.f) - sp_on);
+            sp_went += went;
+        }
         sp_whi = std::max(sp_whi, P + T);
         for (int i = 0; i < n && b.out_h[2 * i] >= 0 && b.out_h[2 * i] < s.V; ++i) out.push_back(b.out_h[2 * i]);
         ++sp_blocks;
