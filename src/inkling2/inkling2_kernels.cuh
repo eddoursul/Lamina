@@ -1548,8 +1548,18 @@ struct TcIn {
     long long lo;          // a full visit's first cell on this card (the cells before it are other cards')
     float* seg;            // several segments: [segments - 1][T][H][D + 2], the sums of those after the first (the
                            // first one's to `part`)
+    const __half* qh;      // not null: q as halves in place of `q` (a cell card's copy, rounded as the kernel rounds)
 };
 constexpr int kTcSegs = 8;   // segments at most
+/// q as halves, two values a thread as the chunk kernel rounds them (__floats2half2_rn): a cell card's copy of a
+/// chunk's q, half the bytes over the link
+__global__ void q_halves_kernel(const float* __restrict__ q, __half2* __restrict__ h, long long n2) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n2) {
+        const float2 v = reinterpret_cast<const float2*>(q)[i];
+        h[i] = __floats2half2_rn(v.x, v.y);
+    }
+}
 template <int NW, bool Q8>
 __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
     constexpr int D = 128, ROWS = 16 * NW, NT = 32 * NW;
@@ -1605,19 +1615,31 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
     // q as the products' row operands: step ks is dims 16 ks .. +15
     unsigned qa[8][4];
     {
-        const float* qA = a.q + hA * D + 2 * tig;
-        const float* qB = a.q + hB * D + 2 * tig;
-        const float2 z = make_float2(0.f, 0.f);
+        if (a.qh != nullptr) {   // (halves already: their bits as the floats' rounding gives them)
+            const unsigned* hA2 = reinterpret_cast<const unsigned*>(a.qh + hA * D + 2 * tig);
+            const unsigned* hB2 = reinterpret_cast<const unsigned*>(a.qh + hB * D + 2 * tig);
 #pragma unroll
-        for (int ks = 0; ks < 8; ++ks) {
-            const float2 a0 = inA ? *reinterpret_cast<const float2*>(qA + 16 * ks) : z;
-            const float2 a1 = inB ? *reinterpret_cast<const float2*>(qB + 16 * ks) : z;
-            const float2 a2 = inA ? *reinterpret_cast<const float2*>(qA + 16 * ks + 8) : z;
-            const float2 a3 = inB ? *reinterpret_cast<const float2*>(qB + 16 * ks + 8) : z;
-            qa[ks][0] = h2(a0.x, a0.y);
-            qa[ks][1] = h2(a1.x, a1.y);
-            qa[ks][2] = h2(a2.x, a2.y);
-            qa[ks][3] = h2(a3.x, a3.y);
+            for (int ks = 0; ks < 8; ++ks) {
+                qa[ks][0] = inA ? hA2[8 * ks] : 0u;
+                qa[ks][1] = inB ? hB2[8 * ks] : 0u;
+                qa[ks][2] = inA ? hA2[8 * ks + 4] : 0u;
+                qa[ks][3] = inB ? hB2[8 * ks + 4] : 0u;
+            }
+        } else {
+            const float* qA = a.q + hA * D + 2 * tig;
+            const float* qB = a.q + hB * D + 2 * tig;
+            const float2 z = make_float2(0.f, 0.f);
+#pragma unroll
+            for (int ks = 0; ks < 8; ++ks) {
+                const float2 a0 = inA ? *reinterpret_cast<const float2*>(qA + 16 * ks) : z;
+                const float2 a1 = inB ? *reinterpret_cast<const float2*>(qB + 16 * ks) : z;
+                const float2 a2 = inA ? *reinterpret_cast<const float2*>(qA + 16 * ks + 8) : z;
+                const float2 a3 = inB ? *reinterpret_cast<const float2*>(qB + 16 * ks + 8) : z;
+                qa[ks][0] = h2(a0.x, a0.y);
+                qa[ks][1] = h2(a1.x, a1.y);
+                qa[ks][2] = h2(a2.x, a2.y);
+                qa[ks][3] = h2(a3.x, a3.y);
+            }
         }
     }
     const float scale = rsqrtf((float) D);

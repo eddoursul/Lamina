@@ -1168,6 +1168,7 @@ struct Rows {
           *part = nullptr, *aout = nullptr, *oraw = nullptr, *fraw = nullptr, *w = nullptr, *rows = nullptr,
           *logits = nullptr, *ctl_h = nullptr, *probs = nullptr;
     int* chain = nullptr;   // a decode forward's gated sublayer inputs: gate_chain_kernel's counters
+    __half* qh = nullptr;   // a chunk's q as halves, for the cell cards
     float* crows = nullptr;   // with experts in RAM: the CPU's rows of a visit, packed in the entries' order
     // the step record: the rows' positions, then the cells in use, the full visits' {stretch, stretches in use} and
     // a chunk's window range's cells
@@ -1236,6 +1237,7 @@ struct Engine {
     // LAMINA_INK_MMA_ROWS=N: from N rows, 2-8)
     bool mma_q8 = true;
     int mma_rows = 6;
+    bool q_half = true;          // a chunk's q to the cell cards as halves (LAMINA_INK_QHALF=0: as floats)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
     bool fuse_gate = false;      // and the messages' mix, the mix, the gate and the norm where it is (LAMINA_INK_GATE=1)
@@ -1719,6 +1721,7 @@ struct Engine {
         R.step_h = halloc<int32_t>(T + 5);
         R.ns = dzero<float>(T * H);
         if (batch) R.spart = dzero<float>((size_t) seg_cap() * H * (D_ + 2));
+        if (batch) R.qh = dzero<__half>(T * Q);   // (a chunk's q as halves for the cell cards)
         if (!batch) {
             R.grp_ptr = dzero<unsigned long long>(n_ent + 1);
             R.grp_start = dzero<int32_t>(n_ent + 1);
@@ -2566,6 +2569,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_CHUNK_MIN")) chunk_min = std::max(1, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_FUSE")) fuse_products = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA")) mma_q8 = std::atoi(r) != 0;
+        if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
@@ -3419,7 +3423,7 @@ struct Engine {
             CK(cudaSetDevice(c.dev));
             const bool two = second();   // (the split's card's driver in a staged run: its own rows here)
             float *const cq = two ? c.cq2 : c.cq, *const cns = two ? c.cns2 : c.cns, *const csum = two ? c.csum2 : c.csum;
-            CK(cudaMemcpyAsync(cq, two ? pq_h2 : pq_h, (size_t) T * H * D_ * 4, cudaMemcpyHostToDevice, c.st));
+            CK(cudaMemcpyAsync(cq, two ? pq_h2 : pq_h, (size_t) T * H * D_ * (q_half ? 2 : 4), cudaMemcpyHostToDevice, c.st));
             CK(cudaMemcpyAsync(cns, two ? ps_h2 : ps_h, (size_t) T * H * 4, cudaMemcpyHostToDevice, c.st));
             ik::Cells cc{};
             cc.k = c.k_vm[(size_t) fi]->base();
@@ -3434,8 +3438,8 @@ struct Engine {
             const int n_seg = (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, (long long) c.cells / (8 * ik::kTcCells),
                                                             (long long) (c.seg_rows / T)}));
             float* const cseg = two ? c.cseg2 : c.cseg;
-            ik::TcIn a{cc, cq, nullptr, cns, nullptr, c.cpos, nullptr, T, H, HK, 0, 0, (long long) c.cells, csum, 1, 0,
-                       n_seg > 1 ? cseg : nullptr};
+            ik::TcIn a{cc, q_half ? nullptr : cq, nullptr, cns, nullptr, c.cpos, nullptr, T, H, HK, 0, 0, (long long) c.cells,
+                       csum, 1, 0, n_seg > 1 ? cseg : nullptr, q_half ? reinterpret_cast<const __half*>(cq) : nullptr};
             tc_launch(a, n_seg, c.st, c.arch);
             if (n_seg > 1) {
                 ik::SegJoinIn j{csum, cseg, H, D_, n_seg - 1, T};
@@ -4963,7 +4967,13 @@ struct Engine {
             // cells in segments
             const bool carded = L.full && lo > 0;
             if (carded) {
-                CK(cudaMemcpyAsync(second() ? pq_h2 : pq_h, R.q, (size_t) T * H * D_ * 4, cudaMemcpyDeviceToHost, st));
+                if (q_half) {   // (the cards' kernel rounds q to halves itself: they go as halves)
+                    const long long n2 = (long long) T * H * D_ / 2;
+                    ik::q_halves_kernel<<<(unsigned) ((n2 + 255) / 256), 256, 0, st>>>(R.q, reinterpret_cast<__half2*>(R.qh), n2);
+                    CK(cudaMemcpyAsync(second() ? pq_h2 : pq_h, R.qh, (size_t) T * H * D_ * 2, cudaMemcpyDeviceToHost, st));
+                } else {
+                    CK(cudaMemcpyAsync(second() ? pq_h2 : pq_h, R.q, (size_t) T * H * D_ * 4, cudaMemcpyDeviceToHost, st));
+                }
                 CK(cudaMemcpyAsync(second() ? ps_h2 : ps_h, R.ns, (size_t) T * H * 4, cudaMemcpyDeviceToHost, st));
                 stream_wait();
                 cards_scan_chunk(full_of[(size_t) v], T);
