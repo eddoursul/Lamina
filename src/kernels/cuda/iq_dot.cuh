@@ -947,10 +947,16 @@ __device__ __forceinline__ float vec_dot_nvfp4_q8_1(const void* __restrict__ vbq
 // weight word's nibbles have, so a word's half is the selector of one prmt over the eight magnitudes.  The selector's
 // sign-replicate bit is the value's sign bit and leaves a negative value's byte 0; the same with the sign bits
 // flipped gives the negative values' magnitudes, summed apart and subtracted: vec_dot_nvfp4_q8_1's integers, and its
-// floats in its order, in two thirds of its instructions.
+// floats in its order, in two thirds of its instructions.  LAMINA_NVFP4_ONE_DP4A (a build option, off): the two
+// magnitude words as one signed one (0x80 - n never borrows from the next byte: n <= 12), one dp4a a word - the same
+// integers; not faster (the kernels' time is their loads' latency).
 template<> struct Split<40> : SplitNoGrid {
     using A = SplitAct<8>;
+#if defined(LAMINA_NVFP4_ONE_DP4A)
+    struct W { uint32_t p[8]; float d[2]; };
+#else
     struct W { uint32_t p[8], n[8]; float d[2]; };
+#endif
     __device__ static W load(const void* __restrict__ vbq, int kbx, int iqs, const void*) {
         constexpr uint32_t m0 = 0x03020100u, m1 = 0x0C080604u;   // kvalues_mxfp4's magnitudes
         const block_nvfp4* bq4 = (const block_nvfp4*) vbq + kbx;
@@ -958,10 +964,15 @@ template<> struct Split<40> : SplitNoGrid {
 #pragma unroll
         for (int l = 0; l < 4; ++l) {
             const uint32_t q = (uint32_t) get_int_b4(bq4->qs, iqs + l), qn = q ^ 0x88888888u;
+#if defined(LAMINA_NVFP4_ONE_DP4A)
+            w.p[2 * l] = prmt_sel(m0, m1, q) | ((0x80808080u - prmt_sel(m0, m1, qn)) ^ 0x80808080u);
+            w.p[2 * l + 1] = prmt_sel(m0, m1, q >> 16) | ((0x80808080u - prmt_sel(m0, m1, qn >> 16)) ^ 0x80808080u);
+#else
             w.p[2 * l] = prmt_sel(m0, m1, q);
             w.p[2 * l + 1] = prmt_sel(m0, m1, q >> 16);
             w.n[2 * l] = prmt_sel(m0, m1, qn);
             w.n[2 * l + 1] = prmt_sel(m0, m1, qn >> 16);
+#endif
         }
 #pragma unroll
         for (int i = 0; i < 2; ++i) w.d[i] = ue4m3_half(bq4->d[(iqs >> 1) + i]);
@@ -976,7 +987,9 @@ template<> struct Split<40> : SplitNoGrid {
 #pragma unroll
             for (int h = 0; h < 4; ++h) {
                 sp = ggml_cuda_dp4a((int) w.p[4 * i + h], a.u[4 * i + h], sp);
+#if !defined(LAMINA_NVFP4_ONE_DP4A)
                 sn = ggml_cuda_dp4a((int) w.n[4 * i + h], a.u[4 * i + h], sn);
+#endif
             }
             const float d = w.d[i] * a.d8;
             sum += d * (float) (sp - sn);
