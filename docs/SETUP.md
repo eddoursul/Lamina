@@ -449,8 +449,9 @@ occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the m
 `lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
 `dspark-Inkling-2-Mini-Q8_0.gguf`), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a
 window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.5).
-It takes 0.40 GiB of VRAM for its weights and ~0.35 GiB for its context cells (made from the model's own states of
-every position; `--dspark-reach N`, 32,768: those its layer without a window keeps) and buffers, and is left out
+It takes 0.40 GiB of VRAM for its weights and ~0.8 GiB for its context cells (made from the model's own states of
+every position; `--dspark-reach N`: those its layer without a window keeps - 131,072, 4.5 KiB each, 32,768 with
+experts in RAM and no more than a context set lower) and buffers, and is left out
 where the card alone holds the context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX 3090: 108
 tok/s without drafts, 120 after a short prompt, 140 thinking, 248 where the answer quotes its prompt.
 

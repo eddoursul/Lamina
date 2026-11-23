@@ -37,9 +37,9 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   Lamina writes 4.7-6.1x as fast as llama.cpp's PR #32517 and reads prompts 17-31x as fast (its 64K prompt in 35 s
   against 18 minutes).
 - [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): with the
-  model's drafter in both, Lamina writes 2.3-3.4x as fast as unsloth's llama.cpp fork (157-334 tok/s against 62-98)
+  model's drafter in both, Lamina writes 2.3-3.4x as fast as unsloth's llama.cpp fork (159-334 tok/s against 62-98)
   and reads prompts 3.3-3.7x as fast. On a 16 GB card, which the file does not fit, 140-300 tok/s against 21. With
-  its layers over the RTX 3090 and the RTX 5070 Ti (this PC's config) 181-400 tok/s and prompts at 4,460-5,180.
+  its layers over the RTX 3090 and the RTX 5070 Ti (this PC's config) 182-404 tok/s and prompts at 4,460-5,210.
 
 ## The PC and the engines
 
@@ -378,7 +378,7 @@ thinking task, the edit, after the 16K prompt; 200 / 400 / 400 / 200 positions),
 The engine's inkling2 path (`src/inkling2`) on unsloth's UD-IQ4_XS (24 layers of which 12 run three times a token,
 128 experts a layer with 8 used; the experts NVFP4 in layers 0-19, the attention's matrices Q8_0), llama.cpp
 measured on 2026-11-21 and Lamina on 2026-11-22 and 23, the whole model on the main RTX 3090 in both engines, K and V in
-FP16. Lamina on that card alone (the context what its VRAM holds: 196,608 tokens beside the drafter; prompts in
+FP16. Lamina on that card alone (the context what its VRAM holds: 184,320 tokens beside the drafter; prompts in
 chunks of 1,024 rows that grow to 4,096 while the card's free VRAM holds their buffers; the model's drafter,
 DSpark, found beside the model, and the prompt lookup). llama.cpp: unsloth's fork as released
 (b12572-mix-8eebad4, the only build that reads the files' layout), `-ub 512`, a context of 32,768; for the 86K prompt
@@ -390,17 +390,19 @@ below).
 
 | | llama.cpp | llama.cpp, drafter (3 / 7) | Lamina, no drafts | Lamina | Lamina, this PC's config |
 |---|---|---|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 118.1 | 157.5 | 180.9 |
-| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 117.4 | 171.4 | 208.2 |
-| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 3,293 / 114.5 | 3,221 / 333.7 | 4,680 / 400.4 |
-| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 3,332 / 105.4 | 3,366 / 208.2 | 5,181 / 267.2 |
-| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 2,792 / 80.1 | 2,778 / 144.1 | 4,460 / 168.4 |
+| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 118.1 | 158.6 | 182.1 |
+| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 117.4 | 172.0 | 210.7 |
+| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 3,293 / 114.5 | 3,237 / 333.8 | 4,722 / 403.9 |
+| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 3,332 / 105.4 | 3,347 / 206.9 | 5,213 / 269.7 |
+| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 2,792 / 80.1 | 2,795 / 157.3 | 4,455 / 183.1 |
 
 Lamina's greedy text is the same with drafts and without (a window's rows leave what a row at a time leaves, to the
 bit); sampled at temperature 0.7 the speeds are the greedy ones within 3% (the sampler runs on the GPU). Its drafter
 keeps as many of its drafts as llama.cpp's (three a window: 46% and 47% after the short prompt and thinking, 92% on
 the edit; llama.cpp 51%, 51% and 91%), and goes on only while their joint probability stays at 0.5 (0.7 until
 2026-11-22, where those shares were counted: an agent's session takes 5-6% less time a generated token at 0.5).
+Its layer without a window keeps the context cells of the last 131,072 positions (32,768 until 2026-11-23: after
+the 86K-token prompt a window's pass kept 3.20 tokens where it keeps 3.54 - 144 and 168 tok/s in the two columns).
 
 To the API in 7.1 s with the drafter (6.3 without; the model loaded in 4.9; llama.cpp 9.3); 16,230 MiB of VRAM at a
 short context, ~0.75 GiB more with the drafter (llama.cpp 19,410 with its 32,768 cells allocated, 20,778 with the
@@ -416,12 +418,12 @@ exact arithmetic is 2,000 times smaller there.
 
 The layers over two cards (a later card's `layers=6-17`: the repeated layers, half of the weights and three
 quarters of a token's layer applications; a prompt's chunks on the two cards at once), through the API with drafts
-and the conversation cache off on 2026-11-22, against the RTX 3090 alone (157 / 171 / 334 tok/s for code / thinking
+and the conversation cache off on 2026-11-22, against the RTX 3090 alone (159 / 172 / 334 tok/s for code / thinking
 / an edit, prompts at 3,256 / 3,341 / 2,798 tok/s at 2.9K / 21K / 86K tokens):
 
 | The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 on the two |
 |---|---|---|---|
-| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free and its clocks locked at 2,900 MHz: this PC's config | 181 / 208 / 400 | 4,680 / 5,181 / 4,460 | 405,504 |
+| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free and its clocks locked at 2,900 MHz: this PC's config | 182 / 211 / 404 | 4,722 / 5,213 / 4,455 | 397,312 |
 | the same at the driver's lower clock (~2,150 MHz: it picks either) | 174 / 198 / 371 | 4,014 / 5,039 / 4,430 | 405,504 |
 | RTX 5070 Ti, RTX 3090 | 177 / 190 / 345 | 3,402 / 3,728 / 3,271 | 462,848 |
 | RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 163 / 179 / 312 | 3,252 / 3,546 / 3,143 | 778,240 |
