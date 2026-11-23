@@ -1418,6 +1418,7 @@ struct Engine {
         int chunk = 0, n_chunks = 0; // a scan's stretches: cells each, how many at most
     };
     std::vector<SparkRing> sp_ring;
+    bool sp_q8 = false;              // its cells in q8_0 (the model's format, or LAMINA_INK_SPARK_KV's)
     std::vector<double> sp_theta;    // a pair's angle a position
     float* sp_wf = nullptr;          // a BF16 context projection widened to floats (a chunk's GEMM)
     // the context the rings hold of the state's text: positions [sp_vlo, sp_vhi), written since without a break, the
@@ -5548,6 +5549,10 @@ struct Engine {
         int max_ch = 1;
         if (const char* e = std::getenv("LAMINA_INK_SPARK_STRETCH")) sp_stretch = std::max<int64_t>(0, std::atoll(e));
         if (const char* e = std::getenv("LAMINA_INK_SPARK_HEAD")) sp_head = std::max(0, std::min(2, std::atoi(e)));
+        // (its cells in the model's format: q8_0 halves their VRAM - 590 -> 314 MiB at a reach of 131,072 cells)
+        sp_q8 = kv_q8;
+        if (const char* e = std::getenv("LAMINA_INK_SPARK_KV")) sp_q8 = std::string(e) == "q8_0";
+        const size_t sp_cell = sp_q8 ? (size_t) s.HK * (size_t) (s.D / 32) * 34 : KV * 2;
         for (int l = 0; l < s.n_layer; ++l) {
             SparkRing& r = sp_ring[(size_t) l];
             r.see = s.layers[(size_t) l].window ? s.n_swa : std::max<int64_t>(sp_reach, s.n_swa);
@@ -5557,10 +5562,10 @@ struct Engine {
             r.n_chunks = (int) ((r.see + T + r.chunk - 1) / r.chunk);
             if (sp_stretch > 0) r.n_chunks = (int) std::min<int64_t>(512, (r.see + T + sp_stretch - 1) / sp_stretch + 1);
             r.cells.ring = 1;
-            r.cells.q8 = 0;
+            r.cells.q8 = sp_q8 ? 1 : 0;
             r.cells.cap = (r.see + (int64_t) T + kSparkSlack + 2 * r.chunk - 1) / r.chunk * r.chunk;
-            r.cells.k = dzero<uint8_t>((size_t) r.cells.cap * KV * 2);
-            r.cells.v = dzero<uint8_t>((size_t) r.cells.cap * KV * 2);
+            r.cells.k = dzero<uint8_t>((size_t) r.cells.cap * sp_cell);
+            r.cells.v = dzero<uint8_t>((size_t) r.cells.cap * sp_cell);
             max_ch = std::max(max_ch, r.n_chunks);
         }
         frnn = dzero<float>(T * N);
@@ -5786,7 +5791,8 @@ struct Engine {
             at.win = (int) (r.see + T);
             at.chunk = r.chunk;
             at.n_chunks = r.n_chunks;
-            ik::attn_rows_kernel<false><<<dim3((unsigned) r.n_chunks, (unsigned) s.HK), 256, 0, st>>>(at, T);
+            if (sp_q8) ik::attn_rows_kernel<true><<<dim3((unsigned) r.n_chunks, (unsigned) s.HK), 256, 0, st>>>(at, T);
+            else ik::attn_rows_kernel<false><<<dim3((unsigned) r.n_chunks, (unsigned) s.HK), 256, 0, st>>>(at, T);
             ik::JoinIn jn{b.part, b.sum, at.dyn, s.H, s.D, r.n_chunks};
             ik::attn_join_kernel<<<dim3((unsigned) T, (unsigned) s.H), (unsigned) s.D, 0, st>>>(jn);
             ik::attn_avg_kernel<<<dim3((unsigned) T, (unsigned) s.H), (unsigned) s.D, 0, st>>>(b.sum, b.ao, b.aimg, s.H, s.D);
