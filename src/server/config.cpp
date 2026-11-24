@@ -6,8 +6,8 @@
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/program/engine.hpp"
-#include "lamina/core/gpu_select.hpp"
 #include "lamina/program/gpu_cards.hpp"
+#include "lamina/program/options.hpp"
 #include "log.hpp"
 
 #include <algorithm>

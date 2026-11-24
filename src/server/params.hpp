@@ -69,7 +69,8 @@ void set_setting(json& cfg, std::string_view key, json v);
 /// the config's top-level keys no Param names (nor "args", "mcpServers"): typos, or keys this server does not read
 std::vector<std::string> unknown_keys(const json& cfg);
 
-/// --help's text
+/// --help's text: the commands, the table's options, then the engine's options a server takes
+/// (lamina/program/options.hpp)
 std::string params_help();
 
 }  // namespace lamina

@@ -1,9 +1,10 @@
 // lamina-server's settings table (src/server/params.hpp): every option names one key and the other way round, the
 // command line's values by their kinds (switches and their --no- forms, numbers, lists given again, NAME=VALUE pairs,
 // JSON), the engine's options apart, the errors, a section merged key by key, the config's keys the table lacks, and
-// --help naming every option.  (CPU only.)
+// --help naming every option, the engine's a server takes too.  (CPU only.)
 #include "params.hpp"
 #include "config.hpp"
+#include "lamina/program/options.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -148,6 +149,20 @@ int main() {
     for (const char* f : {"--bench ", "--bench-url", "--bench-runs", "--bench-clients", "--bench-long", "--bench-think",
                           "--bench-out", "--bench-compare"})
         CHECK(help.find(f) != std::string::npos);
+    // the engine's options for a server, and its deprecated spellings, in --help; none of them the server's own, which
+    // would keep it from the engine
+    size_t served = 0;
+    for (const lamina::program::OptionHelp& o : lamina::program::engine_options()) {
+        if (*o.flag == '\0' || (o.lists & lamina::program::kListServed) == 0) continue;
+        ++served;
+        CHECK(help.find(std::string("  ") + o.flag + (*o.value ? " " : "") + o.value) != std::string::npos);
+        if (o.flag[0] == '-') CHECK(lamina::find_param(o.flag) == nullptr);
+    }
+    CHECK(served > 80);
+    for (const lamina::program::DeprecatedOption& d : lamina::program::deprecated_options()) {
+        CHECK(help.find(std::string("  ") + d.flag) != std::string::npos);
+        CHECK(lamina::find_param(d.flag) == nullptr);
+    }
 
     if (fails == 0) std::printf("params_test: ok (%zu options)\n", keys.size());
     return fails == 0 ? 0 : 1;

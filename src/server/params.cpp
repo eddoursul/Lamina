@@ -2,6 +2,7 @@
 #include "params.hpp"
 
 #include "config.hpp"
+#include "lamina/program/options.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -50,11 +51,12 @@ const std::vector<Param> kParams = {
      "(default: the file's)"},
     {"--chat-template-file", "", "chat_template_file", K::Path, "FILE", "a chat template in place of the model file's"},
 
-    {"", "", "", K::Str, "", "The engine"},
-    {"--gpu", "", "gpu", K::Many, "CARD",
-     "a GPU the engine uses, again for each: the first runs the model, the others hold experts (a name only one card "
-     "has, a UUID's start, a PCI bus id, a number or auto, then its settings: cache=, reserve=, vram-only=, prefetch=, "
-     "clocks=, sleep=; lamina --help says them); numbers alone (0,1): the cards the engine sees, as nvidia-smi "
+    {"", "", "", K::Str, "", "Running the engine"},
+    {"--gpu", "", "gpu", K::Many, "CARD[,key=value...]",
+     "a GPU the engine uses, again for each: the first runs the model, the others hold experts as tiers in their order "
+     "(Qwen3.6 and Qwen3.8-27B: the layer split's GPUs; Inkling 2: context cells, layers or the RAM experts' copy). "
+     "CARD: a name only one card has, a UUID's start, a PCI bus id, a number or auto (every other GPU), then its "
+     "settings, which the engine's options below list; numbers alone (0,1): the cards the engine sees, as nvidia-smi "
      "numbers them"},
     {"--parallel", "", "parallel", K::Int, "N", "requests decoding together in the engine's batch slots"},
     {"--replicas", "", "replicas", K::Value, "N|JSON",
@@ -276,26 +278,6 @@ json parse_value(const Param& p, const std::string& flag, const std::string& v) 
     return v;
 }
 
-/// the wrapped lines of `text` after `indent` spaces, at most `width` wide
-std::string wrapped(std::string_view text, size_t indent, size_t width, size_t first_col) {
-    std::string out, line;
-    size_t col = first_col;
-    for (const std::string_view w : words(text)) {
-        if (col + (line.empty() ? 0 : 1) + w.size() > width && !line.empty()) {
-            out += line + "\n" + std::string(indent, ' ');
-            line.clear();
-            col = indent;
-        }
-        if (!line.empty()) {
-            line += ' ';
-            ++col;
-        }
-        line += w;
-        col += w.size();
-    }
-    return out + line + "\n";
-}
-
 }  // namespace
 
 const Param* find_param(std::string_view flag, bool* negated) {
@@ -478,6 +460,8 @@ std::vector<std::string> unknown_keys(const json& cfg) {
 }
 
 std::string params_help() {
+    using program::help_line;
+    using program::wrapped;
     constexpr size_t kWidth = 118, kCol = 36;
     std::string out =
         "lamina-server: the OpenAI, Anthropic and Responses APIs and the web app in front of the Lamina engine.\n"
@@ -485,11 +469,12 @@ std::string params_help() {
         "  lamina-server -m MODEL.gguf [options] [engine options]\n"
         "  lamina-server --config FILE [options] [engine options]\n"
         "\n";
-    out += wrapped("Each option is a key of the run config too, named in [brackets] (a dot: a key of that section), "
-                   "and the other way round. A value of the command line takes the place of the config file's, and "
-                   "the file's that of the preset -m builds from. A switch takes --no-<name> for off. Any other "
-                   "--option, with the values after it, is the engine's (the config's \"args\"; lamina --help lists "
-                   "Qwen3.8-Flash-Next's, docs/SETUP.md the others'), in place of the config's own: --max-context 65536.",
+    out += wrapped("Each of the server's options is a key of the run config too, named in [brackets] (a dot: a key of "
+                   "that section), and the other way round; the engine's options, after the server's, are the config's "
+                   "\"args\" (\"max-context\": 65536, a switch true or false). A value of the command line takes the "
+                   "place of the config file's, and the file's that of the preset -m builds from (--check shows the "
+                   "engine's command line). A switch takes --no-<name> for off. docs/PARAMETERS.md describes every "
+                   "option.",
                    0, kWidth, 0);
     out += "\nCommands\n";
     for (const auto& [left, help] : {
@@ -511,31 +496,27 @@ std::string params_help() {
              {"--bench-compare OLD [NEW]", "an earlier report (its folder or results.json) beside this run's; with "
                                            "NEW and no --bench, two reports side by side"},
              {"-h, --help", "this text"},
-             {"-v, --version", "the program's version"}}) {
-        std::string l = std::string("  ") + left;
-        l += std::string(l.size() < kCol ? kCol - l.size() : 1, ' ');
-        out += l + wrapped(help, kCol, kWidth, l.size());
-    }
+             {"-v, --version", "the program's version"}})
+        out += help_line(left, help, kWidth, kCol);
     for (const Param& p : kParams) {
         if (p.flag.empty()) {
             out += "\n" + std::string(p.help) + "\n";
             continue;
         }
-        std::string l = "  ";
+        std::string l;
         for (const std::string_view a : words(p.aliases))
             if (a.size() == 2) l += std::string(a) + ", ";   // a short one first: -m, --model
         l += std::string(p.flag);
         for (const std::string_view a : words(p.aliases))
             if (a.size() > 2) l += ", " + std::string(a);
         if (!p.arg.empty()) l += " " + std::string(p.arg);
-        const std::string help = "[" + std::string(p.key) + "] " + std::string(p.help);
-        if (l.size() + 1 > kCol) {
-            out += l + "\n" + std::string(kCol, ' ') + wrapped(help, kCol, kWidth, kCol);
-        } else {
-            l += std::string(kCol - l.size(), ' ');
-            out += l + wrapped(help, kCol, kWidth, l.size());
-        }
+        out += help_line(l, "[" + std::string(p.key) + "] " + std::string(p.help), kWidth, kCol);
     }
+    out += "\n\nENGINE OPTIONS: the config's \"args\"\n" +
+           wrapped("Their defaults are the engine's own; -m's preset sets some of them (lamina-server -m MODEL.gguf "
+                   "--check shows the engine's command line).",
+                   0, kWidth, 0);
+    out += program::options_help(program::kListServed, true, kWidth, kCol);
     return out;
 }
 

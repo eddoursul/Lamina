@@ -17,6 +17,7 @@
 #endif
 #include "lamina/program/engine.hpp"
 #include "lamina/program/gpu_cards.hpp"
+#include "lamina/program/options.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/core/adaptive_tier.hpp"
 #include "lamina/core/expert_cache.hpp"
@@ -425,260 +426,13 @@ bool number_list(const char* s, std::vector<double>& out) {
     }
 }
 
-/// The deprecated spellings the engine still takes (--help-all's last part; lamina-server names the ones a start uses).
-const lamina::program::DeprecatedOption kDeprecated[] = {
-    {"--main-gpu", "GPU", "the first --gpu's card"},
-    {"--second-gpu", "G[,G,G]", "the later --gpu's cards, or auto (-1: none)"},
-    {"--tier-gpus", "G[,G,G]", "the later --gpu's cards, as --second-gpu"},
-    {"--expert-cache", "N|auto", "the main GPU's cache= (N slots; 0: the profile's count)"},
-    {"--vram-reserve-mib", "M", "the main GPU's reserve= in MiB"},
-    {"--vram-pin-gib", "G", "the main GPU's vram-only= in GiB"},
-    {"--second-gpu-pin-gib", "G", "the first tier's vram-only= in GiB"},
-    {"--second-gpu-gib", "G[,..]", "each tier's cache= in GiB (0: auto)"},
-    {"--second-gpu-reserve-mib", "R[,..]", "each tier's reserve= in MiB"},
-    {"--second-gpu-prefetch-mb", "M[,..]", "each tier's prefetch= in MiB"},
-    {"--second-gpu-clocks", "C[,..]", "each tier's clocks= (0: the driver's)"},
-    {"--second-gpu-sleep-us", "T[,..]", "each tier's sleep= in microseconds (0: none)"},
-    {"--second-gpu-clocks-hold", "S", "--clocks-hold in seconds"},
-    {"--second-gpu-clocks-lead", "S", "--clocks-lead in seconds"},
-    {"--second-gpu-min-mb", "M", "--tier-min in MiB"},
-    {"--second-gpu-adapt", "", "--tier-adapt"},
-    {"--no-second-gpu-adapt", "", "--no-tier-adapt"},
-};
-
 /// --help: the options most runs set; --help-all: every one, then the deprecated spellings the engine still takes.
 void usage(bool all = false) {
-    std::fprintf(stderr,
-                 "lamina --native MODEL.gguf [options]   (lamina-server runs it; generate mode also takes --tokens)\n"
-                 "\n"
-                 "The options most runs set (lamina --help-all lists every one; a switch also takes --no-<name>):\n"
-                 "  --native MODEL.gguf  the model's GGUF: its first shard (a split model's others are found by name)\n"
-                 "  --gpu CARD[,key=value...]  a GPU the engine uses, the flag again for each: the first runs the model,\n"
-                 "                       the others hold experts as tiers, in order (up to three).  CARD: a number,\n"
-                 "                       a UUID or its start (GPU-f26e9ba6), a PCI bus id (10:00.0) or a name only one\n"
-                 "                       card has (\"RTX 5070 Ti\"); auto after the main GPU: every other GPU, the fastest\n"
-                 "                       link first.  Its settings, each optional:\n"
-                 "                         cache=auto|SIZE|N  its VRAM for experts (auto, the default: all but its\n"
-                 "                                            reserve; the main GPU's also N expert slots)\n"
-                 "                         reserve=SIZE       the VRAM it leaves free (the main GPU 700M; a tier 2G\n"
-                 "                                            when the desktop uses it, else 512M)\n"
-                 "                         vram-only=SIZE|auto  the profile's experts it holds only in VRAM, left out of\n"
-                 "                                            the RAM (auto: as many as keep the experts within the RAM)\n"
-                 "                         prefetch=SIZE      a tier: each layer's likeliest experts no GPU holds,\n"
-                 "                                            copied ahead (default 12M over a link of 20 GB/s or more)\n"
-                 "                         clocks=MIN-MAX/MEM a tier: its clocks in MHz, locked through NVML while the\n"
-                 "                                            engine generates (1395-2100/9751 for an RTX 3090; needs\n"
-                 "                                            administrator rights, root on Linux; 0: the driver's)\n"
-                 "                         sleep=TIME         a tier after the first: it sleeps while the CPU pool would\n"
-                 "                                            need less than TIME a layer without it\n"
-                 "                         layers=A-B         Inkling 2 Mini: a later card runs those layers\n"
-                 "                       Sizes are binary (8G, 700M), times have their unit (55us, 1.5ms, 1s).  Example:\n"
-                 "                       --gpu GPU-75af3083 --gpu \"RTX 5070 Ti\" --gpu GPU-f26e9ba6,clocks=1395-2100/9751\n"
-                 "                       Qwen3.6-35B-A3B and Qwen3.8-27B: the cards' order is the layer split's\n"
-                 "                       (--layer-split N,N,.. sets the counts), their settings unused.  Inkling 2\n"
-                 "                       Mini: a later card with layers= runs those layers, one with cache= holds the RAM\n"
-                 "                       experts' copies, the others the context's cells; each takes reserve= and clocks=\n"
-                 "  --max-context N      the K/V's cells (default: --serve the model's trained 262,144, else 4096; at\n"
-                 "                       most the QSA selection's capacity, set by the GPU's shared memory: 1,466,368\n"
-                 "                       cells on 99 KiB, 630,784 on 48 KiB)\n"
-                 "  --kv fp16|int8|k8v4|q4_0  the K/V's format: int8 codes + fp16 scale per 64 values (half FP16's\n"
-                 "                       VRAM); k8v4: int8 K, 4-bit V of rotated rows (23%% less than int8); q4_0: 4-bit\n"
-                 "                       K and V (45%% less); default fp16.  Qwen3.6-35B-A3B and Qwen3.8-27B: fp16 or q8_0\n"
-                 "  --kv-grow            --serve: the K/V takes VRAM only for the cells the requests reach and the\n"
-                 "                       expert cache holds the rest (the default; LAMINA_KV_GROW=1/0 too); --no-kv-grow:\n"
-                 "                       the whole --max-context allocated at start\n"
-                 "  --prefill CHUNK|auto prompts in chunks of CHUNK tokens (auto, the default: 16384, halved until its\n"
-                 "                       buffers fit the caches' lendable slots)\n"
-                 "  --spec T             verify windows of up to T tokens: the last one and T-1 drafts (2..8; default 4)\n"
-                 "  --mtp FILE           the draft layer, Lamina-Qwen3.8-Flash-Next-MTP.gguf (%s fetches it), or a\n"
-                 "                       folder of its earlier layout; --serve without it: one token a window, or\n"
-                 "                       prompt lookup's drafts\n"
-                 "  --expert-profile P   fill the VRAM tiers from this profile (builtin: the model's in the programs, or what\n"
-                 "                       --expert-profile-save wrote; --serve: the built-in one) instead of admitting\n"
-                 "                       experts on first use\n"
-                 "  --serve              stay resident and take requests on stdin, as lamina-server sends them\n"
-                 "  --vision             --serve takes images too (GENI requests; the image encoder's rows)\n"
-                 "  --help-all           every option\n"
-                 "  -v, --version        the program's version\n",
-                 lamina::kDraftLayerScript);
-    if (!all) return;
-    std::fprintf(stderr,
-                 "\n"
-                 "Every other option:\n"
-                 "  --tokens LIST        generate mode: the prompt as comma-separated token IDS\n"
-                 "  --tokens-file PATH   pretokenized prompt, commas or whitespace (alternative to --tokens)\n"
-                 "  --max-new N          tokens to generate (default 16)\n"
-                 "  --stop-eos           stop at an end-of-turn token (<|endoftext|>, <|im_end|>; --serve always does)\n"
-                 "  --eos-ids LIST       the end-of-turn tokens instead of 248044,248046 (implies --stop-eos)\n"
-                 "  --temperature F      generate mode: sample at this temperature (default 0: greedy), with\n"
-                 "                       --top-p F (1), --top-k N (20), --min-p F (0) and --seed N (0: the clock);\n"
-                 "                       --serve takes each request's\n"
-                 "  --ple-gguf PATH      the PLE table: a GGUF holding per_layer_token_embd, such as one of unsloth's\n"
-                 "                       engram tables (default: the --native model's shard that holds it)\n"
-                 "  --ple-io direct|mmap|ram  n-gram table reads. direct (default): unbuffered SSD reads, the table\n"
-                 "                       never enters RAM or the file cache; mmap: A/B arm; ram: read into RAM once\n"
-                 "                       the experts are loaded (the table's size: 28.8 GB as IQ4_NL), direct reads\n"
-                 "                       until then\n"
-                 "  --rope-scaling T     rotate for a context past the trained one: none, linear (position\n"
-                 "                       interpolation) or yarn, as llama.cpp does.  Fixed at startup: K in the cache is\n"
-                 "                       post-RoPE\n"
-                 "  --rope-scale F       the extension factor (>= 1), e.g. 2 for 524288 over a 262144 training run\n"
-                 "  --rope-freq-base N   the rotation base (0 = 1e7)   --rope-freq-scale F  the raw shrink (0 = 1/F)\n"
-                 "  --yarn-orig-ctx N    trained context (0 = 262144)  --yarn-ext-factor F  < 0 = auto (1 for yarn)\n"
-                 "  --yarn-attn-factor F  --yarn-beta-fast F  --yarn-beta-slow F  the remaining YaRN knobs\n"
-                 "  --expert-math M      how the GPU computes the experts it holds. fast (default): llama.cpp's CUDA\n"
-                 "                       q8_1 arithmetic. exact (K-quant files): the CPU pool's ggml arithmetic\n"
-                 "                       (Q8_K/Q8_0 activations, ggml's x86 summation order, one expf on both sides), so\n"
-                 "                       a GPU hit is bit-identical to the CPU's and the output does not depend on which\n"
-                 "                       experts are resident (a prompt's experts stay on the main GPU); slower, for\n"
-                 "                       regression tests\n"
-                 "  --disable-hit        every routed expert on the CPU (the cache stays allocated): exact's reference\n"
-                 "  --dump-routing PATH  write the routed expert ids and weights per layer per position\n"
-                 "  --prompt-cache N     --serve: keep up to N checkpoints of the sequence state per conversation in\n"
-                 "                       host memory and continue each request from the longest cached prefix\n"
-                 "                       (default 16; 0 = every request starts from an empty sequence)\n"
-                 "  --prompt-cache-every N  checkpoint interval inside long prompts, rounded down to whole --prefill\n"
-                 "                       chunks (default 16384)\n"
-                 "  --conversation-cache-mib MIB  --serve: host memory for conversations a request replaced (their\n"
-                 "                       K/V cells and checkpoints), so switching back to one continues where it\n"
-                 "                       was; the least recently used leaves whole first (default 16384; 0 = none\n"
-                 "                       in RAM: with --conversation-spill-dir every one goes to disk)\n"
-                 "  --conversation-cache-slots N  --serve: at most N such conversations (default 0: no limit)\n"
-                 "  --conversation-cache-min-tokens N  --serve: keep only conversations of at least N tokens\n"
-                 "                       (default 1024)\n"
-                 "  --ram-reserve-mib MIB  --serve: such conversations take no RAM below MIB available to the\n"
-                 "                       system, and leave between requests when it runs below (default 6144;\n"
-                 "                       0 = only --conversation-cache-mib limits them)\n"
-                 "  --conversation-spill-dir DIR  --serve: such conversations that the RAM does not hold, or that\n"
-                 "                       leave it, go to files in a folder of this process's own under DIR\n"
-                 "                       (default: none)\n"
-                 "  --conversation-spill-mib MIB  --serve: those files take at most MIB (default: 32 GiB or a\n"
-                 "                       quarter of the disk's free space, the less; never its last 4 GiB free)\n"
-                 "  --feed-max N         --serve: new prompt parts and last prompt chunks of up to N tokens run\n"
-                 "                       through verify windows instead of the batched prompt path (default 46)\n"
-                 "  --tail-role-token ID --serve: a turn of this role right before the last turn stays out of the\n"
-                 "                       turn checkpoint (a trailing reasoning-effort turn; default -1 = off)\n"
-                 "  --spec-min-p P       a draft enters the window only while it and the drafts before it have at\n"
-                 "                       least probability P under the draft layer (default 0.5; 0: always T-1);\n"
-                 "                       a sampled request's draft, by the number its position draws with, at least\n"
-                 "                       the chance to pass that a draft of probability P has on average\n"
-                 "  --spec-lookup N      when the text's last N+ tokens occurred before, the next window verifies\n"
-                 "                       up to 7 of the tokens that followed there instead, if they are more than\n"
-                 "                       --spec allows the draft layer (windows of up to 8 tokens; default 16; 0 = off)\n"
-                 "  --spec-split         a window's tokens in two groups, the GPU's work on one beside the CPU's on\n"
-                 "                       the other (exact, ~7%% slower: a measurement arm)\n"
-                 "  --mtp-window N       the draft layer attends to the last N cells (default 32768; 0 = every cell)\n"
-                 "  --drafts-per-step N  Qwen3.6, Qwen3.8-27B and Hy4-flash: at most N drafts (0..7) of the file's own\n"
-                 "                       MTP block a step (default 0: none; --spec-min-p as above), --draft-vocab N\n"
-                 "                       its head over the first N ids\n"
-                 "  --lora F[,F]         Qwen3.6 and Qwen3.8-27B: LoRA adapters in llama.cpp's GGUF format, each at\n"
-                 "                       scale 1 (every product with a pair adds s B A x, s = scale * alpha / rank)\n"
-                 "  --lora-scaled F:S[,F:S]  the same at scale S\n"
-                 "  --lora-init-without-apply  the adapters loaded at scale 0: a request's \"lora\" (or the server's\n"
-                 "                       /lora-adapters) sets their scales\n"
-                 "  --clocks-hold TIME   --serve: the tiers' clock locks stay this long after a request (default 5s)\n"
-                 "  --clocks-lead TIME   --serve: they are asked for this long before a batched prompt part ends, by\n"
-                 "                       its progress, instead of from its last chunk on (default off; a lock is at\n"
-                 "                       speed ~0.6 s after it is asked for)\n"
-                 "  --tier-min SIZE      a layer's missed experts from which the tiers take their shares (default 4M;\n"
-                 "                       below it the CPU is quicker than their ~100 us round trip)\n"
-                 "  --no-tier-adapt      keep the tiers' experts as the start placed them while the main GPU's\n"
-                 "                       adaptive tier goes on moving its own\n"
-                 "  --deterministic-adapt  fixed-epoch adaptive copies and stable equal-gain ordering; default async\n"
-                 "                       adaptation remains unchanged (with tiers, applies to every one)\n"
-                 "  --adapt-every N      every N verify rounds the adaptive tiers move the conversation's most-routed\n"
-                 "                       experts they lack in, in place of their least-routed ones (default 1;\n"
-                 "                       0 = the start's placement stays)\n"
-                 "  --adapt-swaps N      an update's moves at most (default 96)\n"
-                 "  --adapt-decay F      the share of the routing counts the adaptive tiers keep after each update\n"
-                 "                       (default 0.7; between 0 and 1)\n"
-                 "  --head-split F       with a tier: the first tier's share of the output head's rows (default 0.45;\n"
-                 "                       each GPU streams its part after the last layer; 0 = all on the main GPU)\n"
-                 "  --prompt-shift F     with a tier: in prompt chunks of 8K tokens and more the first tier also\n"
-                 "                       computes the likeliest F (0..1) of each layer's experts the main GPU holds,\n"
-                 "                       copied ahead with the ones it streams (when the main GPU's share is the\n"
-                 "                       longer; default 0)\n"
-                 "  --prompt-split L[,M] with a tier: a prompt of more than one chunk runs in two stages, the first\n"
-                 "                       tier running each chunk's layers L.. whole (their weights and state copied\n"
-                 "                       into its lent cache slots) while the main GPU runs the next chunk through the\n"
-                 "                       first ones (0: off, the default).  L,M with two or more tiers: three stages,\n"
-                 "                       the tier after the first running the layers L..M-1 (the experts its cache\n"
-                 "                       lacks on the first tier), the first tier the layers M..; with one tier, two\n"
-                 "                       stages split halfway between L and M\n"
-                 "  --prompt-split-from N  with --prompt-split: a prompt part of N tokens or more that fits one chunk\n"
-                 "                       (--prefill) is read in two chunks of one size through the stages too (the\n"
-                 "                       stages' own costs set N: by default, 0, such a part is read in one chunk)\n"
-                 "  --prompt-tiers N     with two or more tiers: the first N of them compute their experts in prompts\n"
-                 "                       (default 1: the first tier alone, the experts of the later ones streaming to\n"
-                 "                       it; 2: the tier after it computes the ones its cache holds, their input and\n"
-                 "                       sums over its own link)\n"
-                 "  --no-prompt-offload  with a tier: the prompt path streams the experts the main GPU's cache lacks\n"
-                 "                       to the main GPU instead of computing them on the first tier\n"
-                 "  --arena-place        at the start, time each expert's place in the RAM arena and move the experts\n"
-                 "                       no GPU holds out of the slow places, into the GPU-resident ones' (RAM with\n"
-                 "                       slower regions, as unpaired DIMMs make; ~2-4 s).  Off by default\n"
-                 "  --no-file-cache      the experts read from the model's GGUF past the OS file cache, which then\n"
-                 "                       keeps no second copy of them on RAM the next starts' arenas would have had\n"
-                 "                       (where the arena and the cached file fill the faster RAM); each start reads\n"
-                 "                       them from the drive.  Off by default\n"
-                 "  --hc-q8              the hyper-connection projections only in 8 bits (int8, an f16 scale a 32: the\n"
-                 "                       GGUF's Q8_0 as stored, BF16 ones rounded so); the verify windows read them,\n"
-                 "                       the prompt path takes them in BF16 a layer at a time (the default;\n"
-                 "                       --no-hc-q8: BF16 copies, 1.27 GiB of VRAM instead of 644 MiB)\n"
-                 "  --control-vector F[,F]  a control vector in llama.cpp's GGUF format (direction.<layer> tensors),\n"
-                 "                       applied to every hyper-connection stream after each layer's FFN write\n"
-                 "  --control-vector-scaled F:S[,F:S]  the same at scale S (the vectors of several files add up)\n"
-                 "  --control-vector-layer-range A B  the layers it follows, inclusive (default 1 .. the last)\n"
-                 "  --cvec-mode add|project  add: h += S d (llama.cpp's, the default); project: h -= |S d| (h . v) v,\n"
-                 "                       v = d / |d| (the cvec-hooks fork's: a unit direction at S 1 is removed)\n"
-                 "  --cvec-dir per-layer|single:L  project: each layer's own direction (default) or layer L's in every\n"
-                 "                       layer\n"
-                 "  --spec-follow PATH   benchmarks: emit this continuation (token ids) instead of the argmax and\n"
-                 "                       accept the drafts that match it, so speculation settings compare on the\n"
-                 "                       same text (not --serve)\n"
-                 "  --no-prefill-borrow  the prompt path's buffers keep VRAM of their own for the whole session\n"
-                 "                       instead of borrowing the expert caches' last slots while a prompt runs\n"
-                 "  --no-warmup          --serve: no throw-away prompt part before READY (the first request then\n"
-                 "                       loads the prompt path's kernels)\n"
-                 "  --stats              print the per-stage breakdown\n"
-                 "  --window-hashes PATH per verify window, a line with its round, first position and size, a 64-bit\n"
-                 "                       hash of its final residual rows and its argmaxes: two builds that do the same\n"
-                 "                       arithmetic write the same file (fixed text through --spec-follow,\n"
-                 "                       --adapt-every 0; not --serve)\n"
-                 "  --window-logits PATH per token the verify windows emit, a line with its index among the generated\n"
-                 "                       tokens, the token and the 64 likeliest as id:log-probability, from the head's\n"
-                 "                       logits (comparisons with llama.cpp; not --serve)\n"
-                 "  --dump-draft-data DIR  with --serve: each request's positions for the draft layer's training: the\n"
-                 "                       final residual rows, and the verify windows' 64 likeliest next tokens and\n"
-                 "                       drafts (the prompt read in batches whatever --feed-max)\n"
-                 "  --window-profile     with --stats: the GPU time of each stage of the verify window (timestamps\n"
-                 "                       inside the graph; each costs ~2 us)\n"
-                 "  --prefill-profile    the GPU time of each section of the batched prompt path (--serve: each\n"
-                 "                       batched part's)\n"
-                 "  --expert-profile-save P  --serve: save what the run learned (the routing counted since the start,\n"
-                 "                       blended with the profile it started from) as a profile at P, at QUIT (or\n"
-                 "                       Ctrl+C) and between requests once --expert-profile-save-every MIN minutes\n"
-                 "                       have passed since the last save (default 10; 0 = at QUIT only); start from it\n"
-                 "                       with --expert-profile P\n"
-                 "  --pcie-frac F        in verify windows, the share of each layer's missed experts that the main\n"
-                 "                       GPU reads from RAM over its link instead of the CPU computing them\n"
-                 "                       (default 0: over an x4 link the CPU computes them sooner; the GPU tiers\n"
-                 "                       take theirs first)\n"
-                 "  --pcie-mode M        how that share reaches the main GPU: kernel (default: a copy kernel stages it\n"
-                 "                       inside the window's graph), dma (the copy engine stages it) or direct (the\n"
-                 "                       expert kernels read the mapped RAM)\n"
-                 "  --pool-workers N     the CPU expert pool's workers (default 0: every physical core but the\n"
-                 "                       host loop's)\n"
-                 "\n"
-                 "Deprecated spellings, still taken (a card's own setting wins over them; a per-tier list's values go\n"
-                 "to the tiers in order, its last one to those past it; of --gpu, --main-gpu and --second-gpu the later\n"
-                 "takes the earlier's place: --second-gpu -1 after the cards, no tiers; lamina-server names the ones a\n"
-                 "start uses):\n");
-    for (const lamina::program::DeprecatedOption& d : kDeprecated) {
-        std::string left = std::string(d.flag) + (*d.value ? " " : "") + d.value;
-        left += std::string(left.size() < 21 ? 21 - left.size() : 2, ' ');
-        std::fprintf(stderr, "  %s%s\n", left.c_str(), d.instead);
-    }
+    std::fputs("lamina --native MODEL.gguf [options]   (lamina-server runs it; generate mode also takes --tokens)\n"
+               "\n"
+               "A switch also takes --no-<name>.\n",
+               stderr);
+    std::fputs(lamina::program::options_help(all ? 0 : lamina::program::kListCommon, all, 118, 36).c_str(), stderr);
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -2112,12 +1866,6 @@ int lamina::program::check_args(int argc, char** argv) {
     Options o;
     bool help = false;
     return parse_options(argc, argv, o, help, false);
-}
-
-const lamina::program::DeprecatedOption* lamina::program::deprecated_option(const char* flag) {
-    for (const DeprecatedOption& d : kDeprecated)
-        if (std::strcmp(d.flag, flag) == 0) return &d;
-    return nullptr;
 }
 
 const char* lamina::program::option_default(const char* flag) {

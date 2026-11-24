@@ -18,15 +18,4 @@ int check_args(int argc, char** argv);
 /// lamina-server --write-config writes leaves out the options at their default.
 const char* option_default(const char* flag);
 
-/// A deprecated spelling the engine still takes: its value's form ("" for a switch) and what takes its place.
-struct DeprecatedOption {
-    const char* flag;
-    const char* value;
-    const char* instead;
-};
-
-/// The deprecated spelling `flag` is, as --help-all lists it; nullptr for any other option.  lamina-server names the
-/// ones a start uses.
-const DeprecatedOption* deprecated_option(const char* flag);
-
 }  // namespace lamina::program
