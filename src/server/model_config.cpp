@@ -636,8 +636,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     const double experts = (double) m.expert_bytes, dense = (double) m.bytes - experts;
                     const double beside =
                         (double) main->memory_mib * 1048576.0 - dense - drafter_at(true) - (main->display ? 3.0 : 2.2) * gibi;
-                    uint64_t avail = 0;
-                    const double ram = platform::available_ram(avail) ? std::max(0.0, (double) avail - 6.0 * gibi) : experts;
+                    uint64_t ram_free = 0;
+                    const double ram = platform::available_ram(ram_free) ? std::max(0.0, (double) ram_free - 6.0 * gibi) : experts;
                     const double alone = std::max(0.0, experts - ram);
                     const double first = std::max(0.0, std::min(experts, beside - (on.size() > 1 ? 16384.0 : 32768.0) * per));
                     const double tokens = std::min(1048576.0, (std::max(0.0, beside - alone) + others) / per);
