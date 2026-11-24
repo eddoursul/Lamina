@@ -111,10 +111,10 @@ prompt chunks run on both at once, so the prompts read ~11% faster than in the o
     text turns heavy. It gives up speed for the card's awake power, by an amount that is the model file's and the
     PC's: here IQ3_S at 55 slept through 59-63% of a session's rounds for 10.5% fewer joules a token, its time a
     token within ~1% of the config's (code and edits kept the card, worth 11-13% of their time), Gyro-L at 100
-    through 51% for 6.7% fewer joules and 2% more time, and UD-Q4_K_XL's load never falls that low. `--stats` prints
-    the measure at the end of a `lamina` run, predicted while the tier works and measured while it sleeps: start
-    from what a thinking text shows, and compare whole sessions with and without the switch, several each (single
-    runs differ by 2%).
+    through 51% for 6.7% fewer joules and 2% more time, and UD-Q4_K_XL's load never falls that low. An answer's
+    `timings.expert_tiers` has the measure over its rounds, `third_awake_us` predicted while the tier works and
+    `third_asleep_us` measured while it sleeps, beside the rounds it slept through: start from what a thinking text
+    shows, and compare whole sessions with and without the switch, several each (single runs differ by 2%).
 - **`dfly`** (Hy4-flash): Tencent's DFly2 drafter, a download of its own (the tencent/Hy4-flash checkpoint's last
   shard, `model-00148-of-00148.safetensors`, 1.7 GB, with its `config.json` beside it), drafts in place of the file's
   MTP block, which the example drafts with: `"dfly": "<the shard>"` in the args. Here, over an agent's session

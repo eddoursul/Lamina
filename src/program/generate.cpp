@@ -4417,7 +4417,8 @@ int lamina::program::run(int argc, char** argv) {
             int64_t main_swaps, main_fills, main_dropped, cpu_layers;
             struct Gpu {
                 int64_t entries, experts, layers, swaps, fills, dropped, prefetched, prefetch_used;
-                int64_t rounds, rounds_asleep, sleeps;   // --second-gpu-sleep-us
+                int64_t rounds, rounds_asleep, sleeps;   // a card's sleep=
+                double us_awake, us_asleep;              // its measure, summed over the rounds awake and asleep
             } gpu[lamina::core::kMaxGpuTiers];
         };
         const auto tier_counters = [&]() {
@@ -4425,9 +4426,10 @@ int lamina::program::run(int argc, char** argv) {
             for (int t = 0; t < n_tiers; ++t) {
                 const lamina::core::SecondGpu& gp = tiers[(size_t) t].gpu;
                 const lamina::core::AdaptiveTier& ad = tiers[(size_t) t].adapt;
+                const Drive::TierPower& pw = drive.power[t];
                 c.gpu[t] = {gp.entries_done, gp.experts, gp.layers, ad.swaps, ad.fills, ad.dropped,
-                            gp.prefetch_copied, gp.prefetch_used, drive.power[t].rounds, drive.power[t].rounds_asleep,
-                            drive.power[t].sleeps};
+                            gp.prefetch_copied, gp.prefetch_used, pw.rounds, pw.rounds_asleep, pw.sleeps,
+                            pw.us_awake, pw.us_asleep};
             }
             return c;
         };
@@ -5218,10 +5220,15 @@ int lamina::program::run(int argc, char** argv) {
                 field("empty_slots", tiers[(size_t) t].adapt.free_slots());
                 field("prefetched", b.prefetched - a.prefetched);
                 field("prefetch_used", b.prefetch_used - a.prefetch_used);
-                if (drive.power[t].sleep_us > 0) {   // --second-gpu-sleep-us: the rounds it slept through
+                if (drive.power[t].sleep_us > 0) {   // a card's sleep=: the rounds it slept through
                     field("rounds", b.rounds - a.rounds);
                     field("asleep_rounds", b.rounds_asleep - a.rounds_asleep);
                     field("sleeps", b.sleeps - a.sleeps);
+                    // the measure its threshold is held against, the pool's us a layer without the tier: predicted
+                    // over the request's rounds awake, measured over its rounds asleep (no rounds: no field)
+                    const int64_t asleep = b.rounds_asleep - a.rounds_asleep, awake = b.rounds - a.rounds - asleep;
+                    if (awake > 0) field("awake_us", std::llround((b.us_awake - a.us_awake) / (double) awake));
+                    if (asleep > 0) field("asleep_us", std::llround((b.us_asleep - a.us_asleep) / (double) asleep));
                 }
             }
             serve_print("TIERS main_swaps=%lld main_fills=%lld main_dropped=%lld%s deterministic_adapt=%d\n",

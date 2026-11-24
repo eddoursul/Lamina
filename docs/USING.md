@@ -46,7 +46,11 @@ print(r.choices[0].message.content)
 ```
 
 Any model name is served; `/v1/models` lists the config's `model_name` and its `aliases`. An answer's `timings` use
-llama.cpp's names, with the drafts offered and accepted. `/metrics` in Prometheus' format carries vLLM's metric names,
+llama.cpp's names, with the drafts offered and accepted, and with GPU tiers the tiers' work in `expert_tiers` (the
+first tier's fields `second_*`, the next ones' `third_*` and `fourth_*`); a tier with `sleep=` adds the rounds it slept
+through (`*_rounds`, `*_asleep_rounds`, `*_sleeps`) and the measure its threshold is held against, the CPU's
+microseconds a layer without the tier: `*_awake_us` predicted over the answer's rounds awake, `*_asleep_us` measured
+over its rounds asleep ([PARAMETERS.md](PARAMETERS.md#gpus)). `/metrics` in Prometheus' format carries vLLM's metric names,
 so dashboards written for vLLM read this server, and the Monitor's other facts as `lamina:<key>`;
 [monitoring/](monitoring/) has a Prometheus scrape config, a Prometheus Operator `ServiceMonitor` and a Grafana
 dashboard.
