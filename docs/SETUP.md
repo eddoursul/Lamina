@@ -16,7 +16,7 @@ build.bat                        (Windows)
 ```
 
 They build the preset `native` of `CMakePresets.json` into `build/`: `lamina-server` (the image encoder is a part of
-it) and `lamina`, on Windows with the CUDA runtime's DLLs beside them (on Linux they take the toolkit's), for this PC's
+it) and `lamina` (the engine alone, for tests and measurements), on Windows with the CUDA runtime's DLLs beside them (on Linux they take the toolkit's), for this PC's
 CPU and its GPUs of the RTX 30 series and newer, as `nvidia-smi` names them at each build (after a card is added, build
 again). The programs run from there: `build\lamina-server -m MODEL.gguf` ([below](#a-model-file)).
 `build.bat portable` (`./build.sh portable`) builds them for other PCs into `build-portable/`, as the releases are: RTX
@@ -61,10 +61,10 @@ build.bat
 
 The CUDA toolkit's Visual Studio integration is not needed.
 
-`cmake --install build --prefix <folder>` puts the programs into a folder of their own, flat, as a release's two
-downloads extract: the programs, `download-draft-layer.bat` (`.sh` on Linux) and the licenses (the component
-`lamina`), and the CUDA runtime and cuBLAS the programs load, with NVIDIA's license (`cudart`; `--component` installs
-one). Installed on Linux, the programs load the libraries in their own folder.
+`cmake --install build --prefix <folder>` puts the server into a folder of its own, flat, as a release's two
+downloads extract: `lamina-server`, `download-draft-layer.bat` (`.sh` on Linux) and the licenses (the component
+`lamina`), and the CUDA runtime and cuBLAS it loads, with NVIDIA's license (`cudart`; `--component` installs
+one). Installed on Linux, the server loads the libraries in its own folder.
 
 **The image encoder** is a part of `lamina-server` (half a megabyte of it): on the CPU a graph on ggml, on a GPU the
 engine's own kernels, so a GPU it runs on is one the engine runs on (an RTX 30 or newer). A config's `vision` section
@@ -109,8 +109,7 @@ The server builds a config for the file and says in its window what it took:
   RAM. A picture
   whose loan finds no memory is encoded on the CPU, on its logical cores (the log says so once). With batch slots
   (`--parallel`) the engine lends beside the requests that are generating, and after a prompt one of them is still
-  reading. The engine does not lend to a server with replicas: the CPU encodes there, as the window says,
-  unless `--vision-cuda-device` names a card for the encoder to keep its VRAM on. `--no-vision-lend`: the encoder keeps its VRAM (the
+  reading. `--no-vision-lend`: the encoder keeps its VRAM (the
   projector's size and 0.1-0.3 GB of buffers: 0.7 GB with Lamina's Q8_0 projector, 1.0 GB with an F16 one, 1.2 GB
   with Hy4-flash's) and encodes such a picture in 0.2 s, on a card besides the main one: the one with the least VRAM
   that drives no display, else any, else the main one; `--vision-cuda-device <UUID>` names another (`nvidia-smi -L`
@@ -161,10 +160,9 @@ parser reads those options first, for the model's family, and the server stops o
 argument: ...", a value out of range); `--native`, `--serve` and `--vision` are the server's to set (the model is
 `"model"`, the pictures the `vision` section). `lamina-server --config OLD.json --write-config NEW.json` writes an
 earlier config in this form: its GPUs as cards (the main GPU's and the per-tier flags as their settings, into `"gpu"`'s
-own cards too), the other deprecated options renamed (a replica's own `args` too), its options at the engine's default
-left out, `"args"` an object. Three keep their GPU flags, as the engine still reads them: a `"gpu"` of numbers (the
-cards the engine sees), replicas (each one's `"gpu"` its group's numbers) and an `auto` card a flag would give a
-setting.
+own cards too), the other deprecated options renamed, its options at the engine's default and `lib_dirs` left out,
+`"args"` an object. Two keep their GPU flags, as the engine still reads them: a `"gpu"` of numbers (the cards the
+engine sees) and an `auto` card a flag would give a setting.
 
 `--write-config FILE` writes the config the command line runs to FILE (the preset's, the config file's and the command
 line's settings in one) and stops; `lamina-server --config FILE` then runs it, and the web app's Model settings card
@@ -194,20 +192,21 @@ stops it before anything loads: the two would share the GPUs.
 Each [release](https://github.com/eddoursul/Lamina/releases) has the programs built for Windows and Linux, on x64 and
 arm64, in two downloads a platform:
 
-- `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server with the engine and the image encoder (`lamina-server`)
-  and the engine alone (`lamina`), with their licenses, and the script that downloads Flash-Next's draft layer (`download-draft-layer.bat`, `.sh` on Linux);
-- `cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>`: the CUDA runtime and cuBLAS they load, beside them (the same in every
+- `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server with the engine and the image encoder (`lamina-server`),
+  with the licenses, and the script that downloads Flash-Next's draft layer (`download-draft-layer.bat`, `.sh` on
+  Linux);
+- `cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>`: the CUDA runtime and cuBLAS it loads, beside it (the same in every
   release of that CUDA version: one download serves the next releases).
 
 Both are flat: extract them into one folder, and `lamina-server -m` runs a model file from there
-([above](#a-model-file)). The programs are built for RTX 30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.x, the
+([above](#a-model-file)). The server is built for RTX 30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.x, the
 GB10's among them, with PTX for newer ones), any x64 CPU with AVX2 (the AVX-512 kernels where the CPU has them) or arm64
-CPU with Armv8.2's dot product and FP16 instructions, and a driver for CUDA 13; the Linux ones for glibc 2.34 and
-OpenSSL 3, as Ubuntu 22.04, Debian 12, RHEL 9 (and Rocky Linux, AlmaLinux), Amazon Linux 2023, openSUSE Leap 15.6 and
-newer systems have them (the C++ runtime is linked in), and without the runtime archive they take the CUDA 13 libraries
-of the system (`LD_LIBRARY_PATH`). Other GPUs (an A100's 8.0, a GH200's 9.0) and a native build for the PC's CPU need a
-build from the source ([above](#building)). The arm64 programs are built and their CPU tests run on each release, not
-yet run with a GPU.
+CPU with Armv8.2's dot product and FP16 instructions, and a driver for CUDA 13; on Linux for glibc 2.34 and OpenSSL 3,
+as Ubuntu 22.04, Debian 12, RHEL 9 (and Rocky Linux, AlmaLinux), Amazon Linux 2023, openSUSE Leap 15.6 and newer
+systems have them (the C++ runtime is linked in), and without the runtime archive it takes the CUDA 13 libraries of
+the system (`LD_LIBRARY_PATH`). Other GPUs (an A100's 8.0, a GH200's 9.0) and a native build for the PC's CPU need a
+build from the source ([above](#building)). The arm64 builds are made and their CPU tests run on each release, not yet
+run with a GPU.
 
 The releases come from the GitHub workflow `.github/workflows/build.yml` at a `v*` tag; it also builds every push to
 `main` and every pull request, and runs the tests that need no GPU. Its steps are `.github/ci.py`'s, which runs on a PC
@@ -223,7 +222,7 @@ preset ([above](#a-model-file)). Its keys:
 | `model` | the model's GGUF (its first shard) |
 | `gpu` | the GPUs as cards in their roles, each with its settings ([below](#the-gpus)) |
 | `args` | the engine's options that differ from its defaults, an object (`"kv": "k8v4"`) or a list of words ([PARAMETERS.md](PARAMETERS.md#the-engines-options)) |
-| `cwd`, `lib_dirs` | the folder the engine runs in, where the config's relative paths start (the folder the server starts in when it has none); on Linux, folders put first on the library path |
+| `cwd` | the folder the engine runs in, where the config's relative paths start (the folder the server starts in when it has none); `lib_dirs`, an earlier version's, is taken and not read |
 | `model_name` | the name the API lists |
 | `port`, `log` | the server's port; the engine's log file |
 | `sampling` | the defaults for requests that send no sampling fields ([USING.md](USING.md#sampling)) |
@@ -273,7 +272,7 @@ A card's settings (`cache=`, `reserve=`, `vram-only=`, `prefetch=`, `clocks=`, `
 each optional, and what each trades: [PARAMETERS.md](PARAMETERS.md#gpus). `"gpu"` as numbers alone (`[0, 1]`,
 `--gpu 0,1`) keeps its earlier meaning: the cards the engine sees, the first its main one. An earlier config's
 `--main-gpu`, `--second-gpu` and per-tier lists (`--second-gpu-clocks 0,1395-2100/9751`: a value per tier in their
-order) still work, deprecated (`lamina --help-all` lists them), a card's own setting winning over them; of `--gpu`,
+order) still work, deprecated (`lamina-server --help` lists them), a card's own setting winning over them; of `--gpu`,
 `--main-gpu` and `--second-gpu` the later takes the earlier's place (`--second-gpu -1` after a config's cards: no tiers).
 lamina-server names the deprecated options a start uses in its window, each with what takes its place (an earlier
 config's `--native` in its `"args"`, in place of `"model"`, too).
@@ -324,7 +323,7 @@ The vector holds for every request of the process: Strata's per-request switch i
 ## Qwen3.6-35B-A3B and Qwen3.8-27B
 
 The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) and Qwen3.8-27B (`qwen35`, a dense model of the same
-family) on a path of its own (`src/qwen35`): `lamina` switches to it from the model file's header, so their configs
+family) on a path of its own (`src/qwen35`): the engine switches to it from the model file's header, so their configs
 name the file with `"model"` like the others. It reads the GGUF as it is (no expert profile; the drafts come from the
 file's own MTP block). K and V are fp16 (~22 KB a cell for Qwen3.6, ~68 KB for the 27B), or with `--kv q8_0` 8 bits
 in llama.cpp's q8_0 rounding, about half: the 27B's full 262,144 cells then take ~9 GiB.
@@ -362,7 +361,7 @@ and continues it only when the request extends it).
 
 The engine runs Thinking Machines Lab's Inkling 2 Mini (GGUF architectures `inkling2`, unsloth's files, and
 `inkling2_loop`, mainline llama.cpp's layout of the same tensors: unsloth's `Mainline_Support/*.gguf_file`) on a
-path of its own (`src/inkling2`): `lamina` switches to it from the model file's header. Every quant of unsloth's
+path of its own (`src/inkling2`): the engine switches to it from the model file's header. Every quant of unsloth's
 repository runs, from UD-IQ1_S (7.2 GiB) to UD-Q8_K_XL (21.3 GiB); `lamina-server -m FILE --check` says whether a
 card holds one and how much context is left beside it. The model is 24 layers of which 12 run three times a token, 128 experts
 a layer with 8 used; five layers of six attend their last 1,024 tokens and the sixth every token, so K and V are kept

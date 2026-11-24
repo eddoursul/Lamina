@@ -266,11 +266,6 @@ with `checkEndpoint: /health` (the server listens once the model has loaded) and
 minutes. llama-swap passes the client's `Host` through: without an API key, add the name clients reach it by to
 `allowed_hosts` ([below](#from-other-devices)), or those requests get 403.
 
-## Replicas
-
-`"replicas": N` with a `"gpu"` list of numbers cuts the GPUs into N groups and runs one engine on each, the requests
-spread over them (or `"replicas": [{"gpus": [0, 1]}, {"gpus": [2, 3]}]`). Each engine pins its own experts in RAM.
-
 ## From other devices
 
 The server listens on this PC only (`127.0.0.1`). `"host": "0.0.0.0"` in the config (or `--host`) opens it to the

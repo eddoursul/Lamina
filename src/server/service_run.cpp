@@ -491,11 +491,6 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         const auto it = terminal_requests.find(request_id);
         if (it != terminal_requests.end() && jstr(it->second, "state") != "reading") it->second["state"] = "reading";
     };
-    cancel.replica_selected = [this, request_id](int index) {
-        std::lock_guard<std::mutex> lk(status_mu);
-        const auto it = terminal_requests.find(request_id);
-        if (it != terminal_requests.end()) it->second["replica"] = index;
-    };
     bool queued_counted = true;
     {
         std::lock_guard<std::mutex> lk(status_mu);

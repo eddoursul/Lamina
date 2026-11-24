@@ -24,7 +24,6 @@
     "lend": true,
     "threads": 16
   },
-  "lib_dirs": [],
   "expert_profile_save": "./hy4-flash-q4_k_m-learned.bin",
   "expert_profile_save_every": 1
 }

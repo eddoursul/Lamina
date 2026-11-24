@@ -59,11 +59,6 @@ const std::vector<Param> kParams = {
      "settings, which the engine's options below list; numbers alone (0,1): the cards the engine sees, as nvidia-smi "
      "numbers them"},
     {"--parallel", "", "parallel", K::Int, "N", "requests decoding together in the engine's batch slots"},
-    {"--replicas", "", "replicas", K::Value, "N|JSON",
-     "data-parallel replicas: the gpu list cut into N groups, or [{\"gpus\": [0, 1]}, ...], one engine each"},
-    {"--replica-cpus", "", "replica_cpus", K::Bool, "", "Linux: each replica on CPU cores of its own (default on)"},
-    {"--replica-load-tokens", "", "replica_load_tokens", K::Int, "N",
-     "a request in flight counts as N prompt tokens when one is picked for a replica (default 3000)"},
     {"--expert-profile-save", "", "expert_profile_save", K::Path, "FILE",
      "Flash-Next and Hy4-flash: what the run learned about the experts, which the next start begins from (with -m: "
      "beside the program)"},
@@ -76,7 +71,8 @@ const std::vector<Param> kParams = {
     {"--log", "--log-file", "log", K::Path, "FILE", "the engine's log (with -m: beside the program)"},
     {"--cwd", "", "cwd", K::Path, "DIR", "the folder the engine runs in, which the config's relative paths start from"},
     {"--env", "", "env", K::Pairs, "NAME=VALUE", "a variable of the engine's environment (again for more)"},
-    {"--lib-dirs", "", "lib_dirs", K::List, "D1,D2", "folders searched first for the CUDA libraries"},
+    {"--lib-dirs", "", "lib_dirs", K::List, "D1,D2", "taken and not read: the engine runs in this process, which "
+     "loads the CUDA libraries as it starts (earlier versions started the engine as a program of its own)"},
 
     {"", "", "", K::Str, "", "The network and access"},
     {"--host", "", "host", K::Str, "HOST",

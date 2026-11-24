@@ -9,11 +9,11 @@ GPU, and the release archives from cmake --install.
                                                  portable preset: the release's GPUs, for other PCs)
     python .github/ci.py test                   the tests that need no GPU: ctest -L cpu, the tools' unit tests
     python .github/ci.py package [--version V]  dist/lamina-V-bin-<os>-cuda-<x.y>-<cpu>.zip (.tar.gz on Linux): the
-                                                 programs, the script that downloads Flash-Next's draft layer and the
+                                                 server, the script that downloads Flash-Next's draft layer and the
                                                  licenses (cmake --install's component lamina), and
                                                  dist/cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>.zip: the CUDA runtime and
                                                  cuBLAS (component cudart); both flat, for one folder. On Linux the
-                                                 programs' libraries are checked first (GLIBC_MAX, SYSTEM_LIBS)
+                                                 server's libraries are checked first (GLIBC_MAX, SYSTEM_LIBS)
 """
 from __future__ import annotations
 
@@ -43,8 +43,9 @@ CUDA_REDIST = "13.4.1"
 REDIST_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
 COMPONENTS = ("cuda_nvcc", "cuda_crt", "libnvvm", "cuda_cudart", "libcublas", "cccl")
 SKIP = {"libcublas_static.a", "libcublasLt_static.a"}   # ~1 GB the engine does not link
-# What each archive holds (cmake --install's components): checked before it is written
-EXECUTABLES = [f"lamina-server{EXE}", f"lamina{EXE}"]
+# What each archive holds (cmake --install's components): checked before it is written.  The server alone: the
+# engine runs in its process (the engine alone, lamina, is for tests and measurements)
+EXECUTABLES = [f"lamina-server{EXE}"]
 PROGRAMS = [*EXECUTABLES, "download-draft-layer.bat" if WIN else "download-draft-layer.sh", "LICENSE",
             "LICENSE-llama.cpp", "LICENSE-cpp-httplib", "LICENSE-jsonhpp", "LICENSE-Outfit"]
 # What the Linux programs may take from the system (docs/SETUP.md, Release binaries): glibc 2.34 at most (Ubuntu

@@ -44,8 +44,8 @@ std::string fr(double v) { return py_repr(v); }
 // ---------------------------------------------------------------------------------------------- LaminaEngine
 double LaminaEngine::ready_timeout_s = 900.0;
 
-LaminaEngine::LaminaEngine(std::vector<std::string> args, std::string log, bool lazy, EngineProcess process)
-    : args_(std::move(args)), log_(std::move(log)), process_(std::move(process)) {
+LaminaEngine::LaminaEngine(std::vector<std::string> args, std::string log, bool lazy)
+    : args_(std::move(args)), log_(std::move(log)) {
     for (size_t i = 0; i + 1 < args_.size(); ++i) {
         if (args_[i] == "--native") model_path = args_[i + 1];
         if (args_[i] == "--max-context") max_context_ = std::atoll(args_[i + 1].c_str());
@@ -71,10 +71,6 @@ LaminaEngine::~LaminaEngine() {
     } catch (const EngineStuck&) {   // the process is ending: the engine's threads end with it
         if (thread_.joinable()) thread_.detach();
         if (pump_.joinable()) pump_.detach();
-        if (reader_.joinable()) {     // a child's reader still reads it: its Process is left to the process's end
-            reader_.detach();
-            (void) proc_.release();
-        }
     }
 }
 
@@ -121,10 +117,7 @@ void LaminaEngine::start() {
     rc_ = -1;
     ended_ = true;   // not alive until READY
     finished_ = false;
-    if (!process_.exe.empty()) {
-        argv[0] = process_.exe;
-        start_process(argv);
-    } else thread_ = std::thread([this, argv, out] {
+    thread_ = std::thread([this, argv, out] {
         std::vector<char*> ptrs;
         std::vector<std::string> own(argv);
         for (auto& a : own) ptrs.push_back(a.data());
@@ -178,13 +171,6 @@ void LaminaEngine::start() {
         }
     }
     if (max_context_ <= 0) {
-        if (proc_ != nullptr) {   // a child is ended, and nothing of it is left half-started
-            proc_->kill();
-            in_->close();
-            if (reader_.joinable()) reader_.join();
-            if (thread_.joinable()) thread_.join();
-            proc_.reset();
-        }
         if (timed_out) {
             // an engine thread cannot be ended from here: it keeps its GPU until it returns
             throw EngineDied("the engine did not report READY within " + std::to_string((int) ready_timeout_s) +
@@ -222,72 +208,14 @@ void LaminaEngine::close() {
         }
         in_->close();
     }
-    if (proc_ != nullptr) {
-        close_process();   // its writer (thread_) and reader joined
-    } else {
-        for (int i = 0; i < kQuitWaitS * 20 && !finished_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        if (!finished_.load())
-            throw EngineStuck("the engine did not stop within " + std::to_string(kQuitWaitS) + " s of QUIT: it still holds "
-                              "its GPU and RAM; restart the server");
-    }
+    for (int i = 0; i < kQuitWaitS * 20 && !finished_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!finished_.load())
+        throw EngineStuck("the engine did not stop within " + std::to_string(kQuitWaitS) + " s of QUIT: it still holds "
+                          "its GPU and RAM; restart the server");
     if (thread_.joinable()) thread_.join();
     ended_ = true;
     if (pump_.joinable()) pump_.join();   // its output closed with the engine thread
     for (int i = 0; i < 100 && bg_.load() > 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-}
-
-void LaminaEngine::start_process(const std::vector<std::string>& argv) {
-    // a replica's engine: a child of its own, the same line protocol through its stdin and stdout
-    SpawnOptions o;
-    o.args = argv;
-    o.cwd = process_.cwd;
-    o.env = process_.env;
-    o.cpus = process_.cpus;
-    o.in = SpawnOptions::pipe;
-    o.out = SpawnOptions::pipe;
-    if (log_.empty()) {
-        o.err = SpawnOptions::null;
-    } else {
-        o.err = SpawnOptions::file;
-        o.err_file = log_;
-    }
-    o.own_group = true;   // Ctrl+C reaches the server only, which ends the engine the clean way
-    try {
-        proc_ = std::make_unique<Process>(o);
-    } catch (const std::exception& e) {
-        finished_ = true;
-        throw EngineDied(std::string("the engine could not start: ") + e.what());
-    }
-    std::shared_ptr<LineChannel> in = in_, out = out_;
-    Process* p = proc_.get();
-    reader_ = std::thread([this, p, out] {
-        std::string line;
-        while (p->read_line(line, -1) == 1) out->push(line);
-        out->close();
-        rc_ = p->wait(-1).value_or(-1);
-        ended_ = true;
-        finished_ = true;
-    });
-    thread_ = std::thread([p, in] {   // the lines to the engine, in order, from every request thread
-        std::string line;
-        while (in->pop(line, -1) == 1)
-            if (!p->write(line + "\n")) break;
-        p->close_stdin();   // QUIT, or the end of the input: the engine ends
-    });
-}
-
-void LaminaEngine::close_process() {
-    // QUIT's time to free its memory, then the child is ended
-    for (int i = 0; i < 20 * 20 && !finished_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    if (!finished_.load()) {
-        proc_->kill();
-        for (int i = 0; i < 20 * 20 && !finished_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    if (!finished_.load()) throw EngineStuck("Lamina is still releasing GPU/RAM; retry unloading after it exits");
-    in_->close();
-    if (thread_.joinable()) thread_.join();   // the writer holds the process (a write to the ended child fails)
-    if (reader_.joinable()) reader_.join();
-    proc_.reset();
 }
 
 void LaminaEngine::unload() {
@@ -334,10 +262,6 @@ void* LaminaEngine::lend(int device, uint64_t bytes, std::string& why) {
     // the loan is memory of the engine's process.  Without batch slots it is handed over between two requests (the
     // caller holds the service's turn); with them the engine picks the moment: at once beside the requests that
     // decode, after the prompt one of them is reading, and a request sent meanwhile waits in the engine for UNLEND
-    if (!process_.exe.empty()) {
-        why = "the engine runs in a process of its own";
-        return nullptr;
-    }
     if (!alive()) {
         why = "the engine is not running";
         return nullptr;

@@ -74,7 +74,6 @@ public:
     json api_key = "";                     ///< a key ("k1,k2": several) or a list of keys; "" none
     int64_t requested_slots = 0;           ///< the slots the config asked for (0: what the engine has)
     std::vector<int> gpu_indices;          ///< every card the engine uses (the Monitor's)
-    std::vector<std::vector<int>> replica_gpu_groups;
     std::mutex config_mu;                  ///< POST /config: one change of the run config at a time
     std::set<std::string> hosted_tools_noted;   ///< /v1/responses' hosted tools said once each
     static constexpr double kUnloadWaitS = 300.0;   ///< POST /unload?wait=1 waits this long for the running turn

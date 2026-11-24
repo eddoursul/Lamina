@@ -19,7 +19,6 @@
 #include "net.hpp"
 #include "process.hpp"
 #include "prometheus.hpp"
-#include "replicas.hpp"
 #include "runconfig.hpp"
 #include "service.hpp"
 #include "telemetry.hpp"
@@ -51,6 +50,9 @@
 using namespace lamina;
 
 namespace {
+
+// a config or a command line that asks for replicas (an engine on each group of the cards) is refused
+constexpr const char* kOneEngine = "replicas are no longer supported, a server runs one engine";
 
 std::atomic<int> g_stops{0};              // stop requests so far (a second Ctrl+C ends the engine at once)
 std::atomic<const char*> g_reason{"sigint"};
@@ -146,62 +148,6 @@ std::string join(const std::vector<std::string>& v, const char* sep) {
     return out;
 }
 
-/// opt-in data-parallel replicas: one `lamina --serve` child per card group, each with its own cards, log and (Linux)
-/// CPU cores, started together; the ReplicaEngine in front spreads the requests
-std::shared_ptr<Engine> start_replicas(const json& cfg, const std::vector<std::vector<int>>& groups,
-                                       const std::vector<std::string>& effort_end, bool lazy, bool offline, double silence) {
-    const size_t n = groups.size();
-    const auto cpus = cpu_sets(n, jget(cfg, "replica_cpus") != false);
-    std::string where;
-    for (size_t i = 0; i < n; ++i) {
-        std::string g;
-        for (const int c : groups[i]) g += (g.empty() ? "" : ",") + std::to_string(c);
-        where += (where.empty() ? "" : " | ") + g;
-    }
-    say("[lamina] " + std::to_string(n) + " replicas on the cards " + where + (cpus ? " (own CPU cores each)" : "") +
-        ": requests go to the least busy one, a conversation back to its own");
-#ifdef _WIN32
-    const std::string exe = u8_str(u8_path(self_dir()) / "lamina.exe");
-#else
-    const std::string exe = u8_str(u8_path(self_dir()) / "lamina");
-#endif
-    std::vector<std::shared_ptr<LaminaEngine>> engines(n);
-    std::vector<std::string> errors(n);
-    auto one = [&](size_t i) {
-        const json rc = replica_cfg(cfg, i, groups[i]);
-        try {
-            std::vector<std::string> args = engine_args(rc);
-            args.insert(args.end(), effort_end.begin(), effort_end.end());
-            EngineProcess p{exe, jstr(rc, "cwd"), child_env(rc, offline), cpus ? (*cpus)[i] : std::vector<int>{}};
-            engines[i] = std::make_shared<LaminaEngine>(args, jstr(rc, "log"), lazy, p);
-            engines[i]->silence_s = silence;
-        } catch (const std::exception& e) {
-            errors[i] = e.what();
-        }
-    };
-    const char* serial = std::getenv("LAMINA_REPLICA_START");
-    if (serial != nullptr && std::string(serial) == "serial") {
-        for (size_t i = 0; i < n; ++i) one(i);
-    } else {
-        std::vector<std::thread> ts;
-        for (size_t i = 0; i < n; ++i) ts.emplace_back(one, i);
-        for (auto& t : ts) t.join();
-    }
-    for (size_t i = 0; i < n; ++i)
-        if (!errors[i].empty()) {
-            for (auto& e : engines)
-                if (e != nullptr) {
-                    try {
-                        e->close();
-                    } catch (const std::exception&) {
-                    }
-                }
-            throw std::runtime_error("replica " + std::to_string(i) + " did not start: " + errors[i]);
-        }
-    const json& lt = jget(cfg, "replica_load_tokens");
-    return std::make_shared<ReplicaEngine>(engines, truthy(lt) && lt.is_number() ? lt.get<int64_t>() : 3000);
-}
-
 std::string server_names(const McpHub& hub) {
     std::string out;
     for (const auto& srv : hub.servers) out += (out.empty() ? "" : ", ") + srv->name;
@@ -277,10 +223,9 @@ void settle_vision(json& cfg) {
 /// expert cache, the main GPU's or a tier's; Hy4-flash its main GPU's slots; the qwen35 path its prompt path's
 /// staging buffers, or VRAM it leaves free - with batch slots too, beside the requests that decode).  `arch`: the
 /// model's ("": not read).
-std::string no_lending(const json& cfg, const std::string& arch, bool replicas, std::vector<GpuInfo>& gpus) {
+std::string no_lending(const json& cfg, const std::string& arch, std::vector<GpuInfo>& gpus) {
     const json& v = jget(cfg, "vision");
     if (!truthy(jget(v, "gpu"))) return "the encoder runs on the CPU";
-    if (replicas) return "the replicas' engines are processes of their own";
     const json& dev = jget(v, "cuda_device");
     if (dev.is_null()) return "";
     if (gpus.empty()) gpus = nvidia_gpus();
@@ -296,12 +241,10 @@ std::string no_lending(const json& cfg, const std::string& arch, bool replicas, 
 /// a vision section that asks for a GPU and names none: the card pick_vision_gpu chooses, by its UUID, said in the
 /// window (the encoder would otherwise take CUDA's first); one that names its card by nvidia-smi's number: that
 /// card's UUID (the encoder finds its card among this process's CUDA devices, whose order is another).  With
-/// "lend", `lend_no` is why the engine cannot lend (no_lending; "": it can), which decides what a section that names
-/// no card gets: the engine's main GPU for a loan; where there is none to be had (replicas), the CPU - "lend" asks
-/// for an encoder that keeps no VRAM, and one kept on an engine's card would take the model's (replicas are
-/// engines in processes of their own, which do not see this process's VRAM when they size their caches).  A section
-/// that names its card keeps the encoder there, with its VRAM.
-void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string& arch, bool replicas, std::string& lend_no) {
+/// "lend", a section that names no card gets the engine's main GPU, where every engine lends; for one that names its
+/// card `lend_no` is why the engine cannot lend there (no_lending; "": it can), and the encoder then keeps its VRAM
+/// on that card.
+void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string& arch, std::string& lend_no) {
     lend_no.clear();
     // "gpu" naming a card (a name, a UUID's start, a PCI bus id, a number): the encoder on it, by its UUID
     if (const json& g = jget(jget(cfg, "vision"), "gpu"); g.is_string() && !strip(g.get<std::string>()).empty()) {
@@ -325,18 +268,11 @@ void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string&
             for (const GpuInfo& g : gpus)
                 if (g.index == std::stoi(spec) && !g.uuid.empty()) cfg["vision"]["cuda_device"] = g.uuid;
         }
-        if (lend_asked) lend_no = no_lending(cfg, arch, replicas, gpus);
+        if (lend_asked) lend_no = no_lending(cfg, arch, gpus);
         return;
     }
     if (gpus.empty()) gpus = nvidia_gpus();
     const std::vector<int> engine = engine_gpus(cfg, gpus);
-    if (lend_asked) lend_no = no_lending(cfg, arch, replicas, gpus);
-    if (lend_asked && !lend_no.empty()) {
-        cfg["vision"]["gpu"] = false;
-        say("[lamina] the image encoder on the CPU: it has no VRAM to borrow (" + lend_no + "), and \"lend\" has it keep "
-            "none; --no-vision-lend puts it on a GPU with VRAM of its own, --vision-cuda-device names that card");
-        return;
-    }
     // "lend": the engine's main GPU, where every engine lends; without it a card beside that one
     const bool lend = lend_asked && !engine.empty();
     const int pick = lend ? engine.front() : pick_vision_gpu(gpus, engine.empty() ? -1 : engine.front());
@@ -389,6 +325,9 @@ int run(int argc, char** argv) {
     if (cl.bench_think) bench_opts.command += " --bench-think";
     if (cl.bench_runs != 3) bench_opts.command += " --bench-runs " + std::to_string(cl.bench_runs);
     for (const EngineOption& eo : cl.engine) {   // the ones the server sets itself
+        if (eo[0] == "--replicas" || starts_with(eo[0], "--replica-") || eo[0] == "--no-replica-cpus")
+            usage_error(eo[0] + ": " + kOneEngine + "; for engines on other cards start a server for each, with its own "
+                        "--gpu and --port");
         if (eo[0] == "--native") usage_error("--native: the model is -m MODEL.gguf, or the config's");
         if (eo[0] == "--serve") usage_error("--serve: the server runs the engine in serve mode itself");
         if (eo[0] == "--vision")
@@ -412,6 +351,11 @@ int run(int argc, char** argv) {
         if (!cl.config.empty()) file_cfg = read_config(cl.config);
     } catch (const ConfigError& e) {
         say_err(std::string("[lamina] ") + e.what());
+        return 1;
+    }
+    if (file_cfg.contains("replicas")) {   // refused, not run as one engine on every card of its "gpu"
+        say_err(std::string("[lamina] config \"replicas\": ") + kOneEngine + "; remove the key, and for engines on other "
+                "cards start a server for each, with its own \"gpu\" and \"port\"");
         return 1;
     }
     for (const std::string& k : unknown_keys(file_cfg))
@@ -485,23 +429,18 @@ int run(int argc, char** argv) {
         for (const std::string& n : notes) say(n);
         say_main_gpu(cfg, gpus);
     }
-    // the pictures' card, and with "lend" whether this model's engine can lend (the model's architecture, replicas)
+    // the pictures' card, and with "lend" whether this model's engine can lend (the model's architecture)
     std::string lend_no;
     {
         const json& v = jget(cfg, "vision");
         std::string arch = model_arch;
-        bool replicas = false;
         if (!mock && v.is_object() && truthy(jget(v, "lend"))) {
             try {
                 if (arch.empty()) arch = read_model(model_file(cfg)).arch;
             } catch (const std::exception&) {   // (the start says what is wrong with the file)
             }
-            try {
-                replicas = !gpu_groups(cfg).empty();
-            } catch (const std::exception&) {   // (as the start says)
-            }
         }
-        settle_vision_gpu(cfg, gpus, arch, replicas, lend_no);
+        settle_vision_gpu(cfg, gpus, arch, lend_no);
     }
     if (!cl.write_config.empty()) {
         json out;
@@ -657,7 +596,6 @@ int run(int argc, char** argv) {
     bool vision_lends = false;   // its section's "lend", where the engine can lend
     json sampling_defaults = json::object();
     std::optional<std::vector<std::string>> effort_end;
-    std::vector<std::vector<int>> groups;
     bool lazy = false;
     // the Monitor's cards (#112), read before the engine loads: engine_gpus runs nvidia-smi when the args name a card,
     // and on Linux a child forked once the expert arena is pinned would copy it where madvise refuses MADV_DONTFORK
@@ -665,18 +603,15 @@ int run(int argc, char** argv) {
     std::optional<std::vector<int>> monitor_gpus;
     try {
         if (!mock) {
-            groups = gpu_groups(cfg);   // replicas: engines of their own, each a child with its cards and its log
             const std::string log = jstr(cfg, "log");
             if (cl.bench && !log.empty()) {   // the report's excerpt: this run's part of the log
                 std::error_code ec;
                 const auto size = std::filesystem::file_size(u8_path(log), ec);
                 bench_log_from = ec ? 0 : (uint64_t) size;
             }
-            if (groups.empty()) {
-                apply_engine_env(cfg, offline);   // the engine runs in this process: its environment is this one
-                show_vision_gpu(cfg, gpus);       // and the image encoder's
-                if (!log.empty()) redirect_stderr(log);   // the engine's messages go to its log; the server's stay here
-            }
+            apply_engine_env(cfg, offline);   // the engine runs in this process: its environment is this one
+            show_vision_gpu(cfg, gpus);       // and the image encoder's
+            if (!log.empty()) redirect_stderr(log);   // the engine's messages go to its log; the server's stay here
             monitor_gpus = engine_gpus(cfg);   // in the config's "env", before the engine and the image encoder start
             sampling_defaults = sampling_defaults_from_config(cfg);
             if (!sampling_defaults.empty()) say("[lamina] sampling defaults from the config: " + items(sampling_defaults));
@@ -715,13 +650,9 @@ int run(int argc, char** argv) {
                 std::filesystem::current_path(cfg_dir, ec);   // the engine's relative paths are the config's cwd's
                 if (ec) throw ConfigError("\"cwd\": " + cfg_cwd + " is not a directory");
             }
-            if (!groups.empty()) {
-                engine = start_replicas(cfg, groups, effort_end.value_or(std::vector<std::string>{}), lazy, offline, silence);
-            } else {
-                auto le = std::make_shared<LaminaEngine>(args, log, lazy);
-                le->silence_s = silence;
-                engine = le;
-            }
+            auto le = std::make_shared<LaminaEngine>(args, log, lazy);
+            le->silence_s = silence;
+            engine = le;
             if (vision != nullptr && vision_lends) {   // the encoder's loans for its pictures, and the first one now
                 vision->set_lender([engine](int device, uint64_t bytes, std::string& why) { return engine->lend(device, bytes, why); },
                                    [engine] { engine->unlend(); });
@@ -736,9 +667,6 @@ int run(int argc, char** argv) {
                                                   jget(cfg, "script_cycle") == true);
         }
     } catch (const ConfigError& e) {
-        say_err(std::string("[lamina] config ") + e.what());
-        return 1;
-    } catch (const ReplicaConfigError& e) {
         say_err(std::string("[lamina] config ") + e.what());
         return 1;
     } catch (const std::exception& e) {
@@ -776,8 +704,7 @@ int run(int argc, char** argv) {
                         }
                     }
             }
-            const int64_t per_replica = requested.is_number_integer() && requested.get<int64_t>() > 0 ? requested.get<int64_t>() : 1;
-            svc.requested_slots = groups.empty() ? per_replica : per_replica * (int64_t) groups.size();
+            svc.requested_slots = requested.is_number_integer() && requested.get<int64_t>() > 0 ? requested.get<int64_t>() : 1;
         }
         svc.answer_room = jget(cfg, "answer_room") != false;
         svc.reasoning_close_retry = jget(cfg, "reasoning_close_retry") == true;   // #1053: opt-in
@@ -879,11 +806,6 @@ int run(int argc, char** argv) {
         svc.reasoning_loop_recovery = loop.is_string() ? loop.get<std::string>() : "";
         // the Monitor reads every card the engine uses (#112), the first its own (#51)
         svc.gpu_indices = monitor_gpus ? *monitor_gpus : engine_gpus(cfg);
-        if (!groups.empty()) {               // replicas: every card of every group
-            svc.gpu_indices.clear();
-            for (const auto& g : groups) svc.gpu_indices.insert(svc.gpu_indices.end(), g.begin(), g.end());
-            svc.replica_gpu_groups = groups;
-        }
         svc.gpu_index = svc.gpu_indices.empty() ? 0 : svc.gpu_indices[0];
     } catch (const ConfigError& e) {
         say_err(std::string("[lamina] config ") + e.what());

@@ -23,7 +23,6 @@
     "presence_penalty": 0.0
   },
   "log": "./lamina-qwen38-27b-ud-q6_k_m.log",
-  "lib_dirs": [],
   "vision": {
     "mmproj": "../Lamina-data/models/qwen38-27b-UD-Q6_K_M/mmproj-F16.gguf",
     "gpu": true,

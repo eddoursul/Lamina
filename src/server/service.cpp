@@ -1106,7 +1106,6 @@ json Service::metrics(bool all_requests) {
         live["admitting"] = admitting;
         if (running && state == "idle") live["state"] = "generating";
     }
-    if (const json rv = engine->replica_view(); !rv.is_null()) live["replicas"] = rv;   // each replica's state
     if (const json cv = engine->cache_view(); !cv.is_null()) live["cache"] = cv;   // the Conversation cache card
     json eng = {{"model", model}, {"max_context", reported_ctx()}, {"images", vision != nullptr}};
     const json facts = engine->info();

@@ -71,9 +71,6 @@ same in short.
 | --- | --- | --- | --- |
 | `--gpu CARD[,key=value...]` | `gpu` | with `-m`: the RTX 30 or newer with the most VRAM that drives no display, then `auto` | The GPUs in their roles: [GPUs](#gpus). |
 | `--parallel N` | `parallel` | 1 | Qwen3.6 and Qwen3.8-27B: up to N requests (8 at most) decoding together in batch slots, on one GPU. Each slot holds a session's K/V. |
-| `--replicas N\|JSON` | `replicas` | | One engine on each of N groups of the `gpu` list, the requests spread over them; `[{"gpus": [0, 1]}, {"gpus": [2, 3]}]` names the groups. Each engine pins its own experts in RAM. |
-| `--replica-cpus` | `replica_cpus` | on | Linux: each replica on CPU cores of its own. |
-| `--replica-load-tokens N` | `replica_load_tokens` | 3000 | A request in flight counts as N prompt tokens when a replica is picked. |
 | `--expert-profile-save FILE` | `expert_profile_save` | with `-m`: `<model>-learned.bin` beside the program | Flash-Next, Hy4-flash and Inkling 2 (with experts in RAM): the experts' use the run counted, blended with the ranking it started from, written at exit and between requests; the next start fills the GPUs from it. On the development PC, after a session of code and reasoning requests, fixed text took 9-14% less time on code (-4 to +1% on thinking and edits). |
 | `--expert-profile-save-every MIN` | `expert_profile_save_every` | 1 with `-m`; else Flash-Next 10, the others 1 | Minutes between those saves (0: at exit only). |
 | `--engine-silence-s S` | `engine_silence_s` | 300 | A request ends when the engine says nothing for S seconds, and the engine starts again (0: no limit). |
@@ -81,7 +78,7 @@ same in short.
 | `--log FILE` (`--log-file`) | `log` | `<model>.log` beside the config file, or beside the program with `-m` alone | The engine's log. |
 | `--cwd DIR` | `cwd` | the folder the server starts in | The engine's folder, where the config's relative paths start. |
 | `--env NAME=VALUE` | `env` | | A variable of the engine's environment (again for more). |
-| `--lib-dirs D1,D2` | `lib_dirs` | | Folders searched first for the CUDA libraries. |
+| `--lib-dirs D1,D2` | `lib_dirs` | | Taken and not read: the engine runs in the server's process, which loads the CUDA libraries as it starts (earlier versions started the engine as a program of its own, these folders first on its library path). |
 
 ### The network and access
 
@@ -433,9 +430,10 @@ after the cards: no tiers).
 
 ### The engine alone
 
-`lamina --native MODEL.gguf` runs the engine without the server: `--serve` and `--vision` are the line protocol and
-the pictures lamina-server speaks; with `--tokens` it generates from token ids, for tests and measurements.
-`lamina --help` lists the common options, `lamina --help-all` every one.
+`lamina --native MODEL.gguf` runs the engine without the server, for tests and measurements: a build makes it beside
+lamina-server, the releases have the server alone. `--serve` and `--vision` are the line protocol and the pictures
+lamina-server speaks to the engine in its process; with `--tokens` it generates from token ids. `lamina --help` lists
+the common options, `lamina --help-all` every one.
 
 | Option | Models | What it does |
 | --- | --- | --- |

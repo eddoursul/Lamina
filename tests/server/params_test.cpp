@@ -70,7 +70,7 @@ int main() {
 
     const lamina::CommandLine cl = parse(
         {"-m", "x.gguf", "--port", "8090", "--temp", "0.6", "--top-k", "20", "--lazy", "--no-answer-room",
-         "--aliases", "a,b", "--alias", "c", "--env", "A=1", "--env", "B=x=y", "--gpu", "0,2", "--replicas", "2",
+         "--aliases", "a,b", "--alias", "c", "--env", "A=1", "--env", "B=x=y", "--gpu", "0,2",
          "--before-load", "[\"a\", \"b\"]", "--script", "x, y", "--script", "z", "--max-context", "65536", "--kv-grow",
          "--second-gpu", "-1", "--no-mmproj", "--mmproj", "p.gguf", "--open", "--idle-unload", "600",
          "--queue-timeout", "1.5", "--fit-max-tokens=false", "--reasoning-loop-recovery", "false", "--config", "c.json",
@@ -82,7 +82,7 @@ int main() {
     CHECK(s["lazy_load"] == true && s["answer_room"] == false && s["open_browser"] == true);
     CHECK((s["aliases"] == json{"a", "b", "c"}));
     CHECK((s["env"] == json{{"A", "1"}, {"B", "x=y"}}));
-    CHECK((s["gpu"] == json{0, 2}) && s["replicas"] == 2);
+    CHECK((s["gpu"] == json{0, 2}));
     {   // --gpu again for each card, a card's settings after its name: one item each, in order
         const char* argv2[] = {"lamina-server", "--gpu", "GPU-75af3083", "--gpu", "RTX 5070 Ti",
                                "--gpu", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"};

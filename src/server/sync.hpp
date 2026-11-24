@@ -43,7 +43,6 @@ public:
     /// Service::run and cleared once the request is sent
     std::optional<double> queue_deadline;
     std::function<void()> queue_started;          ///< the request is sent: its row reads "reading"
-    std::function<void(int)> replica_selected;    ///< the replica it went to
 
 private:
     std::atomic<bool> flag_{false};

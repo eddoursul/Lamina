@@ -20,7 +20,6 @@
     "presence_penalty": 0.0
   },
   "log": "./lamina-iq3_s.log",
-  "lib_dirs": [],
   "vision": {
     "mmproj": "../Lamina-data/models/mmproj/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
     "gpu": true,

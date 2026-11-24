@@ -904,8 +904,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
                 src/server/engine.cpp src/server/engine_batch.cpp src/server/http_client.cpp src/server/http_server.cpp
                 src/server/images.cpp src/server/keepawake.cpp src/server/mcp.cpp src/server/model_config.cpp
                 src/server/net.cpp src/server/params.cpp src/server/process.cpp src/server/prometheus.cpp
-                src/server/replicas.cpp src/server/responses.cpp
-                src/server/runconfig.cpp src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp
+                src/server/responses.cpp src/server/runconfig.cpp src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp
                 src/server/telemetry.cpp src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
                 ${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_BINARY_DIR}/bench_files.cpp)
     target_include_directories(lamina_server_core PUBLIC src/server ${_lamina_llama_root}/vendor
@@ -935,7 +934,9 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_executable(bench_test tests/server/bench_test.cpp)
     target_link_libraries(bench_test PRIVATE lamina_server_core)
     add_test(NAME bench_test COMMAND bench_test)
-    install(TARGETS lamina lamina-server RUNTIME DESTINATION . COMPONENT lamina)
+    # the releases' programs: the server, with the engine in its process (the engine alone, `lamina`, is for tests
+    # and measurements and stays in the build folder)
+    install(TARGETS lamina-server RUNTIME DESTINATION . COMPONENT lamina)
     if(WIN32)
       install(PROGRAMS download-draft-layer.bat DESTINATION . COMPONENT lamina)
     else()

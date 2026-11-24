@@ -98,7 +98,7 @@ public:
     virtual void close() {}
     /// `bytes` of the VRAM the engine holds on its CUDA device `device`, lent until unlend(): the address, with
     /// what it is in `why` (its expert cache's last slots, its prompt path's staging buffers, VRAM it leaves free),
-    /// or null with why not (an engine in another process, a cache or a card that cannot spare it).  One loan at a
+    /// or null with why not (a cache or a card that cannot spare it).  One loan at a
     /// time: the caller holds the service's turn, which without batch slots also keeps requests away; with them
     /// the engine lends beside the requests that decode, once no prompt is being read, and holds a request sent
     /// meanwhile until unlend().
@@ -126,8 +126,6 @@ public:
     virtual json slots_view() { return nullptr; }
     /// --batch: requests waiting for the control lines, and those that gave them back to wait for a slot
     virtual std::pair<int, int> admission() { return {0, 0}; }
-    /// replicas: each one's state (null without them)
-    virtual json replica_view() { return nullptr; }
     /// the Monitor's Conversation cache card: the running engine's last CACHE line and `active` (null: the cache is
     /// off, or no engine runs)
     virtual json cache_view() { return nullptr; }
@@ -154,7 +152,7 @@ public:
         std::lock_guard<std::mutex> lk(progress_mu_);
         f(progress_);
     }
-    /// the INFO key=value facts (the Monitor), a copy: a start and the replicas write them while HTTP threads read
+    /// the INFO key=value facts (the Monitor), a copy: a start writes them while HTTP threads read
     json info() const {
         std::lock_guard<std::mutex> lk(info_mu_);
         return info_;
@@ -164,7 +162,7 @@ public:
         info_ = std::move(v);
     }
     std::atomic<double> silence_s{300.0};  ///< the config's engine_silence_s (0: wait for ever)
-    /// the Settings view's engine_silence_s, for the requests from now on (the replicas pass it to their engines)
+    /// the Settings view's engine_silence_s, for the requests from now on
     virtual void set_silence_s(double s) { silence_s = s; }
     std::string model_path;
     bool can_stop = true;
@@ -181,19 +179,10 @@ private:
     json info_ = json::object();
 };
 
-/// how a LaminaEngine runs: on a thread of this process (the default), or as a `lamina --serve` child of its own
-/// (a replica: its own cards, environment and CPU cores)
-struct EngineProcess {
-    std::string exe;                   ///< "": in this process
-    std::string cwd;
-    std::optional<Environment> env;
-    std::vector<int> cpus;             ///< Linux: the cores it may run on (empty: any)
-};
-
 class LaminaEngine : public Engine {
 public:
     /// the engine's command line (without --serve), its log file (empty: none); starts it unless `lazy`
-    LaminaEngine(std::vector<std::string> args, std::string log, bool lazy = false, EngineProcess process = {});
+    LaminaEngine(std::vector<std::string> args, std::string log, bool lazy = false);
     ~LaminaEngine() override;
     void generate(const std::vector<int32_t>& ids, int64_t max_new, const json& sampling, Cancel& cancel,
                   const std::string& embeddings, const std::function<bool(int32_t)>& on_token,
@@ -286,14 +275,8 @@ private:
     std::string ctl_mode_, last_done_;
     std::optional<std::pair<std::string, bool>> ctl_result_;
 
-    void start_process(const std::vector<std::string>& argv);
-    void close_process();
-
     std::vector<std::string> args_;
     std::string log_;
-    EngineProcess process_;
-    std::unique_ptr<Process> proc_;          ///< the child (EngineProcess::exe)
-    std::thread reader_;                     ///< the child's output to out_
     std::thread thread_;
     std::shared_ptr<LineChannel> in_, out_;   // to the engine, from it
     std::atomic<bool> ended_{true};

@@ -21,7 +21,6 @@ OBJECTS = {
     "main.cpp": {"cfg": "", 'cfg["vision"]': "vision", "given": "", "file_cfg": ""},
     "config.cpp": {"cfg": "", 'cfg["vision"]': "vision"},
     "service.cpp": {"cfg": ""},
-    "replicas.cpp": {"cfg": "", "c": ""},
     "mcp.cpp": {"cfg": ""},
     "model_config.cpp": {"c": "", "cfg": ""},
     "vision.cpp": {"cfg": "vision"},
@@ -33,11 +32,11 @@ FUNCTIONS = {"mcp.cpp": ("settings_from", "hub_from_config")}
 LOOPED = re.compile(r'for \(const char\* k : \{([^}]*)\}\)\s*\{?\s*(?:const json& v = )?jget\(cfg, k\)')
 # keys compared in a function of their section: settings_from (mcp), sampling_defaults_from_config (sampling)
 COMPARED = {"mcp.cpp": ("settings_from", "mcp"), "service.cpp": ("sampling_defaults_from_config", "sampling")}
-# read, and not settings: the config's engine options, the other spelling of mcp_servers, and the sampling keys'
-# other spellings (repeat_penalty, repeat_last_n: merged into the table's)
-NOT_SETTINGS = {"args", "mcpServers", "sampling.repeat_penalty", "sampling.repeat_last_n"}
+# read, and not settings: the config's engine options, the other spelling of mcp_servers, the sampling keys' other
+# spellings (repeat_penalty, repeat_last_n: merged into the table's), and replicas, which a config is refused for
+NOT_SETTINGS = {"args", "mcpServers", "sampling.repeat_penalty", "sampling.repeat_last_n", "replicas"}
 # options taken and not read: a config or a command line of an earlier version may hold them
-NOT_READ = {"vision.model"}
+NOT_READ = {"vision.model", "lib_dirs"}
 
 
 def table() -> dict[str, tuple[str, str, str]]:

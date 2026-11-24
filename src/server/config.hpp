@@ -63,10 +63,10 @@ json gpu_canonical(const json& gpu);
 std::vector<std::string> engine_cards(const json& cfg);
 /// a config in the form --write-config writes: the older GPU flags as cards of "gpu" (--main-gpu and --second-gpu as
 /// their names, the main GPU's flags and the per-tier lists as their settings, a card's own setting winning), but
-/// beside a "gpu" of numbers or replicas and where a setting would go to an auto card; the other older names renamed
-/// (--clocks-hold, --tier-min ...), in the replicas' own args too; with `flash` (a Qwen3.8-Flash-Next config) the
-/// options at the engine's default left out; --native as "model", --vision as its section, and "args" as an object (an
-/// empty one too: a config without "args" is the preset's)
+/// beside a "gpu" of numbers and where a setting would go to an auto card; the other older names renamed
+/// (--clocks-hold, --tier-min ...); with `flash` (a Qwen3.8-Flash-Next config) the options at the engine's default
+/// left out; --native as "model", --vision as its section, "lib_dirs" left out, and "args" as an object (an empty
+/// one too: a config without "args" is the preset's)
 json modern_config(json cfg, bool flash);
 struct GpuInfo {
     int index;
@@ -95,8 +95,7 @@ double engine_silence_s(const json& cfg);
 /// the engine's arguments: the config's, with what "vision", "parallel" and "expert_profile_save" ask for
 std::vector<std::string> engine_args(const json& cfg);
 /// the deprecated options a start uses, "FLAG VALUE: what takes its place" each, once: the engine's deprecated
-/// spellings (program::deprecated_option) in its command line `line` (engine_args) and in the replicas' own args, and
-/// --native in place of "model".  `file`: the config as its file has it (the server writes its "model" into the merged
+/// spellings (program::deprecated_option) in its command line `line` (engine_args), and --native in place of "model".  `file`: the config as its file has it (the server writes its "model" into the merged
 /// config's args as --native)
 std::vector<std::string> deprecated_options(const json& file, const std::vector<std::string>& line);
 /// An engine option on lamina-server's command line: the flag ("--max-context") and the values that follow it.
@@ -111,16 +110,11 @@ std::string model_file(const json& cfg);
 /// the engine's environment, set in this process before the engine starts: "gpu" (CUDA_DEVICE_ORDER and
 /// CUDA_VISIBLE_DEVICES), the config's "env", the offline policy
 void apply_engine_env(const json& cfg, bool offline);
-/// a child engine's environment (a replica): this process's with the config's "gpu", "env", "lib_dirs" and the offline
-/// policy
-Environment child_env(const json& cfg, bool offline);
 /// After apply_engine_env, for the image encoder, which runs in this process too: where "gpu" is numbers (the process
 /// narrowed to them) and the vision section's "cuda_device" is none of them, that card is visible after them and the
 /// engine's devices are CUDA's first ones, as many as the numbers (core::engine_gpu_count).  `gpus`: nvidia-smi's
 /// list, read when empty.
 void show_vision_gpu(const json& cfg, std::vector<GpuInfo>& gpus);
-/// the config's "lib_dirs" (the existing ones) before env's library search path: LD_LIBRARY_PATH, PATH on Windows
-void prepend_lib_dirs(const json& cfg, Environment& env);
 /// the variables every child gets under --offline
 const std::vector<std::pair<std::string, std::string>>& offline_env();
 /// why this config cannot be strictly offline (empty: it can)

@@ -14,7 +14,6 @@
     "top_k": 64
   },
   "log": "./lamina-inkling2-mini-ud-iq4_xs.log",
-  "lib_dirs": [],
   "expert_profile_save": "./inkling2-mini-ud-iq4_xs-learned.bin",
   "expert_profile_save_every": 1,
   "vision": {

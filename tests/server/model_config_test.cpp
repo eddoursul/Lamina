@@ -281,9 +281,11 @@ int main() {
                       "--second-gpu", "RTX 5070 Ti,GPU-f26e9ba6", "--second-gpu-clocks", "0,1395-2100/9751",
                       "--second-gpu-clocks-hold", "1", "--second-gpu-clocks-lead", "1.0", "--second-gpu-sleep-us",
                       "0,55", "--main-gpu", "GPU-75af3083", "--prompt-split", "26"}},
-            {"port", 8081}};
+            {"port", 8081},
+            {"lib_dirs", json::array()}};
         const json written = lamina::modern_config(earlier, true);
         CHECK(written["model"] == "m.gguf");
+        CHECK(!written.contains("lib_dirs"));   // taken and not read: left out
         CHECK((written["gpu"] == json{"GPU-75af3083", "RTX 5070 Ti",
                                       {{"id", "GPU-f26e9ba6"}, {"clocks", "1395-2100/9751"}, {"sleep", "55us"}}}));
         CHECK((written["args"] == json{{"kv", "k8v4"}, {"arena-place", true}, {"clocks-hold", "1s"},
@@ -312,29 +314,18 @@ int main() {
                    "--second-gpu-sleep-us 0,55: each tier's sleep= in microseconds (0: none)",
                    "--main-gpu GPU-75af3083: the first --gpu's card"}));
         CHECK(lamina::deprecated_options(written, lamina::engine_args(written)).empty());
-        // a switch of an object's args, a replica entry's own args, each once
-        const json r = {{"model", "m.gguf"},
-                        {"args", {{"second-gpu-adapt", false}}},
-                        {"replicas", json::array({json{{"args", {"--vram-reserve-mib", "800"}}},
-                                                  json{{"args", {"--vram-reserve-mib", "800"}}}})}};
+        // a switch of an object's args; an option given twice, once
+        const json r = {{"model", "m.gguf"}, {"args", {{"second-gpu-adapt", false}}}};
         CHECK((lamina::deprecated_options(r, lamina::engine_args(r)) ==
-               std::vector<std::string>{"--no-second-gpu-adapt: --no-tier-adapt",
-                                        "--vram-reserve-mib 800: the main GPU's reserve= in MiB"}));
-        // its form written: the older names renamed in the replicas' own args too, their GPU flags kept ("gpu" numbers)
+               std::vector<std::string>{"--no-second-gpu-adapt: --no-tier-adapt"}));
+        const json twice = {{"model", "m.gguf"}, {"args", {"--vram-reserve-mib", "800", "--vram-reserve-mib", "800"}}};
+        CHECK((lamina::deprecated_options(twice, lamina::engine_args(twice)) ==
+               std::vector<std::string>{"--vram-reserve-mib 800: the main GPU's reserve= in MiB"}));
+        // its form written beside "gpu" numbers: the older names renamed, the GPU flags kept
         const json rw = lamina::modern_config(
-            {{"gpu", {0, 1, 2, 3}},
-             {"args", {"--native", "m.gguf", "--vram-reserve-mib", "800", "--second-gpu-adapt"}},
-             {"replicas", json::array({json{{"gpus", {0, 1}}, {"args", {"--second-gpu-clocks-hold", "2",
-                                                                         "--vram-reserve-mib", "900"}}},
-                                       json{{"gpus", {2, 3}}}})}},
+            {{"gpu", {0, 1, 2, 3}}, {"args", {"--native", "m.gguf", "--vram-reserve-mib", "800", "--second-gpu-adapt"}}},
             false);
         CHECK((rw["args"] == json{{"vram-reserve-mib", 800}, {"tier-adapt", true}}) && rw["gpu"] == json({0, 1, 2, 3}));
-        CHECK((rw["replicas"][0]["args"] == json{{"clocks-hold", "2s"}, {"vram-reserve-mib", 900}}));
-        // replicas named by their groups alone: the same (each replica's "gpu" its group's numbers)
-        const json groups = lamina::modern_config(
-            {{"args", {"--native", "m.gguf", "--vram-reserve-mib", "800"}},
-             {"replicas", json::array({json{{"gpus", {0}}}, json{{"gpus", {2}}}})}}, true);
-        CHECK(!groups.contains("gpu") && (groups["args"] == json{{"vram-reserve-mib", 800}}));
         // the engine's default switch left out, as the options at their default
         CHECK(lamina::modern_config({{"args", {"--native", "m.gguf", "--second-gpu-adapt"}}}, true)["args"].empty());
     }

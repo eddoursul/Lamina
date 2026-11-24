@@ -194,8 +194,7 @@ the model's chat template (from its GGUF, or the config's `chat_template_file`, 
 the GGUF too), and runs the engine on a thread of its own process: the engine takes prompts as token ids and writes
 tokens as each pass accepts them, through in-process channels that carry the line protocol `lamina --serve` speaks on
 stdin and stdout. The server turns the tokens back into text, reasoning and tool calls, streamed. Flash-Next runs one
-request at a time, the others wait; when the engine stops, the server starts it again. With replicas (opt-in) each
-engine is a `lamina --serve` child on its own GPUs.
+request at a time, the others wait; when the engine stops, the server starts it again.
 
 ## Exactness
 

@@ -683,13 +683,6 @@ std::vector<std::string> deprecated_options(const json& file, const std::vector<
         }
     };
     scan(line);
-    if (const json& spec = jget(file, "replicas"); spec.is_array())   // an entry's own, added to the config's
-        for (const json& entry : spec) {
-            std::vector<std::string> own;
-            if (entry.is_object())
-                for (const json& a : args_as_list(jget(entry, "args"))) own.push_back(arg_str(a));
-            scan(own);
-        }
     return out;
 }
 
@@ -745,50 +738,6 @@ void apply_engine_env(const json& cfg, bool offline) {
         for (auto it = env.begin(); it != env.end(); ++it) set_env(it.key(), arg_str(it.value()));
     if (offline)   // last, so the config's own "env" cannot remove the policy
         for (const auto& [k, v] : offline_env()) set_env(k, v);
-}
-
-Environment child_env(const json& cfg, bool offline) {
-    Environment env = environment();
-    const std::vector<int> gpus = gpu_list(cfg);
-    if (!gpus.empty()) {   // issue #51: the GPU(s) as nvidia-smi numbers them
-        std::string v;
-        for (const int g : gpus) v += (v.empty() ? "" : ",") + std::to_string(g);
-        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID";
-        env["CUDA_VISIBLE_DEVICES"] = v;
-    }
-    const json& extra = jget(cfg, "env");
-    if (extra.is_object())
-        for (auto it = extra.begin(); it != extra.end(); ++it) env[it.key()] = arg_str(it.value());
-    if (offline)
-        for (const auto& [k, v] : offline_env()) env[k] = v;
-    prepend_lib_dirs(cfg, env);
-    return env;
-}
-
-void prepend_lib_dirs(const json& cfg, Environment& env) {
-    std::string dirs;
-    const json& lib = jget(cfg, "lib_dirs");
-    if (lib.is_array())
-        for (const auto& d : lib) {
-            std::error_code ec;
-            if (d.is_string() && std::filesystem::is_directory(u8_path(d.get<std::string>()), ec))
-#ifdef _WIN32
-                dirs += (dirs.empty() ? "" : ";") + d.get<std::string>();
-#else
-                dirs += (dirs.empty() ? "" : ":") + d.get<std::string>();
-#endif
-        }
-    if (!dirs.empty()) {
-#ifdef _WIN32
-        const char* var = "PATH";
-        const char* sep = ";";
-#else
-        const char* var = "LD_LIBRARY_PATH";
-        const char* sep = ":";
-#endif
-        const auto it = env.find(var);
-        env[var] = it == env.end() || it->second.empty() ? dirs : dirs + sep + it->second;
-    }
 }
 
 void show_vision_gpu(const json& cfg, std::vector<GpuInfo>& gpus) {
@@ -881,10 +830,9 @@ json modern_config(json cfg, bool flash) {
     };
     // the GPUs as cards: "gpu"'s, else --main-gpu's and --second-gpu's (--tier-gpus') names, the main GPU the
     // engine's "0" when none names it; the older per-card flags their settings where a card has none of its own (its
-    // own wins, as in the engine).  Beside a "gpu" of numbers or replicas (the cards the engine sees, a replica's "gpu"
-    // its group's numbers) the flags stay, and where a setting would go to an auto card (it takes none as the first, an
-    // auto tier's stay the per-tier lists').
-    if (gpu_list(cfg).empty() && !truthy(jget(cfg, "replicas"))) {
+    // own wins, as in the engine).  Beside a "gpu" of numbers (the cards the engine sees) the flags stay, and where a
+    // setting would go to an auto card (it takes none as the first, an auto tier's stay the per-tier lists').
+    if (gpu_list(cfg).empty()) {
         auto list = [&](const char* f) {
             std::vector<std::string> v;
             if (const auto s = value(f))
@@ -980,20 +928,10 @@ json modern_config(json cfg, bool flash) {
         erase("--vision");
         if (!jstr(cfg, "model").empty() && jstr(cfg["vision"], "model") == jstr(cfg, "model")) cfg["vision"].erase("model");
     }
+    cfg.erase("lib_dirs");   // taken and not read: the engine runs in the server's process
     json list = json::array();
     for (const std::string& w : a) list.push_back(w);
     cfg["args"] = args_as_object(list).value_or(list);   // an empty one stays: a config without "args" is a preset's
-    // a replica's own args, the older names renamed (its GPUs are numbers: their flags stay)
-    if (cfg.contains("replicas") && cfg["replicas"].is_array())
-        for (json& entry : cfg["replicas"]) {
-            if (!entry.is_object() || !truthy(jget(entry, "args"))) continue;
-            std::vector<std::string> own;
-            for (const json& w : args_as_list(entry["args"])) own.push_back(arg_str(w));
-            rename_older(own);
-            json words = json::array();
-            for (const std::string& w : own) words.push_back(w);
-            entry["args"] = args_as_object(words).value_or(words);
-        }
     // the model, its cards and its options first
     json out = json::object();
     for (const char* k : {"model", "gpu", "args"})

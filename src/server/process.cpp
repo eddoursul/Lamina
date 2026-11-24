@@ -29,7 +29,6 @@
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
-#include <sched.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -599,8 +598,8 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
                 *fd = -1;
             }
     };
-    // close-on-exec from the start: a child another thread starts meanwhile would otherwise hold these ends (a
-    // replica's stdout write end kept open by an MCP server: no EOF when the replica dies); dup2 clears it for 0-2
+    // close-on-exec from the start: a child another thread starts meanwhile would otherwise hold these ends (an MCP
+    // server's stdout write end kept open by another: no EOF when it dies); dup2 clears it for 0-2
     if ((o.in == SpawnOptions::pipe && ::pipe2(in_pipe, O_CLOEXEC) != 0) ||
         (o.out == SpawnOptions::pipe && ::pipe2(out_pipe, O_CLOEXEC) != 0) ||
         (o.err == SpawnOptions::pipe && ::pipe2(err_pipe, O_CLOEXEC) != 0) || ::pipe2(status, O_CLOEXEC) != 0) {
@@ -650,12 +649,6 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
             if (::getppid() != parent) ::_exit(127);   // the server ended before the call
         }
         if (group) ::setpgid(0, 0);
-        if (!o.cpus.empty()) {   // a replica's own physical cores
-            cpu_set_t set;
-            CPU_ZERO(&set);
-            for (const int c : o.cpus) CPU_SET(c, &set);
-            ::sched_setaffinity(0, sizeof set, &set);
-        }
         auto fd_to = [](int fd, int target) {
             if (fd >= 0 && fd != target) ::dup2(fd, target);
             else if (fd == target) ::fcntl(fd, F_SETFD, 0);   // already there: only its close-on-exec cleared

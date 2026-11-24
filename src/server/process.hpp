@@ -1,5 +1,5 @@
-// src/server/process.hpp - the programs the server starts (the image encoder, MCP servers, sd-cli, replicas' engines,
-// the before_load command), tied to the server's lifetime (serve/lifeline.py, serve/winjob.py).
+// src/server/process.hpp - the programs the server starts (MCP servers, sd-cli, the before_load command, nvidia-smi),
+// tied to the server's lifetime (serve/lifeline.py, serve/winjob.py).
 //
 // Windows: each contained child starts in a kill-on-close job object whose only handle is the server's, so it ends
 // however the server ends (a crash, Task Manager, the console closed), and kill() ends whatever it started too; it
@@ -44,8 +44,7 @@ struct SpawnOptions {
     std::string err_file;              ///< err == file: appended to this file
     bool contain = true;               ///< ends with the server; kill() ends what it started too
     bool own_group = false;            ///< out of the console's Ctrl+C (Windows: a new process group)
-    std::vector<int> cpus;             ///< Linux: the CPUs it may run on (empty: any)
-    bool no_window = false;            ///< Windows: no console of its own (CREATE_NO_WINDOW)
+    bool no_window = false;           ///< Windows: no console of its own (CREATE_NO_WINDOW)
     bool cr_lines = false;             ///< out == pipe: a lone CR ends a line too (a progress bar's updates)
     std::function<void(const std::string&)> on_err_line;   ///< err == pipe: each line of its stderr, as it comes
 };

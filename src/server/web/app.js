@@ -169,7 +169,7 @@ function sparkLines(id, series, max) {
   }
 }
 // the i-th of n cards' color, the legend dot's and its graph lines' (by position, so two cards always differ): the
-// kit's four for a model's own split (at most four cards); past four (a multi-replica box) every card a golden-angle
+// kit's four for a model's own split (at most four cards); past four every card a golden-angle
 // hue from the first one's blue, at least 32 degrees apart up to eight cards
 const gpuColor = (i, n) => (n <= 4 ? `var(--st-gpu-${i + 1})` : `hsl(${(217 + i * 137.508) % 360} 65% 58%)`);
 // the per-GPU split the GPU cards share: the headline goes, the sub slot becomes one line per card (its colored token
