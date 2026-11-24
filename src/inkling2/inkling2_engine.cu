@@ -1540,9 +1540,7 @@ struct Engine {
     cudaGraphExec_t sp_graph = nullptr;         // a block's layers and its first draft
     std::map<int, cudaGraphExec_t> sp_graphs;   // the drafts after the first: by their count
     std::map<int, cudaGraphExec_t> sp_whole;    // a block's layers and every draft, the head read once: by their count
-    int sp_head = 2;                            // LAMINA_INK_SPARK_HEAD: 0 the first draft's product and the others',
-                                                // 1 one product, 2 one where the first draft mostly goes on
-    float sp_on = 0.5f;                         // how often it did, of late
+    float sp_on = 0.5f;                         // how often a block's first draft went on, of late (kSparkWhole)
     long long sp_blocks = 0;
     float sp_q[kMaxT] = {};   // the last block's drafts' probabilities under the drafter's head, each at its step
     // A sampled request's drafter chain: by the drafts' joint chance to pass under their positions' draws, at this
@@ -1623,13 +1621,12 @@ struct Engine {
     // the room this block leaves.  The experts not sent ahead that an application routes follow as before (the
     // CPU's, or sent before the products).
     // The budget is the card's own: kAheadTime to start, less where an application's products waited for what went
-    // ahead (the link is short), more where they did not (LAMINA_INK_AHEAD_FIXED=1: kAheadTime throughout).  And the
-    // next chunk's first application's experts go up during this chunk's last one (ahead_next: more of the part
-    // follows; a short piece's decode forwards before that chunk may move the layer's experts - the set is taken
-    // while every one of them is still off the card).
+    // ahead (the link is short), more where they did not.  And the next chunk's first application's experts go up
+    // during this chunk's last one (ahead_next: more of the part follows; a short piece's decode forwards before that
+    // chunk may move the layer's experts - the set is taken while every one of them is still off the card).
     static constexpr double kAheadTime = 1.5;
     double ahead_k = kAheadTime;
-    bool ahead_fixed = false, ahead_next = false, ahead_sent_next = false;
+    bool ahead_next = false, ahead_sent_next = false;
     bool ahead_across = true;        // (LAMINA_INK_AHEAD_NEXT=0: no chunk's first application sent ahead)
     bool ahead_on = true;            // (LAMINA_INK_AHEAD=0: none, a test's)
     cudaStream_t st_up = nullptr;
@@ -1692,7 +1689,6 @@ struct Engine {
     bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
     bool stages_apart = false;       // LAMINA_INK_STAGES=2 (a test's): the stretches as in stages, their chunks one card after the other
     bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
-    bool snap_sync = false;          // LAMINA_INK_SNAP_SYNC=1: a split's checkpoint image copied on the spot
     bool stage_log = false;          // LAMINA_INK_STAGE_LOG=1: a line a segment of a part (staged, or why not)
     int group_rows = 1024;           // LAMINA_INK_GROUP=N: a chunk of up to N rows grouped by expert on the card (0: never)
     int gate_fuse = 1;               // LAMINA_INK_GATE_FUSE=N: a chunk's loop gates in three launches from N rows (0: cuBLAS's)
@@ -2990,7 +2986,6 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_QHALF")) q_half = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_LOT_IMAGE")) img_on = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_XFER")) xfer_mode = std::max(0, std::min(2, std::atoi(r)));
-        if (const char* r = std::getenv("LAMINA_INK_AHEAD_FIXED")) ahead_fixed = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_AHEAD_NEXT")) ahead_across = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
@@ -3032,7 +3027,6 @@ struct Engine {
         }
         stage_log = env_on("LAMINA_INK_STAGE_LOG");
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
-        snap_sync = env_on("LAMINA_INK_SNAP_SYNC");
         if (const char* r = std::getenv("LAMINA_INK_GROUP")) group_rows = std::max(0, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_TC_PROD")) tc_prod = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_GATE_FUSE")) gate_fuse = std::max(0, std::atoi(r));
@@ -4850,7 +4844,7 @@ struct Engine {
         for (int k = L.n_slots; k < E; ++k)   // (the ranking's order)
             if (at_of[L.order[(size_t) k]] < 0) cand[nc++] = L.order[(size_t) k];
         if (nc == 0 || gpu_ms <= 0) return;
-        const double link = (ahead_fixed ? kAheadTime : ahead_k) * gpu_ms / (up_ms_mb * (double) L.stride / 1e6);
+        const double link = ahead_k * gpu_ms / (up_ms_mb * (double) L.stride / 1e6);
         std::stable_sort(cand, cand + nc, [&](int a, int b) { return rows[(size_t) a] > rows[(size_t) b]; });
         // (an odd visit's experts end at the scratch's end, past the current block; an even one's start at its start,
         // before the current block - or anywhere where that block is empty)
@@ -5802,7 +5796,6 @@ struct Engine {
         sp_ring.resize((size_t) s.n_layer);
         int max_ch = 1;
         if (const char* e = std::getenv("LAMINA_INK_SPARK_STRETCH")) sp_stretch = std::max<int64_t>(0, std::atoll(e));
-        if (const char* e = std::getenv("LAMINA_INK_SPARK_HEAD")) sp_head = std::max(0, std::min(2, std::atoi(e)));
         // (its cells in the model's format: q8_0 halves their VRAM - 590 -> 314 MiB at a reach of 131,072 cells)
         sp_q8 = kv_q8;
         if (const char* e = std::getenv("LAMINA_INK_SPARK_KV")) sp_q8 = std::string(e) == "q8_0";
@@ -6142,7 +6135,7 @@ struct Engine {
         };
         // (the head is its bytes: one product of the block's rows reads them once, 0.7 ms where the first row's takes
         // 0.5 and the others' 0.7 - which a block that ends at its first draft does not pay)
-        const bool whole = n > 1 && (sp_head == 1 || (sp_head == 2 && sp_on >= kSparkWhole));
+        const bool whole = n > 1 && sp_on >= kSparkWhole;
         if (whole) {
             issue(sp_whole[n], [&] { spark_launches(n); });
         } else {
@@ -6450,7 +6443,7 @@ struct Engine {
             if (begun < k) begin(begun = k);
             if (posted < k) post(posted = k);
             const bool mark = settles != nullptr && (*settles)(end_of(k));
-            const bool ahead = k + 1 < n_chunks && !stop && !(mark && (snap == nullptr || snap_sync));
+            const bool ahead = k + 1 < n_chunks && !stop && !(mark && snap == nullptr);
             const bool image = ahead && mark;
             waited += !ahead && k + 1 < n_chunks;
             if (image) image_part(0);
@@ -6844,13 +6837,6 @@ struct Engine {
         const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
         snap_dst = nullptr;   // (the image's name once it holds this checkpoint)
         snap_pos = -1;
-        if (sat && snap_sync) {   // (an A/B: the two cards' parts straight into the buffer, waited for; no image)
-            bool ok = state_io(host, true);
-            if (end) ok = ok && soft(cudaMemcpy(host + body, lg_rows->logits, V4, cudaMemcpyDeviceToHost));
-            const int32_t held[2] = {end ? 1 : 0, 0};
-            std::memcpy(host + body + V4, held, 8);
-            return ok;
-        }
         const uint8_t* const named = host;
         auto name = [&](bool ok) {
             if (ok) {
