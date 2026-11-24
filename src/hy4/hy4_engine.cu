@@ -1577,6 +1577,7 @@ struct Engine {
         lent_from.clear();
         const int n = (int) restore.size();
         pump();
+        if (!adapt) drain();
         return n;
     }
     /// The main GPU's slots back toward s_max from the spare chunks and the free VRAM above kReserve (after the prompt
@@ -3194,6 +3195,9 @@ struct Engine {
         const char* v = std::getenv("LAMINA_HY4_MOVE_BUDGET");
         return v ? std::max(0, std::atoi(v)) : 32;
     }();
+    // --adapt-every 0: the start's placement stays - no moves planned (at an answer's start, during it, after it), the
+    // residents a lend displaced back before the next forward - so every process writes the same output
+    bool adapt = true;
     int main_dev = 0;
     std::vector<char> tier_used;   // a forward's layer: the tiers given entries
 
@@ -3603,6 +3607,14 @@ struct Engine {
             if (gp.next < gp.backlog.size()) return true;
         return false;
     }
+    /// Every copy queued landed and switched in (adapt off: the placement as the requests leave it, not as the copies'
+    /// timing does).  Between forwards only.
+    void drain() {
+        do {
+            pump();
+            settle(true);
+        } while (moves_waiting());
+    }
     /// Expert e's copy into slot k (empty) of GPU gi's slots of layer li, queued on that GPU's copy thread
     void issue(int li, int gi, int k, int32_t e) {
         Layer& l = m->layers[(size_t) li];
@@ -3986,7 +3998,7 @@ struct Prompt {
         base_mapped = false;
         E.base_lent = true;
         E.slots_back();
-        E.plan_moves(512, false);   // the new slots filled by the ranking now, not 32 copies per 128 tokens
+        if (E.adapt) E.plan_moves(512, false);   // the new slots filled by the ranking now, not 32 copies per 128 tokens
     }
     /// A prompt part: the buffers mapped again, the slots past what is left giving way
     void base_take() {
@@ -5406,7 +5418,7 @@ struct Serve {
         E.settle(false);
         const long long landed = (long long) (E.moves_landed - landed0);
         E.relax();
-        const int queued = E.plan_moves(512, true);
+        const int queued = E.adapt ? E.plan_moves(512, true) : 0;
         E.save_profile(false);
         std::fprintf(stderr, "lamina: expert copies: %d planned at the answer's start, %lld landed during it, %d planned "
                      "after it; MiB of VRAM free: %s\n", moved_at_start, landed, queued, E.vram_free().c_str());
@@ -5498,6 +5510,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     int lookup = 16;
     int warm_ms = 500;
     int prefill_lend = 0;
+    bool adapt = true;
     bool tier_doorbell = false;
     std::vector<int> tier_devs;
     for (int i = 1; i < argc; ++i) {
@@ -5551,6 +5564,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
         else if (a == "--warm-ms") warm_ms = std::max(0, std::atoi(next()));   // a request after a pause: the cards kept running
         else if (a == "--prefill-lend") prefill_lend = std::max(0, std::atoi(next()));   // the prompt buffers lent after N tokens
+        else if (a == "--adapt-every") adapt = std::atoi(next()) != 0;   // 0: the start's placement stays (Engine::adapt)
         else if (a == "--tier-doorbell") tier_doorbell = true;   // the tiers' shares queued behind doorbells
         else if (a == "--kv-grow") kv_grow = true;
         else if (a == "--vision") vision = true;    // pictures: GENI requests, --emb (the rows lamina-vision's)
@@ -5594,6 +5608,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.lookup_min = lookup;
     E.warm_ms = warm_ms;
     E.lend_after = prefill_lend;
+    E.adapt = adapt;
+    if (!adapt) E.move_at_start = E.move_budget = 0;
     E.tier_doorbell = tier_doorbell;
     if (lookup > 0)
         E.sfx = std::make_unique<lamina::spec::SuffixDrafter>(lookup, 32, (size_t) std::max<int64_t>(4096, max_ctx));
