@@ -421,7 +421,10 @@ other's: an RTX 5070 Ti left to the driver ran at 2,150 or at 2,900 MHz, 5-8% ap
 `clocks=2900-3090/0` holds it), the later one `reserve=`. The first card's `clocks=` locks it while a request
 runs in any layout: a card that waits for the CPU's experts is left at one clock or the other too. Without `layers=` the engine does this by itself with the card after the first
 where the first would keep under 80% of the experts (two 12 GB cards: all the experts on cards instead of a third
-of them in RAM); `--layer-split 0` keeps the experts in RAM. Its options: `--kv fp16 | q8_0`;
+of them in RAM); `--layer-split 0` keeps the experts in RAM. Where experts stay in RAM, a later card with `cache=`
+(`{"id": "RTX 3060", "cache": "auto"}`, `--expert-gpu`) holds a copy of all of them and computes a token's entries of
+those the first card lacks in place of the CPU (it takes all or none: the start says when it lacks the room) - with
+drafts 28-42% faster on an RTX 3090 that holds 6 of the 13 GiB of experts. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
 32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
