@@ -101,6 +101,11 @@ __global__ void head_m_kernel(const float* __restrict__ y, __half* __restrict__ 
     const int t = (int) (i / V), v = (int) (i % V);
     M[(size_t) v * R + c0 + t] = __float2half(y[i]);
 }
+/// The head's product as a file folds it ([V][R] floats, M's own order): M = half(w), n values from where `M` points.
+__global__ void half_rows_kernel(const float* __restrict__ w, __half* __restrict__ M, long long n) {
+    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) M[i] = __float2half(w[i]);
+}
 /// Its rows as signed bytes: scale[v] = max |M[v]| / 127 / 127 (a latent's bytes are its values times 127), M8[v] =
 /// round(M[v] / (max / 127)).  A block a token; R = 256 threads.
 __global__ void __launch_bounds__(256) head_m8_kernel(const __half* __restrict__ M, int8_t* __restrict__ M8,

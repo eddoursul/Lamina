@@ -1076,15 +1076,18 @@ struct Spark {
     std::vector<SparkLayer> layers;
     std::vector<float> fuse;    // [n_layer + 1][taps]: each layer's weights of the taps, then the head's context's
     const float *out_norm = nullptr, *mask = nullptr, *rnn_norm = nullptr, *joint_w = nullptr, *joint_b = nullptr;
-    const uint16_t* w1 = nullptr;     // [the vocabulary, padded][R] bfloat16: a token's row for the head
+    int mask_rows = 1;                // mask's rows [mask_rows][N]: one for every masked row, or a row each
+    const uint16_t* w1 = nullptr;     // [the file's vocabulary][R] bfloat16: a token's row for the head
     std::vector<float> hidden_cols;   // hidden_out's columns [R][N], then its bias [N]: the head's product is made of them
+    std::vector<float> w2, w2_bias;   // or that product as a file folds it ([V][R], its bias [V]): let go once made
     double gib = 0, load_s = 0;
 };
 
 static_assert(lamina::inkling2::kDrafterRows == kMaxT && lamina::inkling2::kDrafterTile == ik::kTcCells,
               "the drafter's rings as geometry.hpp sizes them");
 
-/// The drafter of model `m` from `path`.  False with `err`: not such a file, or not one this path's kernels run.
+/// The drafter of model `m` from `path`, in either layout (lamina/inkling2/geometry.hpp, the model's block drafter).
+/// False with `err`: not such a file, or not one this path's kernels run.
 bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& err) {
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
@@ -1093,6 +1096,7 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
         err = path + " is not a block drafter (general.architecture dflash)";
         return false;
     }
+    const bool folded = lamina::inkling2::drafter_folded(f);   // mainline llama.cpp's layout
     auto num = [&](const char* k, double def) {
         const lamina::MetaValue* v = f.get(std::string("dflash.") + k);
         return v && v->is_num() ? v->num() : def;
@@ -1105,12 +1109,18 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
     s.D = (int) num("attention.key_length", 0);
     s.R = (int) num("dspark.markov_rank", 0);
     s.block = (int) num("block_size", 0);
-    s.n_swa = (int) num("attention.sliding_window", 0);
+    s.n_swa = (int) lamina::inkling2::drafter_window(f);
     s.V = (int) num("vocab_size_unpadded", 0);
     s.eps = (float) num("attention.layer_norm_rms_epsilon", 1e-6);
     s.cap = (float) num("final_logit_softcapping", 0);
     s.rope_base = num("rope.freq_base", 10000.0);
-    const int Vp = (int) num("vocab_size", 0);
+    int Vp = (int) num("vocab_size", 0);
+    // (a file without the rank and the vocabulary's keys: markov_w1 [rank, its vocabulary] says them)
+    if (const lamina::TensorInfo* t = gm.find("markov_w1.weight"); t != nullptr && t->shape.size() == 2) {
+        if (s.R == 0) s.R = (int) t->shape[0];
+        if (Vp == 0) Vp = (int) t->shape[1];
+        if (s.V == 0) s.V = Vp;
+    }
     std::vector<uint64_t> tl, pat;
     f.numbers("dflash.target_layers", &tl);
     f.numbers("dflash.attention.sliding_window_pattern", &pat);
@@ -1137,10 +1147,16 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
     size_t fr0 = 0, tot = 0;
     CK(cudaMemGetInfo(&fr0, &tot));
     const size_t nt = s.taps.size();
-    {   // each row of the mix: the softmax of its weights
+    s.fuse.resize(nt * (size_t) (s.n_layer + 1));
+    if (folded) {   // each row of the mix (a layer's, then the head's) softmaxed, a tensor each
+        for (int r = 0; r <= s.n_layer; ++r) {
+            const std::vector<float> w = L.floats(r < s.n_layer ? "blk." + std::to_string(r) + ".ctx_mix.weight" : "markov_ctx_mix.weight");
+            if (w.size() != nt) return no("a mix of the target's states of another shape");
+            std::copy(w.begin(), w.end(), s.fuse.begin() + (ptrdiff_t) ((size_t) r * nt));
+        }
+    } else {   // each row of the mix: the softmax of its weights
         const std::vector<float> w = L.floats("dspark_fuse.weight");
-        if (w.size() != nt * (size_t) (s.n_layer + 1)) return no("a mix of the target's states of another shape");
-        s.fuse.resize(w.size());
+        if (w.size() != s.fuse.size()) return no("a mix of the target's states of another shape");
         for (int r = 0; r <= s.n_layer; ++r) {
             double mx = -1e30, sum = 0;
             for (size_t k = 0; k < nt; ++k) mx = std::max(mx, (double) w[(size_t) r * nt + k]);
@@ -1155,8 +1171,13 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
         return h.size() == n ? f32_dev(h) : nullptr;
     };
     s.out_norm = vec("output_norm.weight", (size_t) s.N);
-    s.mask = vec("mask_embd.weight", (size_t) s.N);
-    s.rnn_norm = vec("dspark_norm.weight", (size_t) s.N);
+    {   // a masked row's input: one row for all, or a row each [block - 1][N]
+        const std::vector<float> w = L.floats("mask_embd.weight");
+        if (w.size() != (size_t) s.N && w.size() != (size_t) s.N * (size_t) (s.block - 1)) return no("a mask embedding of another shape");
+        s.mask_rows = (int) (w.size() / (size_t) s.N);
+        s.mask = f32_dev(w);
+    }
+    s.rnn_norm = vec(folded ? "markov_ctx_norm.weight" : "dspark_norm.weight", (size_t) s.N);
     s.joint_b = vec("joint_proj.bias", (size_t) 3 * s.R);
     {
         const lamina::TensorInfo* t = L.find("joint_proj.weight");
@@ -1164,7 +1185,13 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
             return no("a head projection of another shape");
         s.joint_w = L.f32("joint_proj.weight");
     }
-    {   // hidden_out [R -> N] by columns, its bias after them
+    if (folded) {   // the head's product as the file folds it: markov_w2 [R -> V], its bias [V]
+        const lamina::TensorInfo* t = L.find("markov_w2.weight");
+        if (t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != s.V) return no("a folded head of another shape");
+        s.w2 = L.floats("markov_w2.weight");
+        s.w2_bias = L.floats("markov_w2.bias");
+        if (s.w2_bias.size() != (size_t) s.V) return no("a folded head's bias of another length");
+    } else {   // hidden_out [R -> N] by columns, its bias after them
         const lamina::TensorInfo* t = L.find("dspark_hidden_out.weight");
         if (t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != s.N) return no("a head output of another shape");
         const std::vector<float> w = L.floats("dspark_hidden_out.weight"), b = L.floats("dspark_hidden_out.bias");
@@ -1210,7 +1237,7 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
                 return no("context projections in a format a prompt chunk's kernels do not read");
         y.attn_norm = vec(b + "attn_norm.weight", (size_t) s.N);
         y.ffn_norm = vec(b + "ffn_norm.weight", (size_t) s.N);
-        y.ctx_norm = vec(b + "dflare_norm.weight", (size_t) s.N);
+        y.ctx_norm = vec(b + (folded ? "ctx_norm.weight" : "dflare_norm.weight"), (size_t) s.N);
         y.q_norm = vec(b + "attn_q_norm.weight", (size_t) s.D);
         y.k_norm = vec(b + "attn_k_norm.weight", (size_t) s.D);
         y.k_ctx_norm = vec(b + "attn_k_ctx_norm.weight", (size_t) s.D);
@@ -5849,30 +5876,46 @@ struct Engine {
         b.cs_h = halloc<float>(T * (size_t) s.D);
         b.step_h = halloc<int32_t>((size_t) b.n_step);
         b.out_h = halloc<int32_t>(2 * T);
-        // a block's rows before its layers: the token's row comes into the first, the others are the mask
-        for (size_t t = 1; t < T; ++t) CK(cudaMemcpy(b.x0 + t * N, s.mask, N * 4, cudaMemcpyDeviceToDevice));
-        // the head's product: the target's head over hidden_out's columns, 8 a pass; over its bias; then as bytes
-        float* cols = nullptr;
+        // a block's rows before its layers: the token's row comes into the first, the others are the mask's
+        for (size_t t = 1; t < T; ++t)
+            CK(cudaMemcpy(b.x0 + t * N, s.mask + (s.mask_rows > 1 ? (t - 1) * N : 0), N * 4, cudaMemcpyDeviceToDevice));
         __half* M = nullptr;
-        CK(cudaMalloc(&cols, s.hidden_cols.size() * 4));
         CK(cudaMalloc(&M, V * R_ * 2));
-        CK(cudaMemcpy(cols, s.hidden_cols.data(), s.hidden_cols.size() * 4, cudaMemcpyHostToDevice));
-        for (size_t c = 0; c <= R_; c += T) {
-            const int n = (int) std::min(T, R_ + 1 - c);
-            K::native_quantize_q8_1(cols + c * N, b.img, (int) N, n, st);
-            mm(m->head, b.img, cols + c * N, b.base, n);
-            const int nm = (int) std::min<size_t>((size_t) n, R_ - std::min(c, R_));
-            if (nm > 0) {
-                const long long cnt = (long long) nm * (long long) V;
-                ik::head_m_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(b.base, M, (int) V, (int) R_, (int) c, nm);
+        if (!s.w2.empty()) {   // the head's product as the file folds it, its bias; through a stretch of floats at a time
+            const size_t n = V * R_, step = (size_t) 1 << 22;
+            float* w = nullptr;
+            CK(cudaMalloc(&w, std::min(n, step) * 4));
+            for (size_t i = 0; i < n; i += step) {
+                const size_t k = std::min(step, n - i);
+                CK(cudaMemcpyAsync(w, s.w2.data() + i, k * 4, cudaMemcpyHostToDevice, st));
+                ik::half_rows_kernel<<<(unsigned) ((k + 255) / 256), 256, 0, st>>>(w, M + i, (long long) k);
             }
-            if (c + (size_t) n > R_)   // the bias's row is this pass's last
-                CK(cudaMemcpyAsync(b.c0, b.base + (size_t) (n - 1) * V, V * 4, cudaMemcpyDeviceToDevice, st));
+            CK(cudaMemcpyAsync(b.c0, s.w2_bias.data(), V * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaStreamSynchronize(st));
+            CK(cudaFree(w));
+        } else {   // the target's head over hidden_out's columns, 8 a pass; over its bias
+            float* cols = nullptr;
+            CK(cudaMalloc(&cols, s.hidden_cols.size() * 4));
+            CK(cudaMemcpy(cols, s.hidden_cols.data(), s.hidden_cols.size() * 4, cudaMemcpyHostToDevice));
+            for (size_t c = 0; c <= R_; c += T) {
+                const int n = (int) std::min(T, R_ + 1 - c);
+                K::native_quantize_q8_1(cols + c * N, b.img, (int) N, n, st);
+                mm(m->head, b.img, cols + c * N, b.base, n);
+                const int nm = (int) std::min<size_t>((size_t) n, R_ - std::min(c, R_));
+                if (nm > 0) {
+                    const long long cnt = (long long) nm * (long long) V;
+                    ik::head_m_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(b.base, M, (int) V, (int) R_, (int) c, nm);
+                }
+                if (c + (size_t) n > R_)   // the bias's row is this pass's last
+                    CK(cudaMemcpyAsync(b.c0, b.base + (size_t) (n - 1) * V, V * 4, cudaMemcpyDeviceToDevice, st));
+            }
+            CK(cudaStreamSynchronize(st));
+            CK(cudaFree(cols));
         }
+        // then as bytes
         ik::head_m8_kernel<<<(unsigned) V, 256, 0, st>>>(M, b.M8, b.mscale, (int) R_);
         CK(cudaStreamSynchronize(st));
         CK(cudaFree(M));
-        CK(cudaFree(cols));
     }
     /// A tapped state of T rows into the mixes of R
     void spark_tap(Rows& R, int k, int T, const float* x) {
@@ -8151,6 +8194,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         std::fprintf(stderr, "lamina: %llu MiB of this GPU stay free of cells for the image encoder's loan\n",
                      (unsigned long long) (loan >> 20));
     E.init(m, max_ctx, kv == "q8_0", kv_grow, (size_t) (*reserve + (m.in_ram ? 0 : loan)));
+    std::vector<float>().swap(spark.w2);   // (a folded head's floats: on the card as bytes now)
+    std::vector<float>().swap(spark.w2_bias);
     Drafts dr;
     dr.init(lookup, E.ctx);
     if (E.sp != nullptr) {

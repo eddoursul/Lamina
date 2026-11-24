@@ -337,6 +337,28 @@ inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* c
 }
 
 // ---- the model's block drafter (DSpark: a dflash GGUF): the rings of context cells the engine keeps a layer
+//
+// Two layouts of the same weights exist.  unsloth's first files: the mix of the target's states as logits
+// (`dspark_fuse` [taps, layers + 1]), the head's output in the target's rows (`dspark_hidden_out`, the target's head
+// over it), `markov_w1` over the padded vocabulary, `dflare_norm` / `dspark_norm`, one `mask_embd` row, the window as
+// the checkpoint counts it.  Mainline llama.cpp's (PR #32218, unsloth's files since 2026-11-23): each mix softmaxed in a
+// tensor of its own (`blk.N.ctx_mix`, `markov_ctx_mix`), the head folded through the target's unembedding
+// (`markov_w2` [rank, vocabulary] and its bias), the tokenizer's rows alone, `ctx_norm` / `markov_ctx_norm`, a
+// `mask_embd` row a masked row, no rank or vocabulary keys, the window one cell more (llama.cpp's counts the query's own).
+
+/// A drafter file in mainline llama.cpp's layout (its head folded: markov_w2)
+inline bool drafter_folded(const GgufFile& f) {
+    for (const TensorInfo& t : f.tensors())
+        if (t.name == "markov_w2.weight") return true;
+    return false;
+}
+/// The context cells a drafter's window layer sees before a block's first row (the checkpoint's sliding_window_size)
+inline int64_t drafter_window(const GgufFile& f) {
+    const MetaValue* v = f.get("dflash.attention.sliding_window");
+    const int64_t w = v && v->is_num() ? (int64_t) v->u : 0;
+    return w > 0 && drafter_folded(f) ? w - 1 : w;
+}
+
 constexpr int64_t kDrafterRows = 8;       ///< a block's rows (the engine's kMaxT)
 constexpr int64_t kDrafterTile = 32;      ///< an attention tile's cells (the engine's ik::kTcCells)
 constexpr int64_t kDrafterSlack = 4096;   ///< cells a ring keeps past its layer's: a state may step back that far
@@ -359,7 +381,7 @@ inline uint64_t drafter_rings_bytes(const GgufFile& f, int64_t reach, bool q8) {
         const MetaValue* v = f.get(std::string("dflash.") + k);
         return v && v->is_num() ? (int64_t) v->u : (int64_t) 0;
     };
-    const int64_t HK = num("attention.head_count_kv"), D = num("attention.key_length"), swa = num("attention.sliding_window");
+    const int64_t HK = num("attention.head_count_kv"), D = num("attention.key_length"), swa = drafter_window(f);
     std::vector<uint64_t> pat;
     f.numbers("dflash.attention.sliding_window_pattern", &pat);
     const uint64_t cell = (uint64_t) (q8 ? HK * (D / 32) * 34 : HK * D * 2);

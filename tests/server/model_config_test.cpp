@@ -8,6 +8,9 @@
 #include "process.hpp"
 #include "runconfig.hpp"
 
+#include "../core/gguf_fixture.hpp"
+#include "lamina/inkling2/geometry.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -376,6 +379,27 @@ int main() {
         CHECK((cleared["gpu"] == json{"GPU-75af3083", "RTX 5070 Ti"}) && rc::value_of(cleared, "vram_reserve_mib").is_null());
         const json listed = rc::apply({{"gpu", {0, 2}}, {"args", {"--native", "m.gguf"}}}, {{"vram_reserve_mib", 900}}).first;
         CHECK((listed["gpu"] == json{0, 2}) && (listed["args"] == json{"--native", "m.gguf", "--vram-reserve-mib", "900"}));
+    }
+
+    {   // Inkling 2's drafter in either layout: unsloth's first (the window as the checkpoint counts it) and mainline
+        // llama.cpp's (markov_w2, the window one cell more): the same window, the same rings
+        auto drafter = [&](const char* name, uint64_t window, bool folded) {
+            std::vector<fixture::Kv> kv = {fixture::str("general.architecture", "dflash"),
+                                           fixture::u32("dflash.attention.head_count_kv", 8),
+                                           fixture::u32("dflash.attention.key_length", 128),
+                                           fixture::u32("dflash.attention.sliding_window", window),
+                                           fixture::u32s("dflash.attention.sliding_window_pattern", {1, 0, 1})};
+            std::vector<fixture::Tensor> ts = {{"markov_w1.weight", {4, 8}, 0, 1}};
+            ts.push_back(folded ? fixture::Tensor{"markov_w2.weight", {4, 8}, 0, 2} : fixture::Tensor{"dspark_hidden_out.weight", {4, 8}, 0, 2});
+            fixture::write(dir / name, kv, ts);
+            return lamina::GgufFile((dir / name).string());
+        };
+        const lamina::GgufFile old_f = drafter("dspark-old.gguf", 1024, false), new_f = drafter("dspark-new.gguf", 1025, true);
+        CHECK(!lamina::inkling2::drafter_folded(old_f) && lamina::inkling2::drafter_folded(new_f));
+        CHECK(lamina::inkling2::drafter_window(old_f) == 1024 && lamina::inkling2::drafter_window(new_f) == 1024);
+        for (const bool q8 : {false, true})
+            CHECK(lamina::inkling2::drafter_rings_bytes(old_f, 32768, q8) == lamina::inkling2::drafter_rings_bytes(new_f, 32768, q8) &&
+                  lamina::inkling2::drafter_rings_bytes(new_f, 32768, q8) > 0);
     }
 
     fs::remove_all(dir, ec);

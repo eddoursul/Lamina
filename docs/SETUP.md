@@ -359,8 +359,9 @@ and continues it only when the request extends it).
 
 ## Inkling 2 Mini
 
-The engine runs Thinking Machines Lab's Inkling 2 Mini (GGUF architectures `inkling2`, unsloth's files, and
-`inkling2_loop`, mainline llama.cpp's layout of the same tensors: unsloth's `Mainline_Support/*.gguf_file`) on a
+The engine runs Thinking Machines Lab's Inkling 2 Mini (GGUF architectures `inkling2_loop`, mainline llama.cpp's
+layout and unsloth's files since 2026-11-23, and `inkling2`, unsloth's first layout of the same tensors, now its
+`Old_Support/*.gguf_file`) on a
 path of its own (`src/inkling2`): the engine switches to it from the model file's header. Every quant of unsloth's
 repository runs, from UD-IQ1_S (7.2 GiB) to UD-Q8_K_XL (21.3 GiB); `lamina-server -m FILE --check` says whether a
 card holds one and how much context is left beside it. The model is 24 layers of which 12 run three times a token, 128 experts
@@ -421,7 +422,7 @@ Q8_0 products take the int8 tensor cores and round apart: a greedy text with dra
 a near tie; `LAMINA_INK_MMA=0`: every window to the bit). The drafts are the tokens that followed the text's last 16 tokens or more where they
 occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the model's block drafter, DSpark:
 `lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
-`dspark-Inkling-2-Mini-Q8_0.gguf`), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a
+`dspark-Inkling-2-Mini-Q8_0.gguf`; either of its layouts, mainline llama.cpp's or unsloth's first), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a
 window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.5).
 It takes 0.40 GiB of VRAM for its weights and ~0.8 GiB for its context cells (made from the model's own states of
 every position; `--dspark-reach N`: those its layer without a window keeps - 131,072, 4.5 KiB each, 32,768 with
