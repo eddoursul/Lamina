@@ -4049,18 +4049,23 @@ struct Engine {
         return n;
     }
     /// The current session's first `cells` K / V cells between the GPUs and `host`, a copy of `held` >= cells cells.
-    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
-        const size_t H = (size_t) m->g.n_head_kv, w = (size_t) cells * m->kv_row(), mine = (size_t) held * m->kv_row();
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) { return kv_range(0, cells, held, host, to_host); }
+    /// The current session's cells [lo, hi) between the GPUs and `host`, laid out as a copy of cells [lo, held) (kv_copy's
+    /// for lo 0): each stage's attention layers, a layer's K then its V, a KV head's cells each.
+    bool kv_range(int64_t lo, int64_t hi, int64_t held, uint8_t* host, bool to_host) {
+        const size_t H = (size_t) m->g.n_head_kv, kr = m->kv_row(), w = (size_t) (hi - lo) * kr,
+                     mine = (size_t) (held - lo) * kr;
         bool ok = true;
         for (Engine* e = this; e != nullptr; e = e->nxt) {
             e->on();
-            const size_t row = (size_t) e->ctx * m->kv_row();   // a KV head's cells on the device
+            const size_t row = (size_t) e->ctx * kr;   // a KV head's cells on the device
             for (size_t l = 0; l < e->kc.size(); ++l) {
                 if (!e->kc[l]) continue;
                 for (__half* d : {e->kc[l], e->vc[l]}) {
+                    uint8_t* const at = reinterpret_cast<uint8_t*>(d) + (size_t) lo * kr;
                     if (w > 0)
-                        ok = ok && soft(to_host ? cudaMemcpy2DAsync(host, mine, d, row, w, H, cudaMemcpyDeviceToHost, e->st)
-                                                : cudaMemcpy2DAsync(d, row, host, mine, w, H, cudaMemcpyHostToDevice, e->st));
+                        ok = ok && soft(to_host ? cudaMemcpy2DAsync(host, mine, at, row, w, H, cudaMemcpyDeviceToHost, e->st)
+                                                : cudaMemcpy2DAsync(at, row, host, mine, w, H, cudaMemcpyHostToDevice, e->st));
                     host += H * mine;
                 }
             }
@@ -4068,6 +4073,15 @@ struct Engine {
         }
         on();
         return ok;
+    }
+    /// Cells [lo, hi) of a copy of `held` cells (kv_copy's layout) into `out`, laid out as kv_range lays them out.
+    void kv_pack(int64_t lo, int64_t hi, const uint8_t* copy, int64_t held, uint8_t* out) const {
+        const size_t kr = m->kv_row(), w = (size_t) (hi - lo) * kr, mine = (size_t) held * kr;
+        size_t rows = 0;   // a KV head's cells of a layer's K or V
+        for (const Engine* e = this; e != nullptr; e = e->nxt)
+            for (size_t l = 0; l < e->kc.size(); ++l)
+                if (e->kc[l]) rows += 2 * (size_t) m->g.n_head_kv;
+        for (size_t r = 0; r < rows; ++r) std::memcpy(out + r * w, copy + r * mine + (size_t) lo * kr, w);
     }
     /// The current session's first `cells` K / V cells from session `src`'s, which keeps them: the start a
     /// conversation lends another one in a session of its own (the cells below a position do not change while the
@@ -4489,6 +4503,8 @@ struct CacheOpts {
     int64_t min_tokens = 1024;       // --conversation-cache-min-tokens: shorter ones are not parked
     int64_t ram_reserve_mib = 6144;  // --ram-reserve-mib: they take no RAM below this much available to the system
     int64_t tail_role = -1;          // --tail-role-token: a trailing turn of this role stays after the turn's checkpoint
+    std::string spill_dir;           // --conversation-spill-dir: the disk tier's folder (empty: none)
+    int64_t spill_mib = -1;          // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
 };
 
 /// The engine's state behind the cache's policy: the current session's (Engine::state_copy, kv_copy), which the
@@ -4534,6 +4550,19 @@ protected:
     bool kv_from(int from, int64_t cells) override {
         E.sync_all();
         return E.kv_from(from, cells);
+    }
+    // the disk tier: the current session's cells a range at a time, from every GPU of a split
+    bool disk_ready() const override { return true; }
+    bool kv_range(int64_t lo, int64_t hi, int64_t held, uint8_t* host, bool to_host) override {
+        E.sync_all();
+        return E.kv_range(lo, hi, held, host, to_host);
+    }
+    void kv_pack(int64_t lo, int64_t hi, const uint8_t* copy, int64_t held, uint8_t* out) const override {
+        E.kv_pack(lo, hi, copy, held, out);
+    }
+    void kv_settle() override {
+        E.sync_all();
+        E.snap_wait();   // (an image's copy into a checkpoint buffer)
     }
 };
 
@@ -4700,6 +4729,7 @@ struct Serve {
                      copt.park_slots > 0 ? (", at most " + std::to_string(copt.park_slots) + " of them").c_str() : "",
                      ram_known ? (", above a RAM reserve of " + std::to_string(copt.ram_reserve_mib) + " MiB (" +
                                   std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
+        cache->open_disk(copt.spill_dir, copt.spill_mib);   // the disk tier below the park
     }
 
     /// The CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE.
@@ -4707,9 +4737,10 @@ struct Serve {
         if (!cache) return;
         const auto cs = cache->state();
         serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                    "evictions=%zu held=%zu sessions=%d\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
-                    (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots, cs.evictions,
-                    cs.held, E.n_sess);
+                    "evictions=%zu held=%zu sessions=%d disk=%zu disk_bytes=%llu disk_budget=%llu\n",
+                    (long long) cs.live_cells, cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
+                    (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.held, E.n_sess, cs.disk,
+                    (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
     }
     /// Session `s` took token `t` (a decode step): its tokens, and the cache's record of them.
     void fed(int s, int32_t t) {
@@ -5771,6 +5802,8 @@ static int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--conversation-cache-slots") cache_opts.park_slots = std::max<int64_t>(0, std::atoll(next().c_str()));
         else if (a == "--conversation-cache-min-tokens") cache_opts.min_tokens = std::max<int64_t>(0, std::atoll(next().c_str()));
         else if (a == "--ram-reserve-mib") cache_opts.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
+        else if (a == "--conversation-spill-dir") cache_opts.spill_dir = next();
+        else if (a == "--conversation-spill-mib") cache_opts.spill_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
         else if (a == "--tail-role-token") cache_opts.tail_role = std::atoll(next().c_str());
         else if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // not a skip: it steers
             std::fprintf(stderr, "lamina: %s: control vectors run on Qwen3.8-Flash-Next's engine only\n", a.c_str());

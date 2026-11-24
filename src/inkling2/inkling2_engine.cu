@@ -7042,6 +7042,68 @@ struct Engine {
         lots_say("a conversation through its buffer", cells);
         return kv_plain(cells, held, host, false);
     }
+    /// The full visits' cells [from, to) of the live sequence between the cards and `host`, laid out as a copy of cells
+    /// [from, held) (kv_copy's for from 0: a visit's K, then its V, each held - from cells long) - the disk tier's
+    /// blocks.  Out: the cell cards' units in the range, then the layers' cards' cells; in: as a sequence that grows (a
+    /// range from 0 clears the cell cards first, ensure moves what the layers' cards have no room for to them again).
+    bool kv_range(int64_t from, int64_t to, int64_t held, uint8_t* host, bool to_host) {
+        const size_t mine = (size_t) (held - from) * cell_bytes;
+        auto place = [&](size_t vi, int side, int64_t c) {   // cell c of an array in the copy
+            return host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) (c - from) * cell_bytes;
+        };
+        auto xfers = [&](int64_t c0, int64_t c1, bool out) {   // the full visits' cells [c0, c1) on the layers' cards
+            std::vector<Xfer> j;
+            for (size_t vi = 0; vi < visits.size(); ++vi) {
+                const Visit& V = visits[vi];
+                if (V.cells.ring) continue;
+                for (int side = 0; side < 2; ++side)
+                    j.push_back({home_dev(vi), home_st(vi), (side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes,
+                                 place(vi, side, c0), (size_t) (c1 - c0) * cell_bytes, out});
+            }
+            return j;
+        };
+        if (from >= to) return true;
+        homes_sync();
+        if (to_host) {
+            for (size_t u = 0; u < unit_card.size(); ++u) {   // (the units before `lo`, on the cell cards)
+                const int64_t u0 = (int64_t) u * unit, a = std::max(from, u0), b = std::min({to, u0 + unit, lo});
+                if (a >= b) continue;
+                Card& c = cards[(size_t) unit_card[u]];
+                for (size_t vi = 0; vi < visits.size(); ++vi)
+                    if (!visits[vi].cells.ring)
+                        for (int side = 0; side < 2; ++side)
+                            card_copy(c, (size_t) full_of[vi], side, unit_slot(u) + (a - u0), place(vi, side, a),
+                                      (size_t) (b - a) * cell_bytes, true);
+            }
+            const int64_t a = std::max(from, lo);
+            return a >= to || host_xfer(xfers(a, to, true));
+        }
+        if (cards.empty()) return ensure(to) && host_xfer(xfers(from, to, false));
+        if (from == 0) cards_clear();
+        bool ok = true;
+        for (int64_t c0 = from; c0 < to && ok; c0 += unit) {   // (a unit at a time, as kv_plain's)
+            const int64_t c1 = std::min(to, c0 + unit);
+            n_pos = c0;
+            ok = ensure(c1) && host_xfer(xfers(c0, c1, false));
+        }
+        n_pos = to;
+        return ok;
+    }
+    /// Cells [from, to) of a copy of `held` cells (kv_copy's layout) into `out`, laid out as kv_range lays them out.
+    void kv_pack(int64_t from, int64_t to, const uint8_t* copy, int64_t held, uint8_t* out) const {
+        const size_t w = (size_t) (to - from) * cell_bytes, mine = (size_t) held * cell_bytes;
+        for (size_t a = 0; a < (size_t) m->g.n_full_visits() * 2; ++a)
+            std::memcpy(out + a * w, copy + a * mine + (size_t) from * cell_bytes, w);
+    }
+    /// The parked copy `host` with all its cells: those its lot and the cell cards still hold to the buffer (the disk
+    /// tier writes it next)
+    void parked_settle(const uint8_t* host) {
+        if (Parked* r = parked_of(host)) {
+            homes_sync();
+            parked_all(*r);
+            parked_trim();
+        }
+    }
     /// The same through the buffer alone: every cell copied
     bool kv_plain(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
         const size_t mine = (size_t) held * cell_bytes;
@@ -7303,6 +7365,8 @@ struct CacheOpts {
     int64_t park_slots = 0;          // --conversation-cache-slots: their number at most (0: no limit)
     int64_t min_tokens = 1024;       // --conversation-cache-min-tokens: shorter ones are not parked
     int64_t ram_reserve_mib = 6144;  // --ram-reserve-mib: they take no RAM below this much available to the system
+    std::string spill_dir;           // --conversation-spill-dir: the disk tier's folder (empty: none)
+    int64_t spill_mib = -1;          // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
 };
 
 /// The engine's state behind the cache's policy
@@ -7338,6 +7402,23 @@ protected:
     void kv_take(const uint8_t* host) override { E.taking = host; }
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override {
         return E.kv_copy(cells, held, host, to_host);
+    }
+    // the disk tier: the live sequence's cells a range at a time, from the cell cards and the layers' cards
+    bool disk_ready() const override { return true; }
+    bool kv_range(int64_t lo, int64_t hi, int64_t held, uint8_t* host, bool to_host) override {
+        E.snap_wait();
+        return E.kv_range(lo, hi, held, host, to_host);
+    }
+    void kv_pack(int64_t lo, int64_t hi, const uint8_t* copy, int64_t held, uint8_t* out) const override {
+        E.kv_pack(lo, hi, copy, held, out);
+    }
+    void kv_settle() override {
+        E.snap_wait();   // (an image's copy into a checkpoint buffer)
+        E.homes_sync();
+    }
+    bool kv_complete(const uint8_t* host) override {
+        E.parked_settle(host);   // (a parked copy's cells still in its lot or on the cell cards)
+        return true;
     }
 };
 
@@ -7387,6 +7468,7 @@ struct Serve {
                      copt.park_slots > 0 ? (", at most " + std::to_string(copt.park_slots) + " of them").c_str() : "",
                      ram_known ? (", above a RAM reserve of " + std::to_string(copt.ram_reserve_mib) + " MiB (" +
                                   std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
+        cache->open_disk(copt.spill_dir, copt.spill_mib);   // the disk tier below the park
     }
 
     // The server's image encoder runs in this process and, where the server has it borrow (its "vision" section's
@@ -7451,9 +7533,10 @@ struct Serve {
         if (!cache) return;
         const auto cs = cache->state();
         serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                    "evictions=%zu held=%zu sessions=1\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
-                    (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots, cs.evictions,
-                    cs.held);
+                    "evictions=%zu held=%zu sessions=1 disk=%zu disk_bytes=%llu disk_budget=%llu\n",
+                    (long long) cs.live_cells, cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
+                    (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.held, cs.disk,
+                    (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
     }
 
     /// Where a prompt's read takes a checkpoint besides a long prompt's periodic ones and its end (which stays in the
@@ -7886,6 +7969,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--conversation-cache-slots") copt.park_slots = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--conversation-cache-min-tokens") copt.min_tokens = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--ram-reserve-mib") copt.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next()));
+        else if (a == "--conversation-spill-dir") copt.spill_dir = next();
+        else if (a == "--conversation-spill-mib") copt.spill_mib = std::max<int64_t>(0, std::atoll(next()));
         else {
             std::fprintf(stderr, "lamina: Inkling 2's path does not take %s\n", a.c_str());
             return 2;

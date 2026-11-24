@@ -12,131 +12,63 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <numeric>
 
 namespace lamina::core {
 
 namespace {
-using lamina::platform::kSpillAlign;
 using lamina::platform::spill_align_up;
 using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 double mib(uint64_t b) { return (double) b / 1048576.0; }
-
-bool disk_failed(const std::string& why) {
-    std::fprintf(stderr, "lamina serve: prompt cache: the disk tier: %s\n", why.c_str());
-    return false;
-}
 }  // namespace
 
-// ---- the disk tier
-//
-// A conversation's file: its K/V cells in blocks, each the K/V states' regions of its cells back to back in
-// kv_spans' order (a block of [0, n) is a parked copy in RAM byte for byte), and its checkpoints in slots of a file
-// of their own.  Both are read and written unbuffered (lamina/platform/spill.hpp), the cells through the stage: two
-// pinned halves in turns, one half's copies to or from the device beside the other's file I/O.  A conversation taken
-// back keeps its file: `cells` says how far its blocks still hold the sequence, and a park appends a block from there.
-struct SeqFile {
-    uint64_t serial = 0;
-    std::string kv_path, ck_path;
-    struct Block {
-        int64_t lo, hi;   ///< its cells [lo, hi)
-        uint64_t off;     ///< where it starts in the K/V file
-    };
-    std::vector<Block> blocks;   ///< lo ascending; a later block's cells over an earlier one's
-    int64_t cells = 0;           ///< the blocks hold the sequence's cells [0, cells)
-    uint64_t kv_end = 0;         ///< where the next block goes in the K/V file (whole pages)
-    uint64_t kv_size = 0;        ///< the K/V file's length
-    std::vector<std::pair<int64_t, uint32_t>> slots;   ///< a checkpoint's position and its slot
-    uint32_t n_slots = 0;
-    std::vector<uint32_t> free_slots;   ///< slots of checkpoints that left the chain
-    const uint32_t* slot(int64_t pos) const {
-        for (const auto& [p, s] : slots)
-            if (p == pos) return &s;
-        return nullptr;
-    }
-};
+// ---- the disk tier (lamina/core/disk_tier.hpp): the files' folder, budget and stage are the tier's; the cache says
+// which conversations go there and when, and the engine copies a range of cells at a time (kv_range).
 
-struct SequenceCache::Disk {
-    lamina::platform::SpillDir dir;
-    uint64_t budget = 0;   ///< the files' bytes at most
-    uint64_t slot = 0;     ///< a checkpoint's slot in its file: a checkpoint buffer, whole pages
-    uint64_t half = uint64_t(64) << 20;
-    uint8_t* stage[2] = {nullptr, nullptr};
-    bool registered[2] = {false, false};      ///< pinned (cudaHostRegister); else pageable, the copies synchronous
-    cudaEvent_t done[2] = {nullptr, nullptr};   ///< a half's copies to or from the device have ended
-    uint64_t serial = 0;
-    ~Disk() {
-        for (int h = 0; h < 2; ++h) {
-            if (done[h] != nullptr) cudaEventDestroy(done[h]);
-            if (registered[h]) cudaHostUnregister(stage[h]);
-            lamina::platform::spill_free(stage[h]);
-        }
-    }
-    uint64_t bytes(const SeqFile& f) const { return f.kv_size + (uint64_t) f.n_slots * slot; }
-};
+void SequenceCache::kv_settle() {
+    (void) cudaDeviceSynchronize();
+}
 
 bool SequenceCache::open_disk(const std::string& root, uint64_t budget, std::string& msg) {
     if (!enabled()) {
         msg = "the prompt cache is off";
         return false;
     }
-    if (kv_spans(0, 1).empty() || kv_stream() == nullptr) {
+    if (!disk_ready()) {
         msg = "this engine keeps no K/V in files";
         return false;
     }
-    auto d = std::make_unique<Disk>();
-    int cleaned = 0;
-    if (!d->dir.open(root, msg, &cleaned)) return false;
-    const uint64_t free = d->dir.free_bytes(), room = free > kSpillFloor ? free - kSpillFloor : 0;
-    d->budget = std::min(room, budget > 0 ? budget : std::min<uint64_t>(uint64_t(32) << 30, free / 4));
-    d->slot = ckpt_alloc_;
-    char b[160];
-    if (d->budget < 2 * d->slot) {
-        std::snprintf(b, sizeof b, "%.0f MiB free on its disk, %.0f MiB of them past the last %.0f MiB", mib(free),
-                      mib(room), mib(kSpillFloor));
-        msg = std::string("too little room in ") + root + ": " + b;
-        return false;
-    }
-    for (int h = 0; h < 2; ++h) {
-        d->stage[h] = (uint8_t*) lamina::platform::spill_alloc(d->half);
-        if (d->stage[h] == nullptr || cudaEventCreateWithFlags(&d->done[h], cudaEventDisableTiming) != cudaSuccess) {
-            (void) cudaGetLastError();
-            msg = "its stage could not be allocated";
-            return false;
-        }
-        d->registered[h] = cudaHostRegister(d->stage[h], (size_t) d->half, cudaHostRegisterDefault) == cudaSuccess;
-        if (!d->registered[h]) (void) cudaGetLastError();   // pageable: the copies wait for themselves
-    }
-    std::snprintf(b, sizeof b, ", up to %.0f MiB (%.0f MiB free on its disk)%s", mib(d->budget), mib(free),
-                  d->registered[0] && d->registered[1] ? "" : ", through a pageable stage");
-    msg = d->dir.path() + b;
-    if (cleaned > 0) msg += ", " + std::to_string(cleaned) + " folder" + (cleaned == 1 ? "" : "s") + " of ended engines removed";
+    auto d = std::make_unique<DiskTier>();
+    if (!d->open(root, budget, ckpt_alloc_, msg)) return false;
     disk_ = std::move(d);
     return true;
 }
 
-std::unique_ptr<SeqFile, FileFree> SequenceCache::new_file() {
-    std::unique_ptr<SeqFile, FileFree> f(new SeqFile, FileFree{[](void* who, SeqFile* p) {
-        static_cast<SequenceCache*>(who)->drop_file(p);
-    }, this});
-    f->serial = ++disk_->serial;
-    f->kv_path = disk_->dir.file(std::to_string(f->serial) + ".kv");
-    f->ck_path = disk_->dir.file(std::to_string(f->serial) + ".ckpt");
-    return f;
+void SequenceCache::open_disk(const std::string& dir, int64_t mib) {
+    if (!enabled() || dir.empty() || mib == 0) return;
+    std::string m;
+    if (open_disk(dir, mib > 0 ? (uint64_t) mib << 20 : 0, m))
+        std::fprintf(stderr, "lamina serve: prompt cache: the conversations the RAM does not hold go to %s\n", m.c_str());
+    else
+        std::fprintf(stderr, "lamina serve: prompt cache: no disk tier: %s\n", m.c_str());
 }
 
-void SequenceCache::drop_file(SeqFile* f) {
-    lamina::platform::spill_remove(f->kv_path);
-    lamina::platform::spill_remove(f->ck_path);
+std::unique_ptr<DiskFile, FileFree> SequenceCache::new_file() {
+    return std::unique_ptr<DiskFile, FileFree>(disk_->make().release(), FileFree{[](void* who, DiskFile* f) {
+        static_cast<SequenceCache*>(who)->drop_file(f);
+    }, this});
+}
+
+void SequenceCache::drop_file(DiskFile* f) {
+    disk_->remove(*f);
     delete f;
 }
 
 bool SequenceCache::disk_room(uint64_t bytes, const Seq* keep) {
-    // the disk's own room: its free bytes above the floor (unknown: the budget alone)
-    const uint64_t free = disk_->dir.free_bytes();
-    uint64_t phys = free == 0 ? UINT64_MAX : free > kSpillFloor ? free - kSpillFloor : 0, kept = live_files();
-    auto short_of = [&] { return parked_.disk_bytes() + kept + bytes > disk_->budget || bytes > phys; };
+    uint64_t phys = disk_->room(), kept = live_files();
+    auto short_of = [&] { return parked_.disk_bytes() + kept + bytes > disk_->budget() || bytes > phys; };
     // The cells of the files the sessions keep give way first (losing them costs a whole write at the next park, a
     // parked file its conversation read anew), but `keep`'s, which a park appends to; their checkpoints stay.
     for (Seq& c : lives_) {
@@ -148,7 +80,7 @@ bool SequenceCache::disk_room(uint64_t bytes, const Seq* keep) {
         if (phys != UINT64_MAX) phys += b;
     }
     const uint64_t room = phys == UINT64_MAX ? UINT64_MAX : parked_.disk_bytes() + phys;
-    const uint64_t limit = std::min(disk_->budget > kept ? disk_->budget - kept : 0, room);
+    const uint64_t limit = std::min(disk_->budget() > kept ? disk_->budget() - kept : 0, room);
     std::vector<Seq> gone;
     if (!parked_.make_disk_room(bytes, limit, gone)) return false;
     for (Seq& s : gone) {
@@ -163,161 +95,39 @@ void SequenceCache::fit_lives() {
     // the files the sessions keep within what the budget leaves beside the parked ones (a conversation taken back
     // brings its file; the one parked meanwhile wrote beside it): their cells go, then their checkpoints
     for (Seq& c : lives_)
-        if (c.file && parked_.disk_bytes() + live_files() > disk_->budget) drop_cells_of(c);
+        if (c.file && parked_.disk_bytes() + live_files() > disk_->budget()) drop_cells_of(c);
     for (Seq& c : lives_)
-        if (c.file && parked_.disk_bytes() + live_files() > disk_->budget) drop_file_of(c);
+        if (c.file && parked_.disk_bytes() + live_files() > disk_->budget()) drop_file_of(c);
 }
 
-bool SequenceCache::disk_put_kv(SeqFile& f, int64_t lo, int64_t hi) {
-    Disk& d = *disk_;
-    const std::vector<KvSpan> sp = kv_spans(lo, hi);
-    uint64_t total = 0;
-    for (const KvSpan& s : sp) total += s.bytes;
-    const uint64_t padded = spill_align_up(total), windows = (padded + d.half - 1) / d.half;
-    cudaStream_t cs = (cudaStream_t) kv_stream();
-    std::string err;
-    lamina::platform::SpillFile file;
-    if (!file.open(f.kv_path, true, err)) return disk_failed(err);
-    auto fill = [&](int h, uint64_t w0) {   // the block's bytes [w0, w0 + half) from the device into half h
-        const uint64_t w1 = std::min(w0 + d.half, total);
-        uint64_t at = 0;
-        for (const KvSpan& s : sp) {
-            const uint64_t a = std::max(at, w0), b = std::min(at + s.bytes, w1);
-            if (a < b && cudaMemcpyAsync(d.stage[h] + (a - w0), (const uint8_t*) s.dev + (a - at), (size_t) (b - a),
-                                         cudaMemcpyDeviceToHost, cs) != cudaSuccess)
-                return false;
-            at += s.bytes;
-            if (at >= w1) break;
-        }
-        return cudaEventRecord(d.done[h], cs) == cudaSuccess;
-    };
-    bool ok = windows == 0 || fill(0, 0), copied = ok;
-    for (uint64_t w = 0; ok && w < windows; ++w) {
-        const int h = (int) (w % 2);
-        if (w + 1 < windows) ok = copied = fill(1 - h, (w + 1) * d.half);   // (half 1 - h was written last turn)
-        ok = ok && (copied = cudaEventSynchronize(d.done[h]) == cudaSuccess) &&
-             file.write(f.kv_end + w * d.half, d.stage[h], std::min(d.half, padded - w * d.half), err);
-    }
-    if (!ok) {
-        cudaStreamSynchronize(cs);
-        (void) cudaGetLastError();
-        return disk_failed(copied ? err : "a copy from the device failed");
-    }
-    f.blocks.push_back({lo, hi, f.kv_end});
-    f.kv_end += padded;
-    f.kv_size = std::max(f.kv_size, f.kv_end);
-    f.cells = hi;
-    return true;
+DiskTier::Bytes SequenceCache::range_bytes() const {
+    return [this](int64_t a, int64_t held) { return kv_range_bytes(a, held); };
 }
 
-bool SequenceCache::disk_put_copy(SeqFile& f, const uint8_t* copy, uint64_t bytes, int64_t held) {
-    std::string err;
-    lamina::platform::SpillFile file;
-    const uint64_t padded = spill_align_up(bytes);   // (the copy's buffer is allocated in whole pages)
-    if (!file.open(f.kv_path, true, err) || !file.write(f.kv_end, copy, padded, err)) return disk_failed(err);
-    f.blocks.push_back({0, held, f.kv_end});
-    f.kv_end += padded;
-    f.kv_size = std::max(f.kv_size, f.kv_end);
-    f.cells = held;
-    return true;
+bool SequenceCache::disk_put_kv(DiskFile& f, int64_t lo, int64_t hi) {
+    return disk_->put_cells(f, lo, hi, kv_unit(), range_bytes(),
+                            [this](int64_t a, int64_t b, int64_t held, uint8_t* host, bool out) {
+                                return kv_range(a, b, held, host, out);
+                            });
 }
 
-bool SequenceCache::disk_get_kv(const SeqFile& f, int64_t cells) {
-    Disk& d = *disk_;
-    cudaStream_t cs = (cudaStream_t) kv_stream();
-    std::string err;
-    lamina::platform::SpillFile file;
-    if (!file.open(f.kv_path, false, err)) return disk_failed(err);
-    struct Seg {   // bytes of a block to the device
-        uint64_t off;
-        uint8_t* dev;
-        uint64_t bytes;
-    };
-    bool used[2] = {false, false}, ok = true, copied = true;
-    int turn = 0;
-    for (const SeqFile::Block& b : f.blocks) {
-        if (b.lo >= cells) break;
-        // of each region as the block lays it out (kv_spans(lo, hi)), the first bytes: those of the cells wanted
-        const std::vector<KvSpan> lay = kv_spans(b.lo, b.hi), want = kv_spans(b.lo, std::min(b.hi, cells));
-        std::vector<Seg> segs;
-        uint64_t at = 0, need = 0;
-        for (size_t i = 0; i < lay.size(); ++i) {
-            if (i < want.size() && want[i].bytes > 0) {
-                segs.push_back({at, (uint8_t*) want[i].dev, want[i].bytes});
-                need = at + want[i].bytes;
-            }
-            at += lay[i].bytes;
-        }
-        const uint64_t end = std::min(spill_align_up(at), spill_align_up(need));
-        size_t first = 0;
-        for (uint64_t w0 = 0; ok && w0 < end; w0 += d.half) {
-            const uint64_t w1 = std::min(w0 + d.half, end);
-            while (first < segs.size() && segs[first].off + segs[first].bytes <= w0) ++first;
-            if (first == segs.size() || segs[first].off >= w1) continue;   // no bytes wanted here
-            const int h = turn;
-            turn ^= 1;
-            if (used[h]) ok = copied = cudaEventSynchronize(d.done[h]) == cudaSuccess;   // its last copies ended
-            ok = ok && file.read(b.off + w0, d.stage[h], w1 - w0, err);
-            for (size_t i = first; ok && i < segs.size() && segs[i].off < w1; ++i) {
-                const uint64_t a = std::max(segs[i].off, w0), e = std::min(segs[i].off + segs[i].bytes, w1);
-                if (a < e)
-                    ok = copied = cudaMemcpyAsync(segs[i].dev + (a - segs[i].off), d.stage[h] + (a - w0),
-                                                  (size_t) (e - a), cudaMemcpyHostToDevice, cs) == cudaSuccess;
-            }
-            ok = ok && (copied = cudaEventRecord(d.done[h], cs) == cudaSuccess);
-            used[h] = true;
-        }
-    }
-    if (cudaStreamSynchronize(cs) != cudaSuccess) ok = copied = false;
-    if (!ok) {
-        (void) cudaGetLastError();
-        return disk_failed(copied ? err : "a copy to the device failed");
-    }
-    return true;
+bool SequenceCache::disk_put_copy(DiskFile& f, const uint8_t* copy, int64_t held) {
+    return disk_->put_copy(f, held, kv_unit(), range_bytes(),
+                           [&](int64_t a, int64_t b, uint8_t* out) { kv_pack(a, b, copy, held, out); });
 }
 
-bool SequenceCache::disk_put_ckpt(SeqFile& f, int64_t pos, const void* host) {
-    Disk& d = *disk_;
-    std::string err;
-    lamina::platform::SpillFile file;
-    const bool reuse = !f.free_slots.empty();
-    const uint32_t s = reuse ? f.free_slots.back() : f.n_slots;
-    if (!file.open(f.ck_path, true, err)) return disk_failed(err);
-    bool ok = true;
-    if ((uintptr_t) host % kSpillAlign == 0) {   // the cache's buffers are page-aligned; else through the stage
-        ok = file.write((uint64_t) s * d.slot, host, d.slot, err);
-    } else {
-        for (uint64_t at = 0; ok && at < d.slot; at += d.half) {
-            const uint64_t n = std::min(d.half, d.slot - at), m = std::min(n, ckpt_bytes_ - std::min(at, ckpt_bytes_));
-            std::memcpy(d.stage[0], (const uint8_t*) host + at, (size_t) m);
-            ok = file.write((uint64_t) s * d.slot + at, d.stage[0], n, err);
-        }
-    }
-    if (!ok) return disk_failed(err);
-    f.slots.push_back({pos, s});
-    if (reuse) f.free_slots.pop_back();
-    else ++f.n_slots;
-    return true;
+bool SequenceCache::disk_get_kv(const DiskFile& f, int64_t cells) {
+    return disk_->get_cells(f, cells, [this](int64_t a, int64_t b, int64_t held, uint8_t* host, bool out) {
+        return kv_range(a, b, held, host, out);
+    });
 }
 
-bool SequenceCache::disk_get_ckpt(const SeqFile& f, int64_t pos, void* host) {
-    Disk& d = *disk_;
-    const uint32_t* s = f.slot(pos);
-    if (s == nullptr) return disk_failed("no checkpoint at " + std::to_string(pos) + " in its file");
-    std::string err;
-    lamina::platform::SpillFile file;
-    if (!file.open(f.ck_path, false, err)) return disk_failed(err);
-    bool ok = true;
-    if ((uintptr_t) host % kSpillAlign == 0) {
-        ok = file.read((uint64_t) *s * d.slot, host, d.slot, err);
-    } else {
-        for (uint64_t at = 0; ok && at < d.slot; at += d.half) {
-            const uint64_t n = std::min(d.half, d.slot - at), m = std::min(n, ckpt_bytes_ - std::min(at, ckpt_bytes_));
-            ok = file.read((uint64_t) *s * d.slot + at, d.stage[0], n, err);
-            if (ok) std::memcpy((uint8_t*) host + at, d.stage[0], (size_t) m);
-        }
-    }
-    return ok || disk_failed(err);
+bool SequenceCache::disk_put_ckpt(DiskFile& f, int64_t pos, const void* host) {
+    return disk_->put_record(f, pos, {{host, ckpt_bytes_, true}});   // (the cache's buffers: whole pages)
+}
+
+bool SequenceCache::disk_get_ckpt(const DiskFile& f, int64_t pos, void* host) {
+    return disk_->get_record(f, pos, {{host, ckpt_bytes_, true}});
 }
 
 bool SequenceCache::load_ckpt(Seq& s, int64_t pos) {
@@ -339,26 +149,15 @@ bool SequenceCache::load_chain(Seq& s, int64_t upto) {
 }
 
 void SequenceCache::cut(Seq& s, int64_t cells) {
-    if (s.file) s.file->cells = std::min(s.file->cells, cells);
+    if (s.file) s.file->cut(cells);
 }
 
 void SequenceCache::forget_slot(Seq& s, int64_t pos) {
-    if (!s.file) return;
-    auto& sl = s.file->slots;
-    for (size_t i = 0; i < sl.size(); ++i)
-        if (sl[i].first == pos) {
-            s.file->free_slots.push_back(sl[i].second);
-            sl.erase(sl.begin() + (ptrdiff_t) i);
-            return;
-        }
+    if (s.file) s.file->forget(pos);
 }
 
 void SequenceCache::drop_cells_of(Seq& s) {
-    if (!s.file || s.file->kv_size == 0) return;
-    lamina::platform::spill_remove(s.file->kv_path);
-    s.file->blocks.clear();
-    s.file->cells = 0;
-    s.file->kv_end = s.file->kv_size = 0;
+    if (s.file && s.file->kv_size > 0) disk_->drop_cells(*s.file);
 }
 
 void SequenceCache::drop_file_of(Seq& s) {
@@ -379,9 +178,12 @@ uint64_t SequenceCache::live_files() const {
 void SequenceCache::evict(Seq&& s, const char* why) {
     if (disk_ != nullptr && s.kv) {   // its copy in RAM to the disk tier, then the RAM back
         const auto t0 = Clock::now();
-        const uint64_t need = spill_align_up(s.kv_bytes) + s.ckpts.size() * disk_->slot;
-        std::unique_ptr<SeqFile, FileFree> f;
-        bool ok = disk_room(need) && (f = new_file()) && disk_put_copy(*f, s.kv.get(), s.kv_bytes, s.kv_cells);
+        kv_settle();
+        const uint64_t need = disk_->size_of(0, s.kv_cells, kv_unit(), range_bytes()) +
+                              s.ckpts.size() * disk_->slot_bytes();
+        std::unique_ptr<DiskFile, FileFree> f;
+        bool ok = kv_complete(s.kv.get()) && disk_room(need) && (f = new_file()) &&
+                  disk_put_copy(*f, s.kv.get(), s.kv_cells);
         for (size_t i = 0; ok && i < s.ckpts.size(); ++i) ok = disk_put_ckpt(*f, s.ckpts[i].pos, s.ckpts[i].host);
         if (ok) {
             s.kv.reset();
@@ -427,18 +229,17 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
         if (void* h = save(L)) s.ckpts.push_back({L, h});   // the session is still at L
     // What a file the sequence came back with lacks: its cells from where it no longer holds them (the blocks past
     // there go), the checkpoints without a slot; without one, all of it.
-    const SeqFile* had = live_.file.get();
-    const int64_t from = had ? std::min<int64_t>(had->cells, L) : 0;
-    uint64_t end = had ? had->kv_end : 0, block = 0;
+    const DiskFile* had = live_.file.get();
+    const int64_t unit = kv_unit(), from = had ? std::min<int64_t>(had->cells, L) / unit * unit : 0;
+    uint64_t end = had ? had->kv_end : 0;
     if (had)
         for (size_t b = had->blocks.size(); b-- > 0 && had->blocks[b].lo >= from;) end = had->blocks[b].off;
-    if (from < L)
-        for (const KvSpan& sp : kv_spans(from, L)) block += sp.bytes;
+    const uint64_t block = disk_->size_of(from, L, unit, range_bytes());   // (its blocks, whole pages each)
     size_t fresh = 0;
     for (const Ckpt& c : s.ckpts) fresh += !(had && had->slot(c.pos));
     const uint64_t size = had ? had->kv_size : 0, free_slots = had ? had->free_slots.size() : 0;
-    const uint64_t grown = end + spill_align_up(block) > size ? end + spill_align_up(block) - size : 0;
-    const uint64_t need = grown + (fresh > free_slots ? fresh - free_slots : 0) * disk_->slot;
+    const uint64_t grown = end + block > size ? end + block - size : 0;
+    const uint64_t need = grown + (fresh > free_slots ? fresh - free_slots : 0) * disk_->slot_bytes();
     const bool room = disk_room(need, &live_);   // (its file counts as the session's until it moves)
     s.file = std::move(live_.file);
     if (s.file) {   // (its slots of the checkpoints the live sequence keeps go too)
@@ -452,18 +253,10 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
         }
     }
     enforce_cap(s);
-    bool ok = room && !s.ckpts.empty() && cudaDeviceSynchronize() == cudaSuccess;
+    bool ok = room && !s.ckpts.empty();
+    if (ok) kv_settle();
     if (ok && !s.file) ok = (s.file = new_file()) != nullptr;
-    if (ok) {
-        SeqFile& f = *s.file;
-        while (!f.blocks.empty() && f.blocks.back().lo >= from) {
-            f.kv_end = f.blocks.back().off;
-            f.blocks.pop_back();
-        }
-        f.cells = from;
-        if (from < L) ok = disk_put_kv(f, from, L);
-        else f.cells = L;   // (the file holds every cell already)
-    }
+    if (ok) ok = disk_put_kv(*s.file, from, L);   // (the blocks from `from` on go first; none past the file's end)
     size_t wrote_ckpts = 0;
     for (size_t i = 0; ok && i < s.ckpts.size(); ++i)
         if (s.file->slot(s.ckpts[i].pos) == nullptr) {
@@ -488,7 +281,7 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     s.kv_cells = L;
     s.kv_bytes = kv_bytes(L);
     s.disk_bytes = disk_->bytes(*s.file);
-    const uint64_t wrote = (from < L ? spill_align_up(block) : 0) + wrote_ckpts * disk_->slot;
+    const uint64_t wrote = block + wrote_ckpts * disk_->slot_bytes();
     const double ms = ms_since(t0);
     std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells parked on the disk (%.0f MiB written "
                          "in %.0f ms, %.2f GiB/s; its file %.0f MiB, from cell %lld)\n", (long long) L, mib(wrote), ms,
@@ -617,10 +410,27 @@ void PromptCache::state_zero() {
     cudaStreamSynchronize((cudaStream_t) stream_);
 }
 
-uint64_t PromptCache::kv_bytes(int64_t cells) const {
+uint64_t PromptCache::kv_bytes(int64_t cells) const { return kv_range_bytes(0, cells); }
+
+uint64_t PromptCache::kv_range_bytes(int64_t lo, int64_t held) const {
     uint64_t bytes = 0;
-    for (const KvSpan& p : kv_parts(0, cells)) bytes += p.bytes;
+    for (const Part& p : kv_parts(lo, held)) bytes += p.bytes;
     return bytes;
+}
+
+void PromptCache::kv_pack(int64_t lo, int64_t hi, const uint8_t* copy, int64_t held, uint8_t* out) const {
+    // each part of the range is where the same device region's bytes are in the copy: its offset there is the regions'
+    const std::vector<Part> whole = kv_parts(0, held), part = kv_parts(lo, hi);
+    for (size_t i = 0; i < part.size(); ++i) {
+        std::memcpy(out, copy + ((const uint8_t*) part[i].dev - (const uint8_t*) whole[i].dev), (size_t) part[i].bytes);
+        out += part[i].bytes;
+        copy += whole[i].bytes;
+    }
+}
+
+int64_t PromptCache::kv_unit() const {
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();   // a page, an indexer block
+    return std::lcm(sh.page_size, sh.idx_block);
 }
 
 void* SequenceCache::prepare(bool* pageable, bool end) {
@@ -684,13 +494,13 @@ void SequenceCache::drop_prepared() {
     prepared_ = nullptr;
 }
 
-std::vector<SequenceCache::KvSpan> PromptCache::kv_parts(int64_t lo, int64_t hi) const {
+std::vector<PromptCache::Part> PromptCache::kv_parts(int64_t lo, int64_t hi) const {
     // [page][kv_head][page_size][head_dim] with an identity page table: a run of pages is one range of each pool.
     // The indexer's pooled rows are one per idx_block cells, and two more past a range's last (as for its end).
     const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const uint64_t row = (uint64_t) g_.idx_key_dim * sizeof(float);
     const uint64_t page = (uint64_t) g_.n_head_kv * (uint64_t) sh.page_size;   // rows a page
-    std::vector<KvSpan> parts;
+    std::vector<Part> parts;
     for (QsaState* st : kv_) {
         const int64_t p0 = std::min<int64_t>(st->n_pages, lo / sh.page_size);
         const int64_t p1 = std::min<int64_t>(st->n_pages, (hi + sh.page_size - 1) / sh.page_size);
@@ -705,10 +515,14 @@ std::vector<SequenceCache::KvSpan> PromptCache::kv_parts(int64_t lo, int64_t hi)
 }
 
 bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
+    return kv_range(0, cells, held, host, to_host);
+}
+
+bool PromptCache::kv_range(int64_t lo, int64_t hi, int64_t held, uint8_t* host, bool to_host) {
     cudaStream_t cs = (cudaStream_t) stream_;
-    const std::vector<KvSpan> parts = kv_parts(0, cells), layout = kv_parts(0, held);
+    const std::vector<Part> parts = kv_parts(lo, hi), layout = kv_parts(lo, held);
     for (size_t i = 0; i < parts.size(); ++i) {
-        const KvSpan& p = parts[i];
+        const Part& p = parts[i];
         const cudaError_t e = to_host ? cudaMemcpyAsync(host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs)
                                       : cudaMemcpyAsync(p.dev, host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs);
         if (e != cudaSuccess) return session_copy_failed(stream_);
@@ -1015,7 +829,7 @@ SequenceCache::State SequenceCache::state() const {
     s.evictions = parked_.evictions();
     s.disk = parked_.disk_size();
     s.disk_bytes = parked_.disk_bytes() + live_files();
-    s.disk_budget = disk_ ? disk_->budget : 0;
+    s.disk_budget = disk_ ? disk_->budget() : 0;
     return s;
 }
 

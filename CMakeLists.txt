@@ -222,7 +222,8 @@ target_link_libraries(lamina-plan PRIVATE lamina_plan)
 # above has already refused anything older than sm_80 by the time this runs.
 if(LAMINA_ENABLE_CUDA)
   add_library(lamina_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
-                                 src/platform/console_quit.cpp src/platform/slice_read.cpp src/platform/spill.cpp)
+                                 src/platform/console_quit.cpp src/platform/slice_read.cpp src/platform/spill.cpp
+                                 src/core/disk_tier.cpp)
   target_include_directories(lamina_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   # CUDA::cudart is PUBLIC because host translation units call the runtime: the .cu sources get cudart through the
   # CUDA language rules, a .cpp does not.
@@ -345,6 +346,9 @@ if(LAMINA_ENABLE_CUDA)
   add_executable(conversation_cache_test tests/core/conversation_cache_test.cpp)
   target_link_libraries(conversation_cache_test PRIVATE lamina_engine)
 
+  add_executable(disk_tier_test tests/core/disk_tier_test.cpp)
+  target_link_libraries(disk_tier_test PRIVATE lamina_core)
+
   add_executable(control_vector_test tests/core/control_vector_test.cpp)
   target_link_libraries(control_vector_test PRIVATE lamina_engine)
   # a sampled request's drafts: the number a position draws with, on the host, and a draft's chance to pass (CPU only)
@@ -355,6 +359,7 @@ if(LAMINA_ENABLE_CUDA)
     add_test(NAME expert_profile_save_test COMMAND expert_profile_save_test)
     add_test(NAME prompt_cache_spread_test COMMAND prompt_cache_spread_test)
     add_test(NAME conversation_cache_test COMMAND conversation_cache_test)
+    add_test(NAME disk_tier_test COMMAND disk_tier_test)
     add_test(NAME control_vector_test COMMAND control_vector_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
     add_test(NAME deterministic_adapt_help COMMAND lamina --deterministic-adapt --help-all)
@@ -993,7 +998,8 @@ endif()
 if(LAMINA_BUILD_TESTS)
   foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test block_form_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
-             conversation_cache_test control_vector_test deterministic_adapt_help platform_memory_test platform_spill_test
+             conversation_cache_test disk_tier_test control_vector_test deterministic_adapt_help platform_memory_test
+             platform_spill_test
              ple_reader_selftest model_config_test params_test bench_test cpu_floor_test)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)

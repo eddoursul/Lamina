@@ -54,11 +54,11 @@ struct KvFree {
 };
 
 /// A conversation's file on the disk tier (SequenceCache's), and its removal.
-struct SeqFile;
+struct DiskFile;
 struct FileFree {
-    void (*drop)(void* who, SeqFile* f) = nullptr;
+    void (*drop)(void* who, DiskFile* f) = nullptr;
     void* who = nullptr;
-    void operator()(SeqFile* f) const {
+    void operator()(DiskFile* f) const {
         if (f != nullptr && drop != nullptr) drop(who, f);
     }
 };
@@ -75,7 +75,7 @@ struct Seq {
     /// Parked on the disk tier: its cells and checkpoints in `file`, `disk_bytes` of it (no K/V copy, and its
     /// checkpoints hold no buffers).  A conversation taken back from it keeps the file while it is live, the image of
     /// its first cells and of the checkpoints that hold no buffer (SequenceCache).
-    std::unique_ptr<SeqFile, FileFree> file;
+    std::unique_ptr<DiskFile, FileFree> file;
     uint64_t disk_bytes = 0;
     bool on_disk() const { return disk_bytes > 0; }
     uint64_t stamp = 0;   ///< the park's clock at its last use (a session's conversation: at its last request)

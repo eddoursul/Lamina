@@ -4395,16 +4395,7 @@ int lamina::program::run(int argc, char** argv) {
                              ? (", at most " + std::to_string(o.conversation_cache_slots) + " of them").c_str() : "",
                          ram_known ? (", above a RAM reserve of " + std::to_string(o.ram_reserve_mib) + " MiB (" +
                                       std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
-        // --conversation-spill-dir: the disk tier below the park
-        if (pcache.enabled() && !o.conversation_spill_dir.empty() && o.conversation_spill_mib != 0) {
-            std::string m;
-            const uint64_t cap = o.conversation_spill_mib > 0 ? (uint64_t) o.conversation_spill_mib << 20 : 0;
-            if (pcache.open_disk(o.conversation_spill_dir, cap, m))
-                std::fprintf(stderr, "lamina serve: prompt cache: the conversations the RAM does not hold go to %s\n",
-                             m.c_str());
-            else
-                std::fprintf(stderr, "lamina serve: prompt cache: no disk tier: %s\n", m.c_str());
-        }
+        pcache.open_disk(o.conversation_spill_dir, o.conversation_spill_mib);   // the disk tier below the park
         // the CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE
         auto print_cache = [&] {
             if (!pcache.enabled()) return;

@@ -472,7 +472,8 @@ alone: 11% faster at 21K tokens, 23% at 86K). Where the card alone holds the con
 under `--max-context`) beside those buffers, the rows are halved until it does, down to 128 (a line says so: the
 21.3 GiB UD-Q8_K_XL on a 24 GB card). On an RTX 50 a chunk's expert products run on the card's FP4 tensor cores, as
 llama.cpp's do. The prompt cache keeps conversations as on the other paths (`--prompt-cache`, `--prompt-cache-every`,
-`--conversation-cache-mib`, `--conversation-cache-slots`, `--conversation-cache-min-tokens`, `--ram-reserve-mib`):
+`--conversation-cache-mib`, `--conversation-cache-slots`, `--conversation-cache-min-tokens`, `--ram-reserve-mib`,
+`--conversation-spill-dir`, `--conversation-spill-mib`):
 a checkpoint holds the window layers' last cells and the convolutions' state (169 MiB in FP16, 92 in q8_0) and
 leaves through an image of that size in VRAM; a conversation another request replaces is parked with its K and V -
 which stay on the cards in address ranges of their own (up to three conversations beside the live one), neither

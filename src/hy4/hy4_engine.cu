@@ -19,6 +19,7 @@
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/artifact/gguf_split.hpp"
 #include "lamina/core/cuda_host.hpp"
+#include "lamina/core/disk_tier.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/hy4/engine.hpp"
@@ -1844,39 +1845,235 @@ struct Engine {
             snap_base = -1;   // DFly's picks are not a snapshot's
         }
         snaps.erase(std::remove_if(snaps.begin(), snaps.end(), [&](const Snap& s) { return s.pos > pos(); }), snaps.end());
+        if (live_file) {   // (the file it came back from: its cells and snapshots past here are no longer its own)
+            live_file->cut(pos());
+            for (size_t i = live_file->slots.size(); i-- > 0;)
+                if (live_file->slots[i].first > pos()) live_file->forget(live_file->slots[i].first);
+            if (pos() == 0) live_file.reset();
+        }
         return pos();
     }
 
     // ---- parked conversations: one a request leaves goes to RAM (its sparse layers' cells and pooled keys up to its
     // end, its snapshots and one at its end), for a later request that continues it; the least recently used leave
-    // when the park passes its budget or the RAM available to the system falls under the reserve
+    // when the park passes its budget or the RAM available to the system falls under the reserve.  With a disk tier
+    // (--conversation-spill-dir, lamina/core/disk_tier.hpp) one the RAM does not hold, or that leaves it, goes to files
+    // instead - its cells and pooled keys from the device a range at a time, its snapshots as records - and comes back
+    // from them; one that comes back keeps its file while it is live, so its next park writes only what it lacks.
+    struct FileGone {
+        lamina::core::DiskTier* tier = nullptr;
+        void operator()(lamina::core::DiskFile* f) const {
+            if (f == nullptr) return;
+            if (tier != nullptr) tier->remove(*f);
+            delete f;
+        }
+    };
+    using File = std::unique_ptr<lamina::core::DiskFile, FileGone>;
+    struct SnapRec {   // a snapshot in a file: its record is its bytes, then its logits
+        int64_t pos;
+        bool mark;
+        size_t n_logits;
+    };
     struct Parked {
         std::vector<int32_t> seq;
         std::vector<uint8_t> cells;   // per sparse layer: K/V rows [0, pos), then pooled keys [0, pos / pool)
         std::vector<Snap> snaps;
         uint64_t used = 0;
-        size_t bytes() const {
+        File file;                    // on the disk tier: its cells and snapshots there (`cells` and `snaps` empty)
+        std::vector<SnapRec> recs;
+        size_t bytes() const {   // (its RAM)
             size_t n = cells.size();
             for (const Snap& x : snaps) n += x.bytes.size() + x.logits.size() * 4;
             return n;
         }
     };
+    std::unique_ptr<lamina::core::DiskTier> disk;   // (before the files: they go first)
     std::vector<Parked> park;
     uint64_t park_clock = 0;
     size_t park_budget = (size_t) 16384 << 20, ram_reserve = (size_t) 6144 << 20;
     static constexpr int64_t kParkMin = 1024;   // shorter conversations are not parked
+    File live_file;   // the live state's, back from the disk tier: its cells up to its `cells`, its snapshots' records
     size_t parked_bytes() const {
         size_t n = 0;
         for (const Parked& c : park) n += c.bytes();
         return n;
+    }
+    /// --conversation-spill-dir / --conversation-spill-mib (-1: the default budget, 0: none)
+    void open_disk(const std::string& dir, int64_t mib) {
+        if (dir.empty() || mib == 0) return;
+        auto d = std::make_unique<lamina::core::DiskTier>();
+        std::string msg;
+        if (d->open(dir, mib > 0 ? (uint64_t) mib << 20 : 0, snap_bytes() + (size_t) m->g.n_vocab * 4, msg)) {
+            disk = std::move(d);
+            std::fprintf(stderr, "lamina: parked conversations the RAM does not hold go to %s\n", msg.c_str());
+        } else {
+            std::fprintf(stderr, "lamina: no disk tier for parked conversations: %s\n", msg.c_str());
+        }
+    }
+    File make_file() { return File(disk->make().release(), FileGone{disk.get()}); }
+    /// The sparse layers' cells [lo, hi) and their pooled keys between the device and `host`, laid out as a copy of
+    /// cells [lo, held) (the park's for lo 0: a layer's K/V rows, then its pooled keys); lo a whole number of pools
+    bool cells_range(int64_t lo, int64_t hi, int64_t held, uint8_t* host, bool to_host) {
+        const int64_t per = m->g.idx_pool, g0 = lo / per, gn = hi / per - g0, gheld = held / per - g0;
+        const size_t pk = (size_t) m->g.idx_dim * 4;
+        const cudaMemcpyKind kind = to_host ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
+        bool ok = true;
+        for (const Layer& l : cl) {
+            if (l.swa) continue;
+            const size_t kr = l.kv_row(), kb = (size_t) (hi - lo) * kr;
+            uint8_t* const dk = l.kv + (size_t) lo * kr;
+            uint8_t* const dp = reinterpret_cast<uint8_t*>(l.pooled) + (size_t) g0 * pk;
+            if (kb > 0) ok = ok && cudaMemcpyAsync(to_host ? host : dk, to_host ? dk : host, kb, kind, st) == cudaSuccess;
+            host += (size_t) (held - lo) * kr;
+            if (gn > 0)
+                ok = ok && cudaMemcpyAsync(to_host ? host : dp, to_host ? dp : host, (size_t) gn * pk, kind, st) == cudaSuccess;
+            host += (size_t) gheld * pk;
+        }
+        ok = cudaStreamSynchronize(st) == cudaSuccess && ok;
+        if (!ok) (void) cudaGetLastError();
+        return ok;
+    }
+    uint64_t cells_bytes(int64_t lo, int64_t held) const {
+        const int64_t per = m->g.idx_pool;
+        uint64_t n = 0;
+        for (const Layer& l : cl)
+            if (!l.swa) n += (uint64_t) (held - lo) * l.kv_row() + (uint64_t) (held / per - lo / per) * m->g.idx_dim * 4;
+        return n;
+    }
+    /// Cells [lo, hi) of a park's copy of `held` cells into `out`, laid out as cells_range lays them out
+    void cells_pack(int64_t lo, int64_t hi, const uint8_t* copy, int64_t held, uint8_t* out) const {
+        const int64_t per = m->g.idx_pool, gn = hi / per - lo / per;
+        const size_t pk = (size_t) m->g.idx_dim * 4;
+        for (const Layer& l : cl) {
+            if (l.swa) continue;
+            const size_t kr = l.kv_row();
+            std::memcpy(out, copy + (size_t) lo * kr, (size_t) (hi - lo) * kr);
+            out += (size_t) (hi - lo) * kr;
+            copy += (size_t) held * kr;
+            std::memcpy(out, copy + (size_t) (lo / per) * pk, (size_t) gn * pk);
+            out += (size_t) gn * pk;
+            copy += (size_t) (held / per) * pk;
+        }
+    }
+    lamina::core::DiskTier::Bytes disk_bytes_of() const {
+        return [this](int64_t lo, int64_t held) { return cells_bytes(lo, held); };
+    }
+    lamina::core::DiskTier::Copy disk_copy() {
+        return [this](int64_t lo, int64_t hi, int64_t held, uint8_t* host, bool out) {
+            return cells_range(lo, hi, held, host, out);
+        };
+    }
+    uint64_t files_bytes() const {   // the parked ones'
+        uint64_t n = 0;
+        for (const Parked& c : park)
+            if (c.file) n += disk->bytes(*c.file);
+        return n;
+    }
+    /// Room on the disk tier for `need` bytes more beside its files (and `also`, a file in hand that a park appends
+    /// to): the live state's file gives its cells back first (its next park writes them whole), then the least
+    /// recently used parked files leave
+    bool disk_room(uint64_t need, uint64_t also) {
+        uint64_t phys = disk->room(), live = live_file ? disk->bytes(*live_file) : 0;
+        auto short_of = [&] { return files_bytes() + live + also + need > disk->budget() || need > phys; };
+        if (short_of() && live_file && live_file->kv_size > 0) {
+            const uint64_t b = live_file->kv_size;
+            disk->drop_cells(*live_file);
+            live -= b;
+            if (phys != UINT64_MAX) phys += b;
+        }
+        while (short_of()) {
+            auto lru = park.end();
+            for (auto it = park.begin(); it != park.end(); ++it)
+                if (it->file && (lru == park.end() || it->used < lru->used)) lru = it;
+            if (lru == park.end()) return false;
+            const uint64_t b = disk->bytes(*lru->file);
+            std::fprintf(stderr, "lamina: a parked conversation of %zu tokens leaves the disk (%.0f MiB)\n", lru->seq.size(),
+                         (double) b / (double) (1 << 20));
+            park.erase(lru);
+            if (phys != UINT64_MAX) phys += b;
+        }
+        return true;
+    }
+    /// A parked conversation in RAM to the disk tier (its RAM freed); false: no room, or a write failed
+    bool demote(Parked& c) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const int64_t p = (int64_t) c.seq.size(), per = m->g.idx_pool;
+        const uint64_t need = disk->size_of(0, p, per, disk_bytes_of()) + c.snaps.size() * disk->slot_bytes();
+        if (!disk_room(need, 0)) return false;
+        File f = make_file();
+        bool ok = disk->put_copy(*f, p, per, disk_bytes_of(), [&](int64_t lo, int64_t hi, uint8_t* out) {
+            cells_pack(lo, hi, c.cells.data(), p, out);
+        });
+        std::vector<SnapRec> recs;
+        for (const Snap& x : c.snaps) {
+            ok = ok && disk->put_record(*f, x.pos, {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
+            recs.push_back({x.pos, x.mark, x.logits.size()});
+        }
+        if (!ok) return false;
+        c.cells = {};
+        c.snaps = {};
+        c.recs = std::move(recs);
+        c.file = std::move(f);
+        std::fprintf(stderr, "lamina: a parked conversation of %lld tokens moved to the disk (%.0f MiB in %.0f ms)\n",
+                     (long long) p, (double) disk->bytes(*c.file) / (double) (1 << 20), ms_since(t0));
+        return true;
+    }
+    /// The live conversation into the park on the disk tier (the RAM does not hold it, or it came back from there):
+    /// its cells from where its file stops holding them, the snapshots the file lacks; the live state keeps copies
+    /// of its snapshots up to `keep`
+    void park_to_disk(int64_t keep) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const int64_t p = pos(), per = m->g.idx_pool;
+        Parked c;
+        const uint64_t had = live_file ? disk->bytes(*live_file) : 0;
+        c.file = live_file ? std::move(live_file) : make_file();
+        const int64_t from = std::min<int64_t>(c.file->cells, p) / per * per;
+        size_t fresh = 0;
+        for (const Snap& x : snaps) fresh += c.file->slot(x.pos) == nullptr;
+        const uint64_t cells = disk->size_of(from, p, per, disk_bytes_of());
+        const uint64_t need = cells + (fresh > c.file->free_slots.size() ? fresh - c.file->free_slots.size() : 0) *
+                                      disk->slot_bytes();
+        bool ok = disk_room(need, had) && disk->put_cells(*c.file, from, p, per, disk_bytes_of(), disk_copy());
+        for (size_t i = c.file->slots.size(); ok && i-- > 0;) {   // (records of snapshots it no longer has)
+            const int64_t k = c.file->slots[i].first;
+            if (std::none_of(snaps.begin(), snaps.end(), [&](const Snap& x) { return x.pos == k; })) c.file->forget(k);
+        }
+        for (const Snap& x : snaps) {
+            if (ok && c.file->slot(x.pos) == nullptr)
+                ok = disk->put_record(*c.file, x.pos, {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
+            c.recs.push_back({x.pos, x.mark, x.logits.size()});
+        }
+        if (!ok) {
+            std::fprintf(stderr, "lamina: a conversation of %lld tokens is not parked: the disk tier has no room for it, "
+                         "or its file could not be written\n", (long long) p);
+            return;
+        }
+        c.seq = seq;
+        std::vector<Snap> kept;
+        for (Snap& x : snaps)
+            if (x.pos <= keep) kept.push_back(std::move(x));
+        snaps = std::move(kept);
+        c.used = ++park_clock;
+        std::fprintf(stderr, "lamina: a conversation of %lld tokens parked on the disk (%.0f MiB written in %.0f ms, its "
+                     "file %.0f MiB, from token %lld)\n", (long long) p,
+                     (double) (cells + fresh * disk->slot_bytes()) / (double) (1 << 20), ms_since(t0),
+                     (double) disk->bytes(*c.file) / (double) (1 << 20), (long long) from);
+        park.push_back(std::move(c));
     }
     /// The live conversation into the park, with a snapshot at its end (the logits of its last token unknown: empty);
     /// the live state keeps copies of its snapshots up to `keep` (the start the next request shares with it)
     void park_live(int64_t keep) {
         const auto& g = m->g;
         const int64_t p = pos(), groups = p / g.idx_pool;
-        if (p < kParkMin) return;
+        if (p < kParkMin) {
+            live_file.reset();
+            return;
+        }
         snapshot({}, false);
+        if (disk && live_file) {   // back from the disk tier: its file holds most of it, the rest goes there
+            park_to_disk(keep);
+            return;
+        }
         Parked c;
         size_t n = 0;
         for (const Layer& l : cl)
@@ -1885,14 +2082,27 @@ struct Engine {
         // the budget counts the snapshots too; the RAM, the cells alone (the snapshots are in RAM already)
         uint64_t avail = 0;
         const bool known = lamina::platform::available_ram(avail);
-        while (!park.empty() && (parked_bytes() + need > park_budget || (known && avail < n + ram_reserve))) {
-            auto lru = std::min_element(park.begin(), park.end(), [](const Parked& a, const Parked& b) { return a.used < b.used; });
-            std::fprintf(stderr, "lamina: a parked conversation of %zu tokens leaves the park (%.0f MiB)\n", lru->seq.size(),
-                         (double) lru->bytes() / (double) (1 << 20));
+        auto short_of = [&] { return parked_bytes() + need > park_budget || (known && avail < n + ram_reserve); };
+        while (short_of()) {   // the least recently used in RAM leave it: to the disk tier where there is one
+            auto lru = park.end();
+            for (auto it = park.begin(); it != park.end(); ++it)
+                if (!it->file && (lru == park.end() || it->used < lru->used)) lru = it;
+            if (lru == park.end()) break;
+            Parked out = std::move(*lru);   // (out of the park first: the disk tier's room may take others)
             park.erase(lru);
+            if (disk && demote(out)) {
+                park.push_back(std::move(out));   // (with its use as it was)
+            } else {
+                std::fprintf(stderr, "lamina: a parked conversation of %zu tokens leaves the park (%.0f MiB)\n",
+                             out.seq.size(), (double) out.bytes() / (double) (1 << 20));
+            }
             if (known) lamina::platform::available_ram(avail);
         }
-        if (need > park_budget || (known && avail < n + ram_reserve)) {
+        if (short_of()) {
+            if (disk) {   // the RAM does not hold it even so: the disk tier does
+                park_to_disk(keep);
+                return;
+            }
             std::fprintf(stderr, "lamina: a conversation of %lld tokens is not parked: %.0f MiB, over the park's budget "
                          "or the RAM reserve\n", (long long) p, (double) need / (double) (1 << 20));
             return;
@@ -1920,11 +2130,42 @@ struct Engine {
         park.push_back(std::move(c));
     }
     /// A parked conversation (taken out of the park) as the live state: its cells and snapshots back, the state at its
-    /// last snapshot (its end)
+    /// last snapshot (its end); one from the disk tier keeps its file
     void unpark(Parked c) {
         const auto& g = m->g;
+        const auto t0 = std::chrono::steady_clock::now();
         const int64_t p = (int64_t) c.seq.size(), groups = p / g.idx_pool;
         ensure(p);
+        if (c.file) {
+            bool ok = disk->get_cells(*c.file, p, disk_copy());
+            snaps.clear();
+            for (const SnapRec& r : c.recs) {
+                Snap s;
+                s.pos = r.pos;
+                s.mark = r.mark;
+                s.bytes.resize(snap_bytes());
+                s.logits.resize(r.n_logits);
+                ok = ok && disk->get_record(*c.file, r.pos, {{s.bytes.data(), s.bytes.size()}, {s.logits.data(), s.logits.size() * 4}});
+                snaps.push_back(std::move(s));
+            }
+            if (!ok) {   // (the state starts over)
+                std::fprintf(stderr, "lamina: a parked conversation of %lld tokens could not be read back from the disk\n",
+                             (long long) p);
+                snaps.clear();
+                seq.clear();
+                sfx_ok = 0;
+                return;
+            }
+            live_file = std::move(c.file);
+            seq = std::move(c.seq);
+            sfx_ok = 0;
+            rewind(pos(), true);   // the rings and tails from its end's snapshot
+            // its file within what the budget leaves beside the parked ones: its cells go first
+            if (files_bytes() + disk->bytes(*live_file) > disk->budget()) disk->drop_cells(*live_file);
+            std::fprintf(stderr, "lamina: a parked conversation of %lld tokens resumed from the disk (%.0f ms)\n",
+                         (long long) p, ms_since(t0));
+            return;
+        }
         size_t at = 0;
         for (const Layer& l : cl) {
             if (l.swa) continue;
@@ -5148,6 +5389,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     int prefill = 4096, prefill_min = 24, prefill_pass = 16384;
     double arena_pin = 72;
     double park_mib = 16384, reserve_mib = 6144;
+    std::string spill_dir;     // --conversation-spill-dir: the park's disk tier (empty: none)
+    int64_t spill_mib = -1;    // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
     bool kv_grow = true;
     bool file_cache = true;   // the model file read through the OS file cache (--no-file-cache: past it)
     bool arena_place = false;
@@ -5197,6 +5440,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--arena-pin") arena_pin = std::atof(next());        // GiB of the arena in pinned memory at most
         else if (a == "--park-mib" || a == "--conversation-cache-mib") park_mib = std::atof(next());
         else if (a == "--ram-reserve-mib") reserve_mib = std::atof(next());
+        else if (a == "--conversation-spill-dir") spill_dir = next();
+        else if (a == "--conversation-spill-mib") spill_mib = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--no-kv-grow") kv_grow = false;
         else if (a == "--file-cache") file_cache = true;
         else if (a == "--arena-place") arena_place = true;   // the pinned places timed, the CPU's experts in the fast ones
@@ -5264,6 +5509,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     E.init(m, max_ctx, threads);
     E.park_budget = (size_t) (std::max(0.0, park_mib) * (double) (1 << 20));
     E.ram_reserve = (size_t) (std::max(0.0, reserve_mib) * (double) (1 << 20));
+    E.open_disk(spill_dir, spill_mib);   // the park's disk tier
     Prompt P(E);   // its buffers before the slots take the GPUs' free memory
     // the MTP block kept up catches up over a chunk's rows at once: no passes past --prefill's
     const bool mtp_kept = E.drafts_on && m.has_mtp;
