@@ -79,6 +79,8 @@ namespace K = lamina::kernels;
 namespace C = lamina::kernels::cpu;
 namespace MMQ = lamina::prefill::mmq;
 using ik::kMaxT;
+using ik::stretch_of;
+using ik::stretches;
 using lamina::core::ms_since;
 using lamina::inkling2::Geometry;
 using Clock = std::chrono::steady_clock;
@@ -253,6 +255,8 @@ int64_t ring_cells(const Geometry& g) { return (g.n_swa + kMaxT + kRingSub - 1) 
 
 // ------------------------------------------------------------------------------------------------ the model
 constexpr size_t kWeightPad = 4096;       // zero bytes after each weight: a kernel may read past a short last row
+static_assert(ik::kGroupTile == K::kNvfp4GemmEntries, "a chunk's grouping on the card writes nvfp4_gemm's tiles");
+static_assert(C::MAXT >= kMaxT, "the CPU's jobs hold a decode forward's rows");
 
 struct Mat {
     const uint8_t* d = nullptr;   // device, GGUF blocks
@@ -478,7 +482,7 @@ std::string kernel_limits(const Geometry& g) {
     if (g.n_rel > ik::kRelMax) return no("a distance bias of more than 32 values a head");
     if (g.n_head > ik::kRingHeads || g.n_head * g.n_rel > ik::kRingRs) return no("that many heads");
     if (g.n_expert > ik::kExpertMax || g.top_k * kMaxT > ik::kTB) return no("that many experts a layer or a token");
-    if (g.n_pass > 1 && (g.gate_rank > ik::kRankMax || ik::kTB % g.gate_rank != 0 || g.gate_rank % 16 != 0))
+    if (g.n_pass > 1 && (g.gate_rank > ik::kRankMax || g.gate_rank % 16 != 0))
         return no("a loop gate of that rank");
     if ((g.n_layers + g.res_block - 1) / g.res_block > ik::kBlk) return no("more than 4 blocks of layers");
     if (g.n_embd % 256 != 0 || g.q_width() % 256 != 0) return no("rows that are no multiple of 256 values");
@@ -3888,11 +3892,9 @@ struct Engine {
             at.part = c.part;
             at.H = H;
             at.HK = HK;
-            at.D = D_;
             at.ext = 0;
             at.win = 0;
             at.n_chunks = c.n_part;
-            at.canon = 1;
             scan(at, T, c.st);
             ik::JoinIn j{c.part, c.sum, at.dyn, H, D_, c.n_part};
             ik::attn_join_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, c.st>>>(j);
@@ -3968,13 +3970,6 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         cards_scan(fi, T);
     }
-    /// A range's stretches that cover its first `cells` cells (ik::stretch_lo), and the one that holds cell `cell`
-    static int stretches(int64_t cells) {
-        if (cells <= 4096) return (int) ((cells + 127) / 128);
-        if (cells <= 36864) return 32 + (int) ((cells - 4096 + 511) / 512);
-        return 96 + (int) ((cells - 36864 + 2047) / 2048);
-    }
-    static int stretch_of(int64_t cell) { return stretches(cell + 1) - 1; }
     /// A decode forward's scan of a visit's cells on stream `s`: every row's in one launch on the tensor cores
     /// (attn_rows_kernel), each row's sums what they are when it is scored alone
     void scan(const ik::AttnIn& at, int T, cudaStream_t s) {
@@ -5526,7 +5521,6 @@ struct Engine {
         at.part = R.part;
         at.H = H;
         at.HK = HK;
-        at.D = D_;
         at.ext = L.ext;
         at.win = L.full ? 0 : win;
         if (batch) {   // on the tensor cores: 16 rows of a query head a warp, 4 or 8 warps a block (tc_warps), over the cells its rows see
@@ -5577,7 +5571,6 @@ struct Engine {
             } else {   // the stretches from the step record: the same launch for any number of cells
                 at.dyn = R.dyn_d;
                 at.n_chunks = R.n_part;
-                at.canon = 1;
             }
             // cells on cards: the rows' q and -sink go to them (pinned memory), they score their cells while this card
             // scores its own, and their sums come back for the join
@@ -5677,7 +5670,7 @@ struct Engine {
         const float w_scale = g.w_scale != 0.f ? g.w_scale : 1.0f;
         if (batch) {
             gemm(L.router, E, N, R.nrm, T, R.probs);
-            ik::PickIn a{R.probs, L.route_bias, R.ids, R.w, E, top_k, w_scale, 1};
+            ik::PickIn a{R.probs, L.route_bias, R.ids, R.w, E, top_k, w_scale};
             ik::pick_kernel<<<(unsigned) T, 32, 0, st>>>(a);
             tick("MoE input and router");
             probe("the MoE's input", R.nrm, (size_t) T, (size_t) N);
@@ -5787,8 +5780,7 @@ struct Engine {
             const int r0 = T - n;
             const ik::Q81* img = R.img + (size_t) r0 * (size_t) (N / 32);
             if (R.batch) {   // (a chunk's rows have no images: its last row's)
-                ik::quant_kernel<<<dim3((unsigned) ((N / 32 + 7) / 8), (unsigned) n), ik::kTB, 0, st>>>(R.nrm + (size_t) r0 * N,
-                                                                                                    R.img, N);
+                K::native_quantize_q8_1(R.nrm + (size_t) r0 * N, R.img, N, n, st);
                 img = R.img;
             }
             mm(m->head, img, R.nrm + (size_t) r0 * N, R.logits, n);
@@ -5921,7 +5913,7 @@ struct Engine {
         CK(cudaMemcpy(cols, s.hidden_cols.data(), s.hidden_cols.size() * 4, cudaMemcpyHostToDevice));
         for (size_t c = 0; c <= R_; c += T) {
             const int n = (int) std::min(T, R_ + 1 - c);
-            ik::quant_kernel<<<dim3((unsigned) ((N / 32 + 7) / 8), (unsigned) n), ik::kTB, 0, st>>>(cols + c * N, b.img, (int) N);
+            K::native_quantize_q8_1(cols + c * N, b.img, (int) N, n, st);
             mm(m->head, b.img, cols + c * N, b.base, n);
             const int nm = (int) std::min<size_t>((size_t) n, R_ - std::min(c, R_));
             if (nm > 0) {
@@ -6090,7 +6082,6 @@ struct Engine {
             at.part = b.part;
             at.H = s.H;
             at.HK = s.HK;
-            at.D = s.D;
             at.ext = 0;
             at.win = (int) (r.see + T);
             at.chunk = r.chunk;

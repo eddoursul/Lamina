@@ -271,9 +271,6 @@ __device__ __forceinline__ void mma_s8s8(int (&d)[4], const unsigned (&a)[4], un
                  : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
-__device__ __forceinline__ void cp_async8(void* s, const void* g) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
-}
 __device__ __forceinline__ int exp_of(float x) { return (__float_as_int(x) >> 23) & 255; }   // x < 2^(E - 126)
 __device__ __forceinline__ float pow2f(int e) { return __int_as_float((e + 127) << 23); }     // -126 <= e <= 127
 // w (65536 r2 + 256 r1 + r0) from three limbs' sums (|r| < 2^21), w a power of two and wk = -65793 C w: the first

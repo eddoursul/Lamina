@@ -22,23 +22,15 @@ namespace q36a {
 using lamina::kernels::cp_async16;
 using lamina::kernels::cp_commit;
 using lamina::kernels::cp_wait;
+using lamina::kernels::h2;
 using lamina::kernels::ldsm4;
 using lamina::kernels::ldsm4t;
+using lamina::kernels::mma16816;
 
 constexpr int kHD = 256;     // the head size
 constexpr int kBc = 32;      // cells a tile
 constexpr int kRows = 64;    // query rows a block
 
-__device__ __forceinline__ void mma16816(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ unsigned h2(float a, float b) {
-    const __half2 v = __floats2half2_rn(a, b);
-    return *reinterpret_cast<const unsigned*>(&v);
-}
 // a K or V tile's cell c, 16-byte chunk j, in halves
 __device__ __forceinline__ int kv_at(int c, int j) { return c * kHD + ((j ^ (c & 7)) << 3); }
 // the probabilities' row r, 16-byte chunk j, in halves

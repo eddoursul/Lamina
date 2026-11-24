@@ -1,8 +1,9 @@
 // include/lamina/kernels/warp.cuh - the kernels' warp-level helpers: sums and maxima over a warp's 32 lanes (the XOR
 // butterfly: every lane gets the result, the additions always in one order), a block of 128 threads' sum, and the
-// ldmatrix and cp.async instructions of the tensor-core kernels.
+// ldmatrix, cp.async and mma instructions of the tensor-core kernels.
 #pragma once
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace lamina::kernels {
@@ -55,5 +56,19 @@ __device__ __forceinline__ void cp_async8(void* s, const void* g) {
 __device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
 /// waits until at most N committed groups are still in flight
 template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+
+/// d += a b on the tensor cores: a 16 x 16 tile of halves by a 16 x 8 one, FP32 sums (mma.m16n8k16, the operands as
+/// ldmatrix leaves them)
+__device__ __forceinline__ void mma16816(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                 "{%0,%1,%2,%3};\n"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+/// two floats as the halves of a word, rounded to nearest (an mma operand's)
+__device__ __forceinline__ unsigned h2(float a, float b) {
+    const __half2 v = __floats2half2_rn(a, b);
+    return *reinterpret_cast<const unsigned*>(&v);
+}
 
 }  // namespace lamina::kernels

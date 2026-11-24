@@ -4,7 +4,7 @@
 //
 //   * the target's states of each row (the inputs of the tapped layer applications and the final normed state)
 //     mixed a drafter layer, normed, and projected to that layer's context K and V at the row's position;
-//   * a block of rows (the last token and masks) through the layers: q, k and v normed a head and rotated by position
+//   * a block of rows (the last token and masks) through the layers: q and k normed a head and rotated by position
 //     (RoPE, pairs i and i + D / 2), attention over the context cells and the block's own without a sink, SwiGLU;
 //   * the recurrent head: a state of R values stepped a drafted position, the position's logits the target's head
 //     over the block row plus a correction, which is M . latent with M = head x hidden_out made once and kept as
@@ -42,9 +42,9 @@ __global__ void __launch_bounds__(kTB) fuse_kernel(FuseIn a) {
     }
 }
 
-/// T rows' heads of D values normed (x rsqrt(mean(x^2) + eps) w; w null: as they are) and rotated by their row's
-/// position: cs [T][D / 2][2], the cosines and sines of pos theta_i (the host's), pairs i and i + D / 2; cs null: not
-/// rotated.  y [T][heads][D].  A block a row and a head; D = 128 threads.
+/// T rows' heads of D values normed (x rsqrt(mean(x^2) + eps) w) and rotated by their row's position: cs [T][D / 2][2],
+/// the cosines and sines of pos theta_i (the host's), pairs i and i + D / 2.  y [T][heads][D].  A block a row and a
+/// head; D = 128 threads.
 __global__ void __launch_bounds__(128) head_rope_kernel(const float* __restrict__ x, const float* __restrict__ w,
                                                         const float* __restrict__ cs, float* __restrict__ y, int heads,
                                                         int D, float eps) {
@@ -53,19 +53,13 @@ __global__ void __launch_bounds__(128) head_rope_kernel(const float* __restrict_
     __shared__ float val[128];
     const size_t at = ((size_t) t * heads + h) * D + i;
     float v = x[at];
-    if (w) {
-        const float ss = lamina::kernels::block128_sum(v * v, part);
-        v = v * rsqrtf(ss / (float) D + eps) * w[i];
-    }
-    val[i] = v;
+    const float ss = lamina::kernels::block128_sum(v * v, part);
+    val[i] = v * rsqrtf(ss / (float) D + eps) * w[i];
     __syncthreads();
-    if (cs) {
-        const int half = D / 2, k = i < half ? i : i - half;
-        const float2 r = *reinterpret_cast<const float2*>(cs + ((size_t) t * half + k) * 2);
-        const float x0 = val[k], x1 = val[k + half];
-        v = i < half ? x0 * r.x - x1 * r.y : x0 * r.y + x1 * r.x;
-    }
-    y[at] = v;
+    const int half = D / 2, k = i < half ? i : i - half;
+    const float2 r = *reinterpret_cast<const float2*>(cs + ((size_t) t * half + k) * 2);
+    const float x0 = val[k], x1 = val[k + half];
+    y[at] = i < half ? x0 * r.x - x1 * r.y : x0 * r.y + x1 * r.x;
 }
 
 // ---------------------------------------------------------------------------------------------- a block's layers
@@ -78,11 +72,7 @@ __global__ void __launch_bounds__(128) attn_avg_kernel(const float* __restrict__
     const float y = p[1] != 0.f ? p[2 + i] / p[1] : 0.f;
     const size_t at = ((size_t) t * H + h) * D + i;
     out[at] = y;
-    const float amax = warp_max(fabsf(y)), s = warp_sum(y);
-    const float d = q8_1_finite(amax / 127.0f);
-    Q81* b = q + at / 32;
-    b->qs[i & 31] = q8_1_quant(y, d, amax);
-    if ((i & 31) == 0) b->ds = q8_1_ds(d, s);
+    q8_1_store(q + at / 32, y, i & 31);
 }
 
 /// x += y over n floats
@@ -100,11 +90,7 @@ __global__ void __launch_bounds__(kTB) swiglu_kernel(const float* __restrict__ g
     const size_t at = (size_t) t * n + b * 32 + lane;
     const float gv = g[at], x = gv / (1.0f + __expf(-gv)) * u[at];
     h[at] = x;
-    const float amax = warp_max(fabsf(x)), sum = warp_sum(x);
-    const float d = q8_1_finite(amax / 127.0f);
-    Q81* y = q + (size_t) t * (n / 32) + b;
-    y->qs[lane] = q8_1_quant(x, d, amax);
-    if (lane == 0) y->ds = q8_1_ds(d, sum);
+    q8_1_store(q + (size_t) t * (n / 32) + b, x, lane);
 }
 
 // ---------------------------------------------------------------------------------------------- the recurrent head
@@ -225,15 +211,7 @@ __global__ void __launch_bounds__(256) head_vocab_kernel(VocabIn a) {
     }
     float bv = l;
     int bi = v;
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
-        const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
-        if (ov > bv || (ov == bv && oi < bi)) {
-            bv = ov;
-            bi = oi;
-        }
-    }
+    warp_argmax(bv, bi);
     if (lane == 0) {
         rv[warp] = bv;
         ri[warp] = bi;
@@ -302,15 +280,7 @@ __global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict
             bi = tk;
         }
     }
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
-        const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
-        if (ov > bv || (ov == bv && oi < bi)) {
-            bv = ov;
-            bi = oi;
-        }
-    }
+    warp_argmax(bv, bi);
     if (lane == 0) {
         rv[warp] = bv;
         ri[warp] = bi;

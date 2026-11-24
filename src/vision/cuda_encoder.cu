@@ -237,21 +237,14 @@ __global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* 
 
 namespace va {
 
+using lamina::kernels::h2;
+using lamina::kernels::mma16816;
+
 constexpr int kD = kHeadPad;   // values a head (five steps of 16 in the scores, ten 8-value tiles in the outputs)
 constexpr int kDs = 128;       // a cell's stride in a shared-memory tile: 16 chunks of 8 values, for the bank swizzle
 constexpr int kBc = 32;        // cells a tile
 constexpr int kRows = 64;      // query rows a block
 
-__device__ __forceinline__ void mma16816(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ unsigned h2(float a, float b) {
-    const __half2 v = __floats2half2_rn(a, b);
-    return *reinterpret_cast<const unsigned*>(&v);
-}
 // a K or V tile's cell c, 16-byte chunk j (of the cell's 10), in halves
 __device__ __forceinline__ int kv_at(int c, int j) { return c * kDs + ((j ^ (c & 7)) << 3); }
 // the probabilities' row r, 16-byte chunk j, in halves

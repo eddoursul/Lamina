@@ -142,7 +142,7 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     real("activation.situ_beta", g.situ_beta);
     real("activation.situ_linear_beta", g.situ_lbeta);
     real("final_logit_softcapping", g.softcap, false);
-    // the loop, by the layout's keys; a file without them has none
+    // the loop, by the layout's keys: mainline's are required, an unsloth file without num_loops has none
     if (g.mainline) {
         i64("loop.count", g.n_pass);
         i64("loop.start", g.loop_start);

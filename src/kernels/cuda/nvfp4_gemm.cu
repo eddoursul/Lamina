@@ -15,12 +15,6 @@ namespace {
 constexpr int kPad = 72;   // a tile row in shared memory, halves (64 + 8: ldmatrix's eight rows on distinct banks)
 constexpr int kSmem = 4096 + 2 * (kNvfp4GemmRows + kNvfp4GemmEntries) * kPad * 2;
 
-__device__ __forceinline__ void mma16816(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
 
 /// A thread eight halves.  Grid ceil(rows * cols / 8 / 256).
 __global__ void halves_kernel(const float* __restrict__ src, const int32_t* __restrict__ map, uint4* __restrict__ dst,
