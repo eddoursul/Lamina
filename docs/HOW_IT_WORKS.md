@@ -3,7 +3,7 @@
 Qwen3.8-Flash-Next has 125 billion parameters, but each token passes through a small part of them: most of the model
 is experts, and each token uses 10 of a layer's 512. Lamina keeps all of them in RAM, puts the ones the model uses most
 on the GPUs, computes the rest on the CPU beside the GPUs, and checks several tokens in each pass of the model. This
-page describes the parts; the options named here are in [SETUP.md](SETUP.md#engine-options), the measured speeds in
+page describes the parts; the options named here are in [PARAMETERS.md](PARAMETERS.md), the measured speeds in
 [COMPARISON.md](COMPARISON.md). The figures were measured on the development PC with an RTX 3090 as the main GPU and an
 RTX 5070 Ti and an RTX 5060 Ti as tiers, Ryzen 7 9700X, DDR5-5600.
 

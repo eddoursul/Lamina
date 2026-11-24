@@ -64,8 +64,8 @@ lamina-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf <other parameters> --write-config q
 lamina-server --config qwen27b.json
 ```
 
-How to connect clients, the config's keys, images, image generation, MCP tools and serving on a network:
-[docs/USING.md](docs/USING.md).
+How to connect clients, images, image generation, MCP tools and serving on a network:
+[docs/USING.md](docs/USING.md); every option: [docs/PARAMETERS.md](docs/PARAMETERS.md).
 
 ## A fixed chat template
 
@@ -84,6 +84,8 @@ To enable, add this key to the model's config or use `--chat-template-file` on t
 - [docs/SETUP.md](docs/SETUP.md): the build, a model file, the release binaries, the configs, choosing the GPUs,
   Qwen3.6 and Qwen3.8-27B.
 - [docs/USING.md](docs/USING.md): the server, its API and web app, clients, pictures, image generation, MCP tools.
+- [docs/PARAMETERS.md](docs/PARAMETERS.md): every option of the server and the engine, its default and what it
+  trades.
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the engine.
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md): when something goes wrong.
 - [docs/COMPARISON.md](docs/COMPARISON.md): speeds, memory and agreement with llama.cpp, against llama.cpp and

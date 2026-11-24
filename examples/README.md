@@ -32,9 +32,8 @@ where its paths say (`../Lamina-data`). Each names its model (`"model"`), its GP
 `auto`) and in `"args"` the engine's options that differ from its defaults. Their `"vision"` section has the image
 encoder on the engine's main GPU, in VRAM it borrows from the engine for each new picture (`"gpu": true, "lend":
 true`, no card named: [SETUP.md](../docs/SETUP.md#a-model-file)); the development PC's configs keep it on a card with
-VRAM to spare instead. Their engine options:
-[SETUP.md](../docs/SETUP.md#engine-options); the GPUs' cards: [SETUP.md](../docs/SETUP.md#the-gpus); the server's keys:
-[USING.md](../docs/USING.md#the-config).
+VRAM to spare instead. Their options and the server's keys:
+[PARAMETERS.md](../docs/PARAMETERS.md); the GPUs' cards: [SETUP.md](../docs/SETUP.md#the-gpus).
 
 ## The development PC's own options
 

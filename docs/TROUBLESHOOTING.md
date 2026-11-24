@@ -70,8 +70,8 @@ or any other.
 **"unknown argument: ..." and "the engine of this model does not take an option of the command line (above)".** An
 option on `lamina-server`'s command line that is not the server's goes to the engine, whose parser refused it: a typo,
 a value it does not take, or an option of Qwen3.8-Flash-Next's engine given for Qwen3.6-35B-A3B or Qwen3.8-27B (or the
-other way). `lamina --help` lists Flash-Next's options; [SETUP.md](SETUP.md#qwen36-35b-a3b-and-qwen38-27b) the
-qwen35 path's.
+other way). `lamina-server --help` lists every option with the models that take it,
+[PARAMETERS.md](PARAMETERS.md) with their defaults.
 
 **"the config's "..." is no key lamina-server reads (lamina-server --help lists them): ignored".** A key of the config
 file that no option names: a typo, or a key of another program or an earlier version. The server starts without it;

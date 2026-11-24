@@ -1,6 +1,6 @@
 # Setup
 
-What a PC needs: [the README](../README.md#what-you-need). This page covers the build from the source, a model file
+What a PC needs: [the README](../README.md#requirements). This page covers the build from the source, a model file
 run with `lamina-server -m`, the release binaries, the config, the GPUs, the engine options worth knowing,
 Qwen3.6-35B-A3B and Qwen3.8-27B, and Inkling 2 Mini.
 
@@ -94,7 +94,7 @@ The server builds a config for the file and says in its window what it took:
   then `auto`) has them; `--gpu NAME` names the main one, `--gpu 0,1` keeps it to those cards (the main one picked
   among them, the others its tiers).
 - **Flash-Next's draft layer**, `Lamina-Qwen3.8-Flash-Next-MTP.gguf`, beside the model, else beside the server
-  ([the README](../README.md#the-draft-layer)).
+  ([the README](../README.md#mtp)).
 - **Pictures**: an image projector made for the model beside it (an `mmproj*.gguf` whose width is the model's; of
   several the smallest; Qwen3.6's and Qwen3.8-27B's repositories have theirs, `mmproj-F16.gguf`), read by the
   server's image encoder on the engine's main GPU, in VRAM it borrows from the engine for each new picture and gives
@@ -147,7 +147,7 @@ with the layer and 50-68% of UD-Q4_K_XL's, an edit that quotes its prompt at 92-
 vocabulary, the 40,525 tokens it proposes from; `tools/mtp_rt.py --gguf <the file> --draft-vocab <ids> --out <new file>`
 writes one over another (`data/draft_vocab_fr.bin`, `draft_vocab_cyrillic.bin`, `tools/draft_vocab.py`).
 
-Every key of a config is an option of the command line too ([USING.md](USING.md#the-config)), and a value given there
+Every key of a config is an option of the command line too ([PARAMETERS.md](PARAMETERS.md#how-options-are-given)), and a value given there
 takes the place of the config file's, the file's that of the preset: `lamina-server -m MODEL.gguf --port 8090
 --temperature 0.6`. A config file can be as short as `{"model": "D:/Models/x.gguf", "port": 8090}`: without `"args"`
 the server builds the rest from the model's preset, as with `-m`, and the file's keys take the place of the preset's;
@@ -222,7 +222,7 @@ preset ([above](#a-model-file)). Its keys:
 | --- | --- |
 | `model` | the model's GGUF (its first shard) |
 | `gpu` | the GPUs as cards in their roles, each with its settings ([below](#the-gpus)) |
-| `args` | the engine's options that differ from its defaults, an object (`"kv": "k8v4"`) or a list of words ([below](#engine-options) and `build/lamina --help`) |
+| `args` | the engine's options that differ from its defaults, an object (`"kv": "k8v4"`) or a list of words ([PARAMETERS.md](PARAMETERS.md#the-engines-options)) |
 | `cwd`, `lib_dirs` | the folder the engine runs in, where the config's relative paths start (the folder the server starts in when it has none); on Linux, folders put first on the library path |
 | `model_name` | the name the API lists |
 | `port`, `log` | the server's port; the engine's log file |
@@ -231,7 +231,7 @@ preset ([above](#a-model-file)). Its keys:
 | `expert_profile_save`, `expert_profile_save_every` | what the run learned about the experts (below) |
 
 The server's other keys (the network, API keys, idle unload, MCP servers, image generation):
-[USING.md](USING.md#the-config).
+[PARAMETERS.md](PARAMETERS.md#the-servers-options).
 
 **The learned expert profile.** The GPUs' expert caches start from a ranking of the experts by how often the model
 routes to them (`data/expert-profiles`: one a model, built into the programs). With `expert_profile_save`, the engine
@@ -269,18 +269,8 @@ that does keeps 2 GiB free, a headless one 512 MiB. Only the first tier takes pa
 link (an x1 or x4 slot) still pays as a later tier. Such a tier gets only short pieces of work, and a driver may lower
 its clocks between them until its results come late: its `clocks` lock them while the engine generates.
 
-A card's settings, each optional:
-
-| Setting | |
-| --- | --- |
-| `cache=auto\|SIZE\|N` | its VRAM for experts: `auto` (the default) all but its reserve, or a size (`22G`); the first card's also N expert slots |
-| `reserve=SIZE` | the VRAM it leaves free: the first card 700 MiB; a tier 2 GiB when the desktop uses it, else 512 MiB |
-| `vram-only=SIZE\|auto` | the profile's experts it keeps only in its VRAM, out of the RAM: for a model whose experts outgrow the RAM; `auto` takes as many as keep them within it (the RAM less 4 GiB, and 6 GiB of it left available). The first card and the first two tiers (the second then computes its experts in prompts too); not with `sleep` |
-| `prefetch=SIZE` | a tier: each layer's likeliest experts no GPU holds, copied to it ahead while the RAM is idle (12 MiB over a link of 20 GB/s or more, else none) |
-| `clocks=MIN-MAX/MEM` | a tier: its graphics and memory clocks locked through NVML while the engine generates, in MHz, the card's own (`1395-2100/9751` for an RTX 3090; a memory clock of 0: the driver's); needs administrator rights (root on Linux). `--clocks-hold` and `--clocks-lead` time the locks around a request ([below](#engine-options)) |
-| `sleep=TIME` | a tier after the first: it sleeps (its experts to the CPU, its lock released) while the CPU pool would need less than TIME a layer without it, averaged over a few seconds of generation; trades speed for the card's awake power, TIME by model file (`55us`) |
-
-Sizes are binary (`8G`, `700M`), times have their unit (`55us`, `1.5ms`, `1s`). `"gpu"` as numbers alone (`[0, 1]`,
+A card's settings (`cache=`, `reserve=`, `vram-only=`, `prefetch=`, `clocks=`, `sleep=`, Inkling 2 Mini's `layers=`),
+each optional, and what each trades: [PARAMETERS.md](PARAMETERS.md#gpus). `"gpu"` as numbers alone (`[0, 1]`,
 `--gpu 0,1`) keeps its earlier meaning: the cards the engine sees, the first its main one. An earlier config's
 `--main-gpu`, `--second-gpu` and per-tier lists (`--second-gpu-clocks 0,1395-2100/9751`: a value per tier in their
 order) still work, deprecated (`lamina --help-all` lists them), a card's own setting winning over them; of `--gpu`,
@@ -295,30 +285,10 @@ programs run on the RTX 30, 40 and 50 series.
 
 ## Engine options
 
-The engine's defaults are the examples' values: a config's `args` holds what differs. The options the examples set, and
-the ones that pay on some PCs; `build/lamina --help` lists the common ones, `--help-all` every one.
-
-| Option | |
-| --- | --- |
-| `--max-context N` | the context the K/V is sized for (by default under `--serve` 262,144, the trained context) |
-| `--kv-grow` | the default: the K/V takes VRAM only for the cells the requests reach; the expert cache holds the rest and gives it back as a conversation grows (`--no-kv-grow`: the whole context at start) |
-| `--kv fp16\|int8\|k8v4\|q4_0` | the K/V's format: 8-bit (`int8`), 8-bit keys and 4-bit values (`k8v4`), 4-bit both; smaller formats leave more VRAM to experts, at a cost in precision |
-| `--spec T`, `--spec-min-p P`, `--spec-lookup N` | verify windows of up to T tokens (the last one and T-1 drafts), a draft kept while its probability under the draft layer stays above P (a sampled request's by the number its position is drawn with: [HOW_IT_WORKS.md](HOW_IT_WORKS.md#drafts)), and drafts from earlier text that repeats (16 tokens of it); 4, 0.5 and 16 by default |
-| `--prefill N` | the prompt chunk (by default 16,384 tokens, halved until its buffers fit the caches' lendable slots) |
-| `--feed-max N` | prompt parts of up to N tokens go through verify windows instead of the prompt path (46 by default) |
-| `--hc-q8` | the default: the hyper-connection projections in 8 bits only, half their VRAM, read ~30% faster (`--no-hc-q8`: BF16) |
-| `--prompt-shift F` | on a second GPU, a share of the experts the main GPU holds is computed beside it in long prompts |
-| `--pcie-frac F`, `--pcie-mode M` | 0 by default: the experts no GPU holds are all computed by the CPU, none read by the main GPU over its link (over an x4 link the CPU is sooner); a share F of them read over it otherwise (`kernel`, the default mode: a copy kernel in the window's graph) |
-| `--prompt-split L[,M]` | off by default: a prompt of more than one chunk runs in two stages, the second GPU taking each chunk's layers L and up while the main GPU runs the next chunk; `L,M` with two or more tiers: three stages, the tier after the first taking the layers L to M-1 (with one tier: two stages, split halfway between L and M) |
-| `--prompt-split-from N` | off by default: with `--prompt-split`, a prompt part of N tokens or more that fits one chunk is read as two chunks of half its size through the stages (a shorter one runs on the main GPU's stage alone) |
-| `--prompt-tiers 2` | off by default: with two or more tiers, the tier after the first computes the experts it holds in prompts too, where they otherwise stream to the first tier |
-| `--arena-place` | off by default: for RAM with slower regions (unpaired DIMMs), the experts the CPU reads are kept out of them |
-| `--no-file-cache` | off by default: the experts are read past the OS file cache, which then holds no second copy of the model |
-| `--clocks-hold TIME` | with a card's `clocks` under `--serve`: the locks stay this long after a request (`5s` by default); a locked card draws its awake power until then |
-| `--clocks-lead TIME` | off by default (the locks are asked for from a batched prompt part's last chunk on): they are asked for this long before the part ends, by its progress; a lock is at speed ~0.6 s after it is asked for |
-
-The options off by default, and the cards' `clocks` and `sleep`, are measured on the development PC in
-[examples/](../examples/README.md); measure them on yours before keeping them.
+The engine's defaults are the examples' values: a config's `args` holds what differs. Every option, its default and
+what it trades: [PARAMETERS.md](PARAMETERS.md) (`lamina-server --help` in short). The options off by default, and the
+cards' `clocks` and `sleep`, are measured on the development PC in [examples/](../examples/README.md); measure them on
+yours before keeping them.
 
 ## Control vectors
 
@@ -380,7 +350,7 @@ Qwen3.8-27B needs a split where one GPU does not hold it: its full 262,144 cells
 VRAM (on the development PC the 5070 Ti first with 26 layers, then the 3090 with 38 and the head:
 [COMPARISON.md](COMPARISON.md#qwen38-27b)).
 
-The prompt cache is Flash-Next's, with its options ([USING.md](USING.md#behaviour)): checkpoints of the recurrent
+The prompt cache is Flash-Next's, with its options ([PARAMETERS.md](PARAMETERS.md#the-prompt-cache)): checkpoints of the recurrent
 state (64 MiB each for Qwen3.6, 151 MiB for the 27B) and conversations parked in RAM with their K and V; the same
 request again reads nothing. Not on this
 path yet: `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU: each of its sessions
@@ -425,11 +395,8 @@ after it with the fastest link of those that then hold their shares (two 12 GB c
 instead of a third of them in RAM); `--layer-split 0` keeps the experts in RAM. Where experts stay in RAM, a later card with `cache=`
 (`{"id": "RTX 3060", "cache": "auto"}`, `--expert-gpu`) holds a copy of all of them and computes a token's entries of
 those the first card lacks in place of the CPU (it takes all or none: the start says when it lacks the room) - with
-drafts 28-42% faster on an RTX 3090 that holds 6 of the 13 GiB of experts. Its options: `--kv fp16 | q8_0`;
-`--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
-32,768; set: a sequence ends where the VRAM does, and with `--no-kv-grow` a start past it is refused); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
-card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
-mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
+drafts 28-42% faster on an RTX 3090 that holds 6 of the 13 GiB of experts. Its options (`--kv fp16|q8_0`,
+`--max-context`, `--no-kv-grow` and the others Inkling 2 takes): [PARAMETERS.md](PARAMETERS.md#the-engines-options).
 
 A card smaller than the file, or than the file and the least context beside it (32,768 tokens, 16,384 where cards
 after it hold K and V; a set `--max-context` where none does), runs it with the experts in RAM (UD-IQ4_XS: 13.1 GiB, pinned;
@@ -471,9 +438,8 @@ of two such chunks or more, and those experts are back on the card before the fi
 alone: 11% faster at 21K tokens, 23% at 86K). Where the card alone holds the context and would hold under 32,768 tokens (or
 under `--max-context`) beside those buffers, the rows are halved until it does, down to 128 (a line says so: the
 21.3 GiB UD-Q8_K_XL on a 24 GB card). On an RTX 50 a chunk's expert products run on the card's FP4 tensor cores, as
-llama.cpp's do. The prompt cache keeps conversations as on the other paths (`--prompt-cache`, `--prompt-cache-every`,
-`--conversation-cache-mib`, `--conversation-cache-slots`, `--conversation-cache-min-tokens`, `--ram-reserve-mib`,
-`--conversation-spill-dir`, `--conversation-spill-mib`):
+llama.cpp's do. The prompt cache keeps conversations as on the other paths
+([PARAMETERS.md](PARAMETERS.md#the-prompt-cache)):
 a checkpoint holds the window layers' last cells and the convolutions' state (169 MiB in FP16, 92 in q8_0) and
 leaves through an image of that size in VRAM; a conversation another request replaces is parked with its K and V -
 which stay on the cards in address ranges of their own (up to three conversations beside the live one), neither

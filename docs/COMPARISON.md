@@ -78,7 +78,7 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   the prompts of 32K / 64K / 128K tokens read IQ3_S 1.24 / 1.43 / 1.55x as fast as in one stage, UD-Q4_K_XL 1.13 /
   1.30 / 1.43x. On another machine they need measuring again, through the server: the split's layer alone moved
   IQ3_S's long prompts by up to 11% here, and generate mode and the server disagreed on the best one
-  ([SETUP.md](SETUP.md#engine-options); the example configs leave the split, the placement and the reads past the
+  ([PARAMETERS.md](PARAMETERS.md#prompts); the example configs leave the split, the placement and the reads past the
   cache out).
 
 ## Speed through the API
@@ -224,7 +224,7 @@ the end of the turn, which prompt lookup drafts and a server never generates. Re
 UD-Q4_K_XL's 72 GB file settles in the cache on the RAM's faster pages over a session's starts, and each later start's
 arena lands on slower ones: with the file settled its code and edit texts ran 119.6 / 164.1 t/s, 8-11% below these
 runs, the CPU pool reading its experts and the 5070 Ti its rows slower alike. Its config reads past the cache
-(`--no-file-cache`, [SETUP.md](SETUP.md#engine-options)); IQ3_S's 47 GB file fits beside its arena.
+(`--no-file-cache`, [PARAMETERS.md](PARAMETERS.md#the-experts)); IQ3_S's 47 GB file fits beside its arena.
 
 <!-- matrix:fixed -->
 | Text | IQ3_S t/s (tokens a pass) | UD-Q4_K_XL t/s (tokens a pass) |
