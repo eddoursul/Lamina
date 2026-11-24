@@ -110,7 +110,7 @@ void qsa_state_free(QsaState& st);
 /// Zeroes the pools AND the indexer, so a fresh sequence matches the reference's own `zeros()`.  The KV pool
 /// matters even for cells that are never attended, because `kv_gather` reads whatever the selection names.
 void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream);
-/// Item bf: a state for the batched prompt path on another GPU (prefill/split.hpp), carved from `base`: the K/V pools
+/// A state for the batched prompt path on another GPU (prefill/split.hpp), carved from `base`: the K/V pools
 /// for cells [first_page * page_size, max_cells) (the page table maps logical page p >= first_page to p - first_page,
 /// the pages before it to the first), with `indexer` the indexer's tail, spare key, pooled keys (for all max_cells)
 /// and block position.  Never elastic, no rotary tables, no per-token staging; the pools and the indexer zeroed on

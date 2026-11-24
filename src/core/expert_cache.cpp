@@ -58,13 +58,11 @@ size_t device_free_bytes() {
 
 std::string_view builtin_expert_profile(int64_t n_layers, int64_t n_expert) {
     // data/expert-profiles' files: a model's profile is found by its shape (the header's layers and experts)
-    static const char* const names[] = {"qwen3.8-flash-next.bin", "inkling-2-mini.bin"};
-    for (const char* name : names) {
-        const EmbeddedFile* f = profile_file(name);
+    for (const EmbeddedFile& f : profile_file_all()) {
         uint32_t hdr[5] = {0, 0, 0, 0, 0};
-        if (f == nullptr || f->data.size() < 4 + sizeof hdr || std::memcmp(f->data.data(), "STRP", 4) != 0) continue;
-        std::memcpy(hdr, f->data.data() + 4, sizeof hdr);
-        if ((int64_t) hdr[1] == n_layers && (int64_t) hdr[2] == n_expert) return f->data;
+        if (f.data.size() < 4 + sizeof hdr || std::memcmp(f.data.data(), "STRP", 4) != 0) continue;
+        std::memcpy(hdr, f.data.data() + 4, sizeof hdr);
+        if ((int64_t) hdr[1] == n_layers && (int64_t) hdr[2] == n_expert) return f.data;
     }
     return {};
 }

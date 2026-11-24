@@ -482,7 +482,7 @@ void usage(bool all = false) {
                  "  --mtp FILE           the draft layer, Lamina-Qwen3.8-Flash-Next-MTP.gguf (%s fetches it), or a\n"
                  "                       folder of its earlier layout; --serve without it: one token a window, or\n"
                  "                       prompt lookup's drafts\n"
-                 "  --expert-profile P   fill the VRAM tiers from this profile (data/expert-profile.bin, or what\n"
+                 "  --expert-profile P   fill the VRAM tiers from this profile (builtin: the model's in the programs, or what\n"
                  "                       --expert-profile-save wrote; --serve: the built-in one) instead of admitting\n"
                  "                       experts on first use\n"
                  "  --serve              stay resident and take requests on stdin, as lamina-server sends them\n"

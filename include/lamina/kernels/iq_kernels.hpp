@@ -1,7 +1,7 @@
 // include/lamina/kernels/iq_kernels.hpp - the GGUF expert and embedding formats on the GPU: the i-quants (IQ1_M,
 // IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL) and Q2_0 of the IQ2_XS / IQ3_XXS model files, Q4_K, Q5_K,
-// Q5_1 and Q8_0 of the UD-Q4_K_XL file, Q5_0 of unsloth's Dynamic 3.1 quants, and NVFP4 and MXFP4 (Inkling 2 Mini's
-// experts as its checkpoint holds them).
+// Q5_1 and Q8_0 of the UD-Q4_K_XL file, Q5_0 of unsloth's Dynamic 3.1 quants, and NVFP4, MXFP4 and BF16 (Inkling 2
+// Mini's experts as its checkpoint and unsloth's largest file hold them).
 //
 // The block layouts, codebook grids and dot products are llama.cpp's (ggml-common.h, ggml-cuda/vecdotq.cuh,
 // ggml-cuda/dequantize.cuh; MIT, see third_party/ggml/LICENSE and VERSION.txt), so a weight means exactly what it
@@ -92,8 +92,10 @@ int gpu_expert_act(int cpu_act) noexcept;
 /// Q5_1 + Q8_1, Q8_0 + Q8_0 or Q4_K/Q5_K + Q8_K down).  Other formats only have the Fast kernels.
 bool native_expert_exact_supported(int gu_type, int d_type, int gu_act, int d_act) noexcept;
 /// Whether the GPU has the dot products (native_expert_grouped) and the dequantizers (the prompt path) for a layer's
-/// gate/up and down formats at this geometry.
-bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_ff) noexcept;
+/// gate/up and down formats at this geometry.  `fp_rows`: BF16, MXFP4 and NVFP4 too - the Inkling 2 path's, which
+/// reads their per-expert scales (NativeExpertLayout::scale_off) and gives the FP4 tensor cores their own activations;
+/// the other paths' loaders and prompt kernels do neither.
+bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, bool fp_rows = false) noexcept;
 /// Exact's dot products alone, for their test: `n_rows` rows of `type` (Q4_K, Q5_K, Q5_1, Q8_0; `row_bytes` apart,
 /// device) against one activation row in the CPU's vec_dot type (`n` values, device) -> out[r] (device).
 void native_exact_dot_rows(int type, const void* rows, size_t row_bytes, int n_rows, const void* x, int64_t n,

@@ -496,11 +496,14 @@ bool native_mma(int ggml_type, const void* weights, const void* x_il, float* y, 
 bool native_mma_q8_0(const MmaJob* jobs, int n_jobs, int n_in, int ncols, void* stream) {
     constexpr int TM = 1, ST = 2, smem = ST * 16 * TM * Q80::PITCH + Q80::UPT * TM * 512;
     static_assert(smem <= 48 * 1024, "within the default dynamic shared memory");
-    if (ncols < 2 || ncols > 8 || n_jobs < 1 || n_jobs > 5 || n_in % (Q80::SB * Q80::VALUES) != 0) return false;
+    if (jobs == nullptr || ncols < 2 || ncols > 8 || n_jobs < 1 || n_jobs > 5 || n_in <= 0 || n_in % (Q80::SB * Q80::VALUES) != 0)
+        return false;
     Jobs j{};
     int most = 0;
     for (int i = 0; i < n_jobs; ++i) {
-        if ((uintptr_t) jobs[i].weights % 16 != 0) return false;
+        if (jobs[i].weights == nullptr || jobs[i].x_il == nullptr || jobs[i].y == nullptr || jobs[i].n_out <= 0 ||
+            (uintptr_t) jobs[i].weights % 16 != 0)
+            return false;
         const Q81IlParts parts = q8_1_il_parts(jobs[i].x_il, n_in, ncols);
         j.w[i] = static_cast<const uint8_t*>(jobs[i].weights);
         j.a[i] = Acts{parts.bm, parts.d, native_q8_1_il_cp(ncols)};
@@ -510,7 +513,7 @@ bool native_mma_q8_0(const MmaJob* jobs, int n_jobs, int n_in, int ncols, void* 
     }
     native_mma_jobs_kernel<Q80, TM, ST><<<dim3((unsigned) ((most + 16 * TM - 1) / (16 * TM)), (unsigned) n_jobs),
                                           TM * Q80::UPT * 32, smem, static_cast<cudaStream_t>(stream)>>>(j, n_in, ncols);
-    return true;
+    return cudaPeekAtLastError() == cudaSuccess;
 }
 
 }  // namespace lamina::kernels

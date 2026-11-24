@@ -17,6 +17,7 @@
 // finite, non-zero scales, and the blob at a DIFFERENT layer must be different data - which is what a wrong
 // stride would break.
 #include "lamina/kernels/cpu/expert.hpp"
+#include "test_blobs.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -41,31 +42,8 @@ double rel_l1(const float* a, const float* b, int n, double* mag_out = nullptr) 
     return d / (mag > 1e-30 ? mag : 1e-30);
 }
 
-bool read_blob(const char* path, long long index, std::vector<uint8_t>& out) {
-    out.assign(cpu::BLOB, 0);
-    std::FILE* f = std::fopen(path, "rb");
-    if (!f) return false;
-#if defined(_MSC_VER)
-    if (_fseeki64(f, (long long) index * (long long) cpu::BLOB, SEEK_SET) != 0) { std::fclose(f); return false; }
-#else
-    if (fseeko(f, (off_t) index * (off_t) cpu::BLOB, SEEK_SET) != 0) { std::fclose(f); return false; }
-#endif
-    const size_t got = std::fread(out.data(), 1, out.size(), f);
-    std::fclose(f);
-    return got == out.size();
-}
-
-/// An expert without the pack: random codes with finite scales (fp16 in [2^-7, 2^-6)), another one an index.  The
-/// kernels and the pool's protocol are under test, not the model's weights.
-void synth_blob(long long index, std::vector<uint8_t>& out) {
-    out.assign(cpu::BLOB, 0);
-    std::mt19937 rng((uint32_t) (0x9E3779B9u * (uint32_t) (index + 1)));
-    for (auto& v : out) v = (uint8_t) rng();
-    for (size_t o = cpu::O_GU_SCALES; o + 2 <= cpu::BLOB; o += 2) {
-        const uint16_t h = (uint16_t) (0x2000 | (rng() & 0x3FF));
-        std::memcpy(out.data() + o, &h, 2);
-    }
-}
+using cpu::test::read_blob;
+using cpu::test::synth_blob;
 
 /// The fp16 scale at a byte offset, decoded by the SAME rule the kernel uses.  Used only for the structural
 /// sanity check, so it is deliberately a second, independent transcription of the three lines in question.

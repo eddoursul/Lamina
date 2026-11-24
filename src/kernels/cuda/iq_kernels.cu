@@ -13,6 +13,7 @@
 #include "lamina/kernels/f16_bits.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -529,14 +530,16 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_il_kernel(const u
 constexpr int IL_GU_G = 8, IL_GU_NS = 72, IL_DOWN_G = 4, IL_DOWN_NS = 36;
 /// The entries a pass of the interleaved kernels on the current card: 4, and 2 on an RTX 50 (see above)
 int il_pass() {
-    static int8_t of_device[64] = {};
+    static std::atomic<int8_t> of_device[64] = {};   // (any host thread's launches ask)
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) return 2;
-    if (of_device[dev] == 0) {
+    int8_t p = of_device[dev].load(std::memory_order_relaxed);
+    if (p == 0) {
         int major = 0;
-        of_device[dev] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major < 12 ? 4 : 2;
+        p = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major < 12 ? 4 : 2;
+        of_device[dev].store(p, std::memory_order_relaxed);
     }
-    return of_device[dev];
+    return p;
 }
 
 // ---------------------------------------------------------------- Hadamard-folded experts (hadamard.hpp)
@@ -1414,7 +1417,9 @@ void iq_dequant_experts_f16(int gu_type, int d_type, const uint8_t* const* blobs
     check("iq_dequant_experts_f16");
 }
 
-bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_ff) noexcept {
+bool native_expert_supported(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, bool fp_rows) noexcept {
+    auto fp = [](int t) { return t == 30 || t == 39 || t == 40; };
+    if (!fp_rows && (fp(gu_type) || fp(d_type))) return false;
     const int qg = fmt_qk(gu_type), qd = fmt_qk(d_type);
     return qg > 0 && qd > 0 && is_iq(gu_type) && is_iq(d_type) && n_embd % qg == 0 && n_ff % qd == 0;
 }

@@ -193,18 +193,22 @@ void q8_0_dot(const block_q8_0* x, int nb, const void* const* act, int nt, float
 // UE4M3 scale (ggml_ue4m3_to_fp32: its table's values, half the E4M3 value), against two Q8_0 blocks.  The weights'
 // int8 values (kvalues_fp4 by nibble), their absolute values and the scales once a block; each token ggml's products,
 // its scales' products and its two fused adds in ggml's order.
-// (a table, as ggml-cpu's GGML_CPU_UE4M3_TO_FP32 on x86: ggml_ue4m3_to_fp32's values)
+// (a table, as ggml-cpu's GGML_CPU_UE4M3_TO_FP32 on x86: ggml_ue4m3_to_fp32's values, m 2^-9 or (1 + m / 8) 2^(e - 7)
+// halved - exact in floats; made at compile time: a static initialiser here would run AVX2 code on every CPU,
+// tools/check_isa_guard.py)
 struct Ue4m3 {
-    float v[256];
-    Ue4m3() {
+    float v[256] = {};
+    constexpr Ue4m3() {
         for (int x = 0; x < 256; ++x) {
             const int e = (x >> 3) & 0xF, m = x & 0x7;
-            const float raw = e == 0 ? ldexpf((float) m, -9) : ldexpf(1.0f + (float) m / 8.0f, e - 7);
+            float raw = e == 0 ? (float) m : 1.0f + (float) m / 8.0f;
+            for (int k = 0; k < (e == 0 ? 9 : 7 - e); ++k) raw *= 0.5f;
+            for (int k = 0; k < e - 7; ++k) raw *= 2.0f;
             v[x] = x == 0 || x == 0x7F ? 0.0f : raw * 0.5f;
         }
     }
 };
-const Ue4m3 k_ue4m3;
+constexpr Ue4m3 k_ue4m3{};
 inline float ue4m3(uint8_t x) { return k_ue4m3.v[x]; }
 void nvfp4_dot(const block_nvfp4* x, int nb, const void* const* act, int nt, float* res) {
     const __m128i values128 = _mm_loadu_si128((const __m128i*) kvalues_fp4);
@@ -245,7 +249,6 @@ void dot_rows(int type, const uint8_t* row, int n, const void* const* act, int n
         case 12: q4k_dot((const block_q4_K*) row, n / QK_K, act, nt, res); break;
         case 7: q5_1_dot((const block_q5_1*) row, n / QK5_1, act, nt, res); break;
         case 8: q8_0_dot((const block_q8_0*) row, n / QK8_0, act, nt, res); break;
-        case 40: nvfp4_dot((const block_nvfp4*) row, n / QK_NVFP4, act, nt, res); break;
         default: break;
     }
 }

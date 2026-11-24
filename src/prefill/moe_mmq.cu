@@ -283,6 +283,10 @@ void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols,
               float* scale) {
     if (rows <= 0) return;
     if (native_fp4(t)) {   // llama.cpp's choice on the FP4 tensor cores: FP4 activations, a scale a row
+        if (t == GGML_TYPE_NVFP4 && scale == nullptr) {
+            std::fprintf(stderr, "prefill mmq: NVFP4 rows on the FP4 tensor cores need quantize's row scales\n");
+            std::exit(1);
+        }
         const bool aligned = (uintptr_t) x % 32 == 0 && (ld * 4) % 32 == 0;
         quantize_mmq_fp4_cuda(x, ids, xq, scale, (ggml_type) t, aligned, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1,
                               1, (cudaStream_t) stream);
@@ -296,6 +300,10 @@ void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols,
 void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows,
                   void* stream, const float* signs) {
     if (rows <= 0) return;
+    if (native_fp4(t)) {
+        std::fprintf(stderr, "prefill mmq: quantize_f16 writes q8_1, which type %d does not read on this card\n", t);
+        std::exit(1);
+    }
     const int64_t ne0 = pad512(cols);
     constexpr int B = CUDA_QUANTIZE_BLOCK_SIZE_MMQ;
     const dim3 grid((unsigned) rows, (unsigned) ((ne0 + 4 * B - 1) / (4 * B)));
@@ -552,8 +560,9 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
 void swiglu_quantize(const float* gu, void* xq, int t, int64_t rows, int64_t n_ff, bool interleaved, void* stream,
                      const float* signs) {
     if (rows <= 0) return;
-    if (n_ff % 4 != 0) {
-        std::fprintf(stderr, "prefill mmq: swiglu_quantize needs a multiple of 4 values a row (%lld)\n", (long long) n_ff);
+    if (n_ff % 4 != 0 || native_fp4(t)) {
+        std::fprintf(stderr, "prefill mmq: swiglu_quantize needs a multiple of 4 values a row (%lld) and q8_1's type (%d)\n",
+                     (long long) n_ff, t);
         std::exit(1);
     }
     const int64_t ne0 = pad512(n_ff);

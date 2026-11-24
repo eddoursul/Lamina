@@ -534,7 +534,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         const std::string p = "blk." + std::to_string(l) + ".";
         const lamina::TensorInfo* tg = gm.find(p + "ffn_gate_up_exps.weight");
         const lamina::TensorInfo* td = gm.find(p + "ffn_down_exps.weight");
-        if (!K::native_expert_supported((int) tg->type, (int) td->type, N, g.n_ff)) {
+        if (!K::native_expert_supported((int) tg->type, (int) td->type, N, g.n_ff, true)) {
             err = p + ": experts of " + tg->type_name() + " gate/up and " + td->type_name() + " down rows, which the "
                   "expert kernels do not read at this geometry";
             return false;

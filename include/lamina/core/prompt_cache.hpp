@@ -209,7 +209,7 @@ public:
     PromptCache(const ModelGeometry& g, SessionState& ss, std::vector<QsaState*> kv, void* stream, int chain_cap,
                 uint64_t park_budget, size_t park_slots, int64_t min_tokens);
 
-    /// Item bf, while a split prompt path runs (prefill/split.hpp): a checkpoint saves the layers below `split_from`
+    /// While a split prompt path runs (prefill/split.hpp): a checkpoint saves the layers below `split_from`
     /// itself and hands its buffer to `split_save`, whose stage writes the rest once that chunk is through it (the
     /// prompt's end waits for that).  0: not split.
     int64_t split_from = 0;

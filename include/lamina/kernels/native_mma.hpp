@@ -1,6 +1,7 @@
 // include/lamina/kernels/native_mma.hpp - the verify window's dense projections of 2-8 tokens on the int8 tensor
-// cores (src/kernels/cuda/native_mma.cu): a CTA's 16-row tiles of the GGUF blocks (Q6_K, Q5_K, Q4_K, IQ4_XS) copied
-// into shared memory a stage ahead and decoded once into mma's A, the window's tokens its N.
+// cores (src/kernels/cuda/native_mma.cu): a CTA's 16-row tiles of the GGUF blocks (Q6_K, Q5_K, Q4_K, IQ4_XS; Q8_0 in
+// several products a launch, native_mma_q8_0) copied into shared memory a stage ahead and decoded once into mma's A,
+// the window's tokens its N.
 #pragma once
 
 namespace lamina::kernels {

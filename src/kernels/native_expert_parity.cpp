@@ -507,7 +507,7 @@ int main(int argc, char** argv) {
             cpu::NativeFmt f;
             std::string err;
             if (gu < 0 || dn < 0 || !cpu::native_fmt(gu, dn, H, FF, f, err) ||
-                !lamina::kernels::native_expert_supported(gu, dn, H, FF)) {
+                !lamina::kernels::native_expert_supported(gu, dn, H, FF, true)) {
                 std::printf("%s: %s\n", arg.c_str(), err.empty() ? "not a supported pair of GGML types" : err.c_str());
                 ++failures;
                 continue;

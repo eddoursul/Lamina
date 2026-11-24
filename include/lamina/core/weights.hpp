@@ -139,7 +139,7 @@ public:
 
     const WeightRef* find(const std::string& name) const;
     const std::map<std::string, WeightRef>& all() const { return table_; }
-    /// `name`'s row as `ref` (item bf: a table of another GPU's copies of some tensors, prefill/split.hpp).
+    /// `name`'s row as `ref` (a table of another GPU's copies of some tensors, prefill/split.hpp).
     void put(const std::string& name, const WeightRef& ref) { table_[name] = ref; }
     const LoadReport& report() const { return report_; }
 

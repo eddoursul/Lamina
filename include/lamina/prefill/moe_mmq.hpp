@@ -20,7 +20,8 @@ bool supported(int ggml_type);
 /// nothing fits.  false (said once per type) keeps that product off MMQ (the Qwen3.6 path asks it).
 bool fits(int ggml_type, int64_t w_rows);
 /// The activation image a weight format's products read (quantize()'s layout of scales and sums): formats of one
-/// layout share an image of the same rows.  -1 for a format MMQ does not cover.
+/// layout share an image of the same rows - but native_fp4's, whose image on such a card is FP4's own.  -1 for a
+/// format MMQ does not cover.
 int ds_layout(int ggml_type);
 /// NVFP4 and MXFP4 on the current device run on its FP4 tensor cores (RTX 50 series), which read activations rounded
 /// to FP4 with a scale a row, not q8_1: quantize() writes that image for such a type (half a q8_1 image's bytes) and,
@@ -38,7 +39,7 @@ size_t q8_bytes(int64_t rows, int64_t cols);
 void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
               void* stream, float* scale = nullptr);
 /// The same from FP16 rows (`ld` halves apart, cols a multiple of 4): llama.cpp's quantizer reading FP16, the bytes
-/// of quantize() over those rows in FP32.
+/// of quantize() over those rows in FP32.  q8_1 alone: not for a native_fp4 type (the process ends).
 /// `signs` (`cols` floats on this device, Hadamard-folded experts: hadamard.hpp): each 128 values rotated first, signs and all.
 void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
                   void* stream, const float* signs = nullptr);
@@ -124,7 +125,7 @@ bool gather_native_group(const uint8_t* const* blob, int n, size_t up_off, size_
 void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interleaved, void* stream);
 
 /// swiglu() and quantize() of its h (n_ff a multiple of 4) in one kernel, their bytes: H's q8_1 rows for the down
-/// product without the FP32 rows between.
+/// product without the FP32 rows between.  Not for a native_fp4 type (the process ends).
 void swiglu_quantize(const float* gu, void* xq, int ggml_type, int64_t rows, int64_t n_ff, bool interleaved, void* stream, const float* signs = nullptr);
 
 /// dst[i] = i for i < n (the identity row map MMQ's MoE mode writes through).

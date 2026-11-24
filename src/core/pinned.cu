@@ -61,13 +61,15 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
 #endif
 }
 
-void release(void* p, uint64_t bytes) {
+void release(void* p, uint64_t bytes, PageBacking got) {
     if (!p) return;
 #ifdef _WIN32
     (void) bytes;
+    (void) got;
     VirtualFree(p, 0, MEM_RELEASE);
 #else
-    munmap(p, bytes);
+    const uint64_t page = 2ull << 20;   // (MAP_HUGE_2MB's: the kernel mapped the length rounded up to it)
+    munmap(p, got == PageBacking::LargePages ? (bytes + page - 1) / page * page : bytes);
 #endif
 }
 
@@ -167,7 +169,7 @@ PinnedArena::~PinnedArena() {
         } else {
             cudaHostUnregister(base);
         }
-        release(base, capacity);
+        release(base, capacity, backing);
         base = nullptr;
     }
 }

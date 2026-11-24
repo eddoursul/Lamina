@@ -229,6 +229,7 @@ int native_gu_mt_min(int gu_type) {
 }
 
 #if LAMINA_X86
+namespace {
 /// NVFP4 rows of several tokens through kq_avx2.cpp's kernel (each row decoded once for them, every token's bits
 /// ggml's); LAMINA_NVFP4_MT=0: ggml-cpu's dot a token
 bool nvfp4_mt() {
@@ -238,6 +239,7 @@ bool nvfp4_mt() {
     }();
     return on;
 }
+}  // namespace
 #endif
 void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt, float* const* ff,
                     int r0, int r1) {

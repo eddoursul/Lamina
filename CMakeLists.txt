@@ -644,12 +644,13 @@ if(LAMINA_NATIVE_EXPERTS)
       target_sources(lamina_mmq PRIVATE ${_lamina_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
     # NVFP4 and MXFP4 (Inkling 2 Mini's experts): their instances hold the RTX 50's FP4 tensor-core instructions,
-    # which assemble for sm_120a alone, so these two files are built for 120a where the build names 120
+    # which assemble for the arch-specific 12Xa alone, so these two files are built for 12Xa where the build names 12X
+    # (llama.cpp's ggml-cuda rewrite)
     add_library(lamina_mmq_fp4 OBJECT ${_lamina_mmq}/template-instances/mmq-instance-mxfp4.cu
                                       ${_lamina_mmq}/template-instances/mmq-instance-nvfp4.cu)
     set(_lamina_fp4_archs "")
     foreach(_a ${CMAKE_CUDA_ARCHITECTURES})
-      string(REGEX REPLACE "^120(-real)?$" "120a\\1" _a "${_a}")
+      string(REGEX REPLACE "^(12[0-9])((-real|-virtual)?)$" "\\1a\\2" _a "${_a}")
       list(APPEND _lamina_fp4_archs ${_a})
     endforeach()
     set_target_properties(lamina_mmq_fp4 PROPERTIES CUDA_ARCHITECTURES "${_lamina_fp4_archs}")
@@ -751,6 +752,7 @@ if(LAMINA_NATIVE_EXPERTS)
     add_test(NAME native_expert_parity_k_quants COMMAND native_expert_parity --synthetic q4_K/q5_1 q5_K/q8_0)
     add_test(NAME native_expert_parity_q5_0 COMMAND native_expert_parity --synthetic iq4_xs/q5_0 iq3_xxs/q5_0 iq2_s/q5_0)
     add_test(NAME native_expert_parity_trellis COMMAND native_expert_parity --synthetic tqp5/tqp5 tqp6/tqp6 tqp7/tqp7)
+    add_test(NAME native_expert_parity_fp_rows COMMAND native_expert_parity --synthetic nvfp4/nvfp4 mxfp4/mxfp4 bf16/bf16)
     # --expert-math exact's expf: the CPU pool's (lamina_kernels_cpu) against the GPU's, over every float
     add_executable(swiglu_expf_parity src/kernels/swiglu_expf_parity.cu)
     target_link_libraries(swiglu_expf_parity PRIVATE lamina_kernels_cpu CUDA::cudart)

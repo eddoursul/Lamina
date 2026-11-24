@@ -13,7 +13,7 @@
 
 namespace lamina::kernels::cpu {
 
-/// Bytes of the largest quantized activation any native layer uses (2560 values as Q8_K: 10 x 292).
+/// Bytes of the largest quantized activation any native layer uses (2,560 values as Q8_K, 10 x 292 - or as BF16).
 inline constexpr size_t kNativeActBytes = 5120;
 /// The widest native expert's hidden (n_ff): the pool's per-token rows (Hy4-flash's 1,536; Flash-Next's 640).
 inline constexpr int kNativeFF = 2048;
@@ -38,8 +38,9 @@ struct NativeFmt {
     int act = 0;
     float act_beta = 0.f, act_lbeta = 0.f;
     /// > 0: two floats there in the blob, the scales of its gate/up and of its down rows' products (NVFP4's
-    /// per-expert scales, as the GPU's NativeExpertLayout::scale_off).  The gate/up rows take theirs before the
-    /// activation; the down rows' products are left without (the caller's, where it sums the experts' rows).
+    /// per-expert scales, as the GPU's NativeExpertLayout::scale_off), with act 1 (the SwiGLU rows read none).  The
+    /// gate/up rows take theirs before the activation; the down rows' products are left without (the caller's,
+    /// where it sums the experts' rows).
     size_t scale_off = 0;
 };
 

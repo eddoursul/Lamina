@@ -120,7 +120,7 @@ public:
     /// Adds another instance's counts (the second stage's layers).
     void add_routed(const std::vector<uint32_t>& counts);
 
-    /// Item bf, the prompt path in two stages on two GPUs (lamina/prefill/split.hpp): this instance runs layers
+    /// The prompt path in two stages on two GPUs (lamina/prefill/split.hpp): this instance runs layers
     /// [first, last) only.  first > 0: no embedding and no PLE block; a chunk's residual reaches the buffers' R
     /// (`residual()`) a sub-chunk at a time, each piece before the event `set_in_events` names for it; the session
     /// state holds the layers from `first` on (its QSA states and GDN states indexed from there).  last < n_layers:

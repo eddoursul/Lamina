@@ -469,8 +469,8 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
                 return false;
             }
             if (ts[0]->type == kNvfp4 || ts[2]->type == kNvfp4) {
-                // the GPU expert kernels have no NVFP4, and the GGUF keeps these experts' scales out of their blobs
-                err = "layer " + std::to_string(l) + ": NVFP4 experts, which this engine has no GPU kernels for";
+                // (the GGUF keeps these experts' scales beside their blobs, which the pack's layout has no room for)
+                err = "layer " + std::to_string(l) + ": NVFP4 experts, whose scales this path's pack does not take";
                 return false;
             }
             // a format past ggml's own only where the engine has kernels: its trellis types
