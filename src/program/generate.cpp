@@ -381,7 +381,8 @@ bool apply_cards(Options& o, bool main_after, bool tiers_after) {
         if (!main_after) o.main_gpu_name = "0";
         if (!tiers_after) {
             o.tier_names = {"auto"};
-            o.tier_cards = {GpuCard{"auto"}};
+            o.tier_cards.assign(1, GpuCard{});
+            o.tier_cards[0].name = "auto";
         }
         return true;
     }
@@ -432,7 +433,7 @@ void usage(bool all = false) {
                "\n"
                "A switch also takes --no-<name>.\n",
                stderr);
-    std::fputs(lamina::program::options_help(all ? 0 : lamina::program::kListCommon, all, 118, 36).c_str(), stderr);
+    std::fputs(lamina::program::options_help(all ? 0u : (unsigned) lamina::program::kListCommon, all, 118, 36).c_str(), stderr);
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -1984,7 +1985,10 @@ int lamina::program::run(int argc, char** argv) {
     const bool tier_auto = o.tier_names.size() == 1 && o.tier_names[0] == "auto";
     std::vector<lamina::program::GpuCard> kept_cards;
     auto card_of = [&](size_t i) {
-        return i < o.tier_cards.size() ? o.tier_cards[i] : lamina::program::GpuCard{o.tier_names[i]};
+        if (i < o.tier_cards.size()) return o.tier_cards[i];
+        lamina::program::GpuCard card;
+        card.name = o.tier_names[i];
+        return card;
     };
     for (const lamina::core::GpuInfo& gi : gpus)
         if (tier_auto && gi.ordinal != o.main_gpu) {

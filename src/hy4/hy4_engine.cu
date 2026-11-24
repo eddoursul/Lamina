@@ -994,6 +994,18 @@ struct CopyQueue {
     }
 };
 
+// A parked conversation's file: closing it takes it off the disk tier.  Outside Engine: nested there, its default
+// member initializer is not usable before Engine is complete, so GCC and Clang find it not default-constructible and
+// delete the default constructors of every class that holds one.
+struct FileGone {
+    lamina::core::DiskTier* tier = nullptr;
+    void operator()(lamina::core::DiskFile* f) const {
+        if (f == nullptr) return;
+        if (tier != nullptr) tier->remove(*f);
+        delete f;
+    }
+};
+
 struct Engine {
     Model* m = nullptr;
     int64_t ctx = 0;     // cells of the sparse layers' caches
@@ -1865,14 +1877,6 @@ struct Engine {
     // or that leaves it, goes to files instead - its cells and pooled keys from the device a range at a time, its
     // snapshots as records - and comes back from them; one that comes back keeps its file while it is live, so its
     // next park writes only what it lacks.
-    struct FileGone {
-        lamina::core::DiskTier* tier = nullptr;
-        void operator()(lamina::core::DiskFile* f) const {
-            if (f == nullptr) return;
-            if (tier != nullptr) tier->remove(*f);
-            delete f;
-        }
-    };
     using File = std::unique_ptr<lamina::core::DiskFile, FileGone>;
     struct SnapRec {   // a snapshot in a file: its record is its bytes, then its logits
         int64_t pos;

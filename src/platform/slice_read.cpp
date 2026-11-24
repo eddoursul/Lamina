@@ -91,7 +91,6 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
                 return s.places ? s.places[pc.first + i] + s.dst_off + pc.off
                                 : group + s.dst_off + (uint64_t) (pc.first + i) * s.stride + pc.off;
             };
-            uint8_t* const dst = place(0);
             const uint64_t at = s.offset + (uint64_t) pc.first * s.bytes + pc.off;
             const uint64_t n = pc.len ? pc.len : (uint64_t) pc.n * s.bytes;   // bytes
             const uint64_t slice = pc.len ? pc.len : s.bytes;                  // one slice's (or part's)
@@ -124,7 +123,7 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
                 src = buf;
             }
             if (pc.n == 1 || (!s.places && s.stride == s.bytes)) {
-                std::memcpy(dst, src, (size_t) n);
+                std::memcpy(place(0), src, (size_t) n);
             } else {
                 for (int64_t i = 0; i < pc.n; ++i) std::memcpy(place(i), src + (uint64_t) i * s.bytes, (size_t) s.bytes);
             }
