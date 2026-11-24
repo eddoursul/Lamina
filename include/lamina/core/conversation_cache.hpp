@@ -160,17 +160,22 @@ inline constexpr int64_t kParkDropped = 1024;
 ///   * the prompt is a start of the conversation: the same request again, whose answer is asked for anew;
 ///   * the prompt holds the end of what the conversation wrote last, in another rendering (a client sends an answer
 ///     back without its reasoning, a template leaves a block out of the history): a run of kRun of the conversation's
-///     last kTail tokens stands in the prompt after `at`, no further on than the conversation is long (and kTail).
-inline bool superseded(const Seq& seq, const std::vector<int64_t>& ids, int64_t at) {
-    constexpr int64_t kRun = 16, kTail = 64;
-    const int64_t L = (int64_t) seq.tokens.size(), n = (int64_t) ids.size();
+///     last kLast tokens stands in the prompt after `at`, no further on than the conversation is long (and kLast).
+/// (`tokens`: the conversation's; an engine with a park of its own asks with its own token type.)
+template <class T, class U>
+inline bool superseded(const std::vector<T>& tokens, const std::vector<U>& ids, int64_t at) {
+    constexpr int64_t kRun = 16, kLast = 64;
+    const int64_t L = (int64_t) tokens.size(), n = (int64_t) ids.size();
     if (at < 0 || at > L || at > n) return false;
     if (L - at < kParkDropped) return true;
-    if (n <= L && std::equal(ids.begin(), ids.end(), seq.tokens.begin())) return true;
-    const auto from = ids.begin() + at, to = ids.begin() + std::min(n, L + kTail);
-    for (int64_t s = L - kRun; s >= std::max(at, L - kTail); --s)
-        if (std::search(from, to, seq.tokens.begin() + s, seq.tokens.begin() + s + kRun) != to) return true;
+    if (n <= L && std::equal(ids.begin(), ids.end(), tokens.begin())) return true;
+    const auto from = ids.begin() + at, to = ids.begin() + std::min(n, L + kLast);
+    for (int64_t s = L - kRun; s >= std::max(at, L - kLast); --s)
+        if (std::search(from, to, tokens.begin() + s, tokens.begin() + s + kRun) != to) return true;
     return false;
+}
+inline bool superseded(const Seq& seq, const std::vector<int64_t>& ids, int64_t at) {
+    return superseded(seq.tokens, ids, at);
 }
 
 /// Where a request starts (SequenceCache::begin).  An engine holds one conversation in each of its sessions (one

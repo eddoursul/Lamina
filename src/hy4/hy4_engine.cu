@@ -18,6 +18,7 @@
 
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/artifact/gguf_split.hpp"
+#include "lamina/core/conversation_cache.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/disk_tier.hpp"
 #include "lamina/core/gpu_select.hpp"
@@ -1856,10 +1857,14 @@ struct Engine {
 
     // ---- parked conversations: one a request leaves goes to RAM (its sparse layers' cells and pooled keys up to its
     // end, its snapshots and one at its end), for a later request that continues it; the least recently used leave
-    // when the park passes its budget or the RAM available to the system falls under the reserve.  With a disk tier
-    // (--conversation-spill-dir, lamina/core/disk_tier.hpp) one the RAM does not hold, or that leaves it, goes to files
-    // instead - its cells and pooled keys from the device a range at a time, its snapshots as records - and comes back
-    // from them; one that comes back keeps its file while it is live, so its next park writes only what it lacks.
+    // when the park passes its budget or the RAM available to the system falls under the reserve, only where the one
+    // coming in then fits, and none while it lends its start.  A request starts from the longest start of its prompt
+    // that the live state or a parked conversation continues from (reusable()); a parked one's own next request
+    // (lamina::core::superseded) takes it back, any other request borrows its start and leaves it parked whole
+    // (borrow()).  With a disk tier (--conversation-spill-dir, lamina/core/disk_tier.hpp) one the RAM does not hold,
+    // or that leaves it, goes to files instead - its cells and pooled keys from the device a range at a time, its
+    // snapshots as records - and comes back from them; one that comes back keeps its file while it is live, so its
+    // next park writes only what it lacks.
     struct FileGone {
         lamina::core::DiskTier* tier = nullptr;
         void operator()(lamina::core::DiskFile* f) const {
@@ -1881,6 +1886,7 @@ struct Engine {
         uint64_t used = 0;
         File file;                    // on the disk tier: its cells and snapshots there (`cells` and `snaps` empty)
         std::vector<SnapRec> recs;
+        bool pin = false;             // lends its start to the live state: it stays as it is meanwhile
         size_t bytes() const {   // (its RAM)
             size_t n = cells.size();
             for (const Snap& x : snaps) n += x.bytes.size() + x.logits.size() * 4;
@@ -1897,6 +1903,35 @@ struct Engine {
         size_t n = 0;
         for (const Parked& c : park) n += c.bytes();
         return n;
+    }
+    struct SnapAt {   // a snapshot's place, and whether it has its last token's logits
+        int64_t pos;
+        bool logits;
+    };
+    static std::vector<SnapAt> snaps_at(const std::vector<Snap>& v) {
+        std::vector<SnapAt> r;
+        for (const Snap& x : v) r.push_back({x.pos, !x.logits.empty()});
+        return r;
+    }
+    static std::vector<SnapAt> snaps_at(const Parked& c) {
+        if (!c.file) return snaps_at(c.snaps);
+        std::vector<SnapAt> r;
+        for (const SnapRec& x : c.recs) r.push_back({x.pos, x.n_logits > 0});
+        return r;
+    }
+    /// The start of the prompt `ids` that a conversation of tokens `s` and snapshots `at` continues from (rewind()'s
+    /// rule): the start they share - less its last token where that is all of the prompt and no snapshot there has its
+    /// logits - where `s` ends within kMaxT tokens of it, else the last snapshot at or before it
+    static int64_t reusable(const std::vector<int32_t>& s, const std::vector<SnapAt>& at, const std::vector<int32_t>& ids) {
+        const int64_t L = (int64_t) s.size(), n = (int64_t) ids.size();
+        int64_t c = 0;
+        while (c < L && c < n && s[(size_t) c] == ids[(size_t) c]) ++c;
+        if (c == n && std::none_of(at.begin(), at.end(), [&](const SnapAt& x) { return x.pos == n && x.logits; })) --c;
+        if (L - c <= kMaxT) return std::max<int64_t>(c, 0);
+        int64_t r = 0;
+        for (const SnapAt& x : at)
+            if (x.pos <= c) r = std::max(r, x.pos);
+        return r;
     }
     /// --conversation-spill-dir / --conversation-spill-mib (-1: the default budget, 0: none)
     void open_disk(const std::string& dir, int64_t mib) {
@@ -1984,7 +2019,7 @@ struct Engine {
         while (short_of()) {
             auto lru = park.end();
             for (auto it = park.begin(); it != park.end(); ++it)
-                if (it->file && (lru == park.end() || it->used < lru->used)) lru = it;
+                if (it->file && !it->pin && (lru == park.end() || it->used < lru->used)) lru = it;
             if (lru == park.end()) return false;
             const uint64_t b = disk->bytes(*lru->file);
             std::fprintf(stderr, "lamina: a parked conversation of %zu tokens leaves the disk (%.0f MiB)\n", lru->seq.size(),
@@ -2010,8 +2045,8 @@ struct Engine {
             recs.push_back({x.pos, x.mark, x.logits.size()});
         }
         if (!ok) return false;
-        c.cells = {};
-        c.snaps = {};
+        c.cells = std::vector<uint8_t>();   // (its RAM freed: `= {}` keeps a vector's capacity)
+        c.snaps = std::vector<Snap>();
         c.recs = std::move(recs);
         c.file = std::move(f);
         std::fprintf(stderr, "lamina: a parked conversation of %lld tokens moved to the disk (%.0f MiB in %.0f ms)\n",
@@ -2083,10 +2118,16 @@ struct Engine {
         uint64_t avail = 0;
         const bool known = lamina::platform::available_ram(avail);
         auto short_of = [&] { return parked_bytes() + need > park_budget || (known && avail < n + ram_reserve); };
-        while (short_of()) {   // the least recently used in RAM leave it: to the disk tier where there is one
+        // the least recently used in RAM leave it, to the disk tier where there is one - only where this one then fits
+        // (with every one in RAM that lends nothing gone)
+        size_t movable = 0;
+        for (const Parked& x : park)
+            if (!x.file && !x.pin) movable += x.bytes();
+        const bool fits = parked_bytes() - movable + need <= park_budget && (!known || avail + movable >= n + ram_reserve);
+        while (fits && short_of()) {
             auto lru = park.end();
             for (auto it = park.begin(); it != park.end(); ++it)
-                if (!it->file && (lru == park.end() || it->used < lru->used)) lru = it;
+                if (!it->file && !it->pin && (lru == park.end() || it->used < lru->used)) lru = it;
             if (lru == park.end()) break;
             Parked out = std::move(*lru);   // (out of the park first: the disk tier's room may take others)
             park.erase(lru);
@@ -2181,6 +2222,48 @@ struct Engine {
         snaps = std::move(c.snaps);
         rewind(pos(), true);   // the rings and tails from its end's snapshot
         std::fprintf(stderr, "lamina: a parked conversation of %lld tokens resumed\n", (long long) p);
+    }
+    /// The first `r` tokens of the parked conversation `c` (at one of its snapshots) as the live state, for another
+    /// conversation that starts as it does: its cells up to there, copies of its snapshots up to there, the state at
+    /// that snapshot; `c` stays parked as it is
+    void borrow(Parked& c, int64_t r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const int64_t p = (int64_t) c.seq.size();
+        ensure(r);
+        std::vector<Snap> got;
+        bool ok = true;
+        if (c.file) {
+            ok = disk->get_cells(*c.file, r, disk_copy());
+            for (const SnapRec& x : c.recs) {
+                if (!ok || x.pos > r) continue;
+                Snap s;
+                s.pos = x.pos;
+                s.mark = x.mark;
+                s.bytes.resize(snap_bytes());
+                s.logits.resize(x.n_logits);
+                ok = disk->get_record(*c.file, x.pos, {{s.bytes.data(), s.bytes.size()}, {s.logits.data(), s.logits.size() * 4}});
+                got.push_back(std::move(s));
+            }
+        } else {
+            ok = cells_range(0, r, p, c.cells.data(), false);   // (the park's copy: lo 0, `p` cells)
+            for (const Snap& x : c.snaps)
+                if (x.pos <= r) got.push_back(x);
+        }
+        c.used = ++park_clock;
+        live_file.reset();
+        sfx_ok = 0;
+        if (!ok) {   // (the state starts over)
+            std::fprintf(stderr, "lamina: the start of a parked conversation of %lld tokens could not be read\n",
+                         (long long) p);
+            snaps.clear();
+            seq.clear();
+            return;
+        }
+        seq.assign(c.seq.begin(), c.seq.begin() + r);
+        snaps = std::move(got);
+        rewind(r, true);   // the rings and tails from its snapshot there
+        std::fprintf(stderr, "lamina: the first %lld tokens of a parked conversation of %lld lent%s (%.0f ms)\n",
+                     (long long) r, (long long) p, c.file ? " from the disk" : "", ms_since(t0));
     }
 
     void quant(const float* x, int64_t rows, int64_t n, uint8_t* out, cudaStream_t s_ = nullptr) {
@@ -5196,22 +5279,35 @@ struct Serve {
             return c;
         };
         size_t common = common_of(E.seq);
-        // a parked conversation the prompt continues further than the live one: it comes back, and the live one is
-        // parked when the request leaves it (it drops kParkMin or more of its cells and more than it keeps)
-        size_t best = 0, best_c = common;
+        // a parked conversation the request continues from further on than from the live one: its own next request
+        // (one that continues it whole, or superseded()) takes it back, any other borrows its start and leaves it
+        // parked; the live one is parked in either case.  Else the live one is parked where the request leaves it (it
+        // drops kParkMin or more of its cells and more than it keeps) and is not its own next request.
+        size_t best = 0;
+        int64_t best_r = Engine::reusable(E.seq, Engine::snaps_at(E.snaps), ids);
         for (size_t i = 0; i < E.park.size(); ++i)
-            if (const size_t c = common_of(E.park[i].seq); c > best_c) {
+            if (const int64_t r = Engine::reusable(E.park[i].seq, Engine::snaps_at(E.park[i]), ids); r > best_r) {
                 best = i + 1;
-                best_c = c;
+                best_r = r;
             }
         const int64_t drop = E.pos() - (int64_t) common;
         if (best > 0) {
-            Engine::Parked back = std::move(E.park[best - 1]);
-            E.park.erase(E.park.begin() + (ptrdiff_t) (best - 1));
-            E.park_live(0);
-            E.unpark(std::move(back));
+            Engine::Parked& c = E.park[best - 1];
+            if (best_r >= (int64_t) c.seq.size() || lamina::core::superseded(c.seq, ids, best_r)) {
+                Engine::Parked back = std::move(c);
+                E.park.erase(E.park.begin() + (ptrdiff_t) (best - 1));
+                E.park_live(0);
+                E.unpark(std::move(back));
+            } else {
+                c.pin = true;
+                E.park_live(0);   // (the park may move: the lender found again)
+                const auto lender = std::find_if(E.park.begin(), E.park.end(), [](const Engine::Parked& x) { return x.pin; });
+                E.borrow(*lender, best_r);
+                lender->pin = false;
+            }
             common = common_of(E.seq);
-        } else if (drop >= Engine::kParkMin && drop > (int64_t) common) {
+        } else if (drop >= Engine::kParkMin && drop > (int64_t) common &&
+                   !lamina::core::superseded(E.seq, ids, (int64_t) common)) {
             E.park_live((int64_t) common);
         }
         std::vector<float> lg;
