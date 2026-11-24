@@ -1314,7 +1314,6 @@ struct Engine {
     bool q_half = true;          // a chunk's q to the cell cards as halves (LAMINA_INK_QHALF=0: as floats)
     bool fuse_qkv = true;        // its q, bias and K/V cells in one launch (LAMINA_INK_QKV=0: two)
     bool fuse_mix = true;        // a sublayer's mix and norm in one launch where no loop gate is between (LAMINA_INK_MIXNORM=0)
-    int gate_rb = 0;             // the gate's h outputs a block of ctrl_h_kernel (0: by the rows; LAMINA_INK_GATE_RB)
     // A decode forward's products of several rows from the rows' interleaved copy, where the library has a kernel for
     // the format and shape (native_mmvq_il: native_mmvq's values to the bit; LAMINA_INK_IL=0: native_mmvq)
     bool il_on = true;
@@ -1327,7 +1326,7 @@ struct Engine {
     void* il_att[3] = {nullptr, nullptr, nullptr};
     static constexpr int kIlIn = 8192;   // values a row of such a product has at most
     // A chunk's NVFP4 experts on the FP16 tensor cores (nvfp4_gemm) instead of MMQ: where the card has no FP4 tensor
-    // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC: 0 never, 1 on any card; LAMINA_INK_TC_MIN: tests')
+    // cores of its own, from tc_min rows a chunk (LAMINA_INK_TC=0: never; LAMINA_INK_TC_MIN: tests')
     bool tc_on = false;
     int tc_min = 48;
     int feed_rows = kMaxT;                  // rows a decode forward of a prompt part takes (LAMINA_INK_ROWS: fewer, a test's)
@@ -1505,7 +1504,6 @@ struct Engine {
     // end go in after them and are written over by the rows that stay), the block's buffers, the head's product.
     const Spark* sp = nullptr;
     int64_t sp_reach = 32768;        // context cells a layer without a window keeps (--dspark-reach)
-    int64_t sp_stretch = 0;          // LAMINA_INK_SPARK_STRETCH=<cells>: a scan's stretch (a test's; 0: by the cells in use)
     struct SparkRing {
         ik::Cells cells{};
         int64_t see = 0;             // context cells its layer's rows see
@@ -1684,7 +1682,6 @@ struct Engine {
     // routing), so the two drivers take turns at the host's work: stage_mu is held by the one that runs, and let go
     // of only while it waits for its card's stream (stream_wait) or for the other driver.
     Rows P2;
-    int tc_warps_set = 0;            // LAMINA_INK_TC_WARPS (a test's): the chunk attention's warps a block, every launch
     bool tc_prod = true;             // LAMINA_INK_TC_PROD=0: no warps that widen q8_0 cells beside the products
     bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
     bool stages_apart = false;       // LAMINA_INK_STAGES=2 (a test's): the stretches as in stages, their chunks one card after the other
@@ -2669,14 +2666,13 @@ struct Engine {
     /// the eight score this one (tc_prods) - a full application's on every card, a window one's on the cards before
     /// the RTX 50s (4,096 rows over 86K cells: 97.9 -> 79.8 ms on an RTX 3090, 66.1 -> 56.1 on an RTX 5070 Ti, whose
     /// window applications keep four warps: 1.12 against 1.27 ms); FP16 cells four (eight lose 0.3-1.1% on an RTX 3090,
-    /// a tenth on an RTX 50).  LAMINA_INK_TC_WARPS=4 or 8: a test's, every launch, without the producers.
+    /// a tenth on an RTX 50).
     int tc_warps(int T, int arch, bool window) const {
-        if (tc_warps_set > 0) return tc_warps_set;
         if (tc_prods(arch, window) > 0) return 8;
         return kv_q8 && arch < 10 && T >= 2048 ? 8 : 4;
     }
     int tc_prods(int arch, bool window) const {
-        return kv_q8 && tc_prod && tc_warps_set == 0 && (!window || arch < 10) ? 4 : 0;
+        return kv_q8 && tc_prod && (!window || arch < 10) ? 4 : 0;
     }
     /// rows of partial sums the segments of a chunk write at most, on a card of `sms` SMs
     static int seg_rows_of(int sms, int n_head) { return 640 * std::max(sms, 1) / n_head + 64; }
@@ -2990,7 +2986,6 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_MMA_ROWS")) mma_rows = std::max(2, std::min(8, std::atoi(r)));
         if (const char* r = std::getenv("LAMINA_INK_QKV")) fuse_qkv = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_MIXNORM")) fuse_mix = std::atoi(r) != 0;
-        if (const char* r = std::getenv("LAMINA_INK_GATE_RB")) gate_rb = std::atoi(r) == 1 ? 1 : 4;
         if (const char* r = std::getenv("LAMINA_INK_DRAW_RULE")) draw_rule = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_IL")) {   // bit 0: a product alone, bit 1: the projections
             il_on = (std::atoi(r) & 1) != 0;
@@ -2998,16 +2993,16 @@ struct Engine {
         }
         if (const char* r = std::getenv("LAMINA_INK_ILP")) il_proj_min = std::max(2, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_AHEAD")) ahead_on = std::atoi(r) != 0;
-        // (by the card: a chunk's NVFP4 experts on the FP16 tensor cores where the current one has no FP4 ones; the
-        // projections' interleaved copy from 3 rows, on an RTX 50 from 8)
+        // (by the card: a chunk's NVFP4 experts on the FP16 tensor cores where the current one has no FP4 ones, but with
+        // LAMINA_INK_TC=0; the projections' interleaved copy from 3 rows, on an RTX 50 from 8)
         const char* const tc_set = std::getenv("LAMINA_INK_TC");
-        auto tc_here = [tc_set] { return tc_set ? std::atoi(tc_set) != 0 : MMQ::built() && !MMQ::native_fp4(40); };
+        const bool tc_off = tc_set != nullptr && std::atoi(tc_set) == 0;
+        auto tc_here = [tc_off] { return !tc_off && MMQ::built() && !MMQ::native_fp4(40); };
         const int il_set = il_proj_min;
         auto il_min = [il_set](int arch) { return il_set > 0 ? il_set : arch >= 10 ? 8 : 3; };
         tc_on = tc_here();
         if (const char* r = std::getenv("LAMINA_INK_TC_MIN")) tc_min = std::max(0, std::atoi(r));
         if (const char* r = std::getenv("LAMINA_INK_TC_SEGS")) tc_segs = std::max(0, std::atoi(r));
-        if (const char* r = std::getenv("LAMINA_INK_TC_WARPS")) tc_warps_set = std::atoi(r) == 8 ? 8 : 4;
         if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
@@ -4755,10 +4750,9 @@ struct Engine {
         else ik::mix_kernel<<<grid, row4(), 0, st>>>(a);
     }
     /// The loop gates' h of a.n inputs: a block four of a row's outputs where several rows run (a window of drafts:
-    /// 0.8% a window), one where a row is alone (four lose 0.4% there) - the same sums.  LAMINA_INK_GATE_RB=1 or 4: every
-    /// forward's.
+    /// 0.8% a window), one where a row is alone (four lose 0.4% there) - the same sums.
     void ctrl_h(const ik::CtrlIn& a, int T) {
-        const bool four = (gate_rb > 0 ? gate_rb == 4 : T > 1) && a.R % 4 == 0;
+        const bool four = T > 1 && a.R % 4 == 0;
         const dim3 grid((unsigned) (four ? a.R / 4 : a.R), (unsigned) T, (unsigned) a.n);
         if (four) ik::ctrl_h_kernel<4><<<grid, row4(), 0, st>>>(a);
         else ik::ctrl_h_kernel<1><<<grid, row4(), 0, st>>>(a);
@@ -5795,7 +5789,6 @@ struct Engine {
         // the rings: a layer's cells, the block's after them, and the slack; whole stretches of whole tiles
         sp_ring.resize((size_t) s.n_layer);
         int max_ch = 1;
-        if (const char* e = std::getenv("LAMINA_INK_SPARK_STRETCH")) sp_stretch = std::max<int64_t>(0, std::atoll(e));
         // (its cells in the model's format: q8_0 halves their VRAM - 590 -> 314 MiB at a reach of 131,072 cells)
         sp_q8 = kv_q8;
         if (const char* e = std::getenv("LAMINA_INK_SPARK_KV")) sp_q8 = std::string(e) == "q8_0";
@@ -5806,7 +5799,6 @@ struct Engine {
             const lamina::inkling2::DrafterRing shape = lamina::inkling2::drafter_ring(r.see);
             r.chunk = shape.chunk;
             r.n_chunks = (int) ((r.see + T + r.chunk - 1) / r.chunk);
-            if (sp_stretch > 0) r.n_chunks = (int) std::min<int64_t>(512, (r.see + T + sp_stretch - 1) / sp_stretch + 1);
             r.cells.ring = 1;
             r.cells.q8 = sp_q8 ? 1 : 0;
             r.cells.cap = shape.cap;
@@ -6092,7 +6084,6 @@ struct Engine {
             // largest allows - a short context is not left to a few blocks of a long reach's stretches)
             const int64_t used = P + T - lo;
             int64_t c = std::max<int64_t>(3, (used + 64 * ik::kTcCells - 1) / (64 * ik::kTcCells)) * ik::kTcCells;
-            if (sp_stretch > 0) c = sp_stretch;
             c = std::min<int64_t>(c, r.chunk);
             c = std::max<int64_t>(c, (used + r.n_chunks - 1) / r.n_chunks);   // (the grid's blocks hold them)
             c = (c + ik::kTcCells - 1) / ik::kTcCells * ik::kTcCells;
