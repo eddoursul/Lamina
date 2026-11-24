@@ -1926,7 +1926,7 @@ namespace {
 // shared expert's 640, the keys' 512), 4096 (the output projections' 2560), 8192 (the gate projection's 6144), 12288
 // (qkv's 10240), and more (the queries' 12288, the head's); 0: native_mmvq's kernels, which spread a row over four
 // warps (IQ3_S's decode the weights once a column).  The fastest in the verify window on the RTX 3090
-// (scratch/mm1_bench.cu alone, CUPTI traces beside the other branches); 5-8 columns take 2 rows from 2048.
+// (the kernels alone, CUPTI traces beside the other branches); 5-8 columns take 2 rows from 2048.
 struct IlRows { int type; uint8_t r[4][5]; };
 constexpr IlRows kIlRows[] = {
     {23, {{0, 0, 0, 0, 0}, {0, 2, 2, 2, 2}, {0, 2, 2, 2, 2}, {0, 2, 2, 1, 2}}},   // IQ4_XS

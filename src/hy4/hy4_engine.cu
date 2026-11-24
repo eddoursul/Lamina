@@ -9,8 +9,7 @@
 //     read from the SSD by PleReader) before its layers, gated MLA with sinks over the window's ring of cells or, on
 //     the sparse layers, over the cells the indexer picks, the dense FFN of layer 0, the latent MoE elsewhere; the
 //     head after the streams' reduce;
-//   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (bench/parity.py's interface through
-//     scratch/q36/logits_to_parity.py).
+//   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (parity runs against llama.cpp).
 #include "hy4_kernels.cuh"
 #include "hy4_dfly_file.hpp"
 #include "hy4_place.hpp"
@@ -2971,8 +2970,8 @@ struct Engine {
         }
         return out;
     }
-    // LAMINA_HY4_DFLY_DUMP=FILE: DFly's first pass written for scratch/hy4/dfly_ref.py (its reference from the BF16
-    // weights): the sizes, the trunk's state, the block's embeddings, each layer's picks and its trunk layer's K/V rows
+    // LAMINA_HY4_DFLY_DUMP=FILE: DFly's first pass written for a check against a reference from the BF16 weights: the
+    // sizes, the trunk's state, the block's embeddings, each layer's picks and its trunk layer's K/V rows
     // up to the block's end (the block's own written by the pass), the block's final states, the first draft's state
     const char* dfly_dump_path = std::getenv("LAMINA_HY4_DFLY_DUMP");
     std::vector<float> dfly_dump_emb;

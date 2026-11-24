@@ -10,8 +10,8 @@
 //     n_pass times a token, each pass with cells and convolution state of its own): the depth mix over the block inputs,
 //     the loop's messages and gates, attention with the distance bias and the sink over a window visit's ring of cells
 //     or a full visit's every cell (FP16 or q8_0), the experts, the causal convolutions after each;
-//   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (bench/parity.py's interface through
-//     scratch/q36/logits_to_parity.py); --serve: lamina-server's line protocol.
+//   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (parity runs against llama.cpp);
+//     --serve: lamina-server's line protocol.
 #include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
 

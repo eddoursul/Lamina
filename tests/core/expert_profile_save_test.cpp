@@ -5,8 +5,8 @@
 //
 //     expert_profile_save_test [<dump> <prior profile> <expected profile>]
 //
-// With files: blend_learned_profile over a run's counts (scratch/bh/patch_dump.py's dump) against a profile ranked from
-// them by scratch/bh/rank.py blend:1.
+// With files: blend_learned_profile over a run's dumped counts against a profile ranked from them by a separate
+// implementation of the same blend.
 #include "lamina/core/expert_cache.hpp"
 
 #include <cstdint>

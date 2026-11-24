@@ -304,7 +304,7 @@ Lamina generates 67% of its speed after a short one, llama.cpp 72%. A follow-up 
 conversation's last checkpoint where its history differs from what the engine holds (0.1-0.3 s at 16-18K tokens), and
 a conversation another request replaced comes back from RAM.
 
-Agreement with llama.cpp (`scratch/q36/parity36.sh`, every expert in VRAM, 8,192 cells): along llama.cpp's own greedy
+Agreement with llama.cpp (every expert in VRAM, 8,192 cells): along llama.cpp's own greedy
 text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 5.8e-4 / 2.0e-3 / 7.5e-7 (a 27-token
 coding request, the thinking task, the edit; 138 / 400 / 400 positions), where llama.cpp's CPU backend is 5.1e-4 /
 1.8e-3 / 1.0e-6 from it; the argmax agrees at 100% / 99.0% / 100% of the positions (the CPU backend's 100% / 98.75% /
@@ -336,7 +336,7 @@ Llama.cpp reads a chunk's micro-batches on both GPUs at once too. With the 3090 
 chunks), Lamina's prompts read ~12% slower (the 5070 Ti, the faster at their products, takes fewer layers) and its
 generation is ~3% faster. VRAM: 13.9 GiB on the 5070 Ti (1.3 left free, the desktop taking 0.6), 21.9 on the 3090.
 
-Agreement with llama.cpp (`scratch/q36/parity36.sh` with `MODEL=27bm`, 8,192 cells, K and V in q8_0 in both engines):
+Agreement with llama.cpp (8,192 cells, K and V in q8_0 in both engines):
 along llama.cpp's own greedy text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 5.9e-5 /
 5.2e-4 / 8.9e-6 (the coding request, the thinking task, the edit; 133 / 400 / 400 positions), where llama.cpp's CPU
 backend is 2.4e-4 / 2.4e-3 / 7.3e-6 from it; the argmax agrees at 100% / 98.75% / 100% of the positions (the CPU
@@ -352,7 +352,7 @@ and in RAM, a part of 8,192 tokens or more in chunks of 16,384 rows run in two o
 (build 12473, commit 0a054d0b0), 72,000 cells, the dense weights on the main 3090, the experts of layers 1-4 there too,
 5-14 on the other 3090, 15-20 on the 5070 Ti, the rest on the CPU (with every expert on the CPU it measured the same).
 The same requests through each server's API, greedy, Lamina's conversation cache off, a short request between the
-fill prompts (prefixes of one text) so that each is read whole (`scratch/hy4/compare.sh`).
+fill prompts (prefixes of one text) so that each is read whole.
 
 | | llama.cpp | Lamina |
 |---|---|---|
@@ -368,7 +368,7 @@ after the fill prompts. An agent's session replayed through the server (pi, 20 r
 19.4-19.7 ms a token (50.8-51.5 tok/s), 9.3 J a token on the three cards and the CPU, its prompts 30 s. VRAM after the
 runs: the main 3090 23.0 GiB, the other 22.2, the 5070 Ti 14.7 (the desktop's 0.7 in it).
 
-Agreement with llama.cpp (`scratch/hy4/parity.sh`, K and V in q8_0 in both engines): Lamina forced along llama.cpp's
+Agreement with llama.cpp (K and V in q8_0 in both engines): Lamina forced along llama.cpp's
 own greedy text, the next-token distributions' mean KL 9.5e-4 / 3.1e-3 / 2.1e-6 / 6.0e-3 (a short coding request, the
 thinking task, the edit, after the 16K prompt; 200 / 400 / 400 / 200 positions), the argmax agreeing at 99.5% /
 97.75% / 100% / 97% of them.
@@ -384,7 +384,7 @@ DSpark, found beside the model, and the prompt lookup). llama.cpp: unsloth's for
 (b12572-mix-8eebad4, the only build that reads the files' layout), `-ub 512`, a context of 32,768; for the 86K prompt
 98,304 with K and V in q8_0, which still passes the card's VRAM, so its numbers there are not clean; with the drafter
 (`--spec-type draft-dspark`) its drafts of up to 3 / up to 7 tokens. The same requests through each server's API,
-greedy, Lamina's conversation cache off (`bench/lamina_bench.py`, `scratch/inkling/llama/speed.py`). The last
+greedy, Lamina's conversation cache off. The last
 column is this PC's config: the model's looped layers on the RTX 5070 Ti beside that card (the second table
 below).
 
@@ -413,7 +413,7 @@ short context, ~0.75 GiB more with the drafter (llama.cpp 19,410 with its 32,768
 drafter); the server ~1.1 GB of RAM. Lamina's prompt cache: a 21K-token prompt's follow-up in 0.2 s, a parked
 22K-token conversation back in 0.4 s.
 
-Agreement with llama.cpp (`scratch/inkling/parity.sh`): Lamina forced along llama.cpp's own greedy text, the argmax
+Agreement with llama.cpp: Lamina forced along llama.cpp's own greedy text, the argmax
 agreeing at 98.0% / 97.75% / 99.5% of the positions (the short prompt, thinking, the edit; 200 / 400 / 400), mean KL
 2.2e-3 / 2.7e-3 / 1.0e-3; after the 21K prompt 96.9% and 1.4e-2 (64 positions), where llama.cpp at another batch size
 agrees with itself at 96.9-98.4% and 3.7e-3 to 1.5e-2. A prompt chunk's experts read their activations as halves on

@@ -295,9 +295,8 @@ struct IQ4XS {
 // d (half), qs[32]. A stage holds UPT * NK blocks (a multiple of 8: its bytes a multiple of 16, so a row's stages all
 // start at the row's own 16-byte offset); unit u: NK blocks, one m16n8k32 each. Block j's codes start 34 j + 2 bytes
 // in: at a word for odd j, two bytes past one for even j; its scale is the low half of the word at 34 j (even j) or
-// the high half of the word two bytes before (odd j). Stages of 24 blocks, 4 warps of 6 (scratch/inkling/kern/
-// q8_bench.cu in the optimization repository: the fastest of three layouts on the RTX 3090, within 3% of the best on
-// the RTX 5070 Ti).
+// the high half of the word two bytes before (odd j). Stages of 24 blocks, 4 warps of 6 (the
+// fastest of three layouts on the RTX 3090, within 3% of the best on the RTX 5070 Ti).
 struct Q80 {
     static constexpr int VALUES = 32, BLOCK = 34, UPT = 4, NK = 6, SB = UPT * NK, PITCH = 848;
     static_assert(NK % 2 == 0 && SB % 8 == 0, "whole words");
@@ -442,7 +441,7 @@ void launch(const void* w, const Acts& a, float* y, int n_in, int n_out, int nco
         static_cast<const uint8_t*>(w), a, y, n_in, n_out, ncols);
 }
 
-// Where the tensor cores are the faster on the RTX 3090 (scratch/bi/mma_bench.cu against native_mmvq_il's kernels and
+// Where the tensor cores are the faster on the RTX 3090 (timed against native_mmvq_il's kernels and
 // MMQ, every format and shape of the two model files at 1-8 tokens): by format and rows (the first class a matrix
 // reaches), from n0 tokens, with tm tiles a CTA and st stages in flight. The heads' class also on the RTX 5070 Ti.
 // Not Q8_0 (UD-Q4_K_XL's): faster alone from 5 tokens, but its shorter dense chain and head took time from the

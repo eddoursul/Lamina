@@ -338,7 +338,7 @@ struct Options {
     /// part that short, and a last prompt chunk that short.  A batched call has a fixed cost (it lends and refills
     /// expert-cache slots and reads every expert its tokens use): ~0.55 s with a second GPU, ~1.6 s with IQ3_XXS on
     /// the 3090 alone; verify windows of 8 tokens (--spec-lookup) cost 5-8 ms per token.  They break even at ~73
-    /// (UD-Q4_K_XL) and ~113 (IQ3_XXS) tokens with a second GPU, ~400 without (bench/feed_test.py).
+    /// (UD-Q4_K_XL) and ~113 (IQ3_XXS) tokens with a second GPU, ~400 without.
     int64_t feed_max = 46;
     /// --serve (upstream #458): the role token of a short turn the server puts right before the new assistant turn
     /// (the "system" of a trailing reasoning-effort turn, with the config's "effort_position": "end").  When the turn
@@ -647,10 +647,10 @@ void usage(bool all = false) {
                  "                       --adapt-every 0; not --serve)\n"
                  "  --window-logits PATH per token the verify windows emit, a line with its index among the generated\n"
                  "                       tokens, the token and the 64 likeliest as id:log-probability, from the head's\n"
-                 "                       logits (comparisons with llama.cpp, bench/parity.py; not --serve)\n"
+                 "                       logits (comparisons with llama.cpp; not --serve)\n"
                  "  --dump-draft-data DIR  with --serve: each request's positions for the draft layer's training: the\n"
                  "                       final residual rows, and the verify windows' 64 likeliest next tokens and\n"
-                 "                       drafts (scratch/bg; the prompt read in batches whatever --feed-max)\n"
+                 "                       drafts (the prompt read in batches whatever --feed-max)\n"
                  "  --window-profile     with --stats: the GPU time of each stage of the verify window (timestamps\n"
                  "                       inside the graph; each costs ~2 us)\n"
                  "  --prefill-profile    the GPU time of each section of the batched prompt path (--serve: each\n"
@@ -825,10 +825,9 @@ double tier1_rate(const Drive* t) {
 /// sleeps when it is under the threshold after kDwell rounds awake, and wakes when it passes kWake of it, or at
 /// once when the quick average passes kGuard of it (code and edits: three to ten times a thinking text's load).
 /// Asleep or with its clocks' lock still on its way, the tier is left out of the windows (ExpertDispatch::GpuTier).
-/// LAMINA_TIER_POWER_LOG=<file>: a line a round with the policy's inputs (scratch/power's sleep_trace.py and
-/// load_stretches.py read it): the window's tokens, the round's ms, the pool's ms, its experts, the second tier's
-/// (the third GPU's), the policy's state and the dispatch's, both averages, the marginal cost, the first tier's
-/// experts, the position.
+/// LAMINA_TIER_POWER_LOG=<file>: a line a round with the policy's inputs: the window's tokens, the round's ms, the
+/// pool's ms, its experts, the second tier's (the third GPU's), the policy's state and the dispatch's, both averages,
+/// the marginal cost, the first tier's experts, the position.
 void tier_power(Drive* t) {
     if (!t->power_on) return;
     constexpr double kAbsorb = 0.35, kWake = 1.15, kGuard = 2.0, kForget = 0.98;
@@ -1192,7 +1191,7 @@ static std::vector<std::array<int32_t, 3>> refill_plan(const SlotLoan& loan, con
     return out;
 }
 
-/// --dump-draft-data DIR: a request's positions for the draft layer's training (scratch/bg), in three files, req<k>.*:
+/// --dump-draft-data DIR: a request's positions for the draft layer's training, in three files, req<k>.*:
 /// .r16 every position's final residual row (hc * n_embd FP16, the prompt's from the batched path), in order; .meta a
 /// record a position (position, token, the next token or -1 for the prompt's, and from a verify window the 64
 /// likeliest next tokens: ids, then log-probabilities); .rounds a record a window (its first position, T, the drafts

@@ -86,7 +86,7 @@ int main() {
                   draft_pass_chance(0, 0.7f, 0.9f, 0.7f) > draft_pass_chance(0, 0.7f, 0.9f, 1.2f),
               "a lower temperature widens the likeliest token's interval");
     }
-    {   // the constants: values of the fit's own code (the optimization repository's scratch/dw/rules.py)
+    {   // the constants: values of the fit's own code
         struct { int step; float q, u, t, want; } c[] = {{0, 0.7f, 0.2f, 0.7f, 0.65417f}, {0, 0.7f, 0.95f, 0.7f, 0.20464f},
                                                          {1, 0.5f, 0.5f, 0.7f, 0.36337f}, {2, 0.9f, 0.99f, 1.0f, 0.28441f},
                                                          {0, 0.4f, 0.05f, 0.3f, 0.49229f}, {5, 0.6f, 0.3f, 1.5f, 0.43514f}};

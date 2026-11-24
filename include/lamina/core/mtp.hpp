@@ -117,7 +117,7 @@ public:
 private:
     /// load's readers, which leave the same dense buffer, expert blobs and draft vocabulary: the layer's file, or a
     /// folder of the earlier layout (dense.txt with dense.bin, experts.bin, experts.txt when the experts are GGUF
-    /// blocks, draft_vocab.bin), as earlier setups downloaded it and scratch/bg's training writes it
+    /// blocks, draft_vocab.bin), as earlier setups downloaded it and the layer's training writes it
     bool load_file(const std::string& path, const ModelGeometry& g, uint64_t& dense_bytes, std::string& err);
     bool load_folder(const std::string& dir, const ModelGeometry& g, uint64_t& dense_bytes, std::string& err);
     bool record_forward(int T, int step_row0, cudaStream_t cs, std::string& err);

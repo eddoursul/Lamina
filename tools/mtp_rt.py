@@ -6,7 +6,7 @@
 
 Sources:
   --rt DIR     a folder of the earlier runtime layout (dense.txt with dense.bin, experts.bin, draft_vocab.bin;
-               experts.txt with experts in GGUF blocks), as the draft layer's training writes it (scratch/bg): its bytes
+               experts.txt with experts in GGUF blocks), as the draft layer's training writes it: its bytes
                as they are, the Q2_0 experts' blobs put back into GGUF blocks; the file is checked against the folder
   --gguf FILE  tools/mtp_pack.py's file of the checkpoint's tensors (BF16), the dense ones put in the engine's forms
                below; or a file this tool wrote, copied (with --draft-vocab: another draft vocabulary)

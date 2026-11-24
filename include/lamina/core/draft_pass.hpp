@@ -23,8 +23,8 @@
 // is the token drawn as often), so the draft stays the likeliest token.
 //
 // The constants: fitted per chain step on dumped rounds of the distilled draft layer (mtp/rt-distilled) under two
-// model files (IQ3_S and UD-Q4_K_XL: one set serves both), at top_p 0.95 and top_k 20 over temperatures 0.3-1.5 (the
-// optimization repository's scratch/dw/fit_final.py).  Another draft layer wants its own.
+// model files (IQ3_S and UD-Q4_K_XL: one set serves both), at top_p 0.95 and top_k 20 over temperatures 0.3-1.5.
+// Another draft layer wants its own.
 #pragma once
 
 #include <algorithm>

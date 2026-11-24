@@ -37,8 +37,8 @@ WIN = os.name == "nt"
 EXE = ".exe" if WIN else ""
 ARM = platform.machine().lower() in ("arm64", "aarch64")
 BUILD = ROOT / "build-portable"   # the portable preset's (CMakePresets.json)
-# NVIDIA's redistributable CUDA 13.4.1 (redistrib_13.4.1.json): nvcc 13.4.59, cuBLAS 13.7.0.27, the toolkit build.cmd
-# uses on the PC Lamina is developed on.  The parts the engine's build takes, nothing else.
+# NVIDIA's redistributable CUDA 13.4.1 (redistrib_13.4.1.json): nvcc 13.4.59, cuBLAS 13.7.0.27, the toolkit the PC
+# Lamina is developed on builds with.  The parts the engine's build takes, nothing else.
 CUDA_REDIST = "13.4.1"
 REDIST_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
 COMPONENTS = ("cuda_nvcc", "cuda_crt", "libnvvm", "cuda_cudart", "libcublas", "cccl")

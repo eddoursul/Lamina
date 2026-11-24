@@ -857,7 +857,7 @@ endif()
 # The HTTP server: the OpenAI, Anthropic and Responses APIs and the web app, with the engine on a thread of its own
 # (lamina_program through in-process channels). lamina_text is its text layer (no GPU): the tokenizer, the chat
 # template (Jinja, vendored from llama.cpp's common/jinja), the request conversions and the output parser;
-# lamina-check runs it on JSON-lines cases (scratch/lamina/p6_check.py compares them with the Python server's).
+# lamina-check runs it on JSON-lines cases.
 if(TARGET cpp-httplib AND TARGET ggml-base)
   file(GLOB _lamina_jinja CONFIGURE_DEPENDS src/server/vendor/jinja/*.cpp)
   add_library(lamina_jinja STATIC ${_lamina_jinja} src/server/vendor/common/json.cpp

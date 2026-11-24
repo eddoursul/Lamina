@@ -1,5 +1,5 @@
 // src/server/check.cpp - lamina-check: the server's text layer on JSON-lines cases, for comparisons with the Python
-// implementation it ports (scratch/lamina/p6_check.py).
+// implementation it ports.
 //
 //   lamina-check tokenize GGUF CASES   {"text", "parse_special", "plain": [[a, b], ...] (bytes)} -> {"ids"}
 //   lamina-check decode GGUF CASES     {"ids"} -> {"text"}
