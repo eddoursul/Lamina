@@ -4574,6 +4574,17 @@ struct Prompt {
             hy4k::k_hc_pre<<<T, 256, 0, st>>>(X, m->ohc_fn, m->ohc_scale, m->ohc_base, hc, N, hc, g.eps, g.hc_eps, 0.f,
                                               nullptr, xh, m->out_norm, y, g.eps);
             K::bf16_gemv_fp32_mmvf_multi(y + (size_t) (T - 1) * N, m->head, E.logits, N, g.n_vocab, 1, st);
+            // the ring as of each snapshot inside the chunk (the block's first row after a restore there takes the
+            // state of the row before): the ring before the chunk, the chunk's rows up to the snapshot; before the
+            // catch-up, whose attention takes y
+            for (size_t si = 0; si < E.chunk_snaps.size(); ++si) {
+                const int64_t S = E.chunk_snaps[si];
+                uint8_t* hr = snap_devs[si] + hring_off;
+                CK(cudaMemcpyAsync(hr, E.hring, (size_t) Engine::kHRing * N * 4, cudaMemcpyDeviceToDevice, st));
+                for (int64_t q = std::max<int64_t>(p0, S - Engine::kHRing); q < S; ++q)
+                    CK(cudaMemcpyAsync(hr + (size_t) (q % Engine::kHRing) * N * 4, y + (size_t) (q - p0) * N,
+                                       (size_t) N * 4, cudaMemcpyDeviceToDevice, st));
+            }
             mtp_catch_up(T, p0);
         } else {
             const float* Xl = X + (size_t) (T - 1) * hc * N;
@@ -4595,7 +4606,7 @@ struct Prompt {
                 CK(cudaMemcpyAsync(sd + tail_off[li], l.tail, (size_t) kTail * 2 * (size_t) g.idx_dim * 4,
                                    cudaMemcpyDeviceToDevice, st));
             }
-            if (E.hring)   // the drafters re-anchor after a restore (DFly) or catch up from it (the MTP block)
+            if (E.hring && !(E.drafts_on && m->has_mtp))   // DFly's: it re-anchors after a restore (the MTP block's above)
                 CK(cudaMemcpyAsync(sd + hring_off, E.hring, (size_t) Engine::kHRing * N * 4, cudaMemcpyDeviceToDevice, st));
             std::vector<uint8_t> bytes(snap_size);
             CK(cudaMemcpyAsync(bytes.data(), sd, snap_size, cudaMemcpyDeviceToHost, st));
