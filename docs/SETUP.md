@@ -446,8 +446,9 @@ sent again may write another text: which experts the CPU computes follows the ro
 
 Drafts: a generated token is a window of rows through the model, the last token and up to 7 drafts after it; a
 draft stays while it is the token the request's sampler picks (the sampler runs on the GPU, a row's draw by its
-token's position), and a window's rows leave what a row at a time leaves, to the bit, so a greedy text is the same
-with drafts and without. The drafts are the tokens that followed the text's last 16 tokens or more where they
+token's position), and a window's rows leave what a row at a time leaves, to the bit, up to 5 rows (from 6 its
+Q8_0 products take the int8 tensor cores and round apart: a greedy text with drafts may part from the one without at
+a near tie; `LAMINA_INK_MMA=0`: every window to the bit). The drafts are the tokens that followed the text's last 16 tokens or more where they
 occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the model's block drafter, DSpark:
 `lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
 `dspark-Inkling-2-Mini-Q8_0.gguf`), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a

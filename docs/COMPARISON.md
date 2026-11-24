@@ -377,7 +377,7 @@ thinking task, the edit, after the 16K prompt; 200 / 400 / 400 / 200 positions),
 
 The engine's inkling2 path (`src/inkling2`) on unsloth's UD-IQ4_XS (24 layers of which 12 run three times a token,
 128 experts a layer with 8 used; the experts NVFP4 in layers 0-19, the attention's matrices Q8_0), llama.cpp
-measured on 2026-11-21 and Lamina on 2026-11-22 and 23, the whole model on the main RTX 3090 in both engines, K and V in
+measured on 2026-11-21 and Lamina on 2026-11-24, the whole model on the main RTX 3090 in both engines, K and V in
 FP16. Lamina on that card alone (the context what its VRAM holds: 184,320 tokens beside the drafter; prompts in
 chunks of 1,024 rows that grow to 4,096 while the card's free VRAM holds their buffers; the model's drafter,
 DSpark, found beside the model, and the prompt lookup). llama.cpp: unsloth's fork as released
@@ -390,14 +390,17 @@ below).
 
 | | llama.cpp | llama.cpp, drafter (3 / 7) | Lamina, no drafts | Lamina | Lamina, this PC's config |
 |---|---|---|---|---|---|
-| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 118.1 | 162.4 | 186.0 |
-| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 117.4 | 176.3 | 215.3 |
-| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 3,293 / 114.5 | 3,258 / 337.6 | 4,722 / 405.3 |
-| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 3,332 / 105.4 | 3,376 / 212.6 | 5,217 / 275.8 |
-| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 2,792 / 80.1 | 2,800 / 160.4 | 4,463 / 186.9 |
+| Generation: code, 31-token prompt (t/s) | 57.2 | 61.6 / 69.5 | 123.3 | 152.2 | 190.7 |
+| Generation: thinking (3,000 tokens) | 57.1 | 62.2 / 50.7 | 122.3 | 189.7 | 220.0 |
+| Edit: prompt / generation (t/s) | 985 / 55.2 | 85.9 / 98.3 | 3,414 / 119.0 | 3,370 / 356.0 | 4,895 / 422.3 |
+| 21K-token prompt / generation after it (t/s) | 897 / 52.4 | | 3,514 / 109.7 | 3,490 / 259.3 | 5,448 / 323.8 |
+| 86K-token prompt / generation after it (t/s) | 253 / 27.3 | | 2,910 / 82.6 | 2,878 / 166.6 | 4,613 / 201.0 |
 
-Lamina's greedy text is the same with drafts and without (a window's rows leave what a row at a time leaves, to the
-bit); sampled at temperature 0.7 the speeds are the greedy ones within 3% (the sampler runs on the GPU). Its drafter
+A window of 6 rows or more takes its Q8_0 products on the int8 tensor cores, which round apart from a row at a time's
+(below that a window's rows leave what a row at a time leaves, to the bit), so a greedy text with drafts may part
+from the one without at a near tie: the code answer is another text since (2.04 tokens a verify pass where the one
+before kept 2.40: 152.2 tok/s, 164.3 with `LAMINA_INK_MMA=0`), the thinking one too (2.92 against 2.79: 189.7, 181.2).
+Sampled at temperature 0.7 the speeds are the greedy ones within 3% (the sampler runs on the GPU). Its drafter
 keeps as many of its drafts as llama.cpp's (three a window: 46% and 47% after the short prompt and thinking, 92% on
 the edit; llama.cpp 51%, 51% and 91%), and goes on only while their joint probability stays at 0.5 (0.7 until
 2026-11-22, where those shares were counted: an agent's session takes 5-6% less time a generated token at 0.5).
@@ -419,12 +422,13 @@ exact arithmetic is 2,000 times smaller there.
 
 The layers over two cards (a later card's `layers=6-17`: the repeated layers, half of the weights and three
 quarters of a token's layer applications; a prompt's chunks on the two cards at once), through the API with drafts
-and the conversation cache off on 2026-11-22 (this PC's config on 2026-11-23), against the RTX 3090 alone (162 / 176
-/ 338 tok/s for code / thinking / an edit, prompts at 3,258 / 3,376 / 2,800 tok/s at 2.9K / 21K / 86K tokens):
+and the conversation cache off on 2026-11-22 (this PC's config on 2026-11-24), against the RTX 3090 alone then (162 /
+176 / 338 tok/s for code / thinking / an edit, prompts at 3,258 / 3,376 / 2,800 tok/s at 2.9K / 21K / 86K tokens;
+on 2026-11-24 152 / 190 / 356 and 3,370 / 3,490 / 2,878):
 
 | The first card, the card with layers 6-17 | Code / thinking / an edit | Prompts at 2.9K / 21K / 86K | Context in FP16 on the two |
 |---|---|---|---|
-| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free and its clocks locked at 2,900 MHz: this PC's config | 186 / 215 / 405 | 4,722 / 5,217 / 4,463 | 397,312 |
+| RTX 3090 (4 lanes), RTX 5070 Ti (16 lanes) with 4 GiB left free and its clocks locked at 2,900 MHz: this PC's config | 191 / 220 / 422 | 4,895 / 5,448 / 4,613 | 397,312 |
 | the same at the driver's lower clock (~2,150 MHz: it picks either) | 174 / 198 / 371 | 4,014 / 5,039 / 4,430 | 405,504 |
 | RTX 5070 Ti, RTX 3090 | 177 / 190 / 345 | 3,402 / 3,728 / 3,271 | 462,848 |
 | RTX 3090, the other RTX 3090 (4 lanes each, its clocks locked) | 163 / 179 / 312 | 3,252 / 3,546 / 3,143 | 778,240 |
