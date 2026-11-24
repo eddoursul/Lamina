@@ -1664,11 +1664,15 @@ __global__ void q_halves_kernel(const float* __restrict__ q, __half2* __restrict
         h[i] = __floats2half2_rn(v.x, v.y);
     }
 }
-template <int NW, bool Q8>
-__global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
+/// NP (q8_0 cells): warps of their own that fetch a tile's cells and widen them into halves for the next step while
+/// the NW warps score the current one - two tiles of halves, one barrier a step for every warp, and the producers'
+/// own (named barrier 1) around the raw tile they share.  0: every warp widens between two barriers.
+template <int NW, bool Q8, int NP = 0>
+__global__ void __launch_bounds__((NW + NP) * 32) attn_tc_kernel(TcIn a) {
+    static_assert(NP == 0 || Q8, "producer warps widen q8_0 cells");
     constexpr int D = 128, ROWS = 16 * NW, NT = 32 * NW;
     constexpr int kRawCell = (D / 32) * 34;                                 // a cell's q8_0 blocks of one K/V head
-    __shared__ __align__(16) __half tile[Q8 ? 1 : 2][2][kTcCells * kTcPad];   // [buffer][K | V]
+    __shared__ __align__(16) __half tile[Q8 && NP == 0 ? 1 : 2][2][kTcCells * kTcPad];   // [buffer][K | V]
     __shared__ __align__(16) uint8_t raw[2][Q8 ? kTcCells * kRawCell : 16];   // Q8: [K | V] as stored
     const int t0 = blockIdx.x * ROWS, h = blockIdx.y, g = h / (a.H / a.HK);
     const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
@@ -1684,9 +1688,11 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
     const size_t cbytes = cell_bytes(a.c, a.HK, D);
     const int n_all = (max(cnt, 0) + kTcCells - 1) / kTcCells, n_seg = (int) gridDim.z, sg = (int) blockIdx.z;
     const int it0 = (int) ((long long) n_all * sg / n_seg), n_tiles = (int) ((long long) n_all * (sg + 1) / n_seg);
+    // (the threads that fetch and widen: the producers' where there are, else every one)
+    const int ft = NP > 0 ? tid - NT : tid, fn = NP > 0 ? 32 * NP : NT;
     auto fetch = [&](int buf, int base) {
         if constexpr (Q8) {   // 17 chunks of 8 bytes a cell and side
-            for (int i = tid; i < 2 * kTcCells * (kRawCell / 8); i += NT) {
+            for (int i = ft; i < 2 * kTcCells * (kRawCell / 8); i += fn) {
                 const int side = i >= kTcCells * (kRawCell / 8), j = i - side * kTcCells * (kRawCell / 8);
                 const int c = j / (kRawCell / 8), ch = j % (kRawCell / 8);
                 uint8_t* d = raw[side] + c * kRawCell + ch * 8;
@@ -1712,7 +1718,52 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
         }
         cp_commit();
     };
-    if (it0 < n_tiles) fetch(0, it0 * kTcCells);
+    auto widen = [&](int buf) {   // the raw tile's blocks into halves, eight values a step
+        for (int i = ft; i < 2 * kTcCells * 16; i += fn) {
+            const int side = i >= kTcCells * 16, j = i - side * kTcCells * 16, c = j / 16, u = j % 16, blk = u / 4;
+            const uint8_t* cell = raw[side] + c * kRawCell;
+            const __half dh = *reinterpret_cast<const __half*>(cell + blk * 34);
+            const __half2 d = __halves2half2(dh, dh);
+            const int at = blk * 34 + 2 + (u % 4) * 8;   // the codes: at a word, or two bytes into one
+            const uint32_t* wp = reinterpret_cast<const uint32_t*>(cell + (at & ~3));
+            uint32_t w0 = wp[0], w1 = wp[1];
+            if (at & 2) {
+                const uint32_t w2 = wp[2];
+                w0 = (w0 >> 16) | (w1 << 16);
+                w1 = (w1 >> 16) | (w2 << 16);
+            }
+            const uint2 x0 = q8_widen4(w0, d), x1 = q8_widen4(w1, d);
+            *reinterpret_cast<uint4*>(tile[buf][side] + c * kTcPad + u * 8) = make_uint4(x0.x, x0.y, x1.x, x1.y);
+        }
+    };
+    if constexpr (NP > 0) {
+        if (tid >= NT) {   // a producer: tile it0 before the products start, then each step the next one
+            auto bar = [] { asm volatile("bar.sync 1, %0;" ::"n"(32 * NP)); };
+            if (it0 < n_tiles) {
+                fetch(0, it0 * kTcCells);
+                cp_wait<0>();
+                bar();
+                widen(0);
+                bar();
+                if (it0 + 1 < n_tiles) fetch(0, (it0 + 1) * kTcCells);
+            }
+            __syncthreads();
+            for (int it = it0; it < n_tiles; ++it) {
+                if (it + 1 < n_tiles) {
+                    cp_wait<0>();
+                    bar();
+                    widen((it + 1 - it0) & 1);
+                    bar();
+                    if (it + 2 < n_tiles) fetch(0, (it + 2) * kTcCells);
+                }
+                __syncthreads();
+            }
+            return;
+        }
+        __syncthreads();   // (tile it0 is widened)
+    } else {
+        if (it0 < n_tiles) fetch(0, it0 * kTcCells);
+    }
     const int rA = w * 16 + (lane >> 2), rB = rA + 8;
     const bool inA = rA < nrows, inB = rB < nrows;
     const size_t hA = (size_t) (t0 + (inA ? rA : 0)) * a.H + h, hB = (size_t) (t0 + (inB ? rB : 0)) * a.H + h;
@@ -1762,31 +1813,21 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
     for (int j = 0; j < 16; ++j) o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.f;
     for (int it = it0; it < n_tiles; ++it) {
         const int base = it * kTcCells;
-        cp_wait<0>();
-        __syncthreads();   // the tile has arrived, and the last one's cells were read
         const __half *kt, *vt;
-        if constexpr (Q8) {   // the blocks into halves, eight values a step; then the next tile's on their way
-            for (int i = tid; i < 2 * kTcCells * 16; i += NT) {
-                const int side = i >= kTcCells * 16, j = i - side * kTcCells * 16, c = j / 16, u = j % 16, blk = u / 4;
-                const uint8_t* cell = raw[side] + c * kRawCell;
-                const __half dh = *reinterpret_cast<const __half*>(cell + blk * 34);
-                const __half2 d = __halves2half2(dh, dh);
-                const int at = blk * 34 + 2 + (u % 4) * 8;   // the codes: at a word, or two bytes into one
-                const uint32_t* wp = reinterpret_cast<const uint32_t*>(cell + (at & ~3));
-                uint32_t w0 = wp[0], w1 = wp[1];
-                if (at & 2) {
-                    const uint32_t w2 = wp[2];
-                    w0 = (w0 >> 16) | (w1 << 16);
-                    w1 = (w1 >> 16) | (w2 << 16);
-                }
-                const uint2 x0 = q8_widen4(w0, d), x1 = q8_widen4(w1, d);
-                *reinterpret_cast<uint4*>(tile[0][side] + c * kTcPad + u * 8) = make_uint4(x0.x, x0.y, x1.x, x1.y);
-            }
+        if constexpr (NP > 0) {   // (the producers widened this one in the step before)
+            kt = tile[(it - it0) & 1][0];
+            vt = tile[(it - it0) & 1][1];
+        } else if constexpr (Q8) {   // the blocks into halves, eight values a step; then the next tile's on their way
+            cp_wait<0>();
+            __syncthreads();   // the tile has arrived, and the last one's cells were read
+            widen(0);
             __syncthreads();
             if (it + 1 < n_tiles) fetch(0, base + kTcCells);
             kt = tile[0][0];
             vt = tile[0][1];
         } else {
+            cp_wait<0>();
+            __syncthreads();   // the tile has arrived, and the last one's cells were read
             if (it + 1 < n_tiles) fetch((it + 1 - it0) & 1, base + kTcCells);
             kt = tile[(Q8 ? 0 : it - it0) & 1][0];
             vt = tile[(Q8 ? 0 : it - it0) & 1][1];
@@ -1893,6 +1934,7 @@ __global__ void __launch_bounds__(NW * 32) attn_tc_kernel(TcIn a) {
                 mma16816(o[2 * n4 + 1], pa, b[2], b[3]);
             }
         }
+        if constexpr (NP > 0) __syncthreads();   // (the producers' next tile is whole; this one may be written)
     }
     if (a.part) {   // the partial sums: a row's m and l by one of its lanes, its values by each lane's
         float* const to = sg == 0 ? a.part : a.seg + (size_t) (sg - 1) * a.T * a.H * (D + 2);

@@ -1602,6 +1602,7 @@ struct Engine {
     // of only while it waits for its card's stream (stream_wait) or for the other driver.
     Rows P2;
     int tc_warps_set = 0;            // LAMINA_INK_TC_WARPS (a test's): the chunk attention's warps a block, every launch
+    bool tc_prod = true;             // LAMINA_INK_TC_PROD=0: no warps that widen q8_0 cells beside the products
     bool stages_on = true;           // LAMINA_INK_STAGES=0: a split's chunks one card after the other
     bool stages_apart = false;       // LAMINA_INK_STAGES=2 (a test's): the stretches as in stages, their chunks one card after the other
     bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
@@ -2532,13 +2533,19 @@ struct Engine {
     }
     /// its compute capability's major number (8: RTX 30 and 40, 12: RTX 50)
     int main_arch() { return main_sms(), main_arch_; }
-    /// The chunk attention's warps a block (16 rows each) on a card of compute capability `arch`: eight for q8_0
-    /// cells on the cards before the RTX 50s from 2,048 rows (a tile widened serves twice the rows: an 86K-token
-    /// prompt 1.1% faster on an RTX 3090), four else - FP16 cells lose 0.3-1.1% with eight there, an RTX 50 a
-    /// tenth.  LAMINA_INK_TC_WARPS=4 or 8: a test's, every launch.
-    int tc_warps(int T, int arch) const {
+    /// The chunk attention's warps a block (16 rows each) on a card of compute capability `arch`, for a full
+    /// application or a window one: with q8_0 cells eight and four more that fetch the next tile and widen it while
+    /// the eight score this one (tc_prods) - a full application's on every card, a window one's on the cards before
+    /// the RTX 50s (4,096 rows over 86K cells: 97.9 -> 79.8 ms on an RTX 3090, 66.1 -> 56.1 on an RTX 5070 Ti, whose
+    /// window applications keep four warps: 1.12 against 1.27 ms); FP16 cells four (eight lose 0.3-1.1% on an RTX 3090,
+    /// a tenth on an RTX 50).  LAMINA_INK_TC_WARPS=4 or 8: a test's, every launch, without the producers.
+    int tc_warps(int T, int arch, bool window) const {
         if (tc_warps_set > 0) return tc_warps_set;
+        if (tc_prods(arch, window) > 0) return 8;
         return kv_q8 && arch < 10 && T >= 2048 ? 8 : 4;
+    }
+    int tc_prods(int arch, bool window) const {
+        return kv_q8 && tc_prod && tc_warps_set == 0 && (!window || arch < 10) ? 4 : 0;
     }
     /// rows of partial sums the segments of a chunk write at most
     int seg_cap() { return 640 * main_sms() / (int) m->g.n_head + 64; }
@@ -2546,16 +2553,18 @@ struct Engine {
     /// the card too - five blocks an SM over 16,384 cells or more (the blocks end apart: the last ones alone would
     /// leave SMs idle), one and a quarter over 4,096 or fewer (a block's start and end cost a short range more), a
     /// segment eight tiles at least
-    int tc_segments(int T, long long cells) {
-        const int rows = 16 * tc_warps(T, main_arch()), blocks = (T + rows - 1) / rows * (int) m->g.n_head;
+    int tc_segments(int T, long long cells, bool window) {
+        const int rows = 16 * tc_warps(T, main_arch(), window), blocks = (T + rows - 1) / rows * (int) m->g.n_head;
         const double fill = std::min(5.0, std::max(1.25, 5.0 * (double) cells / 16384.0));
         const long long want = tc_segs > 0 ? tc_segs : ((long long) (fill * main_sms()) + blocks - 1) / blocks;
         return (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, cells / (8 * ik::kTcCells), (long long) (seg_cap() / T)}));
     }
     void tc_launch(const ik::TcIn& a, int n_seg, cudaStream_t s, int arch) {
-        const int nw = tc_warps(a.T, arch);
+        const int nw = tc_warps(a.T, arch, a.win > 0);
         const dim3 grid((unsigned) ((a.T + 16 * nw - 1) / (16 * nw)), (unsigned) a.H, (unsigned) n_seg);
-        if (nw == 8) {
+        if (tc_prods(arch, a.win > 0) > 0) {
+            ik::attn_tc_kernel<8, true, 4><<<grid, 384, 0, s>>>(a);
+        } else if (nw == 8) {
             if (kv_q8) ik::attn_tc_kernel<8, true><<<grid, 256, 0, s>>>(a);
             else ik::attn_tc_kernel<8, false><<<grid, 256, 0, s>>>(a);
         } else {
@@ -2884,6 +2893,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
         snap_sync = std::getenv("LAMINA_INK_SNAP_SYNC") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_GROUP")) group_rows = std::max(0, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_TC_PROD")) tc_prod = std::atoi(r) != 0;
         if (const char* r = std::getenv("LAMINA_INK_GATE_FUSE")) gate_fuse = std::max(0, std::atoi(r));
         CK(cudaEventCreateWithFlags(&ev_q[0], cudaEventDisableTiming));
         for (cudaEvent_t& ev : lag_ev[0]) CK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
@@ -3715,7 +3725,7 @@ struct Engine {
             cc.q8 = kv_q8 ? 1 : 0;
             // (a few rows over the card's cells: in segments, more blocks than the rows and heads make - tc_segments'
             // rule with this card's SMs - their sums joined here)
-            const int rows = 16 * tc_warps(T, c.arch), blocks = (T + rows - 1) / rows * H;
+            const int rows = 16 * tc_warps(T, c.arch, false), blocks = (T + rows - 1) / rows * H;
             const double fill = std::min(5.0, std::max(1.25, 5.0 * (double) c.cells / 16384.0));
             const long long want = tc_segs > 0 ? tc_segs : ((long long) (fill * std::max(c.sms, 1)) + blocks - 1) / blocks;
             const int n_seg = (int) std::max(1LL, std::min({want, (long long) ik::kTcSegs, (long long) c.cells / (8 * ik::kTcCells),
@@ -5316,7 +5326,7 @@ struct Engine {
             }
             const long long in_use = slide ? (long long) (T + win - 1) : (long long) (p0 + T);
             const long long from = L.full ? (long long) lo : 0LL;
-            const int n_seg = tc_segments(T, slide ? (long long) win : in_use - from);
+            const int n_seg = tc_segments(T, slide ? (long long) win : in_use - from, !L.full);
             float* const part = carded ? R.tpart : n_seg > 1 ? R.spart : nullptr;
             float* const seg = n_seg > 1 ? R.spart + (carded ? 0 : (size_t) T * H * (D_ + 2)) : nullptr;
             ik::TcIn a{cells, R.q, R.bias, R.ns, R.graw, R.pos_d, R.aout, T, H, HK, L.ext, L.full ? 0 : win, in_use, part, 0,
