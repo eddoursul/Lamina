@@ -1378,7 +1378,21 @@ struct Engine {
                                           // in use, the first one's number (0)}
         int32_t* step_h = nullptr;        // pinned
         float* sum_h = nullptr;           // pinned: its sums on their way to the main card
-        std::vector<void*> dev_mem, host_mem;
+        std::vector<void*> dev_mem, host_mem;   // its buffers, freed with it
+        /// VRAM of the card's, zeroed (the card current), and pinned memory, freed with it
+        void* dev_buf(size_t bytes) {
+            void* p = nullptr;
+            CK(cudaMalloc(&p, bytes));
+            CK(cudaMemset(p, 0, bytes));
+            dev_mem.push_back(p);
+            return p;
+        }
+        void* host_buf(size_t bytes) {
+            void* p = nullptr;
+            CK(cudaHostAlloc(&p, bytes, cudaHostAllocPortable));
+            host_mem.push_back(p);
+            return p;
+        }
     };
     std::vector<Card> cards;
     std::vector<int> cell_devs;        // --cell-gpus
@@ -1641,8 +1655,8 @@ struct Engine {
     double up_ms_mb = 0.12;          // an upload's ms a MB
     std::vector<float> cpu_job_ms, cpu_row_ms;   // [layer]: a CPU job of one row, and each row more
     long long ck_entries = 0, ck_cpu = 0, ck_sent = 0;   // a chunk's RAM entries, the CPU's of them, experts uploaded
-    long long ex_entries = 0, ex_ram = 0;   // routed entries of the decode forwards, and those the CPU computed
-    double ex_ms = 0;                // the CPU's part of them
+    long long ex_entries = 0, ex_ram = 0;   // routed entries of the decode forwards, those of RAM experts among them
+    double ex_ms = 0;                // their time (the CPU's, or the RAM experts' card's)
     // LAMINA_INK_ROUTE=FILE: the routing the host sees (a chunk's, and a decode forward's with experts in RAM), for
     // placement simulations: "INKR", layers, experts, top_k, each layer's blob bytes (int64); then records of
     // {kind (0 a chunk's visit, 1 a decode forward's, 2 a request's end), layer, n, n experts}, int32 each
@@ -1758,6 +1772,18 @@ struct Engine {
     cudaEvent_t ev_snap = nullptr, ev_landed = nullptr;
     bool logits_held = false;          // the state came from a prompt's end: its logits are the decode rows' row 0
     size_t conv_bytes() const { return visits.size() * conv_floats * 4; }
+    /// A visit's convolution inputs of a decode forward's rows (win_raw: conv_commit takes the states from them)
+    size_t win_raw_floats() const { return (size_t) kMaxT * (size_t) m->g.conv_channels(); }
+    /// Where a split's card's visits sit in the rings and the convolution states, in bytes (the arrays have each
+    /// visit's place on either card): rings [r0, r1), states [c0, c1)
+    struct SatSpan {
+        size_t r0, r1, c0, c1;
+    };
+    SatSpan sat_span() const {
+        const size_t per = 2 * (size_t) ring_cap * cell_bytes;
+        return {(size_t) sat->w0 * per, (size_t) sat->w1 * per, (size_t) sat->v0 * conv_floats * 4,
+                (size_t) sat->v1 * conv_floats * 4};
+    }
     size_t state_bytes() const { return ring_bytes + conv_bytes() + (size_t) m->g.n_vocab * 4 + 8; }
 
     // timing
@@ -1945,14 +1971,16 @@ struct Engine {
     int img_take = -1;   // the lot whose image the next state_load may take (kv_copy's take)
     size_t img_here_bytes() const { return ring_bytes + conv_bytes(); }
     size_t img_there_bytes() const {
-        return sat ? (size_t) (sat->w1 - sat->w0) * 2 * (size_t) ring_cap * cell_bytes + (size_t) (sat->v1 - sat->v0) * conv_floats * 4 : 0;
+        if (!sat) return 0;
+        const auto [r0, r1, c0, c1] = sat_span();
+        return (r1 - r0) + (c1 - c0);
     }
     /// The last checkpoint image, of the conversation parked in lot l now (its buffer `host`), into that lot's image
     /// (where VRAM allows)
     void image_keep(int l, const uint8_t* host) {
         LotImage& im = lot_img[l];
         im.pos = -1;
-        if (!img_on || m->in_ram || snap == nullptr || snap_dst == nullptr || snap_pos < 0) return;
+        if (!img_on || snap == nullptr || snap_dst == nullptr || snap_pos < 0) return;
         auto room = [&](int dev, size_t bytes) {   // (what is free past the card's reserve)
             const OnDev dv(dev);
             size_t fr = 0, tot = 0;
@@ -2001,19 +2029,24 @@ struct Engine {
         const bool mine = im.pos == pos && im.ck == host && im.here != nullptr && (!sat || im.there != nullptr);
         im.pos = -1;
         if (!mine) return false;
-        const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
         // (this card's: its visits' rings and states, where `snap` had them - a split's other part in there stale, unread)
         bool ok = soft(cudaMemcpyAsync(rings, im.here, ring_bytes, cudaMemcpyDeviceToDevice, st)) &&
                   soft(cudaMemcpyAsync(conv_all, im.here + ring_bytes, conv_bytes(), cudaMemcpyDeviceToDevice, st));
         if (sat) {
             const OnDev dv(sat->dev);
-            const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
-            const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4;
+            const auto [r0, r1, c0, c1] = sat_span();
             ok = ok && soft(cudaMemcpyAsync(sat->rings + r0, im.there, r1 - r0, cudaMemcpyDeviceToDevice, sat->st)) &&
                  soft(cudaMemcpyAsync((uint8_t*) sat->conv_all + c0, im.there + (r1 - r0), c1 - c0, cudaMemcpyDeviceToDevice,
                                       sat->st)) &&
                  soft(cudaStreamSynchronize(sat->st));
         }
+        return logits_back(host, ok);
+    }
+    /// After a state's rings and convolution states, queued on `st` (`ok`: so far without a failure): the logits
+    /// `host` holds after them where its flag says so (a prompt's end), then every copy waited for.  False where one
+    /// failed.
+    bool logits_back(const uint8_t* host, bool ok) {
+        const size_t V4 = (size_t) m->g.n_vocab * 4, body = ring_bytes + conv_bytes();
         int32_t held = 0;
         std::memcpy(&held, host + body + V4, 4);
         if (held == 1)
@@ -2757,6 +2790,19 @@ struct Engine {
             CK(cudaDeviceSynchronize());   // (a copy on the device may return before it ran)
             lg_rows = &D;
         }
+        bufs_free(ck_dev, ck_pin);
+        P = Rows{};
+        P2 = Rows{};
+        chunk_cap = 0;
+        if (sat) {
+            const OnDev dv(sat->dev);
+            CK(cudaDeviceSynchronize());
+            bufs_free(sat->ck_dev, sat->ck_pin);
+            sat->P = Rows{};
+        }
+    }
+    /// A card's chunk buffers (VRAM and pinned memory, the current card's) out of the run's lists, back to the driver
+    static void bufs_free(std::vector<void*>& dev, std::vector<void*>& pin) {
         if (g_owned) {
             std::lock_guard<std::mutex> lk(g_owned->mu);
             auto drop = [](std::vector<void*>& all, const std::vector<void*>& gone) {
@@ -2764,33 +2810,13 @@ struct Engine {
                     return std::find(gone.begin(), gone.end(), q) != gone.end();
                 }), all.end());
             };
-            drop(g_owned->dev, ck_dev);
-            drop(g_owned->pinned, ck_pin);
+            drop(g_owned->dev, dev);
+            drop(g_owned->pinned, pin);
         }
-        for (void* q : ck_dev) CK(cudaFree(q));
-        for (void* q : ck_pin) CK(cudaFreeHost(q));
-        ck_dev.clear();
-        ck_pin.clear();
-        P = Rows{};
-        P2 = Rows{};
-        chunk_cap = 0;
-        if (sat) {
-            const OnDev dv(sat->dev);
-            CK(cudaDeviceSynchronize());
-            if (g_owned) {
-                std::lock_guard<std::mutex> lk(g_owned->mu);
-                for (std::vector<void*>* all : {&g_owned->dev, &g_owned->pinned})
-                    all->erase(std::remove_if(all->begin(), all->end(), [&](void* q) {
-                        return std::find(sat->ck_dev.begin(), sat->ck_dev.end(), q) != sat->ck_dev.end() ||
-                               std::find(sat->ck_pin.begin(), sat->ck_pin.end(), q) != sat->ck_pin.end();
-                    }), all->end());
-            }
-            for (void* q : sat->ck_dev) CK(cudaFree(q));
-            for (void* q : sat->ck_pin) CK(cudaFreeHost(q));
-            sat->ck_dev.clear();
-            sat->ck_pin.clear();
-            sat->P = Rows{};
-        }
+        for (void* q : dev) CK(cudaFree(q));
+        for (void* q : pin) CK(cudaFreeHost(q));
+        dev.clear();
+        pin.clear();
     }
     void chunk_set(int rows) {
         if (rows == chunk_cap) return;
@@ -2815,16 +2841,21 @@ struct Engine {
             std::fprintf(stderr, "lamina: stages: the chunk's rows %d -> %d in %.0f ms\n", was, rows,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
-    /// ensure(n) would find its VRAM on this card with `extra` more bytes of it taken (fewer: freed)
-    bool cells_fit(int64_t n, int64_t extra) {
+    /// The mapping chunks ensure(n) maps on this card (`there`: on the split's card), its visits' ranges each
+    int64_t cells_chunks(int64_t n, bool there) {
+        if (n <= mapped) return 0;
         const int64_t G = (int64_t) lamina::core::vmm_granularity();
         auto chunks = [&](int64_t cells) { return ((int64_t) ((uint64_t) cells * cell_bytes) + G - 1) / G; };
-        int64_t need = 0;
-        if (n > mapped) {
-            int64_t ranges = 0;   // (this card's: a split's card has its own check)
-            for (size_t v = 0; v < visits.size(); ++v) ranges += visits[v].k_vm && !on_sat((int) v) ? 2 : 0;
-            need = holes((int64_t) ((uint64_t) lo * cell_bytes / (uint64_t) G), chunks(std::min<int64_t>(ctx, (n + kGrow - 1) / kGrow * kGrow)), false) * ranges;
-        }
+        int64_t ranges = 0;
+        for (size_t v = 0; v < visits.size(); ++v) ranges += visits[v].k_vm && on_sat((int) v) == there ? 2 : 0;
+        return holes((int64_t) ((uint64_t) lo * cell_bytes / (uint64_t) G),
+                     chunks(std::min<int64_t>(ctx, (n + kGrow - 1) / kGrow * kGrow)), there) * ranges;
+    }
+    /// ensure(n) would find its VRAM on this card with `extra` more bytes of it taken (fewer: freed); a split's card
+    /// has its own check (chunk_fit)
+    bool cells_fit(int64_t n, int64_t extra) {
+        const int64_t G = (int64_t) lamina::core::vmm_granularity();
+        const int64_t need = cells_chunks(n, false);
         size_t fr = 0, tot = 0;
         CK(cudaMemGetInfo(&fr, &tot));
         // (the parked conversations' cells give way, and a lot no conversation is in)
@@ -2867,11 +2898,7 @@ struct Engine {
             const int64_t more = (int64_t) chunk_bytes(rows) - (int64_t) chunk_bytes(chunk_cap);
             const int64_t n = std::min<int64_t>(ctx, p0 + (whole ? left : std::min<int64_t>(rows, left)));
             if (sat) {   // (the split's card takes the same buffers: beside its cells' next step, above what it leaves free)
-                const int64_t G = (int64_t) lamina::core::vmm_granularity();
-                auto chunks = [&](int64_t cells) { return ((int64_t) ((uint64_t) cells * cell_bytes) + G - 1) / G; };
-                int64_t ranges = 0;
-                for (size_t v = 0; v < visits.size(); ++v) ranges += visits[v].k_vm && on_sat((int) v) ? 2 : 0;
-                const int64_t need = n > mapped ? holes((int64_t) ((uint64_t) lo * cell_bytes) / G, chunks(std::min<int64_t>(ctx, (n + kGrow - 1) / kGrow * kGrow)), true) * ranges * G : 0;
+                const int64_t need = cells_chunks(n, true) * (int64_t) lamina::core::vmm_granularity();
                 const OnDev dv(sat->dev);
                 size_t fs = 0, ts = 0;
                 CK(cudaMemGetInfo(&fs, &ts));
@@ -2989,7 +3016,7 @@ struct Engine {
         if (prof || nan_probe || xrow_on) use_graphs = false;
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
-        const size_t N = (size_t) g.n_embd, D_ = (size_t) g.head_dim, KV = (size_t) g.kv_width(), C = (size_t) g.n_conv;
+        const size_t N = (size_t) g.n_embd, D_ = (size_t) g.head_dim, C = (size_t) g.n_conv;
         CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
         own(&Owned::streams, st);
         CK(cudaGetDevice(&main_dev));
@@ -3045,12 +3072,10 @@ struct Engine {
             // The first card's own lock, held through every request: a card that works a part of the time (a split's,
             // or beside the CPU's experts) is left by the driver at one clock or another.
             std::string why;
-            int here = 0;
-            CK(cudaGetDevice(&here));
-            main_locked = clocks.add(here, main_clocks, why);
+            main_locked = clocks.add(main_dev, main_clocks, why);
             if (!main_locked)
                 std::fprintf(stderr, "lamina: --main-gpu-clocks %s: %s: GPU %d keeps the driver's clocks\n", main_clocks.c_str(),
-                             why.c_str(), here);
+                             why.c_str(), main_dev);
         }
         if (sat) {
             sat->pack_main = dzero<float>((size_t) ik::kCarry * kMaxT * N);
@@ -3229,10 +3254,10 @@ struct Engine {
         }
 
         // the visits: convolution state, cells
-        conv_floats = (C - 1) * (2 * KV + 2 * N);
+        conv_floats = (C - 1) * (size_t) g.conv_channels();
         const int64_t nv = g.n_visits();
         conv_all = dzero<float>((size_t) nv * conv_floats);
-        win_raw = dzero<float>((size_t) nv * kMaxT * (size_t) (2 * KV + 2 * N));
+        win_raw = dzero<float>((size_t) nv * win_raw_floats());
         ring_cap = ring_cells(g);
         int n_win = 0;
         for (int64_t v = 0; v < nv; ++v) n_win += !g.full(g.visit_layer(v));
@@ -3241,7 +3266,7 @@ struct Engine {
         if (sat) {   // (a visit's place in the three arrays is the same on either card)
             const OnDev dv(sat->dev);
             sat->conv_all = dzero<float>((size_t) nv * conv_floats);
-            sat->win_raw = dzero<float>((size_t) nv * kMaxT * (size_t) (2 * KV + 2 * N));
+            sat->win_raw = dzero<float>((size_t) nv * win_raw_floats());
             sat->rings = dzero<uint8_t>(ring_bytes);
             sat->v0 = (int) nv;
             for (int64_t v = 0; v < nv; ++v)
@@ -3461,10 +3486,8 @@ struct Engine {
         if (!cards.empty()) {
             for (const Card& c : cards) card_lock(c);   // (every lock is known by now: none is added after the first of these)
             const size_t rows = (size_t) kMaxT * (size_t) g.n_head;
-            CK(cudaHostAlloc((void**) &xq_h, rows * D_ * 4, cudaHostAllocPortable));
-            CK(cudaHostAlloc((void**) &xs_h, rows * 4, cudaHostAllocPortable));
-            own(&Owned::pinned, xq_h);
-            own(&Owned::pinned, xs_h);
+            xq_h = halloc<float>(rows * D_);
+            xs_h = halloc<float>(rows);
             D.rpart = dzero<float>(cards.size() * rows * (D_ + 2));
             if (sat) {
                 const OnDev dv(sat->dev);
@@ -3472,17 +3495,13 @@ struct Engine {
             }
             if (prefill > 0) {   // a chunk's rows (the cards' and the pinned ones for the most a chunk grows to)
                 const size_t prow = (size_t) chunk_most() * (size_t) g.n_head;
-                CK(cudaHostAlloc((void**) &pq_h, prow * D_ * 4, cudaHostAllocPortable));
-                CK(cudaHostAlloc((void**) &ps_h, prow * 4, cudaHostAllocPortable));
-                own(&Owned::pinned, pq_h);
-                own(&Owned::pinned, ps_h);
+                pq_h = halloc<float>(prow * D_);
+                ps_h = halloc<float>(prow);
                 // (a staged run's second driver: its own, for the rows a staged chunk has at most)
                 const size_t srow = chunk_sets() > 1 ? (size_t) std::min(chunk_most(), kStageRows) * (size_t) g.n_head : 0;
                 if (srow > 0) {
-                    CK(cudaHostAlloc((void**) &pq_h2, srow * D_ * 4, cudaHostAllocPortable));
-                    CK(cudaHostAlloc((void**) &ps_h2, srow * 4, cudaHostAllocPortable));
-                    own(&Owned::pinned, pq_h2);
-                    own(&Owned::pinned, ps_h2);
+                    pq_h2 = halloc<float>(srow * D_);
+                    ps_h2 = halloc<float>(srow);
                 }
                 chunk_parts(P, ck_dev);
                 if (P2.cap > 0) chunk_parts(P2, ck_dev);
@@ -3494,42 +3513,26 @@ struct Engine {
                 }
                 for (Card& c : cards) {
                     CK(cudaSetDevice(c.dev));
-                    auto dev_alloc = [&](size_t bytes) {
-                        void* p = nullptr;
-                        CK(cudaMalloc(&p, bytes));
-                        CK(cudaMemset(p, 0, bytes));
-                        c.dev_mem.push_back(p);
-                        return p;
-                    };
-                    c.cq = (float*) dev_alloc(prow * D_ * 4);
-                    c.cns = (float*) dev_alloc(prow * 4);
-                    c.csum = (float*) dev_alloc(prow * (D_ + 2) * 4);
-                    c.cseg = (float*) dev_alloc((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
-                    c.cpos = (int32_t*) dev_alloc((size_t) chunk_most() * 4);
+                    c.cq = (float*) c.dev_buf(prow * D_ * 4);
+                    c.cns = (float*) c.dev_buf(prow * 4);
+                    c.csum = (float*) c.dev_buf(prow * (D_ + 2) * 4);
+                    c.cseg = (float*) c.dev_buf((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
+                    c.cpos = (int32_t*) c.dev_buf((size_t) chunk_most() * 4);
                     const std::vector<int32_t> away((size_t) chunk_most(), kFar);
                     CK(cudaMemcpy(c.cpos, away.data(), away.size() * 4, cudaMemcpyHostToDevice));
-                    void* h = nullptr;
-                    CK(cudaHostAlloc(&h, prow * (D_ + 2) * 4, cudaHostAllocPortable));
-                    c.host_mem.push_back(h);
-                    c.csum_h = (float*) h;
+                    c.csum_h = (float*) c.host_buf(prow * (D_ + 2) * 4);
                     if (srow > 0) {
-                        c.cq2 = (float*) dev_alloc(srow * D_ * 4);
-                        c.cns2 = (float*) dev_alloc(srow * 4);
-                        c.csum2 = (float*) dev_alloc(srow * (D_ + 2) * 4);
-                        c.cseg2 = (float*) dev_alloc((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
-                        void* h2 = nullptr;
-                        CK(cudaHostAlloc(&h2, srow * (D_ + 2) * 4, cudaHostAllocPortable));
-                        c.host_mem.push_back(h2);
-                        c.csum_h2 = (float*) h2;
+                        c.cq2 = (float*) c.dev_buf(srow * D_ * 4);
+                        c.cns2 = (float*) c.dev_buf(srow * 4);
+                        c.csum2 = (float*) c.dev_buf(srow * (D_ + 2) * 4);
+                        c.cseg2 = (float*) c.dev_buf((size_t) c.seg_rows * g.n_head * (D_ + 2) * 4);
+                        c.csum_h2 = (float*) c.host_buf(srow * (D_ + 2) * 4);
                         CK(cudaEventCreateWithFlags(&c.ev2, cudaEventDisableTiming));
                     }
                 }
                 CK(cudaSetDevice(main_dev));
             }
-            for (uint8_t*& h : stage_h) {
-                CK(cudaHostAlloc((void**) &h, (size_t) unit * cell_bytes, cudaHostAllocPortable));
-                own(&Owned::pinned, h);
-            }
+            for (uint8_t*& h : stage_h) h = halloc<uint8_t>((size_t) unit * cell_bytes);
         }
         mapped = grow ? 0 : ctx;
         if (!ensure(std::min<int64_t>(ctx, kGrow))) {
@@ -3615,27 +3618,14 @@ struct Engine {
             std::fprintf(stderr, "lamina: --cell-gpus: GPU %d: the cells' address range could not be reserved\n", dev);
             throw Fatal{1};
         }
-        auto dev_alloc = [&](size_t bytes) {
-            void* p = nullptr;
-            CK(cudaMalloc(&p, bytes));
-            CK(cudaMemset(p, 0, bytes));
-            c.dev_mem.push_back(p);
-            return p;
-        };
-        auto host_alloc = [&](size_t bytes) {
-            void* p = nullptr;
-            CK(cudaHostAlloc(&p, bytes, cudaHostAllocPortable));
-            c.host_mem.push_back(p);
-            return p;
-        };
-        c.q = (float*) dev_alloc(rows * D_ * 4);
-        c.ns = (float*) dev_alloc(rows * 4);
+        c.q = (float*) c.dev_buf(rows * D_ * 4);
+        c.ns = (float*) c.dev_buf(rows * 4);
         c.n_part = stretches(c.cap);
-        c.part = (float*) dev_alloc(rows * (size_t) c.n_part * (D_ + 2) * 4);
-        c.sum = (float*) dev_alloc(rows * (D_ + 2) * 4);
-        c.step = (int32_t*) dev_alloc((kMaxT + 4) * 4);
-        c.step_h = (int32_t*) host_alloc((kMaxT + 4) * 4);
-        c.sum_h = (float*) host_alloc(rows * (D_ + 2) * 4);
+        c.part = (float*) c.dev_buf(rows * (size_t) c.n_part * (D_ + 2) * 4);
+        c.sum = (float*) c.dev_buf(rows * (D_ + 2) * 4);
+        c.step = (int32_t*) c.dev_buf((kMaxT + 4) * 4);
+        c.step_h = (int32_t*) c.host_buf((kMaxT + 4) * 4);
+        c.sum_h = (float*) c.host_buf(rows * (D_ + 2) * 4);
         card_empty(c);
         on_cards += c.cap;
         cards.push_back(std::move(c));
@@ -4449,13 +4439,15 @@ struct Engine {
         spare.clear();
         profile_write(false);
     }
-    /// What the CPU took of the decode forwards' routed entries since the last call, for a request's line
+    /// What the RAM experts took of the decode forwards' routed entries since the last call (on the CPU, or on their
+    /// card) and of the chunks', for a request's line
     std::string ram_summary() {
         if (!m->in_ram) return {};
-        char b[320];
-        std::snprintf(b, sizeof b, "; %lld of %zu experts on the GPU, the CPU's %.1f%% of %lld entries (%.1f ms), %lld swaps; "
+        char b[360];
+        std::snprintf(b, sizeof b, "; %lld of %zu experts on the GPU, %s %.1f%% of %lld entries (%.1f ms), %lld swaps; "
                       "the chunks' %lld RAM entries: %.1f%% the CPU's, %lld experts sent and %lld ahead (%.0f%% of those routed)",
-                      (long long) n_held, m->ranked.size(), ex_entries ? 100.0 * (double) ex_ram / (double) ex_entries : 0.0,
+                      (long long) n_held, m->ranked.size(), xc ? "the RAM experts' card's" : "the CPU's",
+                      ex_entries ? 100.0 * (double) ex_ram / (double) ex_entries : 0.0,
                       ex_entries, ex_ms, swaps, ck_entries, ck_entries ? 100.0 * (double) ck_cpu / (double) ck_entries : 0.0, ck_sent,
                       ck_ahead, ck_ahead ? 100.0 * (double) ck_hit / (double) ck_ahead : 0.0);
         ex_entries = ex_ram = swaps = ck_entries = ck_cpu = ck_sent = ck_ahead = ck_hit = 0;
@@ -5236,7 +5228,7 @@ struct Engine {
         float *ck = V.conv, *cv = ck + (size_t) (C - 1) * KV, *ca = cv + (size_t) (C - 1) * KV, *cf = ca + (size_t) (C - 1) * N;
         // the convolutions' inputs: a decode forward of several rows leaves them a visit, and the states are taken
         // from them once it is known how many rows stay (conv_commit)
-        float* const wr = !batch && T > 1 ? win_raw + (size_t) v * kMaxT * (size_t) (2 * KV + 2 * N) : nullptr;
+        float* const wr = !batch && T > 1 ? win_raw + (size_t) v * win_raw_floats() : nullptr;
         float* const kraw = wr ? wr : R.kraw;
         float* const vraw = wr ? wr + (size_t) kMaxT * KV : R.vraw;
         float* const oraw = wr ? wr + (size_t) kMaxT * 2 * KV : R.oraw;
@@ -5707,61 +5699,56 @@ struct Engine {
         xrow("l_out", v, R.x, T);
     }
 
-    /// The logits of rows [r0, r0 + n) of R's last forward, into its logits rows [0, n)
-    void head(Rows& R, int r0, int n) {
+    /// The final normed state of rows [r0, r0 + T) of R's last forward, into R.nrm's rows [0, T) (`image`: with their
+    /// q8_1 image in R.img; `rows`: by the chunks' kernel)
+    void head_norm(Rows& R, int r0, int T, bool image, bool rows) {
         const Geometry& g = m->g;
         const int N = (int) g.n_embd;
         const float* blks[ik::kBlk] = {};
         for (int b = 0; b < nblocks(); ++b) blks[b] = blk_at(R, b, (int) g.n_pass - 1) + (size_t) r0 * N;
-        mix(blks, nblocks(), R.x + (size_t) r0 * N, m->out_query, 1, R.mixed, nullptr, n);
+        mix(blks, nblocks(), R.x + (size_t) r0 * N, m->out_query, 1, R.mixed, nullptr, T);
         ik::NormIn a{};
         a.x[0] = R.mixed;
         a.w[0] = m->out_norm;
         a.y[0] = R.nrm;
-        a.q[0] = R.img;
+        a.q[0] = image ? R.img : nullptr;
         a.n = 1;
         a.N = N;
         a.eps = g.eps;
-        ik::norm_kernel<<<dim3((unsigned) n, 1), row4(), 0, st>>>(a);
-        mm(m->head, R.img, R.nrm, R.logits, n);
+        norm(a, T, rows);
+    }
+    /// The head's logits of n normed rows (`img`: their q8_1 image) into R's logits rows [0, n), softcapped, a row with
+    /// a non-finite one marked
+    void head_logits(Rows& R, const ik::Q81* img, const float* nrm, int n) {
+        const Geometry& g = m->g;
+        mm(m->head, img, nrm, R.logits, n);
         CK(cudaMemsetAsync(R.bad, 0, (size_t) n * 4, st));
         const long long cnt = (long long) n * g.n_vocab;
         ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap, (int) g.n_vocab, R.bad);
         lg_rows = &R;
+    }
+
+    /// The logits of rows [r0, r0 + n) of R's last forward, into its logits rows [0, n)
+    void head(Rows& R, int r0, int n) {
+        head_norm(R, r0, n, true, false);
+        head_logits(R, R.img, R.nrm, n);
         tick("head");
     }
 
     /// With the drafter: every row's final normed state (the last of the states it reads) and the rows' context cells,
     /// then the logits of the last n rows
     void head_all(Rows& R, int T, int n) {
-        const Geometry& g = m->g;
-        const int N = (int) g.n_embd;
-        const float* blks[ik::kBlk] = {};
-        for (int b = 0; b < nblocks(); ++b) blks[b] = blk_at(R, b, (int) g.n_pass - 1);
-        mix(blks, nblocks(), R.x, m->out_query, 1, R.mixed, nullptr, T);
-        ik::NormIn a{};
-        a.x[0] = R.mixed;
-        a.w[0] = m->out_norm;
-        a.y[0] = R.nrm;
-        a.q[0] = R.batch ? nullptr : R.img;
-        a.n = 1;
-        a.N = N;
-        a.eps = g.eps;
-        norm(a, T, R.batch);
+        head_norm(R, 0, T, !R.batch, R.batch);
         spark_tap(R, (int) sp->taps.size() - 1, T, R.nrm);
         spark_inject(R, T);
         if (n > 0) {
-            const int r0 = T - n;
+            const int N = (int) m->g.n_embd, r0 = T - n;
             const ik::Q81* img = R.img + (size_t) r0 * (size_t) (N / 32);
             if (R.batch) {   // (a chunk's rows have no images: its last row's)
                 K::native_quantize_q8_1(R.nrm + (size_t) r0 * N, R.img, N, n, st);
                 img = R.img;
             }
-            mm(m->head, img, R.nrm + (size_t) r0 * N, R.logits, n);
-            CK(cudaMemsetAsync(R.bad, 0, (size_t) n * 4, st));
-            const long long cnt = (long long) n * g.n_vocab;
-            ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap, (int) g.n_vocab, R.bad);
-            lg_rows = &R;
+            head_logits(R, img, R.nrm + (size_t) r0 * N, n);
         }
         tick("head");
     }
@@ -6504,8 +6491,8 @@ struct Engine {
     /// before the split's (before the next chunk's are queued), 1: the split's card's, 2: this card's after them.
     /// snap_state sends the image on (`imaged`).
     void image_part(int part) {
-        const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
-        const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
+        const auto [r0, r1, c0, c1] = sat_span();
+        const size_t cb = conv_bytes();
         if (part == 1) {
             const OnDev dv(sat->dev);
             CK(cudaStreamWaitEvent(sat->st, sat->ev_landed, 0));   // (the image before is in its buffer)
@@ -6561,7 +6548,7 @@ struct Engine {
     /// Every visit's convolution states after the first `rows` rows of the last decode forward of several
     void conv_commit(int rows) {
         const Geometry& g = m->g;
-        const int KV = (int) g.kv_width(), N = (int) g.n_embd, per = 2 * KV + 2 * N;
+        const int KV = (int) g.kv_width(), N = (int) g.n_embd, per = (int) g.conv_channels();
         ik::conv_commit_kernel<<<dim3((unsigned) ((per + 255) / 256), (unsigned) visits.size()), 256, 0, st>>>(
             conv_all, win_raw, KV, N, (int) g.n_conv, rows, kMaxT);
     }
@@ -6833,8 +6820,8 @@ struct Engine {
             return n == 0 || soft(out ? cudaMemcpyAsync(h, d, n, cudaMemcpyDeviceToHost, s_)
                                       : cudaMemcpyAsync(d, h, n, cudaMemcpyHostToDevice, s_));
         };
-        const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
-        const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
+        const auto [r0, r1, c0, c1] = sat_span();
+        const size_t cb = conv_bytes();
         const bool held = out && imaged;   // (a staged run's image, the cards being past it: image_part)
         uint8_t* const rg = held ? snap : rings;
         uint8_t* const cg = held ? snap + ring_bytes : (uint8_t*) conv_all;
@@ -6880,8 +6867,8 @@ struct Engine {
         if (sat) {
             // A split: each card's visits' rings and states into that card's image behind its queued work, then to
             // the buffer on that card's snapshot stream (this card's: the visits before and after the split's).
-            const size_t per = 2 * (size_t) ring_cap * cell_bytes, r0 = (size_t) sat->w0 * per, r1 = (size_t) sat->w1 * per;
-            const size_t c0 = (size_t) sat->v0 * conv_floats * 4, c1 = (size_t) sat->v1 * conv_floats * 4, cb = conv_bytes();
+            const auto [r0, r1, c0, c1] = sat_span();
+            const size_t cb = conv_bytes();
             const uint8_t* const cv = (const uint8_t*) conv_all;
             auto keep_ = [&](size_t at, const uint8_t* from, size_t n) {
                 return n == 0 || soft(cudaMemcpyAsync(snap + at, from, n, cudaMemcpyDeviceToDevice, st));
@@ -6945,15 +6932,7 @@ struct Engine {
                 std::memset(host + body + V4, 0, 8);
                 return ok;
             }
-            int32_t held = 0;
-            std::memcpy(&held, host + body + V4, 4);
-            bool ok = state_io(host, false);
-            if (held == 1)
-                ok = ok && soft(cudaMemcpyAsync(D.logits, host + body, V4, cudaMemcpyHostToDevice, st)) &&
-                     soft(cudaMemsetAsync(D.bad, 0, 4, st)) && soft(cudaStreamSynchronize(st));
-            logits_held = ok && held == 1;
-            if (logits_held) lg_rows = &D;
-            return ok;
+            return logits_back(host, state_io(host, false));
         }
         if (to_host) {
             const bool ok = soft(cudaMemcpyAsync(host, rings, ring_bytes, cudaMemcpyDeviceToHost, st)) &&
@@ -6961,17 +6940,9 @@ struct Engine {
             std::memset(host + body + V4, 0, 8);
             return soft(cudaStreamSynchronize(st)) && ok;
         }
-        int32_t held = 0;
-        std::memcpy(&held, host + body + V4, 4);
-        bool ok = soft(cudaMemcpyAsync(rings, host, ring_bytes, cudaMemcpyHostToDevice, st)) &&
-                  soft(cudaMemcpyAsync(conv_all, host + ring_bytes, conv_bytes(), cudaMemcpyHostToDevice, st));
-        if (held == 1)
-            ok = ok && soft(cudaMemcpyAsync(D.logits, host + body, V4, cudaMemcpyHostToDevice, st)) &&
-                 soft(cudaMemsetAsync(D.bad, 0, 4, st));
-        ok = soft(cudaStreamSynchronize(st)) && ok;
-        logits_held = ok && held == 1;
-        if (logits_held) lg_rows = &D;
-        return ok;
+        const bool ok = soft(cudaMemcpyAsync(rings, host, ring_bytes, cudaMemcpyHostToDevice, st)) &&
+                        soft(cudaMemcpyAsync(conv_all, host + ring_bytes, conv_bytes(), cudaMemcpyHostToDevice, st));
+        return logits_back(host, ok);
     }
     /// A parked conversation's bytes for `cells` positions: the full visits' K and V
     uint64_t kv_bytes(int64_t cells) const {
@@ -7121,6 +7092,17 @@ struct Engine {
         auto array = [&](size_t vi, int side) {   // an array's place in the copy
             return host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine;
         };
+        auto span_jobs = [&](int64_t c0, int64_t n, bool out) {   // the full visits' cells [c0, c0 + n) and their places
+            std::vector<Xfer> jobs;
+            for (size_t vi = 0; vi < visits.size(); ++vi) {
+                const Visit& V = visits[vi];
+                if (V.cells.ring) continue;
+                for (int side = 0; side < 2; ++side)
+                    jobs.push_back({home_dev(vi), home_st(vi), (side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes,
+                                    array(vi, side) + (size_t) c0 * cell_bytes, (size_t) n * cell_bytes, out});
+            }
+            return jobs;
+        };
         homes_sync();
         if (to_host) {
             for (size_t u = 0; u < unit_card.size() && (int64_t) u * unit < cells; ++u) {
@@ -7132,17 +7114,7 @@ struct Engine {
                         for (int side = 0; side < 2; ++side)
                             card_copy(c, (size_t) full_of[vi], side, slot, array(vi, side) + (size_t) u * unit * cell_bytes, n, true);
             }
-            std::vector<Xfer> jobs;
-            if (cells > lo)
-                for (size_t vi = 0; vi < visits.size(); ++vi) {
-                    const Visit& V = visits[vi];
-                    if (V.cells.ring) continue;
-                    for (int side = 0; side < 2; ++side)
-                        jobs.push_back({home_dev(vi), home_st(vi),
-                                        (side ? V.cells.v : V.cells.k) + (size_t) lo * cell_bytes,
-                                        array(vi, side) + (size_t) lo * cell_bytes, (size_t) (cells - lo) * cell_bytes, true});
-                }
-            return host_xfer(jobs);
+            return host_xfer(cells > lo ? span_jobs(lo, cells - lo, true) : std::vector<Xfer>{});
         }
         cards_clear();
         const int64_t was = n_pos;
@@ -7150,17 +7122,7 @@ struct Engine {
         for (int64_t c0 = 0; c0 < cells && ok; c0 += unit) {
             const int64_t n = std::min<int64_t>(unit, cells - c0);
             n_pos = c0;
-            ok = ensure(c0 + n);
-            std::vector<Xfer> jobs;
-            for (size_t vi = 0; vi < visits.size() && ok; ++vi) {
-                const Visit& V = visits[vi];
-                if (V.cells.ring) continue;
-                for (int side = 0; side < 2; ++side)
-                    jobs.push_back({home_dev(vi), home_st(vi),
-                                    (side ? V.cells.v : V.cells.k) + (size_t) c0 * cell_bytes,
-                                    array(vi, side) + (size_t) c0 * cell_bytes, (size_t) n * cell_bytes, false});
-            }
-            ok = ok && host_xfer(jobs);
+            ok = ensure(c0 + n) && host_xfer(span_jobs(c0, n, false));
         }
         n_pos = ok ? cells : was;
         return ok;
@@ -7967,11 +7929,9 @@ int run_engine(int argc, char** argv, bool check_only) {
         return 2;
     }
     if (check_only) return 0;
-    if (!reserve) {   // a card the desktop draws on keeps more free
-        int dev = 0;
-        CK(cudaGetDevice(&dev));
-        reserve = card_keep(dev);
-    }
+    int main_dev = 0;
+    CK(cudaGetDevice(&main_dev));
+    if (!reserve) reserve = card_keep(main_dev);   // (a card the desktop draws on keeps more free)
     Model m;
     std::string err;
     LoadOpts lo;
@@ -7979,8 +7939,6 @@ int run_engine(int argc, char** argv, bool check_only) {
     lo.file_cache = file_cache;
     // (what the server's image encoder will borrow on this card for a picture: experts in RAM give way to it; a card
     // that holds every expert keeps it free of cells)
-    int main_dev = 0;
-    CK(cudaGetDevice(&main_dev));
     for (;;) {   // (a card that runs the model's layers - this one, the split's - is no cell card of theirs)
         const std::vector<int32_t> ids = lamina::program::parse_ids(cell_gpus.c_str());
         const auto it = std::find_if(ids.begin(), ids.end(), [&](int32_t d) { return d == main_dev || d == split_dev; });
