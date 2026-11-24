@@ -1234,6 +1234,7 @@ struct Rows {
     // the experts on the FP16 tensor cores (nvfp4_gemm): each place's blob, the tiles of 64 entries
     unsigned long long *pptr = nullptr, *pptr_h = nullptr;
     int32_t *tiles = nullptr, *tiles_h = nullptr;
+    int* grp = nullptr;   // a chunk's grouping on the card (group_kernel's counts and masks)
     int n_part = 0;   // stretches `part` holds a row and head
     int head_rows() const { return batch ? 1 : cap; }
 };
@@ -1606,6 +1607,10 @@ struct Engine {
     bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
     bool snap_sync = false;          // LAMINA_INK_SNAP_SYNC=1: a split's checkpoint image copied on the spot
     bool stage_log = false;          // LAMINA_INK_STAGE_LOG=1: a line a segment of a part (staged, or why not)
+    int group_rows = 1024;           // LAMINA_INK_GROUP=N: a chunk of up to N rows grouped by expert on the card (0: never)
+    static constexpr int kLag = 3;   // (the host's queue on the card's grouping: kLag - 1 applications)
+    cudaEvent_t lag_ev[2][kLag] = {};   // a card's grouping done, an application each: this card's, the split's
+    int lag_n[2] = {};
     bool staging = false;            // a staged run is under way
     std::mutex stage_mu;
     std::condition_variable stage_cv;
@@ -1802,6 +1807,7 @@ struct Engine {
         R.pptr_h = halloc<unsigned long long>(E);
         R.tiles = dzero<int32_t>(n_tiles);
         R.tiles_h = halloc<int32_t>(n_tiles);
+        R.grp = dzero<int>((size_t) ik::kExpertMax + (size_t) E * (size_t) ((T + 31) / 32));
     }
 
     // ---- parked conversations left on the cards: the prompt cache's copy of a conversation's cells (kv_copy) is not
@@ -2876,13 +2882,16 @@ struct Engine {
         stage_log = std::getenv("LAMINA_INK_STAGE_LOG") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
         snap_sync = std::getenv("LAMINA_INK_SNAP_SYNC") != nullptr;
+        if (const char* r = std::getenv("LAMINA_INK_GROUP")) group_rows = std::max(0, std::atoi(r));
         CK(cudaEventCreateWithFlags(&ev_q[0], cudaEventDisableTiming));
+        for (cudaEvent_t& ev : lag_ev[0]) CK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
             sat = std::make_unique<Sat>();
             sat->dev = m->sat_dev;
             for (cudaEvent_t* e : {&ev_out[0], &ev_out[1], &ev_home[0], &ev_home[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
             const OnDev dv(sat->dev);
             for (cudaEvent_t* e : {&ev_took[0], &ev_took[1], &ev_back[0], &ev_back[1], &ev_q[1]}) CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
+            for (cudaEvent_t& ev : lag_ev[1]) CK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
             CK(cudaStreamCreateWithFlags(&sat->st, cudaStreamNonBlocking));
             own(&Owned::streams, sat->st);
             sat->il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));
@@ -4662,16 +4671,62 @@ struct Engine {
         ahead_ns = on_card[(size_t) L.il];
     }
 
+    /// A chunk's entries grouped by expert on the card, every expert in its own slot (group_kernel): the bounds,
+    /// token rows, outputs and experts the host's grouping writes, the FP16 tiles' list (n_ent / 64 + E long, its tail
+    /// tiles of no entries) and the experts' addresses.  The host then waits for the application before the last
+    /// one's grouping: it stays a queue of two applications ahead of the card.
+    void group_on_card(Rows& R, const Layer& L, int T) {
+        const int E = (int) m->g.n_expert, top_k = (int) m->g.top_k, n_ent = T * top_k, W = (T + 31) / 32;
+        CK(cudaMemsetAsync(R.grp, 0, ((size_t) ik::kExpertMax + (size_t) E * (size_t) W) * 4, st));
+        ik::GroupIn a{};
+        a.ids = R.ids;
+        a.n_ent = n_ent;
+        a.top_k = top_k;
+        a.E = E;
+        a.W = W;
+        a.cnt = R.grp;
+        a.bounds = R.bounds;
+        a.ent_row = R.ent_row;
+        a.ent_dst = R.ent_dst;
+        a.ent_exp = R.ent_exp;
+        a.tiles = R.tiles;
+        a.tiles_cap = n_ent / K::kNvfp4GemmEntries + E;
+        a.pptr = R.pptr;
+        a.slots = L.slots;
+        a.stride = L.stride;
+        ik::group_mark_kernel<<<(unsigned) ((n_ent + 255) / 256), 256, 0, st>>>(a);
+        ik::group_kernel<<<(unsigned) E, 64, 0, st>>>(a);
+        const int c = at_sat ? 1 : 0;
+        CK(cudaEventRecord(lag_ev[c][lag_n[c] % kLag], st));
+        if (++lag_n[c] >= kLag) event_wait(lag_ev[c][lag_n[c] % kLag]);   // (recorded kLag - 1 applications ago)
+    }
+
     /// A chunk's routed entries through their experts: R.rows [T * top_k][N] without the down rows' scales.  v: the
     /// visit (its RAM experts sent ahead; the next visit's are sent from here).
     void experts_batch(Rows& R, const Layer& L, int T, int v) {
         const Geometry& g = m->g;
         const int N = (int) g.n_embd, E = (int) g.n_expert, top_k = (int) g.top_k, F = (int) g.n_ff;
         const int n_ent = T * top_k;
-        // the entries by expert, on the host: each expert's bounds, an entry's token row and its row of the output
-        CK(cudaMemcpyAsync(R.ids_h, R.ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
-        stream_wait();
-        tick_part("experts: the routing, to the host");
+        // An NVFP4 matrix on the FP16 tensor cores (a card without FP4 tensor cores): the card's places in tiles of 64
+        // entries, the entries' rows as halves
+        const bool tc = tc_on && T >= tc_min;
+        const bool tc_gu = tc && L.gl.gu_type == 40 && K::nvfp4_gemm_fits(2 * F, N);
+        const bool tc_d = tc && L.gl.d_type == 40 && K::nvfp4_gemm_fits(N, F);
+        // The entries by expert: each expert's bounds, an entry's token row and its row of the output.  A chunk of up
+        // to group_rows rows outside a staged run has them grouped on the card where every expert is in its own slot,
+        // and the host goes on without the routing; else (and for MMQ on FP4 tensor cores, whose grid for an expert
+        // with every row costs more than the wait) the host groups them.  MMQ's grid is then the bound's, its tile
+        // for an expert's mean.
+        const bool fp4 = (!tc_gu && MMQ::native_fp4(L.gl.gu_type)) || (!tc_d && MMQ::native_fp4(L.gl.d_type));
+        const bool dev = T <= group_rows && !staging && !m->in_ram && !prof && route_f == nullptr && L.gl.gu_type != 30 &&
+                         L.gl.d_type != 30 && !fp4;
+        if (dev) {
+            group_on_card(R, L, T);
+        } else {
+            CK(cudaMemcpyAsync(R.ids_h, R.ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
+            stream_wait();
+            tick_part("experts: the routing, to the host");
+        }
         if (m->in_ram) up_rate();   // (the stream's last timed uploads and products are through)
         // The experts in the launches' order: the layer's slots (every expert's own where the card holds them all),
         // then, with experts in RAM, those of the others this chunk routes, their blobs sent to the scratch - slots in
@@ -4680,7 +4735,8 @@ struct Engine {
         const int ns = m->in_ram ? on_card[(size_t) L.il] : E;
         const int32_t* const at_of = m->in_ram ? slot_at[(size_t) L.il].data() : L.slot_at.data();
         int rows_of[ik::kExpertMax] = {}, place[ik::kExpertMax];
-        for (int i = 0; i < n_ent; ++i) ++rows_of[R.ids_h[i]];
+        if (!dev)
+            for (int i = 0; i < n_ent; ++i) ++rows_of[R.ids_h[i]];
         for (int e = 0; e < E; ++e) place[e] = at_of[e];
         // The experts sent ahead for this visit are in the scratch (most often: the products wait for the rest)
         bool ahead[ik::kExpertMax] = {};
@@ -4777,32 +4833,35 @@ struct Engine {
         const int n_gpu = n_place;   // the places the card's products take; the CPU's experts after them (no launch reads those)
         for (int e = 0; e < E; ++e)
             if (cpus[e]) place[e] = n_place++;
-        std::fill(R.bounds_h, R.bounds_h + E + 1, 0);
-        int max_rows = 0, max_x = 0;
-        for (int e = 0; e < E; ++e) {
-            if (place[e] < 0) continue;   // (an expert in RAM that this chunk does not route)
-            R.bounds_h[place[e] + 1] = rows_of[e];
-            if (cpus[e]) continue;
-            int& most = place[e] < ns ? max_rows : max_x;
-            most = std::max(most, rows_of[e]);
-        }
-        for (int i = 0; i < E; ++i) R.bounds_h[i + 1] += R.bounds_h[i];
-        std::vector<int32_t> at(R.bounds_h, R.bounds_h + E);
-        for (int i = 0; i < n_ent; ++i) {
-            const int e = R.ids_h[i], p = at[(size_t) place[e]]++;
-            R.ent_row_h[p] = i / top_k;
-            R.ent_dst_h[p] = i;
-            R.ent_exp_h[p] = e;
+        int max_rows = dev ? T : 0, max_x = 0;   // (grouped on the card: an expert has a token's entry at most)
+        if (!dev) {
+            std::fill(R.bounds_h, R.bounds_h + E + 1, 0);
+            for (int e = 0; e < E; ++e) {
+                if (place[e] < 0) continue;   // (an expert in RAM that this chunk does not route)
+                R.bounds_h[place[e] + 1] = rows_of[e];
+                if (cpus[e]) continue;
+                int& most = place[e] < ns ? max_rows : max_x;
+                most = std::max(most, rows_of[e]);
+            }
+            for (int i = 0; i < E; ++i) R.bounds_h[i + 1] += R.bounds_h[i];
+            std::vector<int32_t> at(R.bounds_h, R.bounds_h + E);
+            for (int i = 0; i < n_ent; ++i) {
+                const int e = R.ids_h[i], p = at[(size_t) place[e]]++;
+                R.ent_row_h[p] = i / top_k;
+                R.ent_dst_h[p] = i;
+                R.ent_exp_h[p] = e;
+            }
+            CK(cudaMemcpyAsync(R.bounds, R.bounds_h, (size_t) (E + 1) * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(R.ent_row, R.ent_row_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(R.ent_dst, R.ent_dst_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(R.ent_exp, R.ent_exp_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
         }
         auto blob_at = [&](int i) { return i < ns ? L.slots + (size_t) i * L.stride : xs + (size_t) (i - ns) * L.stride; };
-        CK(cudaMemcpyAsync(R.bounds, R.bounds_h, (size_t) (E + 1) * 4, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(R.ent_row, R.ent_row_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(R.ent_dst, R.ent_dst_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(R.ent_exp, R.ent_exp_h, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
         MMQ::Product p{};
         p.expert_bytes = L.stride;
         p.ids_rows = R.ids_rows;
         p.total_rows = n_ent;
+        if (dev) p.opt_rows = (n_ent + E - 1) / E;   // (MMQ's tile for an expert's mean rows, its grid for the bound)
         // a product's launches: over the slots, then over the scratch's experts (`off`: the matrix in a blob)
         auto launch = [&](size_t off) {
             p.w = L.slots + off;
@@ -4817,13 +4876,11 @@ struct Engine {
             p.max_rows = max_x;
             mmq->run(p, st);
         };
-        // An NVFP4 matrix on the FP16 tensor cores: the card's places in tiles of 64 entries, the entries' rows as
-        // halves (x: their floats, map: an entry's row of them, xh: room for the halves)
-        const bool tc = tc_on && T >= tc_min;
-        const bool tc_gu = tc && L.gl.gu_type == 40 && K::nvfp4_gemm_fits(2 * F, N);
-        const bool tc_d = tc && L.gl.d_type == 40 && K::nvfp4_gemm_fits(N, F);
+        // (the tiles' products: x their floats, map an entry's row of them, xh room for the halves)
         int n_tiles = 0;
-        if (tc_gu || tc_d) {
+        if ((tc_gu || tc_d) && dev) {
+            n_tiles = n_ent / K::kNvfp4GemmEntries + E;   // (the card's list, its tail tiles of no entries)
+        } else if (tc_gu || tc_d) {
             for (int i = 0; i < n_gpu; ++i) {
                 R.pptr_h[i] = (unsigned long long) (uintptr_t) blob_at(i);
                 const int n = R.bounds_h[i + 1] - R.bounds_h[i];
@@ -6013,6 +6070,19 @@ struct Engine {
         CK(cudaMemcpyAsync(a.pack, sat->pin, bytes, cudaMemcpyHostToDevice, st));
         ik::carry_kernel<false><<<grid, ik::kTB, 0, st>>>(a);
         CK(cudaMemcpyAsync(to.step_d, R.step_h, (size_t) (R.cap + 5) * 4, cudaMemcpyHostToDevice, st));
+    }
+    /// This card's stream has run up to event `ev`, the other driver of a staged run taking the host meanwhile
+    void event_wait(cudaEvent_t ev) {
+        if (!staging) {
+            CK(cudaEventSynchronize(ev));
+            return;
+        }
+        const bool mine = at_sat;
+        stage_mu.unlock();
+        const cudaError_t r = cudaEventSynchronize(ev);
+        stage_mu.lock();
+        use_card(mine);
+        CK(r);
     }
     /// This card's stream has run what was queued.  In a staged run the other card's driver has the host's work
     /// meanwhile, and this card is the current one again after.

@@ -1313,6 +1313,90 @@ __global__ void __launch_bounds__(32) pick_kernel(PickIn a) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------- a chunk's grouping
+/// A chunk's routed entries by expert on the card, every expert in its own number's slot: the host's grouping, an
+/// expert's entries in their order.  group_mark_kernel sets each entry's token in its expert's mask and counts it
+/// (cnt: kExpertMax counts, then E masks of W words; zero before it); group_kernel, a block an expert and 64 threads,
+/// writes its bounds, its entries' token rows, outputs and expert, its tiles of 64 entries for the FP16 tiles'
+/// product (the last expert's block fills the list up to tiles_cap with tiles of no entries) and its matrices' address.
+struct GroupIn {
+    const int32_t* ids;   // [n_ent]: token t's k-th expert at t top_k + k
+    int n_ent, top_k, E, W;
+    int* cnt;
+    int32_t *bounds, *ent_row, *ent_dst, *ent_exp, *tiles;
+    int tiles_cap;
+    unsigned long long* pptr;
+    const uint8_t* slots;
+    size_t stride;
+};
+__global__ void __launch_bounds__(256) group_mark_kernel(GroupIn a) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= a.n_ent) return;
+    const int e = a.ids[i], t = i / a.top_k;
+    atomicOr(reinterpret_cast<unsigned*>(a.cnt + kExpertMax) + (size_t) e * a.W + (t >> 5), 1u << (t & 31));
+    atomicAdd(a.cnt + e, 1);
+}
+__global__ void __launch_bounds__(64) group_kernel(GroupIn a) {
+    const int e = blockIdx.x, tid = threadIdx.x, lane = tid & 31, wp = tid >> 5;
+    __shared__ int part[2][2];
+    int base = 0, tb = 0;   // the entries and the tiles of the experts before this one
+    for (int q = tid; q < e; q += 64) {
+        const int c = a.cnt[q];
+        base += c;
+        tb += (c + 63) >> 6;
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        base += __shfl_xor_sync(0xffffffffu, base, o);
+        tb += __shfl_xor_sync(0xffffffffu, tb, o);
+    }
+    if (lane == 0) {
+        part[wp][0] = base;
+        part[wp][1] = tb;
+    }
+    __syncthreads();
+    base = part[0][0] + part[1][0];
+    tb = part[0][1] + part[1][1];
+    const int c = a.cnt[e], nt = (c + 63) >> 6;
+    if (tid == 0) {
+        if (e == 0) a.bounds[0] = 0;
+        a.bounds[e + 1] = base + c;
+        a.pptr[e] = (unsigned long long) (uintptr_t) (a.slots + (size_t) e * a.stride);
+    }
+    for (int q = tid; q < nt; q += 64) a.tiles[tb + q] = e << 16 | q;
+    if (e == a.E - 1)
+        for (int q = tb + nt + tid; q < a.tiles_cap; q += 64) a.tiles[q] = e << 16 | 0xFFFF;
+    // an entry's place among its expert's: the set bits before its token's
+    const unsigned* const mask = reinterpret_cast<const unsigned*>(a.cnt + kExpertMax) + (size_t) e * a.W;
+    __shared__ int wsum[2];
+    int run = base;
+    for (int w0 = 0; w0 < a.W; w0 += 64) {
+        const int w = w0 + tid;
+        unsigned bits = w < a.W ? mask[w] : 0u;
+        const int pc = __popc(bits);
+        int incl = pc;
+        for (int o = 1; o < 32; o <<= 1) {
+            const int u = __shfl_up_sync(0xffffffffu, incl, o);
+            if (lane >= o) incl += u;
+        }
+        if (lane == 31) wsum[wp] = incl;
+        __syncthreads();
+        int pos = run + (wp == 1 ? wsum[0] : 0) + incl - pc;
+        while (bits != 0u) {
+            const int t = w * 32 + __ffs((int) bits) - 1;
+            bits &= bits - 1u;
+            const int32_t* const r = a.ids + (size_t) t * a.top_k;
+            int q = 0;
+            while (r[q] != e) ++q;
+            a.ent_row[pos] = t;
+            a.ent_dst[pos] = t * a.top_k + q;
+            a.ent_exp[pos] = e;
+            ++pos;
+        }
+        run += wsum[0] + wsum[1];
+        __syncthreads();
+    }
+}
+
 /// A chunk's routed entries after their gate/up products: h = beta tanh(g s / beta) sigmoid(g s) * lbeta tanh(u s /
 /// lbeta), s the entry's expert's scale (`scale` [E], or null: 1).  gu [n][2 F], the gate first; h [n][F].
 __global__ void situ_rows_kernel(const float* __restrict__ gu, const int32_t* __restrict__ ent_exp,
