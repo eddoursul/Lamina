@@ -264,7 +264,7 @@ __global__ void __launch_bounds__(256) head_vocab_kernel(VocabIn a) {
 /// likeliest, times sigmoid((a + b logit(q) - logit(u)) / w), u within that token's share (a = a0 + a1 / T,
 /// b = b0 + b1 / T, w = exp(w0 + w1 log T)): lamina/core/draft_pass.hpp's model, its constants this drafter's (fitted
 /// to 15,940 drafts of the model's DSpark block drafter in Q8_0 at temperatures 0.6-1.2, top_k 64, four prompts: the
-/// optimization repository's logs/inkling/hn_fit.py), a set for the first draft, the second, and the others.
+/// optimization repository's scratch/inkling/draw_fit.py), a set for the first draft, the second, and the others.
 __device__ __forceinline__ float draft_chance(int j, float q, float u, float T) {
     constexpr float k[3][8] = {{-0.1261f, 0.6805f, -1.2603f, 2.8356f, 0.5522f, 0.1070f, 0.3819f, -0.3074f},
                                {-0.2878f, 0.5908f, -2.2398f, 3.7768f, 0.9437f, -0.1491f, 0.4883f, -0.5104f},
