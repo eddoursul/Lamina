@@ -183,7 +183,8 @@ Flash-Next and Hy4-flash take no adapters.
   the RAM below `--ram-reserve-mib MIB` (default 6144) available to the system, and leave between requests when it
   runs below it: the expert arena is pinned, so without it a park beside a large arena swaps the rest of the system
   instead (0: only the budget limits them). With `--conversation-spill-dir DIR` the conversations the RAM cannot
-  hold, and those that leave it, go to files in a folder of the engine's own under DIR instead (at most
+  hold, and those that leave it, go to files in a folder of the engine's own under DIR instead (all of them with
+  `--conversation-cache-mib 0`; at most
   `--conversation-spill-mib MIB`, by default 32 GiB or a quarter of the disk's free space, the less, never its last
   4 GiB free), written from the GPU past the file cache through a 128 MiB stage and read back when a request continues
   them; one taken back keeps its file, so its next park writes only what is new: where the RAM cannot park an agent's
