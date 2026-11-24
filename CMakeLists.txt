@@ -8,7 +8,7 @@
 # with the CUDA runtime, into a folder of their own as a release lays them out.
 # CMake 3.22 (Ubuntu 22.04's) or newer, with 3.24's policies where CMake has them
 cmake_minimum_required(VERSION 3.22...3.24)
-project(lamina VERSION 0.3.2 LANGUAGES CXX)
+project(lamina VERSION 0.4 LANGUAGES CXX)
 # on the files that print it alone: a new version recompiles these, not every one (the CUDA kernels, ggml)
 set_property(SOURCE src/program/main.cpp src/program/generate.cpp src/server/main.cpp src/server/bench.cpp
              src/server/model_config.cpp APPEND PROPERTY COMPILE_DEFINITIONS LAMINA_VERSION="${PROJECT_VERSION}")
