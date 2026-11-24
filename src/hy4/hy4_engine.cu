@@ -1563,7 +1563,7 @@ struct Engine {
             std::vector<int32_t> back;
             for (const int32_t e : lent_from[li]) {
                 bool held = l.moving[(size_t) e] != 0;
-                for (const SlotSet& o : l.held) held = held || (o.n > 0 && o.slot_of[(size_t) e] >= 0);
+                for (const SlotSet& hs : l.held) held = held || (hs.n > 0 && hs.slot_of[(size_t) e] >= 0);
                 if (!held) back.push_back(e);
             }
             std::stable_sort(back.begin(), back.end(),
@@ -1810,9 +1810,9 @@ struct Engine {
     }
     /// The state back to (at most) its first `keep` tokens: the cells left whole, a snapshot's, or none.  Returns the
     /// tokens kept.
-    int64_t rewind(int64_t keep, bool restore = false) {
+    int64_t rewind(int64_t keep, bool from_snap = false) {
         keep = std::min<int64_t>(keep, pos());
-        if (pos() - keep <= kMaxT && !restore) {
+        if (pos() - keep <= kMaxT && !from_snap) {
             seq.resize((size_t) keep);
             sfx_ok = std::min(sfx_ok, seq.size());
         } else {
@@ -3273,10 +3273,10 @@ struct Engine {
             gp.mover = std::make_unique<CopyQueue>(gp.dev, gp.cst, blob);
         }
         if (lend_bytes > 0 && elastic && !gpus.empty()) {   // the slots the prompt path's buffers make when lent
-            size_t row = 0;
+            size_t row_bytes = 0;
             for (const Layer& l : m->layers)
-                if (!l.dense) row += l.stride;
-            lend_slots = row ? (int) (lend_bytes / row) : 0;
+                if (!l.dense) row_bytes += l.stride;
+            lend_slots = row_bytes ? (int) (lend_bytes / row_bytes) : 0;
         }
         load_profile();
         const auto fill0 = Clock::now();
@@ -3707,12 +3707,6 @@ struct Engine {
             out += b;
         }
         return out;
-    }
-    /// Slot copies queued or in flight
-    size_t moves_pending() const {
-        size_t n = 0;
-        for (const Gpu& gp : gpus) n += gp.moves.size();
-        return n;
     }
     /// A tier's share of an MoE layer, on its GPU (current): the routing and the routed input from the host, its entries
     /// grouped and run, their rows into the mapped h_out (the next segment merges them as the CPU's)
@@ -4359,11 +4353,11 @@ struct Prompt {
     /// The lent set's buffers' bytes, in Bufs' order (each rounded to 512 in the allocation)
     std::vector<size_t> lent_sizes() const {
         const auto& g = m->g;
-        const size_t R = (size_t) pass, N = (size_t) g.n_embd, hc = (size_t) g.hc, Ld = (size_t) g.n_latent,
+        const size_t Rp = (size_t) pass, N = (size_t) g.n_embd, hc = (size_t) g.hc, Ld = (size_t) g.n_latent,
                      K = (size_t) g.top_k, n_mod = g.eng_layers.size(), eh = (size_t) g.eng_heads(), ed = (size_t) g.eng_dim;
-        return {R * hc * N * 4, R * N * 4, R * N * 4, R * hc * 4, R * 4, R * K * 4, R * Ld * 4, R * Ld * 4, R * Ld * 4,
-                n_mod * R * eh * ed, MMQ::q8_bytes((int64_t) R, (int64_t) Ld), MMQ::q8_bytes((int64_t) R, (int64_t) Ld),
-                R * K * 4, R * 4, R * 4};
+        return {Rp * hc * N * 4, Rp * N * 4, Rp * N * 4, Rp * hc * 4, Rp * 4, Rp * K * 4, Rp * Ld * 4, Rp * Ld * 4,
+                Rp * Ld * 4, n_mod * Rp * eh * ed, MMQ::q8_bytes((int64_t) Rp, (int64_t) Ld),
+                MMQ::q8_bytes((int64_t) Rp, (int64_t) Ld), Rp * K * 4, Rp * 4, Rp * 4};
     }
     size_t lent_total() const {
         size_t t = 0;
@@ -4849,7 +4843,7 @@ struct Prompt {
     PlanSet ps[2];
 
     /// Groups over (blob index, entries) in ascending blob order from `base` (`stride` apart), split at kEmax entries
-    void add_groups(DevPlan& dp, const uint8_t* base, size_t stride,
+    void add_groups(DevPlan& dp, const uint8_t* blob0, size_t stride,
                     const std::vector<std::pair<int, const std::vector<int32_t>*>>& seq, const float* wts_h) {
         const int K = (int) m->g.top_k;
         std::vector<int32_t>& P = dp.P;
@@ -4873,7 +4867,7 @@ struct Prompt {
                 off = 0;
             }
             Group gr;
-            gr.w = base + (size_t) ja * stride;
+            gr.w = blob0 + (size_t) ja * stride;
             gr.n = (int) cnt.size();
             gr.n_ent = (int) ents.size();
             gr.max_rows = *std::max_element(cnt.begin(), cnt.end());

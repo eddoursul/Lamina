@@ -1014,7 +1014,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         }
         CK(cudaMemcpy(y.slot_of, so.data(), (size_t) E * 4, cudaMemcpyHostToDevice));
         if (m.twin_layer(l)) {   // (its copy on this card: a split has no experts in RAM)
-            const OnDev dv(here_dev);
+            const OnDev dv_here(here_dev);
             Layer& t = m.twin[(size_t) l];
             t.gl = y.gl;
             t.stride = y.stride;
@@ -2295,7 +2295,7 @@ struct Engine {
         if (n <= 0) return true;
         const size_t w = (size_t) n * cell_bytes, mine = (size_t) held * cell_bytes;
         bool ok = true;
-        std::vector<Xfer> jobs;
+        std::vector<Xfer> xfers;
         for (size_t vi = 0; vi < visits.size(); ++vi) {
             const Visit& V = visits[vi];
             if (!V.k_lot[0]) continue;
@@ -2306,13 +2306,13 @@ struct Engine {
                     ok = ok && soft(cudaMemcpyAsync((side ? V.v_lot[to] : V.k_lot[to])->ptr() + (size_t) at * cell_bytes, d, w,
                                                     cudaMemcpyDeviceToDevice, home_st(vi)));
                 } else {   // (the copies to and from the buffer: every card's at once, below)
-                    jobs.push_back({home_dev(vi), home_st(vi), d,
+                    xfers.push_back({home_dev(vi), home_st(vi), d,
                                     host + ((size_t) full_of[vi] * 2 + (size_t) side) * mine + (size_t) at * cell_bytes, w, !in});
                 }
             }
             if (to >= 0) ok = soft(cudaStreamSynchronize(home_st(vi))) && ok;
         }
-        return host_xfer(jobs) && ok;
+        return host_xfer(xfers) && ok;
     }
     // ---- copies between the cards and host buffers in RAM (a parked conversation's): each card's on a thread of its
     // own, all at once - a copy from pageable memory holds the thread that issues it - and through a pinned stage of
@@ -2329,11 +2329,11 @@ struct Engine {
     static constexpr size_t kXferHalf = 8ull << 20;
     int xfer_mode = 2;
     std::map<int, uint8_t*> xfer_pin;   // a card's stage: two halves of kXferHalf, pinned
-    bool host_xfer(const std::vector<Xfer>& jobs) {
-        if (jobs.empty()) return true;
+    bool host_xfer(const std::vector<Xfer>& xfers) {
+        if (xfers.empty()) return true;
         if (xfer_mode == 0) {
             bool ok = true;
-            for (const Xfer& j : jobs) {
+            for (const Xfer& j : xfers) {
                 const OnDev dv(j.dev);
                 ok = ok && soft(j.to_host ? cudaMemcpyAsync(j.h, j.d, j.n, cudaMemcpyDeviceToHost, j.s)
                                           : cudaMemcpyAsync(j.d, j.h, j.n, cudaMemcpyHostToDevice, j.s)) &&
@@ -2342,7 +2342,7 @@ struct Engine {
             return ok;
         }
         std::map<int, std::vector<const Xfer*>> by;
-        for (const Xfer& j : jobs) by[j.dev].push_back(&j);
+        for (const Xfer& j : xfers) by[j.dev].push_back(&j);
         if (xfer_mode == 2)
             for (const auto& [dev, list] : by)
                 if (xfer_pin.count(dev) == 0) {
@@ -3456,9 +3456,9 @@ struct Engine {
             for (int there = 0; ok && there < (sat ? 2 : 1); ++there) {
                 const OnDev dv(there ? sat->dev : -1);
                 lamina::core::VmmRange spare_addr;
-                size_t fr = 0, tot = 0;
-                ok = spare_addr.reserve(kLotSpare) && cudaMemGetInfo(&fr, &tot) == cudaSuccess &&
-                     fr + (64ull << 20) >= (there ? f1 : f0);
+                size_t fr_now = 0, tot_now = 0;
+                ok = spare_addr.reserve(kLotSpare) && cudaMemGetInfo(&fr_now, &tot_now) == cudaSuccess &&
+                     fr_now + (64ull << 20) >= (there ? f1 : f0);
             }
             if (!ok) {
                 for (Visit& V : visits) {
@@ -5295,10 +5295,10 @@ struct Engine {
                 a.y[c] = R.nrm + (size_t) c * TN;
                 a.q[c] = batch ? nullptr : R.img + (size_t) c * TB;
                 if (ilp) {
-                    const K::Q81IlView v = K::native_q8_1_il_view(il_att[c], N, T);
-                    a.bm[c] = v.bm;
-                    a.pm[c] = v.pm;
-                    a.dl[c] = v.d;
+                    const K::Q81IlView ilv = K::native_q8_1_il_view(il_att[c], N, T);
+                    a.bm[c] = ilv.bm;
+                    a.pm[c] = ilv.pm;
+                    a.dl[c] = ilv.d;
                 }
             }
             a.n = n_in;
@@ -5705,11 +5705,11 @@ struct Engine {
         a.eps = g.eps;
         norm(a, T, rows);
     }
-    /// The head's logits of n normed rows (`img`: their q8_1 image) into R's logits rows [0, n), softcapped, a row with
-    /// a non-finite one marked
-    void head_logits(Rows& R, const ik::Q81* img, const float* nrm, int n) {
+    /// The head's logits of n normed rows (`q8rows`: their q8_1 image) into R's logits rows [0, n), softcapped, a row
+    /// with a non-finite one marked
+    void head_logits(Rows& R, const ik::Q81* q8rows, const float* nrm, int n) {
         const Geometry& g = m->g;
-        mm(m->head, img, nrm, R.logits, n);
+        mm(m->head, q8rows, nrm, R.logits, n);
         CK(cudaMemsetAsync(R.bad, 0, (size_t) n * 4, st));
         const long long cnt = (long long) n * g.n_vocab;
         ik::softcap_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(R.logits, cnt, g.softcap, (int) g.n_vocab, R.bad);
@@ -5731,12 +5731,12 @@ struct Engine {
         spark_inject(R, T);
         if (n > 0) {
             const int N = (int) m->g.n_embd, r0 = T - n;
-            const ik::Q81* img = R.img + (size_t) r0 * (size_t) (N / 32);
+            const ik::Q81* rows_q8 = R.img + (size_t) r0 * (size_t) (N / 32);
             if (R.batch) {   // (a chunk's rows have no images: its last row's)
                 K::native_quantize_q8_1(R.nrm + (size_t) r0 * N, R.img, N, n, st);
-                img = R.img;
+                rows_q8 = R.img;
             }
-            head_logits(R, img, R.nrm + (size_t) r0 * N, n);
+            head_logits(R, rows_q8, R.nrm + (size_t) r0 * N, n);
         }
         tick("head");
     }
@@ -5927,9 +5927,9 @@ struct Engine {
                     mmq->run_dense(W->d, W->type, W->n_out, N, R.f_q, T, out, W->n_out, st);
                 }
             } else {
-                const ik::Q81* img = R.f_img + (size_t) l * (size_t) R.cap * (size_t) (N / 32);
-                run("d: context k's product", [&] { mm(y.wk_ctx, img, cx, R.f_kc, T); });
-                run("d: context v's product", [&] { mm(y.wv_ctx, img, cx, R.f_vc, T); });
+                const ik::Q81* ctx_q8 = R.f_img + (size_t) l * (size_t) R.cap * (size_t) (N / 32);
+                run("d: context k's product", [&] { mm(y.wk_ctx, ctx_q8, cx, R.f_kc, T); });
+                run("d: context v's product", [&] { mm(y.wv_ctx, ctx_q8, cx, R.f_vc, T); });
             }
             run("d: context cells", [&] {
                 ik::head_rope_kernel<<<dim3((unsigned) T, (unsigned) s.HK), 128, 0, st>>>(R.f_kc, y.k_ctx_norm, R.f_cs, R.f_kn, s.HK,
@@ -6059,30 +6059,31 @@ struct Engine {
     /// writes it).
     std::vector<int32_t> spark_draft(int32_t x, int n, float min_p) {
         std::vector<int32_t> out;
-        const int64_t P = pos();
+        const int64_t pn = pos();
         n = std::min(n, kMaxT - 1);
-        if (sp == nullptr || n <= 0 || sp_vhi != P || P < 1 || frnn_n <= 0 || P - 1 < frnn_p0 || P - 1 >= frnn_p0 + frnn_n) return out;
+        if (sp == nullptr || n <= 0 || sp_vhi != pn || pn < 1 || frnn_n <= 0 || pn - 1 < frnn_p0 || pn - 1 >= frnn_p0 + frnn_n) return out;
         const auto t0 = Clock::now();
         const Spark& s = *sp;
         SparkBlock& b = sb;
         const int T = kMaxT;
         CK(cudaStreamSynchronize(st));   // (the last block has read the pinned rows)
         prof_start();
-        CK(cudaMemcpyAsync(b.ctx, frnn + (size_t) (P - 1 - frnn_p0) * (size_t) s.N, (size_t) s.N * 4, cudaMemcpyDeviceToDevice, st));
+        CK(cudaMemcpyAsync(b.ctx, frnn + (size_t) (pn - 1 - frnn_p0) * (size_t) s.N, (size_t) s.N * 4, cudaMemcpyDeviceToDevice, st));
         embed_row(x, b.emb_h);
-        rope_rows(b.cs_h, P, T);
+        rope_rows(b.cs_h, pn, T);
         for (int t = 0; t < T; ++t) {
-            b.step_h[t] = (int32_t) (P + T - 1);
-            b.step_h[T + 1 + t] = (int32_t) (P + t);
+            b.step_h[t] = (int32_t) (pn + T - 1);
+            b.step_h[T + 1 + t] = (int32_t) (pn + t);
         }
-        b.step_h[T] = (int32_t) (P + T);
+        b.step_h[T] = (int32_t) (pn + T);
         for (int l = 0; l < s.n_layer; ++l) {
             const SparkRing& r = sp_ring[(size_t) l];
             // the context cells in use: within the layer's reach, of the text the rings hold, not yet written over
-            const int64_t lo = std::min(P, std::max({(int64_t) 0, P - r.see, sp_vlo, sp_whi - r.cells.cap + r.chunk}));
+            const int64_t lo_cell =
+                std::min(pn, std::max({(int64_t) 0, pn - r.see, sp_vlo, sp_whi - r.cells.cap + r.chunk}));
             // (the stretches by the cells in use: whole tiles, three at least, about 64 stretches while the ring's
             // largest allows - a short context is not left to a few blocks of a long reach's stretches)
-            const int64_t used = P + T - lo;
+            const int64_t used = pn + T - lo_cell;
             int64_t c = std::max<int64_t>(3, (used + 64 * ik::kTcCells - 1) / (64 * ik::kTcCells)) * ik::kTcCells;
             c = std::min<int64_t>(c, r.chunk);
             c = std::max<int64_t>(c, (used + r.n_chunks - 1) / r.n_chunks);   // (the grid's blocks hold them)
@@ -6090,7 +6091,7 @@ struct Engine {
             int32_t* d = b.step_h + 2 * T + 1 + 3 * l;
             d[0] = (int32_t) c;
             d[1] = (int32_t) ((used + c - 1) / c);
-            d[2] = (int32_t) (lo % r.cells.cap);
+            d[2] = (int32_t) (lo_cell % r.cells.cap);
         }
         {
             int32_t* ctl = b.step_h + 2 * T + 1 + 3 * s.n_layer;
@@ -6106,8 +6107,8 @@ struct Engine {
             ctl[4] = by_draw ? 1 : 0;
             ctl[5] = (int32_t) (uint32_t) smp.seed;
             ctl[6] = (int32_t) (uint32_t) (smp.seed >> 32);
-            ctl[7] = (int32_t) (uint32_t) (uint64_t) (P + 1);
-            ctl[8] = (int32_t) (uint32_t) ((uint64_t) (P + 1) >> 32);
+            ctl[7] = (int32_t) (uint32_t) (uint64_t) (pn + 1);
+            ctl[8] = (int32_t) (uint32_t) ((uint64_t) (pn + 1) >> 32);
             std::memcpy(&ctl[9], &smp.temperature, 4);
         }
         // the layers and the first draft; the others (their rows of the target's head first) where it is at the floor
@@ -6137,7 +6138,7 @@ struct Engine {
             const bool went = b.out_h[0] >= 0;   // (a first draft at the floor: the others' rows are scored)
             sp_on += 0.05f * ((went ? 1.f : 0.f) - sp_on);
         }
-        sp_whi = std::max(sp_whi, P + T);
+        sp_whi = std::max(sp_whi, pn + T);
         for (int i = 0; i < n && b.out_h[2 * i] >= 0 && b.out_h[2 * i] < s.V; ++i) {
             out.push_back(b.out_h[2 * i]);
             std::memcpy(&sp_q[i], &b.out_h[2 * i + 1], 4);
@@ -8092,7 +8093,8 @@ int run_engine(int argc, char** argv, bool check_only) {
             size_t fr = 0, tot = 0;
             CK(cudaMemGetInfo(&fr, &tot));
             std::error_code ec;
-            const uint64_t file = (uint64_t) std::filesystem::file_size(std::filesystem::u8path(dspark), ec);
+            const std::filesystem::path ds(std::u8string(dspark.begin(), dspark.end()));
+            const uint64_t file = (uint64_t) std::filesystem::file_size(ds, ec);
             const Geometry& g = m.g;
             const uint64_t cell = (uint64_t) g.cell_bytes(kv == "q8_0");
             const uint64_t ring = (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell * (uint64_t) ring_cells(g);
