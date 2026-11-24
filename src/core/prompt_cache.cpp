@@ -34,7 +34,8 @@ bool disk_failed(const std::string& why) {
 // A conversation's file: its K/V cells in blocks, each the K/V states' regions of its cells back to back in
 // kv_spans' order (a block of [0, n) is a parked copy in RAM byte for byte), and its checkpoints in slots of a file
 // of their own.  Both are read and written unbuffered (lamina/platform/spill.hpp), the cells through the stage: two
-// pinned halves in turns, one half's copies to or from the device beside the other's file I/O.
+// pinned halves in turns, one half's copies to or from the device beside the other's file I/O.  A conversation taken
+// back keeps its file: `cells` says how far its blocks still hold the sequence, and a park appends a block from there.
 struct SeqFile {
     uint64_t serial = 0;
     std::string kv_path, ck_path;
@@ -43,9 +44,12 @@ struct SeqFile {
         uint64_t off;     ///< where it starts in the K/V file
     };
     std::vector<Block> blocks;   ///< lo ascending; a later block's cells over an earlier one's
-    uint64_t kv_end = 0;         ///< the K/V file's length, whole pages
+    int64_t cells = 0;           ///< the blocks hold the sequence's cells [0, cells)
+    uint64_t kv_end = 0;         ///< where the next block goes in the K/V file (whole pages)
+    uint64_t kv_size = 0;        ///< the K/V file's length
     std::vector<std::pair<int64_t, uint32_t>> slots;   ///< a checkpoint's position and its slot
     uint32_t n_slots = 0;
+    std::vector<uint32_t> free_slots;   ///< slots of checkpoints that left the chain
     const uint32_t* slot(int64_t pos) const {
         for (const auto& [p, s] : slots)
             if (p == pos) return &s;
@@ -69,7 +73,7 @@ struct SequenceCache::Disk {
             lamina::platform::spill_free(stage[h]);
         }
     }
-    uint64_t bytes(const SeqFile& f) const { return f.kv_end + (uint64_t) f.n_slots * slot; }
+    uint64_t bytes(const SeqFile& f) const { return f.kv_size + (uint64_t) f.n_slots * slot; }
 };
 
 bool SequenceCache::open_disk(const std::string& root, uint64_t budget, std::string& msg) {
@@ -128,18 +132,40 @@ void SequenceCache::drop_file(SeqFile* f) {
     delete f;
 }
 
-bool SequenceCache::disk_room(uint64_t bytes) {
-    const uint64_t held = parked_.disk_bytes(), free = disk_->dir.free_bytes();
-    // what the disk itself can take beside the files there (its free space unknown: the budget alone)
-    const uint64_t room = free == 0 ? UINT64_MAX : held + (free > kSpillFloor ? free - kSpillFloor : 0);
+bool SequenceCache::disk_room(uint64_t bytes, const Seq* keep) {
+    // the disk's own room: its free bytes above the floor (unknown: the budget alone)
+    const uint64_t free = disk_->dir.free_bytes();
+    uint64_t phys = free == 0 ? UINT64_MAX : free > kSpillFloor ? free - kSpillFloor : 0, kept = live_files();
+    auto short_of = [&] { return parked_.disk_bytes() + kept + bytes > disk_->budget || bytes > phys; };
+    // The cells of the files the sessions keep give way first (losing them costs a whole write at the next park, a
+    // parked file its conversation read anew), but `keep`'s, which a park appends to; their checkpoints stay.
+    for (Seq& c : lives_) {
+        if (!short_of()) break;
+        if (!c.file || &c == keep) continue;
+        const uint64_t b = c.file->kv_size;
+        drop_cells_of(c);
+        kept -= b;
+        if (phys != UINT64_MAX) phys += b;
+    }
+    const uint64_t room = phys == UINT64_MAX ? UINT64_MAX : parked_.disk_bytes() + phys;
+    const uint64_t limit = std::min(disk_->budget > kept ? disk_->budget - kept : 0, room);
     std::vector<Seq> gone;
-    if (!parked_.make_disk_room(bytes, std::min(disk_->budget, room), gone)) return false;
+    if (!parked_.make_disk_room(bytes, limit, gone)) return false;
     for (Seq& s : gone) {
         std::fprintf(stderr, "lamina serve: prompt cache: a parked conversation of %zu cells evicted from the disk\n",
                      s.tokens.size());
         release(s, -1);
     }
     return true;
+}
+
+void SequenceCache::fit_lives() {
+    // the files the sessions keep within what the budget leaves beside the parked ones (a conversation taken back
+    // brings its file; the one parked meanwhile wrote beside it): their cells go, then their checkpoints
+    for (Seq& c : lives_)
+        if (c.file && parked_.disk_bytes() + live_files() > disk_->budget) drop_cells_of(c);
+    for (Seq& c : lives_)
+        if (c.file && parked_.disk_bytes() + live_files() > disk_->budget) drop_file_of(c);
 }
 
 bool SequenceCache::disk_put_kv(SeqFile& f, int64_t lo, int64_t hi) {
@@ -179,6 +205,8 @@ bool SequenceCache::disk_put_kv(SeqFile& f, int64_t lo, int64_t hi) {
     }
     f.blocks.push_back({lo, hi, f.kv_end});
     f.kv_end += padded;
+    f.kv_size = std::max(f.kv_size, f.kv_end);
+    f.cells = hi;
     return true;
 }
 
@@ -189,6 +217,8 @@ bool SequenceCache::disk_put_copy(SeqFile& f, const uint8_t* copy, uint64_t byte
     if (!file.open(f.kv_path, true, err) || !file.write(f.kv_end, copy, padded, err)) return disk_failed(err);
     f.blocks.push_back({0, held, f.kv_end});
     f.kv_end += padded;
+    f.kv_size = std::max(f.kv_size, f.kv_end);
+    f.cells = held;
     return true;
 }
 
@@ -250,7 +280,8 @@ bool SequenceCache::disk_put_ckpt(SeqFile& f, int64_t pos, const void* host) {
     Disk& d = *disk_;
     std::string err;
     lamina::platform::SpillFile file;
-    const uint32_t s = f.n_slots;
+    const bool reuse = !f.free_slots.empty();
+    const uint32_t s = reuse ? f.free_slots.back() : f.n_slots;
     if (!file.open(f.ck_path, true, err)) return disk_failed(err);
     bool ok = true;
     if ((uintptr_t) host % kSpillAlign == 0) {   // the cache's buffers are page-aligned; else through the stage
@@ -264,7 +295,8 @@ bool SequenceCache::disk_put_ckpt(SeqFile& f, int64_t pos, const void* host) {
     }
     if (!ok) return disk_failed(err);
     f.slots.push_back({pos, s});
-    ++f.n_slots;
+    if (reuse) f.free_slots.pop_back();
+    else ++f.n_slots;
     return true;
 }
 
@@ -288,17 +320,60 @@ bool SequenceCache::disk_get_ckpt(const SeqFile& f, int64_t pos, void* host) {
     return ok || disk_failed(err);
 }
 
-bool SequenceCache::load_chain(Seq& s, int64_t upto) {
-    for (Ckpt& c : s.ckpts) {
-        if (c.pos > upto || c.host != nullptr) continue;
-        void* h = take_buffer();
-        if (h == nullptr || !disk_get_ckpt(*s.file, c.pos, h)) {
-            give_back(h);
-            return false;
-        }
-        c.host = h;
+bool SequenceCache::load_ckpt(Seq& s, int64_t pos) {
+    Ckpt* c = s.find(pos);
+    if (c == nullptr || c->host != nullptr) return c != nullptr;
+    void* h = s.file ? take_buffer() : nullptr;
+    if (h == nullptr || !disk_get_ckpt(*s.file, pos, h)) {
+        give_back(h);
+        return false;
     }
+    c->host = h;
     return true;
+}
+
+bool SequenceCache::load_chain(Seq& s, int64_t upto) {
+    for (const Ckpt& c : s.ckpts)
+        if (c.pos <= upto && !load_ckpt(s, c.pos)) return false;
+    return true;
+}
+
+void SequenceCache::cut(Seq& s, int64_t cells) {
+    if (s.file) s.file->cells = std::min(s.file->cells, cells);
+}
+
+void SequenceCache::forget_slot(Seq& s, int64_t pos) {
+    if (!s.file) return;
+    auto& sl = s.file->slots;
+    for (size_t i = 0; i < sl.size(); ++i)
+        if (sl[i].first == pos) {
+            s.file->free_slots.push_back(sl[i].second);
+            sl.erase(sl.begin() + (ptrdiff_t) i);
+            return;
+        }
+}
+
+void SequenceCache::drop_cells_of(Seq& s) {
+    if (!s.file || s.file->kv_size == 0) return;
+    lamina::platform::spill_remove(s.file->kv_path);
+    s.file->blocks.clear();
+    s.file->cells = 0;
+    s.file->kv_end = s.file->kv_size = 0;
+}
+
+void SequenceCache::drop_file_of(Seq& s) {
+    // its checkpoints there without a buffer go with it
+    if (s.file)
+        s.ckpts.erase(std::remove_if(s.ckpts.begin(), s.ckpts.end(), [](const Ckpt& c) { return c.host == nullptr; }),
+                      s.ckpts.end());
+    s.file.reset();
+    s.disk_bytes = 0;
+}
+
+uint64_t SequenceCache::live_files() const {
+    uint64_t n = 0;
+    for (const Seq& c : lives_) n += c.file && disk_ ? disk_->bytes(*c.file) : 0;
+    return n;
 }
 
 void SequenceCache::evict(Seq&& s, const char* why) {
@@ -331,6 +406,12 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     Seq& live_ = live();
     const int64_t L = (int64_t) live_.tokens.size();
     const auto t0 = Clock::now();
+    // A start the live sequence keeps (keep_upto > 0) keeps its checkpoints in buffers of their own: the file goes
+    // with the parked copy.  One that cannot be read is no checkpoint of it any more.
+    if (live_.file && keep_upto > 0 && !load_chain(live_, keep_upto))
+        live_.ckpts.erase(std::remove_if(live_.ckpts.begin(), live_.ckpts.end(),
+                                         [&](const Ckpt& c) { return c.pos <= keep_upto && c.host == nullptr; }),
+                          live_.ckpts.end());
     // its chain: the checkpoints after `keep_upto` and one at its end, capped (as stash_live's)
     const bool has_end = live_.find(L) != nullptr;
     Seq s;
@@ -344,20 +425,60 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     }
     if (!has_end)
         if (void* h = save(L)) s.ckpts.push_back({L, h});   // the session is still at L
-    if (s.ckpts.empty()) return;
+    // What a file the sequence came back with lacks: its cells from where it no longer holds them (the blocks past
+    // there go), the checkpoints without a slot; without one, all of it.
+    const SeqFile* had = live_.file.get();
+    const int64_t from = had ? std::min<int64_t>(had->cells, L) : 0;
+    uint64_t end = had ? had->kv_end : 0, block = 0;
+    if (had)
+        for (size_t b = had->blocks.size(); b-- > 0 && had->blocks[b].lo >= from;) end = had->blocks[b].off;
+    if (from < L)
+        for (const KvSpan& sp : kv_spans(from, L)) block += sp.bytes;
+    size_t fresh = 0;
+    for (const Ckpt& c : s.ckpts) fresh += !(had && had->slot(c.pos));
+    const uint64_t size = had ? had->kv_size : 0, free_slots = had ? had->free_slots.size() : 0;
+    const uint64_t grown = end + spill_align_up(block) > size ? end + spill_align_up(block) - size : 0;
+    const uint64_t need = grown + (fresh > free_slots ? fresh - free_slots : 0) * disk_->slot;
+    const bool room = disk_room(need, &live_);   // (its file counts as the session's until it moves)
+    s.file = std::move(live_.file);
+    if (s.file) {   // (its slots of the checkpoints the live sequence keeps go too)
+        for (size_t i = 0; i < s.file->slots.size();) {
+            if (s.find(s.file->slots[i].first) == nullptr) {
+                s.file->free_slots.push_back(s.file->slots[i].second);
+                s.file->slots.erase(s.file->slots.begin() + (ptrdiff_t) i);
+            } else {
+                ++i;
+            }
+        }
+    }
     enforce_cap(s);
-    const uint64_t bytes = kv_bytes(L), need = spill_align_up(bytes) + s.ckpts.size() * disk_->slot;
-    std::unique_ptr<SeqFile, FileFree> f;
-    const bool room = disk_room(need);
-    bool ok = room && (f = new_file()) && cudaDeviceSynchronize() == cudaSuccess && disk_put_kv(*f, 0, L);
-    for (size_t i = 0; ok && i < s.ckpts.size(); ++i) ok = disk_put_ckpt(*f, s.ckpts[i].pos, s.ckpts[i].host);
+    bool ok = room && !s.ckpts.empty() && cudaDeviceSynchronize() == cudaSuccess;
+    if (ok && !s.file) ok = (s.file = new_file()) != nullptr;
+    if (ok) {
+        SeqFile& f = *s.file;
+        while (!f.blocks.empty() && f.blocks.back().lo >= from) {
+            f.kv_end = f.blocks.back().off;
+            f.blocks.pop_back();
+        }
+        f.cells = from;
+        if (from < L) ok = disk_put_kv(f, from, L);
+        else f.cells = L;   // (the file holds every cell already)
+    }
+    size_t wrote_ckpts = 0;
+    for (size_t i = 0; ok && i < s.ckpts.size(); ++i)
+        if (s.file->slot(s.ckpts[i].pos) == nullptr) {
+            ok = s.ckpts[i].host != nullptr && disk_put_ckpt(*s.file, s.ckpts[i].pos, s.ckpts[i].host);
+            ++wrote_ckpts;
+        }
     for (Ckpt& c : s.ckpts) {   // written or not, their buffers go back
         give_back(c.host);
         c.host = nullptr;
     }
     if (!ok) {
-        std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells (%.0f MiB) not parked: %s\n",
-                     (long long) L, mib(need), room ? "its file could not be written" : "no room on the disk tier");
+        if (!s.ckpts.empty())
+            std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells (%.0f MiB more) not parked: "
+                                 "%s\n", (long long) L, mib(need),
+                         room ? "its file could not be written" : "no room on the disk tier");
         return;
     }
     s.tokens = live_.tokens;
@@ -365,13 +486,13 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     for (const ImgKey& image : live_.imgs)
         if (image.start < L) s.imgs.push_back(image);
     s.kv_cells = L;
-    s.kv_bytes = bytes;
-    s.disk_bytes = disk_->bytes(*f);
-    s.file = std::move(f);
+    s.kv_bytes = kv_bytes(L);
+    s.disk_bytes = disk_->bytes(*s.file);
+    const uint64_t wrote = (from < L ? spill_align_up(block) : 0) + wrote_ckpts * disk_->slot;
     const double ms = ms_since(t0);
-    std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells parked on the disk (%.0f MiB in "
-                         "%.0f ms, %.2f GiB/s)\n", (long long) L, mib(s.disk_bytes), ms,
-                 ms > 0 ? (double) s.disk_bytes / 1073741824.0 / (ms / 1000.0) : 0.0);
+    std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells parked on the disk (%.0f MiB written "
+                         "in %.0f ms, %.2f GiB/s; its file %.0f MiB, from cell %lld)\n", (long long) L, mib(wrote), ms,
+                 ms > 0 ? (double) wrote / 1073741824.0 / (ms / 1000.0) : 0.0, mib(s.disk_bytes), (long long) from);
     parked_.park(std::move(s));
 }
 
@@ -390,7 +511,10 @@ PromptCache::PromptCache(const ModelGeometry& g, SessionState& ss, std::vector<Q
 SequenceCache::~SequenceCache() {
     // the conversations' copies, files and chains go while the disk tier is there, before the buffers
     for (Seq& s : parked_.drain()) release(s, -1);
-    for (Seq& c : lives_) release(c, -1);
+    for (Seq& c : lives_) {
+        release(c, -1);
+        drop_file_of(c);
+    }
     disk_.reset();
     for (const auto& [p, pinned] : owned_) {
         if (pinned) cudaFreeHost(p);
@@ -442,6 +566,7 @@ void SequenceCache::release(Seq& seq, int64_t keep_upto) {
     for (size_t i = 0; i < seq.ckpts.size();) {
         if (seq.ckpts[i].pos > keep_upto) {
             give_back(seq.ckpts[i].host);
+            forget_slot(seq, seq.ckpts[i].pos);
             seq.ckpts.erase(seq.ckpts.begin() + (ptrdiff_t) i);
         } else {
             ++i;
@@ -456,6 +581,7 @@ void SequenceCache::enforce_cap(Seq& seq) {
         for (const Ckpt& c : seq.ckpts) pos.push_back(c.pos);
         const size_t v = chain_victim(pos.data(), pos.size());
         give_back(seq.ckpts[v].host);
+        forget_slot(seq, seq.ckpts[v].pos);
         seq.ckpts.erase(seq.ckpts.begin() + (ptrdiff_t) v);
     }
 }
@@ -546,6 +672,7 @@ void SequenceCache::drop_end() {
                 continue;
             }
             give_back(live_.ckpts[i].host);
+            forget_slot(live_, live_.ckpts[i].pos);
             live_.ckpts.erase(live_.ckpts.begin() + (ptrdiff_t) i);
             return;
         }
@@ -596,6 +723,10 @@ void SequenceCache::stash_live(int64_t keep_upto) {
     const bool ram = parked_.wants(L), disk = disk_ != nullptr && L >= parked_.min_tokens();
     if (!ram && !disk) return;
     if (ensure_kv && !ensure_kv(L)) return;
+    if (disk && live_.file) {   // back from the disk tier: its file holds most of it, the rest goes there
+        park_on_disk(keep_upto);
+        return;
+    }
     const uint64_t bytes = kv_bytes(L);
     // its chain: the checkpoints after `keep_upto` and one at its end, capped
     const bool has_end = live_.find(L) != nullptr;
@@ -648,17 +779,20 @@ void SequenceCache::stash_live(int64_t keep_upto) {
     parked_.park(std::move(s));
 }
 
-bool SequenceCache::restore(const Seq& seq, int64_t pos, bool prefix) {
-    const Ckpt* ck = seq.find(pos);
+bool SequenceCache::restore(Seq& seq, int64_t pos, bool prefix, bool parked, bool keep) {
+    Ckpt* ck = seq.find(pos);
     if (ck == nullptr) return false;
-    const int64_t cells = prefix ? pos : seq.kv_cells;
-    const bool copy = seq.kv != nullptr, file = !copy && seq.file != nullptr;
-    if ((copy || file) && ensure_kv && !ensure_kv(cells)) return false;
-    if (copy && !kv_copy(cells, seq.kv_cells, seq.kv.get(), false)) return false;
-    if (file && !disk_get_kv(*seq.file, cells)) return false;
+    if (parked) {   // its cells: from its copy in RAM, or from its file
+        const int64_t cells = prefix ? pos : seq.kv_cells;
+        const bool copy = seq.kv != nullptr, file = !copy && seq.file != nullptr;
+        if ((copy || file) && ensure_kv && !ensure_kv(cells)) return false;
+        if (copy && !kv_copy(cells, seq.kv_cells, seq.kv.get(), false)) return false;
+        if (file && !disk_get_kv(*seq.file, cells)) return false;
+    }
     if (ck->host != nullptr) return state_load(pos, ck->host);
-    // a checkpoint in the file (a start lent by a conversation on the disk tier): loaded through a buffer
-    void* h = file ? take_buffer() : nullptr;
+    // a checkpoint in the conversation's file: read into a buffer it keeps, or one that goes back after the load
+    if (keep) return load_ckpt(seq, pos) && state_load(pos, ck->host);
+    void* h = seq.file ? take_buffer() : nullptr;
     const bool ok = h != nullptr && disk_get_ckpt(*seq.file, pos, h) && state_load(pos, h);
     give_back(h);
     return ok;
@@ -671,6 +805,7 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
     auto zero = [&]() -> int64_t {
         Seq& c = live();
         release(c, 0);
+        drop_file_of(c);
         c.tokens.clear();
         c.imgs.clear();
         c.tag = tag;
@@ -689,6 +824,7 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
     auto vacate = [&] {
         stash_live(0);
         release(live(), 0);
+        drop_file_of(live());   // (where it was not parked with it)
         live().tokens.clear();
     };
     auto started = [&](const Seq& lender) -> int64_t {   // the session holds the lender's first `best` cells
@@ -715,8 +851,9 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         const int64_t L = (int64_t) c.tokens.size();
         if (st.park_rest) stash_live(best);
         // (the whole prompt: its end's checkpoint brings the engine's output back, also where the state stands there)
-        if ((best < L || best == (int64_t) ids.size()) && !restore(c, best)) return zero();
+        if ((best < L || best == (int64_t) ids.size()) && !restore(c, best, false, false, true)) return zero();
         release(c, best);
+        cut(c, best);
         c.tokens.resize((size_t) best);
         c.imgs = imgs;
         return best;
@@ -725,10 +862,10 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         // Another conversation that shares the start of one a session holds: it takes a session of its own, the
         // cells before `best` copied from the lender's, which stays as it is (it may be decoding).
         Seq& lender = lives_[(size_t) st.from];
-        const Ckpt* const ck = lender.find(best);
         touch(st.from);
         use(st.session);
         vacate();
+        const Ckpt* const ck = load_ckpt(lender, best) ? lender.find(best) : nullptr;
         if (ck == nullptr || !kv_from(st.from, best) || !state_load(best, ck->host)) return zero();
         return started(lender);
     }
@@ -742,7 +879,7 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
                                   [](const Seq& s) { return s.pin >= 0; });
         if (donor == parked_.entries().end()) return zero();
         const auto t0 = Clock::now();
-        const bool ok = restore(*donor, best, true);
+        const bool ok = restore(*donor, best, true, true, false);
         donor->pin = -1;
         if (!ok) return zero();
         if (donor->on_disk())
@@ -756,25 +893,26 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
     }
     // The parked conversation continues: the session's own is parked and the chosen one becomes live - from its end,
     // or cut at `best` where its own next request parts from it there (the cells after, and their checkpoints, go).
+    // One from the disk tier keeps its file, its other checkpoints there until a request needs one.
     const bool whole = best >= parked_.entries()[(size_t) st.from].ckpts.back().pos;
     Seq chosen = parked_.take((size_t) st.from);
     use(st.session);
     vacate();
     if (chosen.kv) kv_take(chosen.kv.get());
     const auto t0 = Clock::now();
-    if ((chosen.file && !load_chain(chosen, best)) || !restore(chosen, best, !whole)) {
+    if (!restore(chosen, best, !whole, true, true)) {
         release(chosen, -1);
         return zero();
     }
-    if (chosen.file) {
+    if (chosen.file)
         std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells back from the disk (%.0f ms)\n",
                      (long long) best, ms_since(t0));
-        chosen.file.reset();
-        chosen.disk_bytes = 0;
-    }
     started(chosen);
     live().ckpts = std::move(chosen.ckpts);
+    live().file = std::move(chosen.file);
     release(live(), best);
+    cut(live(), best);
+    if (disk_) fit_lives();
     return best;
 }
 
@@ -782,6 +920,7 @@ void SequenceCache::set(int64_t pos, const int64_t* tokens, int64_t n) {
     if (!enabled()) return;
     Seq& live_ = live();
     release(live_, pos);
+    cut(live_, pos);
     live_.tokens.resize((size_t) pos);
     live_.tokens.insert(live_.tokens.end(), tokens, tokens + n);
 }
@@ -793,6 +932,7 @@ void SequenceCache::append(int s, int64_t token) {
 void SequenceCache::drop(int s) {
     Seq& c = lives_[(size_t) s];
     release(c, -1);
+    drop_file_of(c);
     c.tokens.clear();
     c.imgs.clear();
 }
@@ -809,6 +949,7 @@ void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
     if (!enabled()) return;
     Seq& live_ = live();
     release(live_, pos);
+    cut(live_, pos);
     live_.tokens.resize((size_t) pos);
     for (int64_t i = 0; i < n; ++i) live_.tokens.push_back(tokens[i]);
 }
@@ -873,22 +1014,25 @@ SequenceCache::State SequenceCache::state() const {
     s.slots = parked_.slots();
     s.evictions = parked_.evictions();
     s.disk = parked_.disk_size();
-    s.disk_bytes = parked_.disk_bytes();
+    s.disk_bytes = parked_.disk_bytes() + live_files();
     s.disk_budget = disk_ ? disk_->budget : 0;
     return s;
 }
 
 std::string SequenceCache::summary() const {
     const State s = state();
-    char in[64] = "", disk[96] = "";
+    char in[64] = "", disk[128] = "";
     if (lives_.size() > 1) std::snprintf(in, sizeof in, " in %zu of %zu sessions", s.held, lives_.size());
-    if (disk_) std::snprintf(disk, sizeof disk, ", %zu of them on the disk (%.0f of %.0f MiB)", s.disk, mib(s.disk_bytes),
-                             mib(s.disk_budget));
+    if (disk_) std::snprintf(disk, sizeof disk, ", %zu of them on the disk; files %.0f of %.0f MiB", s.disk,
+                             mib(s.disk_bytes), mib(s.disk_budget));
+    size_t in_ram = 0;   // (a conversation back from the disk tier keeps the others in its file)
+    for (const Seq& c : lives_)
+        for (const Ckpt& k : c.ckpts) in_ram += k.host != nullptr;
     char buf[400];
     std::snprintf(buf, sizeof buf,
-                  "live %lld cells%s, %zu checkpoints (%.0f MiB); %zu parked conversations (%.0f MiB, %zu evicted)%s; "
-                  "%zu idle checkpoint buffers",
-                  (long long) s.live_cells, in, s.checkpoints, (double) s.checkpoints * (double) ckpt_bytes_ / 1048576.0,
+                  "live %lld cells%s, %zu checkpoints (%.0f MiB in RAM); %zu parked conversations (%.0f MiB, %zu "
+                  "evicted)%s; %zu idle checkpoint buffers",
+                  (long long) s.live_cells, in, s.checkpoints, (double) in_ram * (double) ckpt_bytes_ / 1048576.0,
                   s.parked, mib(s.parked_bytes), s.evictions, disk, free_.size());
     return buf;
 }

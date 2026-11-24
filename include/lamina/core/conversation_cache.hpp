@@ -73,7 +73,8 @@ struct Seq {
     int64_t kv_cells = 0;
     uint64_t kv_bytes = 0;
     /// Parked on the disk tier: its cells and checkpoints in `file`, `disk_bytes` of it (no K/V copy, and its
-    /// checkpoints hold no buffers).
+    /// checkpoints hold no buffers).  A conversation taken back from it keeps the file while it is live, the image of
+    /// its first cells and of the checkpoints that hold no buffer (SequenceCache).
     std::unique_ptr<SeqFile, FileFree> file;
     uint64_t disk_bytes = 0;
     bool on_disk() const { return disk_bytes > 0; }
@@ -87,6 +88,11 @@ struct Seq {
 
     const Ckpt* find(int64_t pos) const {
         for (const Ckpt& c : ckpts)
+            if (c.pos == pos) return &c;
+        return nullptr;
+    }
+    Ckpt* find(int64_t pos) {
+        for (Ckpt& c : ckpts)
             if (c.pos == pos) return &c;
         return nullptr;
     }

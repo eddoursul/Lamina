@@ -21,7 +21,10 @@
 //   * the DISK TIER (open_disk, an engine that names its K/V regions: kv_spans): a conversation the RAM cannot hold
 //     is written from the device to a file through a small pinned stage, never whole in RAM, and one that leaves the
 //     RAM goes from its copy; read back the same way where a request takes or borrows it.  Matched as any parked one
-//     (its tokens and checkpoint positions stay in RAM); its I/O runs in begin() and between requests only.
+//     (its tokens and checkpoint positions stay in RAM); its I/O runs in begin() and between requests only.  A
+//     conversation taken back keeps its file while it is live: the cells before where the sequence is rewritten
+//     stay the file's, its checkpoints there are read when a request needs one, and its next park writes only the
+//     cells and checkpoints the file lacks.
 //
 // Each conversation owns its checkpoints, at most `chain_cap` of them, which thin out geometrically back from its
 // newest (chain_victim); a parked conversation leaves only whole (ConversationCache, conversation_cache.hpp).  One
@@ -180,9 +183,10 @@ protected:
         void* dev;
         uint64_t bytes;
     };
-    /// The disk tier's way to the K/V: the device regions that hold cells [lo, hi) of every K/V state (`lo` a
-    /// multiple of 4), in the order kv_copy lays a parked copy of `hi` cells out when lo is 0; those of cells [lo, n)
-    /// are the first bytes of each.  Empty: the engine keeps nothing on the disk tier.
+    /// The disk tier's way to the K/V: the device regions that hold cells [lo, hi) of every K/V state, in the order
+    /// kv_copy lays a parked copy of `hi` cells out when lo is 0; those of cells [lo, n) are the first bytes of each.
+    /// A region may start before `lo` (a whole page): cells written alike since.  Empty: the engine keeps nothing on
+    /// the disk tier.
     virtual std::vector<KvSpan> kv_spans(int64_t lo, int64_t hi) const {
         (void) lo;
         (void) hi;
@@ -207,9 +211,10 @@ private:
     /// Parks a copy of the live sequence: its K/V cells, its checkpoints after `keep_upto` (the ones before stay with
     /// the live sequence, which continues from there) and one at its end.
     void stash_live(int64_t keep_upto);
-    /// The checkpoint at `pos` and, of a parked conversation, its K/V cells: all of them, or with `prefix` only those
-    /// before `pos` (a borrowed prefix).
-    bool restore(const Seq& seq, int64_t pos, bool prefix = false);
+    /// The checkpoint at `pos` and, of a parked conversation (`parked`), its K/V cells: all of them, or with `prefix`
+    /// only those before `pos` (a borrowed prefix).  A checkpoint in the conversation's file is read into a buffer,
+    /// which it keeps (`keep`) or which goes back after the load (a start a parked conversation lends).
+    bool restore(Seq& seq, int64_t pos, bool prefix, bool parked, bool keep);
 
     /// Session `s` is the one the request runs in: selected in the engine, and used now.
     void use(int s);
@@ -223,9 +228,12 @@ private:
     void evict(Seq&& s, const char* why);
     /// The live sequence, which the RAM does not hold, parked on the disk tier as stash_live parks it in RAM.
     void park_on_disk(int64_t keep_upto);
-    /// Room on the disk tier for a file of `bytes`: within its budget and the disk's free space above kSpillFloor,
-    /// the least recently used files leaving first.
-    bool disk_room(uint64_t bytes);
+    /// Room on the disk tier for `bytes` more: within its budget and the disk's free space above kSpillFloor beside
+    /// the files there, the cells of the files the sessions keep leaving first (but `keep`'s, which a park appends
+    /// to), then the least recently used parked files.  fit_lives: the sessions' files within what the parked ones
+    /// leave.
+    bool disk_room(uint64_t bytes, const Seq* keep = nullptr);
+    void fit_lives();
     std::unique_ptr<SeqFile, FileFree> new_file();
     void drop_file(SeqFile* f);
     /// Cells [lo, hi) from the device to the end of `f`'s K/V file, as one block in kv_spans' order.
@@ -236,8 +244,18 @@ private:
     bool disk_get_kv(const SeqFile& f, int64_t cells);
     bool disk_put_ckpt(SeqFile& f, int64_t pos, const void* host);
     bool disk_get_ckpt(const SeqFile& f, int64_t pos, void* host);
-    /// The checkpoints of `s` up to `upto` read from its file into buffers of their own.
+    /// The checkpoint of `s` at `pos`, and those up to `upto`, read from its file into buffers of their own where
+    /// they hold none.
+    bool load_ckpt(Seq& s, int64_t pos);
     bool load_chain(Seq& s, int64_t upto);
+    /// A live conversation's file: its cells from `cells` on are rewritten (the file's image ends there); a
+    /// checkpoint leaving the chain gives its slot back; the files the sessions keep, their bytes.
+    void cut(Seq& s, int64_t cells);
+    void forget_slot(Seq& s, int64_t pos);
+    /// A session's file gives its cells back (its next park writes them whole), or all of it.
+    void drop_cells_of(Seq& s);
+    void drop_file_of(Seq& s);
+    uint64_t live_files() const;
 
     int chain_cap_;
     uint64_t ckpt_bytes_;

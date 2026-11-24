@@ -162,7 +162,8 @@ A request continues from the longest start of its prompt that the engine still h
   beside the other's write, so it is never whole in RAM), its checkpoints from their buffers, past the file cache. A
   request matches it as one in RAM and reads it back the same way, before its prompt (the embeddings' reads from the
   SSD during a request never wait behind it); the least recently used file goes first, within
-  `--conversation-spill-mib`.
+  `--conversation-spill-mib`. A conversation taken back keeps its file while it is live, its checkpoints there until
+  a request needs one, and its next park writes only the cells and checkpoints the file lacks.
 
 The API reports how many prompt tokens were reused (`cached_tokens`, `cache_read_input_tokens`).
 
