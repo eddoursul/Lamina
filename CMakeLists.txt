@@ -346,6 +346,10 @@ if(LAMINA_ENABLE_CUDA)
   add_executable(conversation_cache_test tests/core/conversation_cache_test.cpp)
   target_link_libraries(conversation_cache_test PRIVATE lamina_engine)
 
+  # the model families: the guards, the geometry from metadata, the layout tables (synthetic GGUFs, CPU only)
+  add_executable(model_family_test tests/core/model_family_test.cpp)
+  target_link_libraries(model_family_test PRIVATE lamina_artifact)
+
   add_executable(disk_tier_test tests/core/disk_tier_test.cpp)
   target_link_libraries(disk_tier_test PRIVATE lamina_core)
 
@@ -360,6 +364,7 @@ if(LAMINA_ENABLE_CUDA)
     add_test(NAME prompt_cache_spread_test COMMAND prompt_cache_spread_test)
     add_test(NAME conversation_cache_test COMMAND conversation_cache_test)
     add_test(NAME disk_tier_test COMMAND disk_tier_test)
+    add_test(NAME model_family_test COMMAND model_family_test)
     add_test(NAME control_vector_test COMMAND control_vector_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
     add_test(NAME deterministic_adapt_help COMMAND lamina --deterministic-adapt --help-all)
