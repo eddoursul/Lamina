@@ -1608,6 +1608,7 @@ struct Engine {
     bool snap_sync = false;          // LAMINA_INK_SNAP_SYNC=1: a split's checkpoint image copied on the spot
     bool stage_log = false;          // LAMINA_INK_STAGE_LOG=1: a line a segment of a part (staged, or why not)
     int group_rows = 1024;           // LAMINA_INK_GROUP=N: a chunk of up to N rows grouped by expert on the card (0: never)
+    int gate_fuse = 1;               // LAMINA_INK_GATE_FUSE=N: a chunk's loop gates in three launches from N rows (0: cuBLAS's)
     static constexpr int kLag = 3;   // (the host's queue on the card's grouping: kLag - 1 applications)
     cudaEvent_t lag_ev[2][kLag] = {};   // a card's grouping done, an application each: this card's, the split's
     int lag_n[2] = {};
@@ -2883,6 +2884,7 @@ struct Engine {
         if (const char* r = std::getenv("LAMINA_INK_CHAIN")) chain_cross = std::atoi(r) != 0;
         snap_sync = std::getenv("LAMINA_INK_SNAP_SYNC") != nullptr;
         if (const char* r = std::getenv("LAMINA_INK_GROUP")) group_rows = std::max(0, std::atoi(r));
+        if (const char* r = std::getenv("LAMINA_INK_GATE_FUSE")) gate_fuse = std::max(0, std::atoi(r));
         CK(cudaEventCreateWithFlags(&ev_q[0], cudaEventDisableTiming));
         for (cudaEvent_t& ev : lag_ev[0]) CK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
         if (m->sat_dev >= 0) {   // the split's card: its stream, its decode rows, its products' interleaved copies
@@ -4593,10 +4595,24 @@ struct Engine {
             throw Fatal{1};
         }
     }
-    /// A chunk's loop gate of one input: out = (1 - tanh(F h)) u + tanh(G h) m, h = D [u / rms(u); m / rms(m)]
+    /// A chunk's loop gate of one input: out = (1 - tanh(F h)) u + tanh(G h) m, h = D [u / rms(u); m / rms(m)].  At
+    /// the model's rank of 64 in three launches (gate_h_part_kernel, gate_h_join_kernel, gate_apply_rows_kernel): u
+    /// and m read twice, h the only array between them; else through cuBLAS (z = the rows over their rms, h, F h and
+    /// G h written and read back).
     void ctrl_batch(Rows& R, const float* u, const float* msg, const float* Dm, const float* G, const float* F, float* out,
                     int T) {
         const int N = (int) m->g.n_embd, rank = (int) m->g.gate_rank;
+        const int bt = (T + ik::kGateRows - 1) / ik::kGateRows;
+        int S = 4;   // (h's K slices: some 160 blocks or more; a short chunk's at most 32)
+        while (S < 32 && bt * S < 160) S *= 2;
+        if (gate_fuse > 0 && T >= gate_fuse && rank == 64 && N % 64 == 0 && (2 * N / S) % ik::kGateK == 0 && N % (2 * N / S) == 0) {
+            float* const part = R.cz;   // (the slices' sums, then their rows' squares: z's room)
+            float* const sq = R.cz + (size_t) S * T * 64;
+            ik::gate_h_part_kernel<<<dim3((unsigned) bt, (unsigned) S), 256, 0, st>>>(u, msg, Dm, part, sq, T, N);
+            ik::gate_h_join_kernel<<<(unsigned) ((T * 64 + 255) / 256), 256, 0, st>>>(part, sq, R.ctl_h, T, N, S);
+            ik::gate_apply_rows_kernel<<<dim3((unsigned) (N / 64), (unsigned) bt), 256, 0, st>>>(u, msg, R.ctl_h, G, F, out, T, N);
+            return;
+        }
         ik::ctrl_cat_kernel<<<(unsigned) T, ik::kTB, 0, st>>>(u, msg, R.cz, N);
         gemm(Dm, rank, 2 * N, R.cz, T, R.ctl_h);
         gemm(G, N, rank, R.ctl_h, T, R.cs1);

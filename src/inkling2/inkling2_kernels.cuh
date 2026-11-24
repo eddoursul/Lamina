@@ -1432,6 +1432,143 @@ __global__ void __launch_bounds__(kTB) ctrl_cat_kernel(const float* __restrict__
         zr[N + i] = mr[i] * im;
     }
 }
+/// The gate's h without z: a block 64 rows of T by the R = 64 outputs over one K slice of [u | m] (gridDim.y slices of
+/// 2 N / gridDim.y columns, whole 16-column steps of one half each), its partial sums into part[slice][t][r] and its
+/// rows' squares into sq[slice][t]; gate_h_join_kernel scales and joins them.  256 threads, a thread 4 rows by 4
+/// outputs; the tiles k-major in shared memory.
+constexpr int kGateRows = 64, kGateK = 16;
+__global__ void __launch_bounds__(256) gate_h_part_kernel(const float* __restrict__ u, const float* __restrict__ m,
+                                                          const float* __restrict__ D, float* __restrict__ part,
+                                                          float* __restrict__ sq, int T, int N) {
+    constexpr int R = 64;
+    __shared__ __align__(16) float as[kGateK][kGateRows + 4];
+    __shared__ __align__(16) float bs[kGateK][R + 4];
+    const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4, t0 = blockIdx.x * kGateRows;
+    const int span = 2 * N / (int) gridDim.y, k0 = blockIdx.y * span, k1 = k0 + span;
+    const int lr = tid >> 2, lq = (tid & 3) * 4;   // (the loads: a row or output, four columns)
+    float acc[4][4] = {};
+    float ss = 0.f;
+    for (int k = k0; k < k1; k += kGateK) {
+        const float* src = k < N ? u : m;
+        const int kc = k < N ? k : k - N;
+        float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (t0 + lr < T) a = *reinterpret_cast<const float4*>(src + (size_t) (t0 + lr) * N + kc + lq);
+        ss += a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w;
+        const float4 b = *reinterpret_cast<const float4*>(D + (size_t) lr * 2 * N + k + lq);
+        as[lq][lr] = a.x;
+        as[lq + 1][lr] = a.y;
+        as[lq + 2][lr] = a.z;
+        as[lq + 3][lr] = a.w;
+        bs[lq][lr] = b.x;
+        bs[lq + 1][lr] = b.y;
+        bs[lq + 2][lr] = b.z;
+        bs[lq + 3][lr] = b.w;
+        __syncthreads();
+#pragma unroll
+        for (int q = 0; q < kGateK; ++q) {
+            const float4 x = *reinterpret_cast<const float4*>(&as[q][ty * 4]);
+            const float4 w = *reinterpret_cast<const float4*>(&bs[q][tx * 4]);
+            const float xs[4] = {x.x, x.y, x.z, x.w}, ws[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) acc[i][j] = fmaf(xs[i], ws[j], acc[i][j]);
+        }
+        __syncthreads();
+    }
+    ss += __shfl_xor_sync(0xffffffffu, ss, 1);
+    ss += __shfl_xor_sync(0xffffffffu, ss, 2);
+    if ((tid & 3) == 0 && t0 + lr < T) sq[(size_t) blockIdx.y * T + t0 + lr] = ss;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int t = t0 + ty * 4 + i;
+        if (t < T)
+            *reinterpret_cast<float4*>(part + ((size_t) blockIdx.y * T + t) * R + tx * 4) =
+                make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+    }
+}
+/// h[t][r] = the u slices' sums / rms(u) + the m slices' (the first half of the S slices are u's).  A thread an output.
+__global__ void gate_h_join_kernel(const float* __restrict__ part, const float* __restrict__ sq, float* __restrict__ h,
+                                   int T, int N, int S) {
+    constexpr int R = 64;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= T * R) return;
+    const int t = i / R;
+    float su = 0.f, sm = 0.f, qu = 0.f, qm = 0.f;
+    for (int s = 0; s < S / 2; ++s) {
+        su += part[(size_t) s * T * R + i];
+        qu += sq[(size_t) s * T + t];
+    }
+    for (int s = S / 2; s < S; ++s) {
+        sm += part[(size_t) s * T * R + i];
+        qm += sq[(size_t) s * T + t];
+    }
+    h[i] = su * rsqrtf(qu / (float) N + 1e-6f) + sm * rsqrtf(qm / (float) N + 1e-6f);
+}
+/// out = (1 - tanh(F h)) u + tanh(G h) m: the gate's two products (R = 64) and its application in one launch, a block
+/// 64 rows by 64 of the N outputs (grid (N / 64, ceil(T / 64))), 256 threads, a thread 4 rows by 4 outputs.
+__global__ void __launch_bounds__(256) gate_apply_rows_kernel(const float* __restrict__ u, const float* __restrict__ m,
+                                                              const float* __restrict__ h, const float* __restrict__ G,
+                                                              const float* __restrict__ F, float* __restrict__ out, int T,
+                                                              int N) {
+    constexpr int R = 64, KS = 32;
+    __shared__ __align__(16) float hs[KS][kGateRows + 4];
+    __shared__ __align__(16) float gs[KS][64 + 4];
+    __shared__ __align__(16) float fs[KS][64 + 4];
+    const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    const int o0 = blockIdx.x * 64, t0 = blockIdx.y * kGateRows;
+    float ag[4][4] = {}, af[4][4] = {};
+    for (int k0 = 0; k0 < R; k0 += KS) {
+        for (int e = tid; e < kGateRows * KS / 4; e += 256) {   // (a row or output, four of the step's columns)
+            const int r = e / (KS / 4), q = (e % (KS / 4)) * 4;
+            float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+            if (t0 + r < T) a = *reinterpret_cast<const float4*>(h + (size_t) (t0 + r) * R + k0 + q);
+            const float4 g = *reinterpret_cast<const float4*>(G + (size_t) (o0 + r) * R + k0 + q);
+            const float4 f = *reinterpret_cast<const float4*>(F + (size_t) (o0 + r) * R + k0 + q);
+            hs[q][r] = a.x;
+            hs[q + 1][r] = a.y;
+            hs[q + 2][r] = a.z;
+            hs[q + 3][r] = a.w;
+            gs[q][r] = g.x;
+            gs[q + 1][r] = g.y;
+            gs[q + 2][r] = g.z;
+            gs[q + 3][r] = g.w;
+            fs[q][r] = f.x;
+            fs[q + 1][r] = f.y;
+            fs[q + 2][r] = f.z;
+            fs[q + 3][r] = f.w;
+        }
+        __syncthreads();
+#pragma unroll 8
+        for (int q = 0; q < KS; ++q) {
+            const float4 x = *reinterpret_cast<const float4*>(&hs[q][ty * 4]);
+            const float4 wg = *reinterpret_cast<const float4*>(&gs[q][tx * 4]);
+            const float4 wf = *reinterpret_cast<const float4*>(&fs[q][tx * 4]);
+            const float xs[4] = {x.x, x.y, x.z, x.w}, g4[4] = {wg.x, wg.y, wg.z, wg.w}, f4[4] = {wf.x, wf.y, wf.z, wf.w};
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    ag[i][j] = fmaf(xs[i], g4[j], ag[i][j]);
+                    af[i][j] = fmaf(xs[i], f4[j], af[i][j]);
+                }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int t = t0 + ty * 4 + i;
+        if (t >= T) continue;
+        const size_t at = (size_t) t * N + o0 + tx * 4;
+        const float4 uu = *reinterpret_cast<const float4*>(u + at), mm = *reinterpret_cast<const float4*>(m + at);
+        float4 o;
+        o.x = (1.0f - tanhf(af[i][0])) * uu.x + tanhf(ag[i][0]) * mm.x;
+        o.y = (1.0f - tanhf(af[i][1])) * uu.y + tanhf(ag[i][1]) * mm.y;
+        o.z = (1.0f - tanhf(af[i][2])) * uu.z + tanhf(ag[i][2]) * mm.z;
+        o.w = (1.0f - tanhf(af[i][3])) * uu.w + tanhf(ag[i][3]) * mm.w;
+        *reinterpret_cast<float4*>(out + at) = o;
+    }
+}
 /// out = (1 - tanh(sf)) u + tanh(sg) m over n values (sg, sf: the gain's and the forget's products)
 __global__ void ctrl_gate_kernel(const float* __restrict__ u, const float* __restrict__ m, const float* __restrict__ sg,
                                  const float* __restrict__ sf, float* __restrict__ out, long long n) {
