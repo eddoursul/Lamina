@@ -1,5 +1,6 @@
 #include "service.hpp"
 
+#include "lamina/artifact/model_family.hpp"
 #include "log.hpp"
 #include "images.hpp"
 #include "keepawake.hpp"
@@ -257,7 +258,7 @@ json model_card_sampling(const std::string& arch, bool thinking) {
     if (arch == "qwen35moe")
         return thinking ? json{{"temperature", 1.0}, {"top_p", 0.95}, {"top_k", 20}, {"presence_penalty", 1.5}}
                         : json{{"temperature", 0.7}, {"top_p", 0.8}, {"top_k", 20}, {"presence_penalty", 1.5}};
-    if (arch == "inkling2" || arch == "inkling2_loop")   // Inkling 2 Mini's: the plain distribution, of the 64 likeliest here
+    if (model_family_from_arch(arch) == ModelFamily::Inkling2)   // Inkling 2 Mini's: the plain distribution, of the 64 likeliest here
         return json{{"temperature", 1.0}, {"top_p", 1.0}, {"top_k", 64}};
     return json::object();
 }
@@ -266,7 +267,7 @@ std::string default_model_name(const json& cfg, const std::string& arch) {
     if (!jstr(cfg, "model_name").empty()) return jstr(cfg, "model_name");
     if (arch == "qwen35moe") return "qwen3.6-35b-a3b";
     if (arch == "qwen35") return "qwen3.8-27b";
-    if (arch == "inkling2" || arch == "inkling2_loop") return "inkling-2-mini";
+    if (model_family_from_arch(arch) == ModelFamily::Inkling2) return "inkling-2-mini";
     return "qwen3.8-flash-next";
 }
 

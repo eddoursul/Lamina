@@ -25,6 +25,7 @@
 #include "telemetry.hpp"
 #include "vision.hpp"
 
+#include "lamina/artifact/model_family.hpp"
 #include "lamina/program/engine.hpp"
 
 #include <atomic>
@@ -288,7 +289,7 @@ std::string no_lending(const json& cfg, const std::string& arch, bool replicas, 
     if (card < 0 || on.empty()) return "";   // (nvidia-smi lists nothing: the engine answers when asked)
     if (std::find(on.begin(), on.end(), card) == on.end()) return "the engine does not work on the encoder's card";
     if (arch == "hy_v4_flash" && card != on.front()) return "Hy4-flash's engine lends on its main GPU alone";
-    if ((arch == "inkling2" || arch == "inkling2_loop") && card != on.front()) return "Inkling 2's engine lends on its own GPU alone";
+    if (lamina::model_family_from_arch(arch) == lamina::ModelFamily::Inkling2 && card != on.front()) return "Inkling 2's engine lends on its own GPU alone";
     return "";
 }
 

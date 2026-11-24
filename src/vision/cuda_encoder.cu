@@ -706,12 +706,14 @@ private:
             m.type = kF16;
             m.d = dmalloc(bytes / 2);
             if (!measuring_) {
-                void* f32 = nullptr;
-                ck(cudaMalloc(&f32, bytes), "an F32 matrix's staging");
-                to_device(f32, raw.data(), bytes);
-                k_to_f16<<<grid1(n), kThreads, 0, st_>>>((const float*) f32, (__half*) m.d, n);
+                struct Staging {   // (freed however the load ends)
+                    void* p = nullptr;
+                    ~Staging() { cudaFree(p); }
+                } f32;
+                ck(cudaMalloc(&f32.p, bytes), "an F32 matrix's staging");
+                to_device(f32.p, raw.data(), bytes);
+                k_to_f16<<<grid1(n), kThreads, 0, st_>>>((const float*) f32.p, (__half*) m.d, n);
                 ck(cudaStreamSynchronize(st_), "an F32 matrix's conversion");
-                cudaFree(f32);
             }
         } else if (info->type == kF32) {
             m.type = kF32;
@@ -1028,15 +1030,7 @@ private:
         if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
             throw std::runtime_error("an empty picture");
         int tw = 0, th = 0;
-        std::vector<float> pixels;
-        if (proj_.pad_to_align) {
-            pixels = planes_padded(picture, proj_.size, proj_.filter, proj_.mean, proj_.std, tw, th);
-        } else {
-            target_size(picture.w, picture.h, proj_.size, tw, th);
-            if (tw <= 0 || th <= 0 || tw % proj_.size.align != 0 || th % proj_.size.align != 0)
-                throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
-            pixels = planes(fit(picture, tw, th, proj_.filter, proj_.letterbox, proj_.pad), proj_.mean, proj_.std);
-        }
+        const std::vector<float> pixels = projector_planes(picture, proj_, tw, th);
 
         const bool qwen = proj_.kind == ProjectorKind::qwen3vl, ink = proj_.kind == ProjectorKind::inkling2v;
         const int E = proj_.n_embd, H = proj_.n_head, D = proj_.d_head(), P = proj_.patch_size;

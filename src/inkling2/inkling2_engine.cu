@@ -1081,34 +1081,8 @@ struct Spark {
     double gib = 0, load_s = 0;
 };
 
-constexpr int64_t kSparkSlack = 4096;   // cells a drafter's ring keeps past its layer's: a state may step back that far
-/// A drafter layer's ring that sees `see` context cells: a scan's stretch (three tiles at least, thirty at most, about
-/// 64 stretches between) and its cells (the block's rows and the slack after them, whole stretches)
-struct SparkRingShape {
-    int chunk;
-    int64_t cap;
-};
-SparkRingShape spark_ring_shape(int64_t see) {
-    const int chunk =
-        (int) std::max<int64_t>(3, std::min<int64_t>(30, (see + kMaxT + 64 * ik::kTcCells - 1) / (64 * ik::kTcCells))) * ik::kTcCells;
-    return {chunk, (see + kMaxT + kSparkSlack + 2 * chunk - 1) / chunk * chunk};
-}
-/// The VRAM the rings of the drafter in `path` take at `reach` context cells, from its metadata (0: none it names)
-uint64_t spark_rings_bytes(const std::string& path, int64_t reach, bool q8) {
-    const lamina::GgufModel gm = lamina::GgufModel::open(path);
-    const auto& f = gm.meta();
-    auto num = [&](const char* k) {
-        const lamina::MetaValue* v = f.get(std::string("dflash.") + k);
-        return v && v->is_num() ? (int64_t) v->u : (int64_t) 0;
-    };
-    const int64_t HK = num("attention.head_count_kv"), D = num("attention.key_length"), swa = num("attention.sliding_window");
-    std::vector<uint64_t> pat;
-    f.numbers("dflash.attention.sliding_window_pattern", &pat);
-    const uint64_t cell = (uint64_t) (q8 ? HK * (D / 32) * 34 : HK * D * 2);
-    uint64_t n = 0;
-    for (const uint64_t w : pat) n += (uint64_t) spark_ring_shape(w ? swa : std::max(reach, swa)).cap * 2 * cell;
-    return n;
-}
+static_assert(lamina::inkling2::kDrafterRows == kMaxT && lamina::inkling2::kDrafterTile == ik::kTcCells,
+              "the drafter's rings as geometry.hpp sizes them");
 
 /// The drafter of model `m` from `path`.  False with `err`: not such a file, or not one this path's kernels run.
 bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& err) {
@@ -5849,7 +5823,7 @@ struct Engine {
         for (int l = 0; l < s.n_layer; ++l) {
             SparkRing& r = sp_ring[(size_t) l];
             r.see = s.layers[(size_t) l].window ? s.n_swa : std::max<int64_t>(sp_reach, s.n_swa);
-            const SparkRingShape shape = spark_ring_shape(r.see);
+            const lamina::inkling2::DrafterRing shape = lamina::inkling2::drafter_ring(r.see);
             r.chunk = shape.chunk;
             r.n_chunks = (int) ((r.see + T + r.chunk - 1) / r.chunk);
             if (sp_stretch > 0) r.n_chunks = (int) std::min<int64_t>(512, (r.see + T + sp_stretch - 1) / sp_stretch + 1);
@@ -8106,7 +8080,9 @@ int run_engine(int argc, char** argv, bool check_only) {
                                   (uint64_t) g.n_full_visits() * 2 * cell;
             // (a chunk of 128 rows at least, the rings and the cache's image of them, the graphs)
             const uint64_t rest = ring * (serve && copt.chain > 0 ? 2 : 1) + (prefill > 0 ? 230ull << 20 : 0) + (64ull << 20);
-            const uint64_t its = ec ? 0 : file + spark_rings_bytes(dspark, reach, kv == "q8_0") + (160ull << 20);
+            const uint64_t its =
+                ec ? 0 : file + lamina::inkling2::drafter_rings_bytes(lamina::GgufModel::open(dspark).meta(), reach, kv == "q8_0") +
+                             (160ull << 20);
             room = ec || its + want + rest + *reserve <= fr;
             if (!room)
                 std::fprintf(stderr, "lamina: the drafter is left out: beside it this GPU's VRAM would hold a context under "

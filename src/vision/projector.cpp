@@ -302,4 +302,12 @@ std::vector<float> hy4_position_table(const std::vector<float>& src, int64_t n_e
     return dst;
 }
 
+std::vector<float> projector_planes(const Rgb& picture, const ProjectorParams& p, int& tw, int& th) {
+    if (p.pad_to_align) return planes_padded(picture, p.size, p.filter, p.mean, p.std, tw, th);
+    target_size(picture.w, picture.h, p.size, tw, th);
+    if (tw <= 0 || th <= 0 || tw % p.size.align != 0 || th % p.size.align != 0)
+        throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
+    return planes(fit(picture, tw, th, p.filter, p.letterbox, p.pad), p.mean, p.std);
+}
+
 }  // namespace lamina::vision

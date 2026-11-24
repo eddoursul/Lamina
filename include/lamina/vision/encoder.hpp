@@ -59,7 +59,8 @@ struct EncoderParams {
     bool q8_fp16 = false;
     /// A GPU: memory of `device` the caller lends the encoder for its whole life, at least encoder_gpu_bytes(): the
     /// weights and the buffers are carved from it and the encoder allocates none of its own (cuBLAS's handle and
-    /// MMQ's pool aside: 12 and 36 MiB).  Null: its own allocations.
+    /// MMQ's pool aside: 12 and 36 MiB; an F32 file's matrices pass through a staging buffer of their bytes as they
+    /// load).  Null: its own allocations.
     void* gpu_arena = nullptr;
     uint64_t gpu_arena_bytes = 0;
 };

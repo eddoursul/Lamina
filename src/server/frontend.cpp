@@ -1403,6 +1403,9 @@ void OutputParser::block_text(std::string& text, std::vector<Event>& out) {
         hdr_ += text;
         break;
     case Blk::Think:
+        if (tsep_) out.push_back({"reasoning", "\n\n", nullptr});
+        tsep_ = false;
+        thinks_ = true;
         out.push_back({"reasoning", text, nullptr});
         break;
     case Blk::Call:
@@ -1495,6 +1498,7 @@ std::vector<Event> OutputParser::feed_blocks(std::string_view delta) {
         } else if (c == kBlkThink) {
             bk_ = Blk::Think;
             state_ = "reasoning";
+            tsep_ = thinks_;
         } else if (c == kBlkText) {
             bk_ = Blk::Text;
             state_ = "content";
@@ -1867,6 +1871,50 @@ std::vector<Event> OutputParser::finish_call(std::string body) {
     state_ = "content";
     lead_ = true;
     return {{"tool_call", "", std::make_shared<ToolCall>(std::move(call))}};
+}
+
+bool names_stop_marker(std::string_view text, const std::string& state, const BlockTags* blocks) {
+    constexpr size_t none = std::string_view::npos;
+    if (blocks != nullptr) {   // the open block's text, after its kind's tag
+        size_t at = none;
+        const std::string* last = nullptr;
+        for (const std::string* tag : {&blocks->model, &blocks->think, &blocks->text, &blocks->call, &blocks->end})
+            if (const size_t i = text.rfind(*tag); i != none && (at == none || i > at)) {
+                at = i;
+                last = tag;
+            }
+        if (last == nullptr || last == &blocks->model || last == &blocks->end) return false;   // none open, a header
+        text = text.substr(at + last->size());
+    }
+    const auto opened = [&](std::string_view open, std::string_view close) {
+        const size_t i = text.rfind(open), j = text.rfind(close);
+        return i != none && (j == none || j < i);
+    };
+    if (state == "call" || state == "rcall") return opened("<parameter=", "</parameter>");
+    if (state != "reasoning" && state != "content") return false;
+    const bool thinking = state == "reasoning";
+    if (const size_t e = text.rfind(kThinkEnd); !thinking && e != none) text = text.substr(e + kThinkEnd.size());
+    bool fence = false;
+    size_t line = 0;
+    for (size_t nl; (nl = text.find('\n', line)) != none; line = nl + 1) {
+        const size_t c = text.find_first_not_of(" \t", line);
+        if (c < nl && text.compare(c, 3, "```") == 0) fence = !fence;
+    }
+    const std::string_view last = text.substr(line);
+    const size_t first = last.find_first_not_of(" \t");
+    if (first != none && last.compare(first, 3, "```") == 0) return false;   // the line of a fence: a real end can follow
+    if (opened("<|im_start|>", "<|im_end|>") || (fence && (thinking || !last.empty()))) return true;
+    if (std::count(last.begin(), last.end(), '`') % 2 == 1) return true;
+    if (const std::string_view q[] = {"(", "[", "\xE2\x80\x9C", "\xE2\x80\x98", "\xC2\xAB"};   // ( [ left quotes
+        std::any_of(std::begin(q), std::end(q), [&](std::string_view o) { return ends_with(last, o); }))
+        return true;
+    if (ends_with(last, "\"") && std::count(last.begin(), last.end(), '"') % 2 == 1) return true;
+    if (ends_with(last, "'") && (last.size() == 1 || !std::isalnum((unsigned char) last[last.size() - 2]))) return true;
+    const size_t end = last.find_last_not_of(" \t");
+    if (!thinking || end == none) return false;
+    const std::string_view written = last.substr(0, end + 1);
+    const std::string_view sentence[] = {".", "!", "?", "\xE3\x80\x82", "\xEF\xBC\x81", "\xEF\xBC\x9F", "\xE2\x80\xA6"};   // . ! ? and CJK, ...
+    return std::none_of(std::begin(sentence), std::end(sentence), [&](std::string_view o) { return ends_with(written, o); });
 }
 
 }  // namespace lamina

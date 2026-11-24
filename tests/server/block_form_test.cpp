@@ -1,7 +1,7 @@
 // A reply in a block form (Inkling 2's: thinking, text and JSON call blocks between special tokens) through the output
 // parser's block mode, a character at a time and whole: the events, a call's arguments streamed as written, a call that
-// does not parse, a reply cut inside a call; and the dialect's translations (a token's piece, the server's Qwen-form
-// text as tags, the template's effort). (CPU only.)
+// does not parse, a reply cut inside a call, a stop token quoted in a block; and the dialect's translations (a token's
+// piece, the server's Qwen-form text as tags, the template's effort). (CPU only.)
 #include "dialect.hpp"
 #include "frontend.hpp"
 
@@ -81,6 +81,22 @@ int main() {
             const Got g = run({t.model, t.text, "One.", t.end, t.model, t.text, "Two.", t.end}, thinking, nullptr, false, 3);
             CHECK(g.reasoning.empty() && g.content == "One.\n\nTwo.");
         }
+    }
+    {   // two thinking blocks are paragraphs of the reasoning
+        const Got g = run({t.model, t.think, "One.", t.end, t.model, t.think, "Two.", t.end, t.model, t.text, "Three.", t.end},
+                          true, nullptr, false, 3);
+        CHECK(g.reasoning == "One.\n\nTwo." && g.content == "Three.");
+    }
+    {   // a stop token drawn in a block form's reply: the open block's text alone tells whether it quotes the marker (a
+        // closed thinking block's fence is not the answer's); after a block's end, or in a block's header, the turn ends
+        const std::string fenced = t.model + t.think + "Like this:\n```\ncode" + t.end;
+        CHECK(lamina::names_stop_marker(fenced + t.model + t.text + "Done.", "content"));   // the form unread: a fence
+        CHECK(!lamina::names_stop_marker(fenced + t.model + t.text + "Done.", "content", &t));
+        CHECK(lamina::names_stop_marker(fenced + t.model + t.text + "Write `", "content", &t));
+        CHECK(!lamina::names_stop_marker(fenced, "content", &t));
+        CHECK(!lamina::names_stop_marker(fenced + t.model, "content", &t));
+        CHECK(lamina::names_stop_marker(t.model + t.think + "Then the", "reasoning", &t));
+        CHECK(!lamina::names_stop_marker(t.model + t.think + "Done.", "reasoning", &t));
     }
     {   // the states the service's budgets and forced calls read
         std::string state;

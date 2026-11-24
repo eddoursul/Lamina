@@ -378,8 +378,9 @@ bool apply_cards(Options& o, bool main_after, bool tiers_after) {
         }
         return true;
     }
-    if (m.prefetch || m.clocks || m.sleep)
-        return refuse(m, "the main GPU takes cache, reserve and vram-only (prefetch, clocks and sleep are a tier's)");
+    if (m.prefetch || m.clocks || m.sleep || m.layers)
+        return refuse(m, "the main GPU takes cache, reserve and vram-only (prefetch, clocks and sleep are a tier's, layers "
+                         "Inkling 2 Mini's)");
     if (!main_after) o.main_gpu_name = m.name;
     if (m.cache_auto) o.expert_cache = -1;
     else if (m.cache_slots) o.expert_cache = (int) *m.cache_slots;
@@ -393,6 +394,7 @@ bool apply_cards(Options& o, bool main_after, bool tiers_after) {
     for (size_t i = 1; i < o.cards.size(); ++i) {
         const GpuCard& c = o.cards[i];
         if (c.cache_slots) return refuse(c, "a tier's cache is a size (22G) or auto, not a number of slots");
+        if (c.layers) return refuse(c, "layers=A-B is Inkling 2 Mini's layer split: this model's tiers hold experts");
         if (c.name == "auto" && o.cards.size() > 2)
             return refuse(c, "auto stands for every other GPU: name the tiers, or give auto alone after the main GPU");
         if (c.name == "auto" && c.has_vram_only())
@@ -463,10 +465,13 @@ void usage(bool all = false) {
                  "                                            administrator rights, root on Linux; 0: the driver's)\n"
                  "                         sleep=TIME         a tier after the first: it sleeps while the CPU pool would\n"
                  "                                            need less than TIME a layer without it\n"
+                 "                         layers=A-B         Inkling 2 Mini: a later card runs those layers\n"
                  "                       Sizes are binary (8G, 700M), times have their unit (55us, 1.5ms, 1s).  Example:\n"
                  "                       --gpu GPU-75af3083 --gpu \"RTX 5070 Ti\" --gpu GPU-f26e9ba6,clocks=1395-2100/9751\n"
                  "                       Qwen3.6-35B-A3B and Qwen3.8-27B: the cards' order is the layer split's\n"
-                 "                       (--layer-split N,N,.. sets the counts), their settings unused\n"
+                 "                       (--layer-split N,N,.. sets the counts), their settings unused.  Inkling 2\n"
+                 "                       Mini: a later card with layers= runs those layers, one with cache= holds the RAM\n"
+                 "                       experts' copies, the others the context's cells; each takes reserve= and clocks=\n"
                  "  --max-context N      the K/V's cells (default: --serve the model's trained 262,144, else 4096; at\n"
                  "                       most the QSA selection's capacity, set by the GPU's shared memory: 1,466,368\n"
                  "                       cells on 99 KiB, 630,784 on 48 KiB)\n"
@@ -1707,6 +1712,7 @@ struct Qwen35Line {
     std::string main_gpu = "0", second;
     std::string bad;       ///< a --gpu it cannot read
     std::string skipped;   ///< --gpu cards whose settings this path has no use for
+    std::string ink_unused;   ///< the cards' settings Inkling 2's path has no use for
     std::vector<std::string> clocks;   ///< each later --gpu card's clocks= ("" where it gives none), as `second` lists them
     std::vector<std::optional<uint64_t>> reserves;   ///< and its reserve=SIZE
     std::vector<std::optional<std::pair<int, int>>> layers;   ///< and its layers=A-B (Inkling 2's layer split)
@@ -1724,6 +1730,8 @@ Qwen35Line qwen35_line(int argc, char** argv) {
     std::string model;
     q.rest.push_back(argv[0]);
     int cards = 0;   // --gpu: the first the main GPU, the others the split's in order (their settings are a tier's)
+    int autos = 0;
+    bool auto_first = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--main-gpu") == 0 && i + 1 < argc) {
             q.main_gpu = argv[++i];
@@ -1743,6 +1751,16 @@ Qwen35Line qwen35_line(int argc, char** argv) {
             }
             if (lamina::program::gpu_card_text(c) != c.name)
                 q.skipped += (q.skipped.empty() ? "" : "; ") + lamina::program::gpu_card_text(c);
+            {
+                std::string no;
+                if (c.has_vram_only()) no += ",vram-only";
+                if (c.prefetch) no += ",prefetch";
+                if (c.sleep) no += ",sleep";
+                if (cards == 0 && c.layers) no += ",layers";
+                if (!no.empty()) q.ink_unused += (q.ink_unused.empty() ? "" : "; ") + c.name + " " + no.substr(1);
+            }
+            autos += c.name == "auto";
+            auto_first = auto_first || (cards == 0 && c.name == "auto");
             if (cards == 0) {
                 q.main_cache = c.cache_bytes;
                 q.main_reserve = c.reserve;
@@ -1764,6 +1782,8 @@ Qwen35Line qwen35_line(int argc, char** argv) {
             model = argv[i + 1];
         q.rest.push_back(argv[i]);
     }
+    if (autos > 0 && cards > (auto_first ? 1 : 2) && q.bad.empty())   // (the cards' settings follow their places)
+        q.bad = "--gpu: auto stands for every other GPU: name the cards after the first, or give auto alone after it";
     if (model.empty()) return q;
     try {
         const lamina::GgufFile meta(lamina::gguf_split_paths(model).front());
@@ -1771,6 +1791,22 @@ Qwen35Line qwen35_line(int argc, char** argv) {
     } catch (const std::exception&) {
     }
     return q;
+}
+
+/// The switch's main GPU (--main-gpu, or the first --gpu card) made current: its CUDA ordinal, or -1 (said)
+int switch_main_gpu(const std::string& main_gpu, const std::vector<lamina::core::GpuInfo>& gpus) {
+    std::string why;
+    const int dev = lamina::core::find_gpu(gpus, main_gpu, why);
+    if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
+        std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
+        return -1;
+    }
+    if (const std::string no = lamina::core::gpu_unusable(dev); !no.empty()) {
+        std::fprintf(stderr, "lamina: --main-gpu %s: GPU %d, %s: %s\n", main_gpu.c_str(), dev,
+                     gpus[(size_t) dev].name.c_str(), no.c_str());
+        return -1;
+    }
+    return dev;
 }
 
 int qwen35_switch(int argc, char** argv) {
@@ -1788,16 +1824,8 @@ int qwen35_switch(int argc, char** argv) {
     std::vector<char*>& rest = q.rest;
     const std::vector<lamina::core::GpuInfo> gpus = lamina::core::list_gpus();
     std::string why;
-    const int dev = lamina::core::find_gpu(gpus, main_gpu, why);
-    if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
-        std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
-        return 2;
-    }
-    if (const std::string no = lamina::core::gpu_unusable(dev); !no.empty()) {
-        std::fprintf(stderr, "lamina: --main-gpu %s: GPU %d, %s: %s\n", main_gpu.c_str(), dev,
-                     gpus[(size_t) dev].name.c_str(), no.c_str());
-        return 2;
-    }
+    const int dev = switch_main_gpu(main_gpu, gpus);
+    if (dev < 0) return 2;
     // --second-gpu: the GPUs a layer split may add, in order (names or numbers, comma-separated, a name no visible GPU
     // answers to left out; auto: every other GPU in CUDA's order; -1: none), each one this build's kernels do not run
     // on left out; the engine takes the fewest that hold the model
@@ -1895,17 +1923,8 @@ int hy4_switch(int argc, char** argv) {
         return 2;
     }
     const std::vector<lamina::core::GpuInfo> gpus = lamina::core::list_gpus();
-    std::string why;
-    const int dev = lamina::core::find_gpu(gpus, q.main_gpu, why);
-    if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
-        std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", q.main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
-        return 2;
-    }
-    if (const std::string no = lamina::core::gpu_unusable(dev); !no.empty()) {
-        std::fprintf(stderr, "lamina: --main-gpu %s: GPU %d, %s: %s\n", q.main_gpu.c_str(), dev,
-                     gpus[(size_t) dev].name.c_str(), no.c_str());
-        return 2;
-    }
+    const int dev = switch_main_gpu(q.main_gpu, gpus);
+    if (dev < 0) return 2;
     std::string list = ordinals(other_cards(q, gpus, dev));
     cudaSetDevice(dev);
     std::vector<char*>& rest = q.rest;
@@ -1936,18 +1955,11 @@ int inkling2_switch(int argc, char** argv) {
         std::fprintf(stderr, "lamina: %s\n", q.bad.c_str());
         return 2;
     }
+    if (!q.ink_unused.empty())
+        std::fprintf(stderr, "lamina: --gpu: this model's path does not take %s: left out\n", q.ink_unused.c_str());
     const std::vector<lamina::core::GpuInfo> gpus = lamina::core::list_gpus();
-    std::string why;
-    const int dev = lamina::core::find_gpu(gpus, q.main_gpu, why);
-    if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
-        std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", q.main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
-        return 2;
-    }
-    if (const std::string no = lamina::core::gpu_unusable(dev); !no.empty()) {
-        std::fprintf(stderr, "lamina: --main-gpu %s: GPU %d, %s: %s\n", q.main_gpu.c_str(), dev,
-                     gpus[(size_t) dev].name.c_str(), no.c_str());
-        return 2;
-    }
+    const int dev = switch_main_gpu(q.main_gpu, gpus);
+    if (dev < 0) return 2;
     std::vector<int> which;
     std::vector<int> others = other_cards(q, gpus, dev, &which);
     std::string split, split_clocks, split_keep;   // the card with layers=: the split's
@@ -2047,7 +2059,8 @@ int inkling2_switch(int argc, char** argv) {
     }
     std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s%s%s\n", lamina::model_family_title(q.family),
                  lamina::model_family_arch(q.family), dev, gpus[(size_t) dev].name.c_str(),
-                 list.empty() ? "" : "; cells also on GPUs ", list.c_str());
+                 list.empty() ? "" : list.find(',') == std::string::npos ? "; cells also on GPU " : "; cells also on GPUs ",
+                 list.c_str());
     return lamina::inkling2::run((int) q.rest.size(), q.rest.data());
 }
 #endif

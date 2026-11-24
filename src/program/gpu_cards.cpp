@@ -121,7 +121,7 @@ std::string seconds_text(double seconds) {
 }
 
 const std::vector<std::string_view>& gpu_card_keys() {
-    static const std::vector<std::string_view> keys = {"cache", "reserve", "vram-only", "prefetch", "clocks", "sleep", "layers"};
+    static const std::vector<std::string_view> keys = {"cache", "reserve", "vram-only", "prefetch", "clocks", "layers", "sleep"};
     return keys;
 }
 

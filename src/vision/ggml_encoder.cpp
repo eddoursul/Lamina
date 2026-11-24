@@ -675,15 +675,7 @@ private:
         if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
             throw std::runtime_error("an empty picture");
         int tw = 0, th = 0;
-        std::vector<float> pixels;
-        if (m_.pad_to_align) {
-            pixels = planes_padded(picture, m_.size, m_.filter, m_.mean, m_.std, tw, th);
-        } else {
-            target_size(picture.w, picture.h, m_.size, tw, th);
-            if (tw <= 0 || th <= 0 || tw % m_.size.align != 0 || th % m_.size.align != 0)
-                throw std::runtime_error("the picture's size cannot be brought to the projector's grid");
-            pixels = planes(fit(picture, tw, th, m_.filter, m_.letterbox, m_.pad), m_.mean, m_.std);
-        }
+        const std::vector<float> pixels = projector_planes(picture, m_, tw, th);
 
         // the first picture reserves the buffers, as mtmd's warm-up does
         if (!allocated_) {

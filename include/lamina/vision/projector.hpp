@@ -34,12 +34,16 @@ struct ProjectorParams {
     /// Inkling 2's processor: a picture is not resized (unless it passes the limit) but padded right and below to whole
     /// merged patches (planes_padded)
     bool pad_to_align = false;
-    /// its tower's rotary positions: the base of the two dimensions' angles
-    float rope_theta = 10000.0f;
+    /// its tower's rotary positions: the base of the two dimensions' angles (mtmd's; no projector file names one)
+    static constexpr float rope_theta = 10000.0f;
 
     /// a head's values
     int d_head() const { return n_embd_head > 0 ? n_embd_head : n_embd / n_head; }
 };
+
+/// A picture's planes as projector `p` takes them (its size rule, filter and padding: image.hpp) and their size tw x
+/// th; std::runtime_error where the picture's size cannot be brought to its grid
+std::vector<float> projector_planes(const Rgb& picture, const ProjectorParams& p, int& tw, int& th);
 
 /// A tensor of the file: ggml's type id, its dimensions as ggml has them (ne[0] the fastest) and its bytes.
 struct TensorInfo {

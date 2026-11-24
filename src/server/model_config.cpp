@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <regex>
 #include <thread>
 #include <utility>
@@ -77,6 +78,7 @@ std::string gpu_line(const GpuInfo& g) {
 
 ModelFacts read_model(const std::string& path) {
     ModelFacts m;
+    std::optional<inkling2::Geometry> ink;   // (Inkling 2's, read from the first shard)
     for (const std::string& s : gguf_split_paths(path)) m.shards.push_back(absolute_path(s));   // a missing shard throws
     m.path = m.shards.front();
     for (const std::string& s : m.shards) {
@@ -99,17 +101,19 @@ ModelFacts read_model(const std::string& path) {
                 }
             }
         }
-        if (s == m.path && (m.arch == "inkling2" || m.arch == "inkling2_loop")) {
+        if (s == m.path && model_family_from_arch(m.arch) == ModelFamily::Inkling2) {
             inkling2::Geometry g;
-            if (inkling2::read_geometry(f, g).empty() && (size_t) g.n_layers == m.layer_bytes.size()) {
-                for (int64_t l = 0; l < g.n_layers; ++l)
-                    m.layer_full.push_back(!g.full(l) ? 0 : l >= g.loop_start && l < g.loop_end ? (int) g.n_pass : 1);
-                m.cell_pair_bytes = (uint64_t) g.kv_width() * 4;   // K and V, a half a value
-                if (g.n_pass > 1) {
-                    m.loop_first = (int) g.loop_start;
-                    m.loop_last = (int) g.loop_end - 1;
-                }
-            }
+            if (inkling2::read_geometry(f, g).empty()) ink = g;
+        }
+    }
+    if (ink && (size_t) ink->n_layers == m.layer_bytes.size()) {
+        const inkling2::Geometry& g = *ink;
+        for (int64_t l = 0; l < g.n_layers; ++l)
+            m.layer_full.push_back(!g.full(l) ? 0 : l >= g.loop_start && l < g.loop_end ? (int) g.n_pass : 1);
+        m.cell_pair_bytes = (uint64_t) g.kv_width() * 4;   // K and V, a half a value
+        if (g.n_pass > 1) {
+            m.loop_first = (int) g.loop_start;
+            m.loop_last = (int) g.loop_end - 1;
         }
     }
     if (m.layer_full.empty()) m.layer_bytes.clear();
@@ -121,7 +125,7 @@ std::string preset_name(const std::string& arch, const std::string& quantized_by
     if (arch == "qwen35moe") return "qwen36-ud-q4_k_xl";
     if (arch == "qwen35") return "qwen38-27b-ud-q6_k_m";
     if (arch == "hy_v4_flash") return "hy4-flash-q4_k_m";
-    if (arch == "inkling2" || arch == "inkling2_loop") return "inkling2-mini-ud-iq4_xs";
+    if (model_family_from_arch(arch) == ModelFamily::Inkling2) return "inkling2-mini-ud-iq4_xs";
     return "";
 }
 
@@ -441,15 +445,40 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
             const std::vector<int> on = engine_gpus(c, gpus, &gpu_why);
             if (!gpu_why.empty() && !gpus.empty()) stops.push_back(gpu_why);   // none listed: said above
             const GpuInfo* main = on.empty() ? nullptr : gpu_by_index(gpus, on.front());
+            const bool inkling = model_family_from_arch(m.arch) == ModelFamily::Inkling2;
+            // (Inkling 2, as its switch reads the cards after the first: one with layers=A-B runs those layers, one
+            // with cache= holds the RAM experts' copies, the others the context's cells)
+            int split_gpu = -1, split_lo = -1, split_hi = -1, xgpu = -1;
+            if (inkling) {
+                const std::vector<std::string> cards = engine_cards(c);
+                for (size_t i = 1; i < cards.size(); ++i) {
+                    program::GpuCard gc;
+                    std::string e;
+                    if (!program::parse_gpu_card(cards[i].c_str(), gc, e) || gc.name == "auto") continue;
+                    if (gc.layers) {
+                        split_gpu = find_gpu(gc.name, gpus);
+                        split_lo = (int) gc.layers->first;
+                        split_hi = (int) gc.layers->second;
+                    } else if (gc.has_cache()) {
+                        xgpu = find_gpu(gc.name, gpus);
+                    }
+                }
+            }
+            const std::string split_layers = std::to_string(split_lo) + "-" + std::to_string(split_hi);
+            const GpuInfo* split_card = split_gpu < 0 ? nullptr : gpu_by_index(gpus, split_gpu);
+            const GpuInfo* x_card = xgpu < 0 ? nullptr : gpu_by_index(gpus, xgpu);
             std::string more;
             for (size_t i = 1; i < on.size(); ++i)
-                if (const GpuInfo* g = gpu_by_index(gpus, on[i])) more += (more.empty() ? "" : "; ") + gpu_line(*g);
+                if (const GpuInfo* g = gpu_by_index(gpus, on[i]); g != nullptr && g->index != xgpu && g->index != split_gpu)
+                    more += (more.empty() ? "" : "; ") + gpu_line(*g);
             const bool flash = m.arch == "qwen4exp";
-            const bool inkling = m.arch == "inkling2" || m.arch == "inkling2_loop";
+            const bool hy4 = model_family_from_arch(m.arch) == ModelFamily::HyV4Flash;   // (its later cards: expert tiers)
             if (main != nullptr)
                 say("  runs on " + gpu_line(*main) +
-                    (more.empty() ? "" : (flash ? ", expert tiers: " : inkling ? ", the context's K and V also on: "
-                                                                               : ", a layer split may add: ") + more));
+                    (split_card != nullptr ? ", layers " + split_layers + " on " + gpu_line(*split_card) : "") +
+                    (more.empty() ? "" : (flash || hy4 ? ", expert tiers: " : inkling ? ", the context's K and V also on: "
+                                                                                      : ", a layer split may add: ") + more) +
+                    (x_card != nullptr ? ", the RAM experts' copies on " + gpu_line(*x_card) : ""));
             // each card's own settings (--gpu NAME,key=value)
             for (const std::string& card : engine_cards(c)) {
                 const size_t comma = card.find(',');
@@ -459,7 +488,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 const GpuInfo* g = i < 0 ? nullptr : gpu_by_index(gpus, i);
                 say("  " + (g != nullptr ? gpu_line(*g) : name) + ": " + replace_all(card.substr(comma + 1), ",", ", ") +
                     (flash ? "" : inkling ? " (this model's path takes the cards' order, the first card's cache=, reserve= and "
-                                            "clocks=, a later card's clocks= and reserve=, and one later card's layers=)"
+                                            "clocks=, a later card's clocks= and reserve=, one later card's layers= and one's "
+                                            "cache=)"
                                           : " (this model's path takes the cards' order alone)"));
             }
             // what it takes
@@ -478,39 +508,43 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 // The whole file and ~1.5 GiB beside it (the window layers' cells, a prompt chunk's buffers, the
                 // graphs) on the first card; K and V of the 8 full-attention layer applications in what is left of it
                 // and on the other cards (which keep ~1 GiB for their own buffers and the reserve).
-                json probe = c;   // the drafter as the start finds it: its file and ~0.3 GiB of cells and buffers
+                json probe = c;   // the drafter as the start finds it: its file, its rings at its reach, ~0.16 GiB beside
                 const std::string line = resolve_drafter(probe, m.arch);
                 const std::vector<std::string> pa = engine_args(probe);
-                const auto kv = std::find(pa.begin(), pa.end(), "--kv");
-                const bool q8 = kv != pa.end() && kv + 1 != pa.end() && *(kv + 1) == "q8_0";
+                auto arg = [&](const char* flag) {
+                    const auto at = std::find(pa.begin(), pa.end(), flag);
+                    return at != pa.end() && at + 1 != pa.end() ? *(at + 1) : std::string();
+                };
+                const bool q8 = arg("--kv") == "q8_0";
                 const double per = (q8 ? 17.0 : 32.0) * 1024.0, gibi = 1073741824.0;
-                double drafter = 0;
-                if (const auto ds = std::find(pa.begin(), pa.end(), "--dspark"); ds != pa.end() && ds + 1 != pa.end()) {
+                // (its reach over the context: 131,072 cells, 32,768 with experts in RAM, no more than a set context)
+                const int64_t reach_set = arg("--dspark-reach").empty() ? -1 : std::atoll(arg("--dspark-reach").c_str()),
+                              ctx_set = std::atoll(arg("--max-context").c_str());
+                auto drafter_at = [&, ds = arg("--dspark")](bool in_ram) {
+                    if (ds.empty()) return 0.0;
                     std::error_code ec;
-                    const auto size = std::filesystem::file_size(u8_path(*(ds + 1)), ec);
-                    drafter = ec ? 0.0 : (double) size + 0.3 * gibi;
-                    say(!line.empty() ? "  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line)
-                                      : "  drafter: " + *(ds + 1));
-                } else if (!line.empty()) {
-                    say("  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line));
-                }
+                    const auto size = std::filesystem::file_size(u8_path(ds), ec);
+                    if (ec) return 0.0;
+                    int64_t reach = reach_set >= 0 ? reach_set : in_ram ? 32768 : 131072;
+                    if (reach_set < 0 && ctx_set > 0) reach = std::min(reach, ctx_set);
+                    uint64_t rings = 0;
+                    try {
+                        rings = inkling2::drafter_rings_bytes(GgufFile(ds), reach, q8);
+                    } catch (const std::exception&) {
+                    }
+                    return (double) size + (double) rings + 0.16 * gibi;
+                };
+                const double drafter = drafter_at(false);
+                auto bare = [](const std::string& l) { return starts_with(l, "[lamina] ") ? l.substr(9) : l; };
+                if (!arg("--dspark").empty()) say(!line.empty() ? "  " + bare(line) : "  drafter: " + arg("--dspark"));
+                else if (!line.empty()) say("  " + bare(line));
                 // (a card's reserve= in place of the VRAM it leaves free by its use: 0.7 GiB, 1.5 where it draws the
                 // desktop; ~1.5 GiB of buffers beside the model on the first card, ~1 GiB on another)
                 std::vector<std::pair<std::string, double>> kept;   // each card's reserve=, by its name in the config
-                int split_gpu = -1;   // the card a layer split runs layers on (layers=A-B), and those layers
-                std::string split_layers;
-                int split_lo = -1, split_hi = -1;
                 for (const std::string& card : engine_cards(c)) {
                     program::GpuCard gc;
                     std::string e;
-                    if (!program::parse_gpu_card(card.c_str(), gc, e)) continue;
-                    if (gc.reserve) kept.emplace_back(gc.name, (double) *gc.reserve);
-                    if (gc.layers && gc.name != "auto") {
-                        split_gpu = find_gpu(gc.name, gpus);
-                        split_layers = std::to_string(gc.layers->first) + "-" + std::to_string(gc.layers->second);
-                        split_lo = (int) gc.layers->first;
-                        split_hi = (int) gc.layers->second;
-                    }
+                    if (program::parse_gpu_card(card.c_str(), gc, e) && gc.reserve) kept.emplace_back(gc.name, (double) *gc.reserve);
                 }
                 auto keeps = [&](const GpuInfo& g, double by_use) {
                     for (const auto& [name, bytes] : kept)
@@ -534,7 +568,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi - beside_it(*main) -
                            keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
                 for (size_t i = 1; i < on.size(); ++i)
-                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]); g != nullptr && g->index != split_gpu) {
+                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]); g != nullptr && g->index != split_gpu && g->index != xgpu) {
                         rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi - beside_it(*g) -
                                                             keeps(*g, (g->display ? 1.5 : 0.7) * gibi)));
                         others += rooms.back().second;
@@ -563,7 +597,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     }
                     return kv1 > 0 && kv2 > 0;
                 };
-                if (const GpuInfo* g = split_gpu < 0 ? nullptr : gpu_by_index(gpus, split_gpu)) {
+                if (const GpuInfo* g = split_card) {
                     // A layer split: the model's weights are over the two cards, each with its layers' cells.  The two
                     // hold the cells of as many tokens as the fuller one has room for; the other holds older cells of
                     // every application in what it has free (less the room a longer prompt's chunks take), and the
@@ -600,7 +634,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
                     // those used most (fewer as the context grows); the ones RAM has no room for stay on the card.
                     const double experts = (double) m.expert_bytes, dense = (double) m.bytes - experts;
-                    const double beside = (double) main->memory_mib * 1048576.0 - dense - drafter - (main->display ? 3.0 : 2.2) * gibi;
+                    const double beside =
+                        (double) main->memory_mib * 1048576.0 - dense - drafter_at(true) - (main->display ? 3.0 : 2.2) * gibi;
                     uint64_t avail = 0;
                     const double ram = platform::available_ram(avail) ? std::max(0.0, (double) avail - 6.0 * gibi) : experts;
                     const double alone = std::max(0.0, experts - ram);
@@ -616,19 +651,22 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                         (alone > 0 ? ", the other " + gib(alone) + " on the GPU alone (no more RAM is free above the 6 GiB "
                                      "left to the system: \"ram-reserve-mib\")" : ", pinned"));
                     plan("the dense weights, the experts used most and K and V in turn, about " + gib(std::max(0.0, beside - alone)));
-                    // (the start's own split: the looped layers on the next card, where the first would keep under
-                    // four fifths of the experts and both cards hold their shares)
+                    // (the start's own split: the looped layers on a card after it - the fastest link of those that
+                    // hold their share - where the first would keep under four fifths of the experts and both cards hold
+                    // their shares of the fewest cells: 32,768 tokens', a few units' where cards after them take cells)
                     double w2 = 0, kv1 = 0, kv2 = 0;
                     const GpuInfo* next = on.size() > 1 ? gpu_by_index(gpus, on[1]) : nullptr;
-                    if (next != nullptr && first < 0.9 * experts && shares(m.loop_first, m.loop_last, w2, kv1, kv2) &&
-                        (double) next->memory_mib * 1048576.0 - w2 - 1.9 * gibi - keeps(*next, (next->display ? 1.5 : 0.7) * gibi) > 16384.0 * kv2 &&
+                    const double least = on.size() > 2 ? 16384.0 : 32768.0;
+                    if (next != nullptr && first < 0.8 * experts && shares(m.loop_first, m.loop_last, w2, kv1, kv2) &&
+                        (double) next->memory_mib * 1048576.0 - w2 - 1.9 * gibi - keeps(*next, (next->display ? 1.5 : 0.7) * gibi) > least * kv2 &&
                         (double) main->memory_mib * 1048576.0 - ((double) m.bytes - w2) - drafter - 2.3 * gibi -
-                                keeps(*main, (main->display ? 1.5 : 0.7) * gibi) > 16384.0 * kv1)
+                                keeps(*main, (main->display ? 1.5 : 0.7) * gibi) > least * kv1)
                         say("    where the engine's start finds under four fifths of the experts on the first card (by this "
                             "estimate " + std::to_string((long long) (100.0 * first / std::max(1.0, experts))) + "%), it takes layers " +
                             std::to_string(m.loop_first) + "-" + std::to_string(m.loop_last) + " (the looped ones, " + gib(w2) +
-                            ") to " + gpu_line(*next) + " instead, and no expert is in RAM then (its line says which; "
-                            "\"layer-split\": 0 keeps the experts in RAM, a card's \"layers\" sets the split)");
+                            ") to a card after it instead - the fastest link of those that hold their share (" + gpu_line(*next) +
+                            " would) - and no expert is in RAM then (its line says which; \"layer-split\": 0 keeps the experts "
+                            "in RAM, a card's \"layers\" sets the split)");
                     if (alone > first)
                         stops.push_back("the model's " + gib(experts) + " of experts fit neither " + gpu_line(*main) +
                                         " nor the RAM that is free: a smaller quant of the model");
@@ -645,7 +683,9 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 for (const int i : on)
                     if (const GpuInfo* g = gpu_by_index(gpus, i)) vram += (double) g->memory_mib * 1048576.0;
                 say("  VRAM: the model's " + gb((double) m.bytes) + ", its GPUs' " + gib(vram) +
-                    " (its layers are split over the fewest that hold them with the context's K/V)");
+                    (hy4 ? " (the dense weights and the context's K/V on the first, the routed experts used most in what the "
+                           "GPUs have left)"
+                         : " (its layers are split over the fewest that hold them with the context's K/V)"));
                 if (m.expert_bytes > 0 && (double) m.bytes > vram) {
                     const platform::RamFit ram = platform::ram_fit(m.expert_bytes);
                     say("  RAM: the experts the GPUs cannot hold, up to " + gib((double) m.expert_bytes));

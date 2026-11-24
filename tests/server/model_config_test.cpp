@@ -111,9 +111,7 @@ int main() {
         const std::vector<std::string> a = lamina::engine_args(p);
         CHECK(std::find(a.begin(), a.end(), "--native") != a.end() && std::find(a.begin(), a.end(), "--gpu") != a.end());
         CHECK(p["port"].is_number_integer());
-        // its pictures: on a GPU, in VRAM borrowed from the engine, on the card the PC's choice gives it (none named);
-        // Inkling 2 Mini's preset reads none
-        if (std::string(name) == "inkling2-mini-ud-iq4_xs") continue;
+        // its pictures: on a GPU, in VRAM borrowed from the engine, on the card the PC's choice gives it (none named)
         const json v = p.value("vision", json::object());
         CHECK(v.value("gpu", json()) == true && v.value("lend", json()) == true && !v.contains("cuda_device") &&
               v.contains("threads"));

@@ -24,43 +24,6 @@ const char* kReasoningWrapUp = "\n\nI have thought about this long enough; time 
 const char* kPrefixEnd = "\x01lamina-prefix-end\x01";   // where a message's shared part ends in the rendered prompt
 constexpr int kMarkerNames = 64;         // the stop markers a reply may name in its text before one ends it
 
-// Whether a stop token drawn now names the marker in the reply's text rather than ending the turn: the vocabulary has
-// the marker as that one token, so a model quoting it draws the id that ends a turn. `text`: the reply so far. A turn
-// does not end inside a code span or fence, after an opening quote, in a chat turn the text opened, in a call's open
-// parameter, nor, while thinking, anywhere but after a sentence or a line.
-bool names_stop_marker(std::string_view text, const std::string& state) {
-    constexpr size_t none = std::string_view::npos;
-    const auto opened = [&](std::string_view open, std::string_view close) {
-        const size_t i = text.rfind(open), j = text.rfind(close);
-        return i != none && (j == none || j < i);
-    };
-    if (state == "call" || state == "rcall") return opened("<parameter=", "</parameter>");
-    if (state != "reasoning" && state != "content") return false;
-    const bool thinking = state == "reasoning";
-    if (const size_t e = text.rfind(kThinkEnd); !thinking && e != none) text = text.substr(e + kThinkEnd.size());
-    bool fence = false;
-    size_t line = 0;
-    for (size_t nl; (nl = text.find('\n', line)) != none; line = nl + 1) {
-        const size_t c = text.find_first_not_of(" \t", line);
-        if (c < nl && text.compare(c, 3, "```") == 0) fence = !fence;
-    }
-    const std::string_view last = text.substr(line);
-    const size_t first = last.find_first_not_of(" \t");
-    if (first != none && last.compare(first, 3, "```") == 0) return false;   // the line of a fence: a real end can follow
-    if (opened("<|im_start|>", "<|im_end|>") || (fence && (thinking || !last.empty()))) return true;
-    if (std::count(last.begin(), last.end(), '`') % 2 == 1) return true;
-    if (const std::string_view q[] = {"(", "[", "\xE2\x80\x9C", "\xE2\x80\x98", "\xC2\xAB"};   // ( [ left quotes
-        std::any_of(std::begin(q), std::end(q), [&](std::string_view o) { return ends_with(last, o); }))
-        return true;
-    if (ends_with(last, "\"") && std::count(last.begin(), last.end(), '"') % 2 == 1) return true;
-    if (ends_with(last, "'") && (last.size() == 1 || !std::isalnum((unsigned char) last[last.size() - 2]))) return true;
-    const size_t end = last.find_last_not_of(" \t");
-    if (!thinking || end == none) return false;
-    const std::string_view written = last.substr(0, end + 1);
-    const std::string_view sentence[] = {".", "!", "?", "\xE3\x80\x82", "\xEF\xBC\x81", "\xEF\xBC\x9F", "\xE2\x80\xA6"};   // . ! ? and CJK, ...
-    return std::none_of(std::begin(sentence), std::end(sentence), [&](std::string_view o) { return ends_with(written, o); });
-}
-
 bool is_url(const std::string& s) { return starts_with(s, "http://") || starts_with(s, "https://"); }
 
 int64_t jint(const json& v, int64_t dflt = 0) { return v.is_number() ? v.get<int64_t>() : dflt; }
@@ -762,7 +725,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                     }
                     if (literal_markers && marker_names < kMarkerNames && parser.buf() != kThinkEnd &&
                         names_stop_marker(tok.hy4 ? TagTranslator(*tok.hy4).text(tok.decode(raw_ids)) : tok.decode(raw_ids),
-                                          parser.state())) {
+                                          parser.state(), tok.blocks ? &*tok.blocks : nullptr)) {
                         --n;   // its text comes in plain tokens
                         named_marker = t;
                         return false;

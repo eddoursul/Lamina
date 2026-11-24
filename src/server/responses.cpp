@@ -309,11 +309,15 @@ void order_tool_results(json& messages) {
         for (size_t k = i; k < j; ++k) messages[k] = std::move(run[k - i].second);
         i = j;
     }
-    for (json& m : messages) {
+    for (json& m : messages) {   // (the ids as the chat converter passes them: a template may name a result by its call's)
+        if (const json id = jget(m, "_call_id"); id.is_string()) m["tool_call_id"] = id;
         m.erase("_call_id");
         const auto calls = m.find("tool_calls");
         if (calls != m.end() && calls->is_array())
-            for (json& c : *calls) c.erase("_call_id");
+            for (json& c : *calls) {
+                if (const json id = jget(c, "_call_id"); id.is_string()) c["id"] = id;
+                c.erase("_call_id");
+            }
     }
 }
 

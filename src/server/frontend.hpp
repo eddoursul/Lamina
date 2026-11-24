@@ -123,6 +123,13 @@ inline constexpr std::string_view kFuncEnd = "</function>";
 
 /// where a parameter value ends (-1: none yet; -2: a candidate whose follower has not arrived, `final` accepts it)
 long param_end(std::string_view text, bool final = false);
+/// Whether a stop token drawn now names the marker in the reply's text rather than ending the turn: the vocabulary
+/// has the marker as that one token, so a model quoting it draws the id that ends a turn.  `text`: the reply so far,
+/// `state`: the output parser's.  A turn does not end inside a code span or fence, after an opening quote, in a chat
+/// turn the text opened, in a call's open parameter, nor, while thinking, anywhere but after a sentence or a line.
+/// `blocks`: a block form's tags: the open block's text alone is read, and with none open (after a block's end, in a
+/// block's header) the token is the turn's end.
+bool names_stop_marker(std::string_view text, const std::string& state, const BlockTags* blocks = nullptr);
 /// where a tool call's body ends (the </tool_call> after its own </function>); -1: not complete
 long call_end(std::string_view text);
 /// where a <function=NAME>...</function> at the start of `text` ends; -1: not complete or not that form
@@ -196,6 +203,7 @@ private:
     std::string hdr_, body_;   ///< a block's header (a call's name), a call's JSON so far
     bool texts_ = false;       ///< a text block has written something: the next one starts a paragraph
     bool sep_ = false;         ///< that paragraph break is due
+    bool thinks_ = false, tsep_ = false;   ///< the same for the thinking blocks
     bool args_sent_ = false;   ///< a piece of the call's arguments went out
     /// where a call's JSON {"name": ..., "args": {...}} holds its arguments' object, found as the text arrives
     struct ArgScan {

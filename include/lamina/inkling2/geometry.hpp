@@ -19,6 +19,7 @@
 
 #include "lamina/artifact/gguf_reader.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -333,6 +334,38 @@ inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* c
             if (!named.count(t.name)) return t.name + " is not in Inkling 2's layout";
     if (checked) *checked = n;
     return {};
+}
+
+// ---- the model's block drafter (DSpark: a dflash GGUF): the rings of context cells the engine keeps a layer
+constexpr int64_t kDrafterRows = 8;       ///< a block's rows (the engine's kMaxT)
+constexpr int64_t kDrafterTile = 32;      ///< an attention tile's cells (the engine's ik::kTcCells)
+constexpr int64_t kDrafterSlack = 4096;   ///< cells a ring keeps past its layer's: a state may step back that far
+
+/// A drafter layer's ring that sees `see` context cells: a scan's stretch (three tiles at least, thirty at most,
+/// about 64 stretches between) and its cells (the block's rows and the slack after them, whole stretches)
+struct DrafterRing {
+    int chunk;
+    int64_t cap;
+};
+inline DrafterRing drafter_ring(int64_t see) {
+    const int64_t tiles = (see + kDrafterRows + 64 * kDrafterTile - 1) / (64 * kDrafterTile);
+    const int chunk = (int) (std::max<int64_t>(3, std::min<int64_t>(30, tiles)) * kDrafterTile);
+    return {chunk, (see + kDrafterRows + kDrafterSlack + 2 * chunk - 1) / chunk * chunk};
+}
+/// The bytes the rings of the drafter with metadata `f` take at `reach` context cells (its window layers see their
+/// window), in halves or q8_0 blocks; 0 where it names no layers
+inline uint64_t drafter_rings_bytes(const GgufFile& f, int64_t reach, bool q8) {
+    auto num = [&](const char* k) {
+        const MetaValue* v = f.get(std::string("dflash.") + k);
+        return v && v->is_num() ? (int64_t) v->u : (int64_t) 0;
+    };
+    const int64_t HK = num("attention.head_count_kv"), D = num("attention.key_length"), swa = num("attention.sliding_window");
+    std::vector<uint64_t> pat;
+    f.numbers("dflash.attention.sliding_window_pattern", &pat);
+    const uint64_t cell = (uint64_t) (q8 ? HK * (D / 32) * 34 : HK * D * 2);
+    uint64_t n = 0;
+    for (const uint64_t w : pat) n += (uint64_t) drafter_ring(w ? swa : std::max(reach, swa)).cap * 2 * cell;
+    return n;
 }
 
 }  // namespace lamina::inkling2

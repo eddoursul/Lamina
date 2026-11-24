@@ -1,6 +1,7 @@
 // src/server/config.cpp - the run config as the server reads it (config.hpp).
 #include "config.hpp"
 
+#include "lamina/artifact/model_family.hpp"
 #include "lamina/artifact/draft_layer.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
@@ -266,7 +267,7 @@ std::string resolve_draft_layer(json& cfg, const std::string& arch) {
 }
 
 std::string resolve_drafter(json& cfg, const std::string& arch) {
-    if ((arch != "inkling2" && arch != "inkling2_loop") || !jget(cfg, "args").is_array()) return "";
+    if (lamina::model_family_from_arch(arch) != lamina::ModelFamily::Inkling2 || !jget(cfg, "args").is_array()) return "";
     namespace fs = std::filesystem;
     json& args = cfg["args"];
     std::error_code ec;
