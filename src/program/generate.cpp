@@ -1710,6 +1710,7 @@ struct Qwen35Line {
     std::vector<std::string> clocks;   ///< each later --gpu card's clocks= ("" where it gives none), as `second` lists them
     std::vector<std::optional<uint64_t>> reserves;   ///< and its reserve=SIZE
     std::vector<std::optional<std::pair<int, int>>> layers;   ///< and its layers=A-B (Inkling 2's layer split)
+    std::vector<char> caches;   ///< and whether it gives cache= (Inkling 2: the card of the RAM experts)
     std::optional<uint64_t> main_cache, main_reserve;   ///< the first --gpu card's cache=SIZE and reserve=SIZE
     std::string main_clocks;                             ///< and its clocks=
     bool main_slots = false;                             ///< its cache=N (a number of slots)
@@ -1755,6 +1756,7 @@ Qwen35Line qwen35_line(int argc, char** argv) {
                 q.clocks.push_back(c.clocks.value_or(""));
                 q.reserves.push_back(c.reserve);
                 q.layers.push_back(c.layers);
+                q.caches.push_back(c.has_cache() ? 1 : 0);
             }
             continue;
         }
@@ -1924,7 +1926,8 @@ int hy4_switch(int argc, char** argv) {
 /// room for: --cell-gpus (their order), their clocks= as --cell-gpu-clocks, their reserve= as
 /// --cell-gpu-reserve-mib.  The first card's cache=SIZE is the VRAM its experts take at most (--expert-cache), its
 /// reserve= what it leaves free (--vram-reserve-mib).  A later card with layers=A-B runs those layers (--layer-split,
-/// its clocks= as --layer-split-clocks, its reserve= as --layer-split-reserve-mib) instead of being a cell card; the
+/// its clocks= as --layer-split-clocks, its reserve= as --layer-split-reserve-mib) instead of being a cell card; a later
+/// card with cache= holds the RAM experts' copies and computes a decode forward's entries of them (--expert-gpu); the
 /// first card's clocks= (--main-gpu-clocks) locks it while a request runs.
 int inkling2_switch(int argc, char** argv) {
     Qwen35Line q = qwen35_line(argc, argv);
@@ -1959,6 +1962,19 @@ int inkling2_switch(int argc, char** argv) {
                 std::to_string(q.layers[(size_t) w]->second);
         if ((size_t) w < q.clocks.size()) split_clocks = q.clocks[(size_t) w];
         if ((size_t) w < q.reserves.size() && q.reserves[(size_t) w]) split_keep = std::to_string(*q.reserves[(size_t) w] >> 20);
+        others.erase(others.begin() + (long) i);
+        which.erase(which.begin() + (long) i);
+        --i;
+    }
+    std::string xgpu;   // the card with cache=: the RAM experts'
+    for (size_t i = 0; i < others.size(); ++i) {
+        const int w = which[i];
+        if (w < 0 || (size_t) w >= q.caches.size() || !q.caches[(size_t) w]) continue;
+        if (!xgpu.empty()) {
+            std::fprintf(stderr, "lamina: --gpu: one card takes cache= (the RAM experts' copies)\n");
+            return 2;
+        }
+        xgpu = std::to_string(others[i]);
         others.erase(others.begin() + (long) i);
         which.erase(which.begin() + (long) i);
         --i;
@@ -2010,6 +2026,11 @@ int inkling2_switch(int argc, char** argv) {
     if (!q.main_clocks.empty() && q.main_clocks != "0" && !given("--main-gpu-clocks")) {
         q.rest.push_back(f_main_clocks.data());
         q.rest.push_back(q.main_clocks.data());
+    }
+    std::string f_xgpu = "--expert-gpu";
+    if (!xgpu.empty() && !given("--expert-gpu")) {
+        q.rest.push_back(f_xgpu.data());
+        q.rest.push_back(xgpu.data());
     }
     std::string f_gpus = "--cell-gpus", f_locks = "--cell-gpu-clocks", f_keeps = "--cell-gpu-reserve-mib";
     if (!list.empty()) {

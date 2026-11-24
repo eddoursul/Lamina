@@ -1523,6 +1523,24 @@ struct Engine {
     int32_t* moe_h = nullptr;        // pinned: a visit's routed experts [kMaxT * top_k], then its MoE input [kMaxT][N]
     int32_t* bell_h = nullptr;       // pinned: -1, then the visit's entries without a slot once those have arrived
     float* rows_h = nullptr;         // pinned: the CPU's rows, packed
+    // The card of the RAM experts (--expert-gpu N, a CUDA ordinal): every expert's RAM copy in its VRAM too, a decode
+    // forward's entries without a slot computed there - the routing's groups, the rows sent over and rounded to q8_1 -
+    // in place of the CPU's; the rows back into rows_h and to this card behind that card's event.  Prompt chunks keep
+    // the CPU and the uploads.  A main RTX 3090 with 6 GiB of experts, the other RTX 3090 that card: 600 tokens along
+    // the thinking text with the drafter 95.7 / 96.1 -> 135.8 / 136.6 tok/s, a token at a time the same.
+    struct XCard {
+        int dev = -1;
+        cudaStream_t st = nullptr;
+        cudaEvent_t ev = nullptr;
+        std::vector<std::vector<unsigned long long>> blob;   // [layer][expert]: its copy there, or 0
+        unsigned long long *ptr_h = nullptr, *ptr_d = nullptr;
+        int32_t *tab_h = nullptr, *tab_d = nullptr;           // the groups' starts, their count, the entries' rows and tokens
+        float* x_d = nullptr;
+        void *xq_d = nullptr, *scratch = nullptr;
+        float* out_d = nullptr;
+    };
+    std::unique_ptr<XCard> xc;
+    int expert_gpu = -1;
     std::vector<uint8_t> acts;       // the rows' activations as the layer's dots take them
     std::vector<C::ExpertJobMulti> jobs;
     std::unique_ptr<lamina::core::VmmRange> x_vm;   // a chunk's scratch: a layer's RAM experts
@@ -2983,6 +3001,53 @@ struct Engine {
             bell_h = halloc<int32_t>(1);
             rows_h = halloc<float>(n_ent * N);
             D.crows = dzero<float>(n_ent * N);
+            size_t xbytes = 0;   // (every expert with a RAM copy: one on the card of the RAM experts too)
+            for (const Layer& L : m->layers)
+                for (size_t x = 0; x < L.blob_h.size(); ++x) xbytes += L.blob_h[x] != nullptr ? L.stride : 0;
+            const size_t xneed = xbytes + kWeightPad + (size_t) n_ent * (N * 8 + 64) + K::native_expert_scratch_bytes((int64_t) n_ent, g.n_ff) +
+                                 (size_t) kMaxT * N * 5 + (256ull << 20);
+            size_t xfree = 0, xtotal = 0;
+            if (expert_gpu >= 0) {
+                const OnDev dv(expert_gpu);
+                CK(cudaMemGetInfo(&xfree, &xtotal));
+                if (xfree < xneed) {
+                    std::fprintf(stderr, "lamina: --expert-gpu %d: %.2f GiB free, the RAM experts' copies take %.2f: the CPU "
+                                 "computes their entries\n", expert_gpu, (double) xfree / (1 << 30), (double) xneed / (1 << 30));
+                    expert_gpu = -1;
+                }
+            }
+            if (expert_gpu >= 0) {
+                xc = std::make_unique<XCard>();
+                xc->dev = expert_gpu;
+                const OnDev dv(xc->dev);
+                CK(cudaStreamCreateWithFlags(&xc->st, cudaStreamNonBlocking));
+                own(&Owned::streams, xc->st);
+                CK(cudaEventCreateWithFlags(&xc->ev, cudaEventDisableTiming));
+                const size_t bytes = xbytes;
+                uint8_t* const at = dalloc<uint8_t>(bytes + kWeightPad);
+                size_t off = 0;
+                xc->blob.assign(nl, std::vector<unsigned long long>(ne, 0));
+                for (size_t l = 0; l < nl; ++l) {
+                    const Layer& L = m->layers[l];
+                    for (size_t x = 0; x < L.blob_h.size(); ++x) {
+                        if (L.blob_h[x] == nullptr) continue;
+                        CK(cudaMemcpy(at + off, L.blob_h[x], L.stride, cudaMemcpyHostToDevice));
+                        xc->blob[l][x] = (unsigned long long) (uintptr_t) (at + off);
+                        off += L.stride;
+                    }
+                }
+                CK(cudaMemset(at + bytes, 0, kWeightPad));
+                xc->ptr_h = halloc<unsigned long long>(n_ent);
+                xc->ptr_d = dzero<unsigned long long>(n_ent);
+                xc->tab_h = halloc<int32_t>(3 * n_ent + 2);
+                xc->tab_d = dzero<int32_t>(3 * n_ent + 2);
+                xc->x_d = dzero<float>((size_t) kMaxT * N);
+                xc->xq_d = dzero<uint8_t>((size_t) kMaxT * (N / 32) * 36);
+                xc->scratch = dzero<uint8_t>(K::native_expert_scratch_bytes((int64_t) n_ent, g.n_ff));
+                xc->out_d = dzero<float>(n_ent * N);
+                std::fprintf(stderr, "lamina: the RAM experts' copies on GPU %d too: %.2f GiB, a decode forward's entries without "
+                             "a slot computed there\n", xc->dev, (double) bytes / (1 << 30));
+            }
             acts.resize((size_t) kMaxT * C::kNativeActBytes);
             size_t most = 0;
             for (const Layer& L : m->layers) most = std::max(most, (size_t) g.n_expert * L.stride);
@@ -4388,7 +4453,47 @@ struct Engine {
             std::fprintf(stderr, "lamina: the card counts %d routed entries without a slot, the host %d\n", n_miss, k);
             throw Fatal{1};
         }
-        pool->run_split_multi_native(L.fmt, jobs.data(), (int) jobs.size());
+        if (xc) {   // (on the card of the RAM experts: the groups as the jobs have them, an entry's row its k)
+            XCard& x = *xc;
+            const int ng = (int) jobs.size();
+            int32_t* const start = x.tab_h;
+            int32_t* const dst = start + ng + 2;
+            int32_t* const tok = dst + k;
+            int fill[ik::kExpertMax];   // (a group's entries, then where its next one goes)
+            std::fill(fill, fill + ng, 0);
+            for (int ex = 0; ex < (int) g.n_expert; ++ex)
+                if (job_of[ex] >= 0) x.ptr_h[job_of[ex]] = x.blob[li][(size_t) ex];
+            for (int ee = 0; ee < n_ent; ++ee)
+                if (slot_at[li][(size_t) ids[ee]] < 0) ++fill[job_of[ids[ee]]];
+            int at = 0;
+            for (int gi = 0; gi < ng; ++gi) {
+                start[gi] = at;
+                at += fill[gi];
+                fill[gi] = start[gi];
+            }
+            start[ng] = at;
+            start[ng + 1] = ng;   // (the count, read on the card)
+            for (int ee = 0, kk = 0; ee < n_ent; ++ee) {
+                if (slot_at[li][(size_t) ids[ee]] >= 0) continue;
+                const int p = fill[job_of[ids[ee]]]++;
+                dst[p] = kk++;
+                tok[p] = ee / top_k;
+            }
+            const OnDev dv(x.dev);
+            CK(cudaMemcpyAsync(x.ptr_d, x.ptr_h, (size_t) ng * 8, cudaMemcpyHostToDevice, x.st));
+            CK(cudaMemcpyAsync(x.tab_d, x.tab_h, (size_t) (ng + 2 + 2 * k) * 4, cudaMemcpyHostToDevice, x.st));
+            CK(cudaMemcpyAsync(x.x_d, nrm, (size_t) T * N * 4, cudaMemcpyHostToDevice, x.st));
+            K::quantize_q8_1_rows(x.x_d, T, N, x.xq_d, x.st);
+            K::NativeExpertLayout xl = L.gl;
+            xl.x_il = false;
+            K::native_expert_grouped(xl, x.ptr_d, x.tab_d, x.tab_d + ng + 1, x.tab_d + ng + 2, x.tab_d + ng + 2 + k, ng, k,
+                                     x.xq_d, (int64_t) (N / 32) * 36, x.scratch, x.out_d, x.st);
+            CK(cudaMemcpyAsync(rows_h, x.out_d, (size_t) k * N * 4, cudaMemcpyDeviceToHost, x.st));
+            CK(cudaEventRecord(x.ev, x.st));
+        } else {
+            pool->run_split_multi_native(L.fmt, jobs.data(), (int) jobs.size());
+        }
+        if (xc) CK(cudaStreamWaitEvent(st, xc->ev, 0));
         CK(cudaMemcpyAsync(D.crows, rows_h, (size_t) k * N * 4, cudaMemcpyHostToDevice, st));
         ex_ram += k;
         ex_ms += ms_since(t0);
@@ -5492,7 +5597,9 @@ struct Engine {
             if (moe_cuts) {
                 moe_cut(v, T);
                 run("f: the CPU's rows", [&] {
-                    ik::cpu_rows_kernel<<<(unsigned) n_ent, ik::kTB, 0, st>>>(R.crows, R.ids, L.slot_of, L.d_scale, R.rows, N);
+                    // (the card of the RAM experts scales them as the card's kernels do: no scale here)
+                    ik::cpu_rows_kernel<<<(unsigned) n_ent, ik::kTB, 0, st>>>(R.crows, R.ids, L.slot_of, xc ? nullptr : L.d_scale,
+                                                                              R.rows, N);
                 });
             }
             tick("experts");
@@ -7665,6 +7772,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     int prefill = 1024, prefill_max = -1, park_vram = -1;
     std::optional<uint64_t> reserve;
     std::string cell_gpus, cell_clocks, cell_keep, layer_split, split_clocks, main_clocks;
+    int expert_gpu = -1;
     int64_t split_keep = -1;
     double clocks_hold = 1.0;
     int64_t main_cells = 0, cell_spread = 0;
@@ -7716,6 +7824,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--load-threads") threads = std::max(1, std::atoi(next()));
         else if (a == "--vram-reserve-mib") reserve = (uint64_t) std::max(0, std::atoi(next())) << 20;
         else if (a == "--cell-gpus") cell_gpus = next();   // cards for the full visits' cells (CUDA ordinals)
+        else if (a == "--expert-gpu") expert_gpu = std::atoi(next());   // a card for the RAM experts' entries (a CUDA ordinal)
         else if (a == "--layer-split") layer_split = next();   // DEV:A-B: the layers A .. B on card DEV
         else if (a == "--layer-split-back") split_back = std::max<int64_t>(0, std::atoll(next()));   // the loop's last applications here
         else if (a == "--layer-split-clocks") split_clocks = next();   // that card's clocks locked while a request runs
@@ -7905,6 +8014,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         return 2;
     }
     E.cpu_threads = cpu_threads;
+    E.expert_gpu = m.in_ram ? expert_gpu : -1;
     E.profile_save = expert_save;
     E.profile_every = expert_save_every > 0 ? expert_save_every * 60.0 : 1e18;
     if (!spark.layers.empty()) E.sp = &spark;
