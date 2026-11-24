@@ -419,25 +419,26 @@ the fuller one has room for beside its layers, the other holds older cells in wh
 the two hold more, as without a split. Both cards take `clocks=` here (each works a part of a token and clocks down in the
 other's: an RTX 5070 Ti left to the driver ran at 2,150 or at 2,900 MHz, 5-8% apart in speed -
 `clocks=2900-3090/0` holds it), the later one `reserve=`. The first card's `clocks=` locks it while a request
-runs in any layout: a card that waits for the CPU's experts is left at one clock or the other too. Without `layers=` the engine does this by itself with the card after the first
-where the first would keep under 80% of the experts (two 12 GB cards: all the experts on cards instead of a third
-of them in RAM); `--layer-split 0` keeps the experts in RAM. Where experts stay in RAM, a later card with `cache=`
+runs in any layout: a card that waits for the CPU's experts is left at one clock or the other too. Without
+`layers=` the engine does this by itself where the first card would keep under 80% of the experts, on the card
+after it with the fastest link of those that then hold their shares (two 12 GB cards: all the experts on cards
+instead of a third of them in RAM); `--layer-split 0` keeps the experts in RAM. Where experts stay in RAM, a later card with `cache=`
 (`{"id": "RTX 3060", "cache": "auto"}`, `--expert-gpu`) holds a copy of all of them and computes a token's entries of
 those the first card lacks in place of the CPU (it takes all or none: the start says when it lacks the room) - with
 drafts 28-42% faster on an RTX 3090 that holds 6 of the 13 GiB of experts. Its options: `--kv fp16 | q8_0`;
 `--max-context N` (not set: what the free VRAM holds K and V for, at most the model's 1,048,576 tokens and not under
-32,768; set: a sequence ends where the VRAM does); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
+32,768; set: a sequence ends where the VRAM does, and with `--no-kv-grow` a start past it is refused); `--vram-reserve-mib N` (the VRAM left free: 700, or 1,536 on a
 card the desktop draws on); `--no-kv-grow` allocates the context's K and V at the start, where they are otherwise
 mapped as a conversation grows; `--no-graph`, `--no-file-cache`, `--load-threads N`.
 
-A card smaller than the file, or than the file and the least context beside it (32,768 tokens; a set
-`--max-context` where no other card holds K and V), runs it with the experts in RAM (UD-IQ4_XS: 13.1 GiB, pinned;
+A card smaller than the file, or than the file and the least context beside it (32,768 tokens, 16,384 where cards
+after it hold K and V; a set `--max-context` where none does), runs it with the experts in RAM (UD-IQ4_XS: 13.1 GiB, pinned;
 what the RAM has no room for above `--ram-reserve-mib` stays on the card alone, and a start that finds room in
 neither is refused with the numbers). The card has the experts used most, in the VRAM its K and V leave: filled at
 the start by a ranking (the one built into the programs; `--expert-profile FILE` another), they give way as a
 conversation grows and come back after it. The CPU computes the experts a token routes that the card lacks
 (`--cpu-threads N`: its pool's threads, a worker a core by default), so the speed follows their share: 2-5% of them
-on a 16 GB card with UD-IQ4_XS (an RTX 5070 Ti: 135-319 tok/s through the API, llama.cpp 21), 11-21% with 6 GiB of
+on a 16 GB card with UD-IQ4_XS (an RTX 5070 Ti: 140-300 tok/s through the API, llama.cpp 21), 11-21% with 6 GiB of
 experts on the card (106 tok/s in an agent's session where the whole model on an RTX 3090 gives 171). A prompt's
 chunk sends the RAM experts it routes to the card - the next layer application's while the card computes the
 current one's, as many as the card's link carries meanwhile: a prompt is read at the card's own speed on a fast
@@ -458,9 +459,9 @@ occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the m
 window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.5).
 It takes 0.40 GiB of VRAM for its weights and ~0.8 GiB for its context cells (made from the model's own states of
 every position; `--dspark-reach N`: those its layer without a window keeps - 131,072, 4.5 KiB each, 32,768 with
-experts in RAM and no more than a context set lower) and buffers, and is left out
-where the card alone holds the context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX 3090: 108
-tok/s without drafts, 120 after a short prompt, 140 thinking, 248 where the answer quotes its prompt.
+experts in RAM and no more than a context set lower) and buffers, and is left out where the card alone holds the
+context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX 3090: 119-123 tok/s without drafts, 152
+after a short prompt, 190 thinking, 356 where the answer quotes its prompt.
 
 A prompt is read in chunks of `--prefill N` rows (1,024; their buffers take ~0.8 GiB of VRAM; 0: 8 rows at a time
 through the generation's kernels), which grow to `--prefill-max N` rows (4,096: 2.3 GiB more, 14% faster at 21K

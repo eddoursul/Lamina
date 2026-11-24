@@ -37,9 +37,9 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   Lamina writes 4.7-6.1x as fast as llama.cpp's PR #32517 and reads prompts 17-31x as fast (its 64K prompt in 35 s
   against 18 minutes).
 - [Inkling 2 Mini](#inkling-2-mini) (Thinking Machines Lab's model, unsloth's UD-IQ4_XS on one RTX 3090): with the
-  model's drafter in both, Lamina writes 2.3-3.4x as fast as unsloth's llama.cpp fork (159-334 tok/s against 62-98)
-  and reads prompts 3.3-3.7x as fast. On a 16 GB card, which the file does not fit, 140-300 tok/s against 21. With
-  its layers over the RTX 3090 and the RTX 5070 Ti (this PC's config) 182-404 tok/s and prompts at 4,460-5,210.
+  model's drafter in both, Lamina writes 2.2-3.6x as fast as unsloth's llama.cpp fork (152-356 tok/s against 62-98)
+  and reads prompts 3.4-3.9x as fast. On a 16 GB card, which the file does not fit, 140-300 tok/s against 21. With
+  its layers over the RTX 3090 and the RTX 5070 Ti (this PC's config) 191-422 tok/s and prompts at 4,613-5,448.
 
 ## The PC and the engines
 
