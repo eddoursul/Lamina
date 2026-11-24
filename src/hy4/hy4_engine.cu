@@ -876,45 +876,7 @@ void engram_ids(const lamina::hy4::Geometry& g, const std::vector<int32_t>& seq,
 }
 
 // ------------------------------------------------------------------------------------------------ pictures
-/// A request's pictures (--vision): lamina-vision's rows in prompt order and each prompt cell's row (-1: text)
-struct ImgReq {
-    std::vector<float> rows;
-    std::vector<int32_t> cell_row;
-    int32_t row(int64_t p) const { return p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
-};
-
-/// Reads a lamina-vision file (records 'SVE1': n, nx, ny, n_embd, then n x n_embd floats, a picture each in prompt
-/// order) and lays the pictures over the prompt's runs of `pad`, a row a cell; each such cell's id becomes negative, from
-/// the picture's key (the server's, img_keys=, else the rows' hash) and its row.  "" or the error.
-std::string build_images(const std::string& path, std::vector<int32_t>& ids, int32_t pad, int64_t n_embd,
-                         const std::vector<uint64_t>& keys, ImgReq& r) {
-    std::vector<lamina::program::VisionImage> imgs;
-    if (std::string ve = lamina::program::read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
-    const int64_t n = (int64_t) ids.size();
-    r.cell_row.assign((size_t) n, -1);
-    size_t k = 0;
-    for (int64_t i = 0; i < n;) {
-        if (ids[(size_t) i] != pad) { ++i; continue; }
-        if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
-        const lamina::program::VisionImage& im = imgs[k++];
-        const uint64_t key = lamina::program::vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr,
-                                                               r.rows.data(), n_embd);
-        for (int64_t j = 0; j < im.n; ++j) {
-            if (i + j >= n || ids[(size_t) (i + j)] != pad)
-                return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                       " rows but fewer image tokens";
-            uint64_t h = key + (uint64_t) j * 0x9E3779B97F4A7C15ull;   // splitmix64 of the key and the row
-            h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
-            h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
-            ids[(size_t) (i + j)] = -1 - (int32_t) ((h ^ (h >> 31)) & 0x3fffffff);
-            r.cell_row[(size_t) (i + j)] = (int32_t) (im.off / (size_t) n_embd + (size_t) j);
-        }
-        i += im.n;
-    }
-    if (k != imgs.size()) return "the embeddings file has more images than the prompt";
-    if (n > 0 && r.cell_row.back() >= 0) return "the prompt cannot end in an image";
-    return "";
-}
+using ImgReq = lamina::program::ImageCells;   // a request's pictures (--vision)
 
 // ------------------------------------------------------------------------------------------------ the engine
 /// A planned move: expert e into slot k of GPU gi's slots of layer li (its resident `out` leaving it, or none)
@@ -4973,7 +4935,8 @@ struct Serve {
         ImgReq ir;
         if (geni) {
             if (!E.vision) { serve_print("ERR this engine was started without --vision\n"); return; }
-            if (const std::string ve = build_images(emb, ids, E.m->image_pad, g.n_embd, img_keys, ir); !ve.empty()) {
+            if (const std::string ve = lamina::program::image_cells(emb, ids, E.m->image_pad, g.n_embd, img_keys, ir);
+                !ve.empty()) {
                 serve_print("ERR %s\n", ve.c_str());
                 return;
             }
@@ -5348,7 +5311,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     ImgReq ir;
     if (!emb_file.empty()) {
-        if (const std::string ve = build_images(emb_file, prompt, m.image_pad, m.g.n_embd, {}, ir); !ve.empty()) {
+        if (const std::string ve = lamina::program::image_cells(emb_file, prompt, m.image_pad, m.g.n_embd, {}, ir);
+            !ve.empty()) {
             std::fprintf(stderr, "lamina: --emb: %s\n", ve.c_str());
             return 2;
         }

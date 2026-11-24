@@ -67,5 +67,17 @@ std::string read_vision_records(const std::string& path, int64_t n_embd, std::ve
 /// What the conversation cache compares: a picture is its grid and the server's key for it (`key`), or else its
 /// embeddings (FNV-1a, with the seed and byte order of upstream's conversation cache).
 uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const float* rows, int64_t n_embd);
+/// A request's pictures over its cells (a model whose picture rows take one cell each): the image encoder's rows in
+/// prompt order and each prompt cell's row (-1: text)
+struct ImageCells {
+    std::vector<float> rows;
+    std::vector<int32_t> cell_row;
+    int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
+};
+/// Reads the image encoder's file (read_vision_records) and lays the pictures over the prompt's runs of `pad`, a row a
+/// cell; each such cell's id becomes negative, from the picture's key (`keys`: the server's, img_keys=, else the rows'
+/// hash) and its row.  "" or the error.
+std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int32_t pad, int64_t n_embd,
+                        const std::vector<uint64_t>& keys, ImageCells& r);
 
 }  // namespace lamina::program

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lamina::inkling2 {
@@ -90,6 +91,8 @@ struct Geometry {
     }
     int64_t q_width() const { return n_head * head_dim; }       ///< 3,072
     int64_t kv_width() const { return n_head_kv * head_dim; }   ///< 1,024: a cell's K, and its V
+    /// a cell's K (or V) bytes: halves, or q8_0 blocks (34 bytes a 32 values)
+    int64_t cell_bytes(bool q8) const { return q8 ? n_head_kv * (head_dim / 32) * 34 : kv_width() * 2; }
     int64_t rel_width() const { return n_head * n_rel; }        ///< 384
     /// a visit's convolution state: K, V, the attention's output and the MoE's, n_conv - 1 earlier rows each
     int64_t conv_channels() const { return 2 * kv_width() + 2 * n_embd; }
