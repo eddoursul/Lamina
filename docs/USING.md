@@ -182,7 +182,12 @@ Flash-Next and Hy4-flash take no adapters.
   recently used first; `--conversation-cache-min-tokens N` (default 1024) keeps shorter ones out. They never take
   the RAM below `--ram-reserve-mib MIB` (default 6144) available to the system, and leave between requests when it
   runs below it: the expert arena is pinned, so without it a park beside a large arena swaps the rest of the system
-  instead (0: only the budget limits them). The Monitor's
+  instead (0: only the budget limits them). With `--conversation-spill-dir DIR` the conversations the RAM cannot
+  hold, and those that leave it, go to files in a folder of the engine's own under DIR instead (at most
+  `--conversation-spill-mib MIB`, by default 32 GiB or a quarter of the disk's free space, the less, never its last
+  4 GiB free), written from the GPU past the file cache through a 128 MiB stage and read back when a request continues
+  them: where the RAM cannot park an agent's long conversations, a switch between them reads seconds of disk instead
+  of minutes of prompt (Qwen3.8-Flash-Next only). The Monitor's
   Conversation cache card shows them. Qwen3.6-35B-A3B and Qwen3.8-27B have the same cache. With batch slots
   (`parallel`) each of the engine's sessions holds a conversation with its checkpoints: a request runs in the
   session that holds its conversation, a subagent starts from what it shares with another one, also one that is

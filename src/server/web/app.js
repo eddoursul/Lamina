@@ -341,17 +341,23 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   $("temp-text").textContent = hw.gpu_temp == null ? "–" : `${fmt(hw.gpu_temp)} °C`;
   $("temp-bar").style.width = hw.gpu_temp == null ? "0%" : `${Math.min(100, hw.gpu_temp)}%`;
 
-  // the prompt cache: the conversations parked in RAM against its budget (the engine's CACHE line; none: no card)
+  // the prompt cache: the conversations parked in RAM against its budget, and those on its disk tier (the engine's
+  // CACHE line; none: no card)
   const c = live.cache, cacheRow = $("cache-row"), cacheProg = $("cache-progress");
   cacheRow.hidden = cacheProg.hidden = c == null;
   if (c) {
+    const onDisk = c.disk_budget > 0;
     $("cache-text").textContent = `${fmt(c.parked)}${c.slots ? `/${fmt(c.slots)}` : ""} parked · ${fmt(c.active)} active · ` +
-      `${gb(c.parked_bytes)} GB` + (c.evictions > 0 ? ` · ${fmt(c.evictions)} eviction${c.evictions === 1 ? "" : "s"}` : "");
-    $("cache-text").title = `parked: conversations kept in RAM, each continuing where it was at its next request; ` +
+      `${gb(c.parked_bytes)} GB` + (onDisk ? ` · ${fmt(c.disk)} on disk, ${gb(c.disk_bytes)} GB` : "") +
+      (c.evictions > 0 ? ` · ${fmt(c.evictions)} eviction${c.evictions === 1 ? "" : "s"}` : "");
+    $("cache-text").title = `parked: conversations kept ${onDisk ? "in RAM or on disk" : "in RAM"}, each continuing where it ` +
+      `was at its next request; ` +
       (c.sessions > 1 ? `active: the ones in the engine's ${fmt(c.sessions)} sessions, one for each request running at once `
                       : `active: the one in the engine's session `) + `(${fmt(c.live)} cells, ${fmt(c.checkpoints)} checkpoints). ` +
-      `The parked ones take ${gb(c.parked_bytes)} of ${gb(c.parked_budget, 0)} GB` +
-      (c.slots ? `, at most ${fmt(c.slots)} of them` : "") + `; ${fmt(c.evictions)} evicted to make room`;
+      `The parked ones take ${gb(c.parked_bytes)} of ${gb(c.parked_budget, 0)} GB of RAM` +
+      (c.slots ? `, at most ${fmt(c.slots)} of them there` : "") +
+      (onDisk ? `; ${fmt(c.disk)} of them are in files of ${gb(c.disk_bytes)} of ${gb(c.disk_budget, 0)} GB` : "") +
+      `; ${fmt(c.evictions)} evicted to make room`;
     $("cache-bar").style.width = c.parked_budget ? `${Math.min(100, (100 * c.parked_bytes) / c.parked_budget)}%` : "0%";
     if (c.evictions > 0) cacheProg.dataset.tone = "warn"; else delete cacheProg.dataset.tone;   // a conversation lost its cache
   }

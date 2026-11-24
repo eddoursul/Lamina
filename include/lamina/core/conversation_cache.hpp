@@ -3,14 +3,16 @@
 // Every conversation owns its checkpoints: the live one of each session of the engine and each parked one (a
 // conversation another request replaced, kept in host memory with its K/V cells) hold chains of their own, so no
 // conversation's new checkpoints can take another's.  A chain over its cap gives up the point chain_victim picks; a
-// parked conversation leaves only whole, the least recently used first, when the park's bytes (its K/V copies and
-// its chains) or its slots run out, or the RAM the system can spare above a reserve, and never while it lends its
-// start to a live one.  A request that parts from a conversation before its end is that conversation's own next
-// request (superseded), which continues it cut where they part, or another conversation, which borrows its start
-// and leaves it whole; choose_start says where a request starts and in which session it runs.
+// parked conversation leaves the RAM only whole, the least recently used first, when the park's bytes (its K/V copies
+// and its chains) or its slots run out, or the RAM the system can spare above a reserve, and never while it lends its
+// start to a live one.  Where the engine has a disk tier, one that leaves the RAM, or that the RAM cannot hold, is
+// kept in a file, and those files leave the same way within the tier's bytes.  A request that parts from a
+// conversation before its end is that conversation's own next request (superseded), which continues it cut where
+// they part, or another conversation, which borrows its start and leaves it whole; choose_start says where a request
+// starts and in which session it runs.
 //
-// The checkpoint buffers and the K/V copies are opaque here: `SequenceCache` allocates and frees them, this header only
-// moves them and counts their bytes, so the policy is testable without a device.
+// The checkpoint buffers, the K/V copies and the files are opaque here: `SequenceCache` allocates and frees them, this
+// header only moves them and counts their bytes, so the policy is testable without a device.
 #pragma once
 
 #include <algorithm>
@@ -39,18 +41,30 @@ struct Ckpt {
     bool end = false;
 };
 
-/// A parked copy's buffer, and who hears of its end: an engine that keeps the cells elsewhere meanwhile
-/// (SequenceCache::kv_drop).
+/// A parked copy's buffer and its release: `drop` frees it where set (SequenceCache's, which tells an engine that
+/// keeps the cells elsewhere meanwhile: SequenceCache::kv_drop), else delete[].
 struct KvFree {
-    void (*drop)(void* who, const uint8_t* host) = nullptr;
+    void (*drop)(void* who, uint8_t* host) = nullptr;
     void* who = nullptr;
     void operator()(uint8_t* p) const {
-        if (p != nullptr && drop != nullptr) drop(who, p);
-        delete[] p;
+        if (p == nullptr) return;
+        if (drop != nullptr) drop(who, p);
+        else delete[] p;
     }
 };
 
-/// One conversation: its tokens, its checkpoints (positions ascending) and, when parked, a copy of its K/V cells.
+/// A conversation's file on the disk tier (SequenceCache's), and its removal.
+struct SeqFile;
+struct FileFree {
+    void (*drop)(void* who, SeqFile* f) = nullptr;
+    void* who = nullptr;
+    void operator()(SeqFile* f) const {
+        if (f != nullptr && drop != nullptr) drop(who, f);
+    }
+};
+
+/// One conversation: its tokens, its checkpoints (positions ascending) and, when parked, a copy of its K/V cells in
+/// RAM or a file of its cells and checkpoints on the disk tier.
 struct Seq {
     std::vector<int64_t> tokens;
     std::vector<ImgKey> imgs;
@@ -58,6 +72,11 @@ struct Seq {
     std::unique_ptr<uint8_t[], KvFree> kv;   ///< cells [0, kv_cells) of every K/V state (parked conversations only)
     int64_t kv_cells = 0;
     uint64_t kv_bytes = 0;
+    /// Parked on the disk tier: its cells and checkpoints in `file`, `disk_bytes` of it (no K/V copy, and its
+    /// checkpoints hold no buffers).
+    std::unique_ptr<SeqFile, FileFree> file;
+    uint64_t disk_bytes = 0;
+    bool on_disk() const { return disk_bytes > 0; }
     uint64_t stamp = 0;   ///< the park's clock at its last use (a session's conversation: at its last request)
     /// What its state depends on besides its tokens and images (SequenceCache::begin): requests of another tag do
     /// not continue it.
@@ -231,69 +250,88 @@ inline Start choose_start(const std::vector<Seq>& lives, uint64_t busy, const st
     return st;
 }
 
-/// The parked conversations: their K/V copies and chains within `budget` bytes, at most `slots` of them (0: no limit),
-/// and only conversations of at least `min_tokens` cells.
+/// The parked conversations: in RAM their K/V copies and chains within `budget` bytes, at most `slots` of them (0: no
+/// limit); on the disk tier their files, within the bytes the caller gives (make_disk_room); only conversations of at
+/// least `min_tokens` cells.  `evictions` counts the conversations that are gone: one that leaves the RAM for a file
+/// is readmitted.
 class ConversationCache {
 public:
     ConversationCache(uint64_t budget, size_t slots, int64_t min_tokens, uint64_t ckpt_bytes)
         : budget_(budget), slots_(slots), min_tokens_(min_tokens), ckpt_bytes_(ckpt_bytes) {}
 
-    /// Whether a conversation of `cells` cells is parked at all.
+    /// Whether a conversation of `cells` cells is parked in RAM at all.
     bool wants(int64_t cells) const { return budget_ > 0 && cells >= min_tokens_; }
+    int64_t min_tokens() const { return min_tokens_; }
     size_t size() const { return entries_.size(); }
     size_t evictions() const { return evictions_; }
     uint64_t budget() const { return budget_; }
     size_t slots() const { return slots_; }
-    /// A parked conversation's bytes: its K/V copy and its chain.
-    uint64_t bytes(const Seq& s) const { return s.kv_bytes + s.ckpts.size() * ckpt_bytes_; }
+    /// A parked conversation's RAM: its K/V copy and its chain (none on the disk tier).
+    uint64_t bytes(const Seq& s) const { return s.on_disk() ? 0 : s.kv_bytes + s.ckpts.size() * ckpt_bytes_; }
     uint64_t bytes() const {
         uint64_t n = 0;
         for (const Seq& s : entries_) n += bytes(s);
         return n;
     }
+    /// The conversations on the disk tier, and their files' bytes.
+    size_t disk_size() const {
+        return (size_t) std::count_if(entries_.begin(), entries_.end(), [](const Seq& s) { return s.on_disk(); });
+    }
+    uint64_t disk_bytes() const {
+        uint64_t n = 0;
+        for (const Seq& s : entries_) n += s.disk_bytes;
+        return n;
+    }
 
-    /// Makes room for a conversation of `incoming` bytes: the least recently used conversation that lends nothing
-    /// leaves whole until it fits and a slot is free.  `spare`: the RAM the park may still take beside what it holds
-    /// (the system's available RAM less the reserve; negative when it is below the reserve, kNoRamLimit: only the
-    /// budget counts), so with it the park holds at most its bytes now plus `spare`: an eviction gives its bytes back
-    /// to the system.  The evicted ones move to `evicted` (their buffers are the caller's to free).  false, with
-    /// nothing evicted: it would not fit even so (the budget, the RAM, or only lenders left).
+    /// Makes room in RAM for a conversation of `incoming` bytes: the least recently used conversation in RAM that
+    /// lends nothing leaves whole until it fits and a slot is free.  `spare`: the RAM the park may still take beside
+    /// what it holds (the system's available RAM less the reserve; negative when it is below the reserve,
+    /// kNoRamLimit: only the budget counts), so with it the park holds at most its bytes now plus `spare`: an
+    /// eviction gives its bytes back to the system.  The evicted ones move to `evicted` (their buffers are the
+    /// caller's to free, or to write to the disk tier and readmit).  false, with nothing evicted: it would not fit
+    /// even so (the budget, the RAM, or only lenders left).  Files on the disk tier take neither RAM nor slots.
     bool make_room(uint64_t incoming, std::vector<Seq>& evicted, int64_t spare = kNoRamLimit) {
         const uint64_t limit = std::min(budget_, ram_limit(spare));
         if (incoming > limit) return false;
         std::vector<size_t> victims;   // chosen first: an eviction is only committed once the incoming one fits
         uint64_t held = bytes();
-        size_t left = entries_.size();
+        size_t left = entries_.size() - disk_size();
         while ((slots_ > 0 && left >= slots_) || held + incoming > limit) {
-            size_t pick = entries_.size();
-            for (size_t i = 0; i < entries_.size(); ++i)
-                if (entries_[i].pin < 0 && std::find(victims.begin(), victims.end(), i) == victims.end() &&
-                    (pick == entries_.size() || entries_[i].stamp < entries_[pick].stamp))
-                    pick = i;
+            const size_t pick = oldest(victims, false);
             if (pick == entries_.size()) return false;
             victims.push_back(pick);
             held -= bytes(entries_[pick]);
             --left;
         }
-        std::sort(victims.begin(), victims.end(), std::greater<size_t>());   // erased from the back
-        for (size_t i : victims) {
-            evicted.push_back(std::move(entries_[i]));
-            entries_.erase(entries_.begin() + (ptrdiff_t) i);
-            ++evictions_;
+        take_out(victims, evicted);
+        return true;
+    }
+
+    /// Room on the disk tier for a file of `incoming` bytes beside the files there, all of them within `limit`:
+    /// the least recently used file of a conversation that lends nothing leaves until it fits.  The evicted
+    /// conversations move to `evicted` (the caller frees them and their files).  false, with nothing evicted: it
+    /// would not fit even so.
+    bool make_disk_room(uint64_t incoming, uint64_t limit, std::vector<Seq>& evicted) {
+        if (incoming > limit) return false;
+        std::vector<size_t> victims;
+        uint64_t held = disk_bytes();
+        while (held + incoming > limit) {
+            const size_t pick = oldest(victims, true);
+            if (pick == entries_.size()) return false;
+            victims.push_back(pick);
+            held -= entries_[pick].disk_bytes;
         }
+        take_out(victims, evicted);
         return true;
     }
 
     /// Gives RAM back when the system runs below the reserve (`spare` < 0, as make_room's): the least recently used
-    /// conversations that lend nothing leave whole until their bytes cover the deficit or none is left.  The evicted
-    /// ones move to `evicted`; returns how many.
+    /// conversations in RAM that lend nothing leave whole until their bytes cover the deficit or none is left.  The
+    /// evicted ones move to `evicted`; returns how many.
     size_t shed(int64_t spare, std::vector<Seq>& evicted) {
         size_t n = 0;
         while (spare < 0) {
-            size_t pick = entries_.size();
-            for (size_t i = 0; i < entries_.size(); ++i)
-                if (entries_[i].pin < 0 && (pick == entries_.size() || entries_[i].stamp < entries_[pick].stamp))
-                    pick = i;
+            const size_t pick = oldest({}, false);
             if (pick == entries_.size()) break;
             spare += (int64_t) bytes(entries_[pick]);
             evicted.push_back(std::move(entries_[pick]));
@@ -304,10 +342,17 @@ public:
         return n;
     }
 
-    /// Admits `s` (after make_room) as the most recently used.
+    /// Admits `s` (after make_room, or on the disk tier) as the most recently used.
     void park(Seq&& s) {
         entries_.push_back(std::move(s));
         entries_.back().stamp = tick();
+    }
+    /// Takes back a conversation make_room or shed evicted, now on the disk tier: with its use as it was (it keeps
+    /// its place among the least recently used), and not gone.
+    void readmit(Seq&& s) {
+        auto at = std::find_if(entries_.begin(), entries_.end(), [&](const Seq& e) { return e.stamp > s.stamp; });
+        entries_.insert(at, std::move(s));
+        if (evictions_ > 0) --evictions_;
     }
     /// Moves the entry at `at` out (the conversation continues live).
     Seq take(size_t at) {
@@ -334,6 +379,26 @@ private:
         const int64_t held = (int64_t) bytes();
         if (spare <= -held) return 0;
         return spare > INT64_MAX - held ? UINT64_MAX : (uint64_t) (held + spare);
+    }
+    /// The least recently used conversation in RAM (`disk`: on the disk tier) that lends nothing and is not among
+    /// `skip`; size(): none.
+    size_t oldest(const std::vector<size_t>& skip, bool disk) const {
+        size_t pick = entries_.size();
+        for (size_t i = 0; i < entries_.size(); ++i)
+            if (entries_[i].pin < 0 && entries_[i].on_disk() == disk &&
+                std::find(skip.begin(), skip.end(), i) == skip.end() &&
+                (pick == entries_.size() || entries_[i].stamp < entries_[pick].stamp))
+                pick = i;
+        return pick;
+    }
+    /// The entries at `victims` out to `evicted`, counted as gone.
+    void take_out(std::vector<size_t> victims, std::vector<Seq>& evicted) {
+        std::sort(victims.begin(), victims.end(), std::greater<size_t>());   // erased from the back
+        for (size_t i : victims) {
+            evicted.push_back(std::move(entries_[i]));
+            entries_.erase(entries_.begin() + (ptrdiff_t) i);
+            ++evictions_;
+        }
     }
 
     uint64_t budget_;

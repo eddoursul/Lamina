@@ -222,7 +222,7 @@ target_link_libraries(lamina-plan PRIVATE lamina_plan)
 # above has already refused anything older than sm_80 by the time this runs.
 if(LAMINA_ENABLE_CUDA)
   add_library(lamina_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
-                                 src/platform/console_quit.cpp src/platform/slice_read.cpp)
+                                 src/platform/console_quit.cpp src/platform/slice_read.cpp src/platform/spill.cpp)
   target_include_directories(lamina_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   # CUDA::cudart is PUBLIC because host translation units call the runtime: the .cu sources get cudart through the
   # CUDA language rules, a .cpp does not.
@@ -432,6 +432,11 @@ if(LAMINA_ENABLE_CUDA)
   target_link_libraries(platform_memory_test PRIVATE lamina_core CUDA::cudart)
   add_test(NAME platform_memory_test COMMAND platform_memory_test)
   set_tests_properties(platform_memory_test PROPERTIES SKIP_RETURN_CODE 77)   # a lock ulimit -l does not allow
+
+  # The prompt cache's disk tier: a process's folder, the folders of ended ones, unbuffered files (CPU only).
+  add_executable(platform_spill_test src/platform/spill_test.cpp)
+  target_link_libraries(platform_spill_test PRIVATE lamina_core CUDA::cudart)
+  add_test(NAME platform_spill_test COMMAND platform_spill_test)
 
   # Plan v0.3 P2: the n-gram table read straight from the SSD. The selftest needs only the CPU and a temp file.
   add_executable(ple_reader_test src/ngram/ple_reader_test.cpp)
@@ -988,7 +993,7 @@ endif()
 if(LAMINA_BUILD_TESTS)
   foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test block_form_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
-             conversation_cache_test control_vector_test deterministic_adapt_help platform_memory_test
+             conversation_cache_test control_vector_test deterministic_adapt_help platform_memory_test platform_spill_test
              ple_reader_selftest model_config_test params_test bench_test cpu_floor_test)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)

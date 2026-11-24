@@ -326,6 +326,12 @@ struct Options {
     /// --ram-reserve-mib: the parked conversations take no RAM below this much available to the system, and give it
     /// back between requests when it runs below (0 = only --conversation-cache-mib limits them).
     int64_t ram_reserve_mib = 6144;
+    /// --conversation-spill-dir: the disk tier (SequenceCache::open_disk): the parked conversations the RAM does not
+    /// hold, and those that leave it, in files of a folder of this process's own there (empty: none).
+    std::string conversation_spill_dir;
+    /// --conversation-spill-mib: the disk tier's files at most, in MiB (-1: min(32 GiB, a quarter of the disk's
+    /// free space); 0: no tier), never into the disk's last 4 GiB free.
+    int64_t conversation_spill_mib = -1;
     /// Checkpoint interval inside long prompts, in whole prompt chunks (counted from the request's first new cell).
     int64_t prompt_cache_every = 16384;
     /// Prompt parts of up to this many tokens go through verify windows instead of the batched prompt path: a new
@@ -542,6 +548,11 @@ void usage(bool all = false) {
                  "  --ram-reserve-mib MIB  --serve: such conversations take no RAM below MIB available to the\n"
                  "                       system, and leave between requests when it runs below (default 6144;\n"
                  "                       0 = only --conversation-cache-mib limits them)\n"
+                 "  --conversation-spill-dir DIR  --serve: such conversations that the RAM does not hold, or that\n"
+                 "                       leave it, go to files in a folder of this process's own under DIR\n"
+                 "                       (default: none)\n"
+                 "  --conversation-spill-mib MIB  --serve: those files take at most MIB (default: 32 GiB or a\n"
+                 "                       quarter of the disk's free space, the less; never its last 4 GiB free)\n"
                  "  --feed-max N         --serve: new prompt parts and last prompt chunks of up to N tokens run\n"
                  "                       through verify windows instead of the batched prompt path (default 46)\n"
                  "  --tail-role-token ID --serve: a turn of this role right before the last turn stays out of the\n"
@@ -1633,6 +1644,8 @@ int parse_options(int argc, char** argv, Options& o, bool& help, bool usage_on_e
             else if (a == "--conversation-cache-slots") o.conversation_cache_slots = std::max(0, std::atoi(next("--conversation-cache-slots")));
             else if (a == "--conversation-cache-min-tokens") o.conversation_cache_min_tokens = std::max<int64_t>(0, std::atoll(next("--conversation-cache-min-tokens")));
             else if (a == "--ram-reserve-mib") o.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next("--ram-reserve-mib")));
+            else if (a == "--conversation-spill-dir") o.conversation_spill_dir = next("--conversation-spill-dir");
+            else if (a == "--conversation-spill-mib") o.conversation_spill_mib = std::max<int64_t>(0, std::atoll(next("--conversation-spill-mib")));
             else if (a == "--feed-max") o.feed_max = std::max<int64_t>(0, std::atoll(next("--feed-max")));
             else if (a == "--tail-role-token") o.tail_role_token = std::atoll(next("--tail-role-token"));
             else if (a == "--eos-ids") {
@@ -4381,14 +4394,25 @@ int lamina::program::run(int argc, char** argv) {
                              ? (", at most " + std::to_string(o.conversation_cache_slots) + " of them").c_str() : "",
                          ram_known ? (", above a RAM reserve of " + std::to_string(o.ram_reserve_mib) + " MiB (" +
                                       std::to_string(ram_now >> 20) + " MiB available now)").c_str() : "");
+        // --conversation-spill-dir: the disk tier below the park
+        if (pcache.enabled() && !o.conversation_spill_dir.empty() && o.conversation_spill_mib != 0) {
+            std::string m;
+            const uint64_t cap = o.conversation_spill_mib > 0 ? (uint64_t) o.conversation_spill_mib << 20 : 0;
+            if (pcache.open_disk(o.conversation_spill_dir, cap, m))
+                std::fprintf(stderr, "lamina serve: prompt cache: the conversations the RAM does not hold go to %s\n",
+                             m.c_str());
+            else
+                std::fprintf(stderr, "lamina serve: prompt cache: no disk tier: %s\n", m.c_str());
+        }
         // the CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE
         auto print_cache = [&] {
             if (!pcache.enabled()) return;
             const auto cs = pcache.state();
             serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                        "evictions=%zu\n", (long long) cs.live_cells, cs.checkpoints, cs.parked,
-                        (unsigned long long) cs.parked_bytes, (unsigned long long) cs.parked_budget, cs.slots,
-                        cs.evictions);
+                        "evictions=%zu disk=%zu disk_bytes=%llu disk_budget=%llu\n", (long long) cs.live_cells,
+                        cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
+                        (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.disk,
+                        (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
         };
         // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
         // away, or pressed Esc): the flag is checked between prompt chunks and between verify windows.

@@ -18,7 +18,10 @@
 //      taken back or lending) and on several (the session that holds the conversation; a new one in the session
 //      that holds nothing, else the one with the smallest conversation, of equal ones the one used longest ago; a
 //      sibling's start copied from a session, also one that decodes; never a session that decodes; the same request
-//      again beside the first).
+//      again beside the first);
+//   7. the disk tier: files take neither RAM nor slots, the RAM's evictions and shed() take conversations in RAM
+//      only, one readmitted in a file keeps its use and is not counted gone, and make_disk_room() evicts the least
+//      recently used files within its limit, never a lender's, nothing for a file that would not fit even so.
 #include "lamina/core/conversation_cache.hpp"
 
 #include <cstdint>
@@ -330,6 +333,58 @@ int main() {
         // a session's conversation against a parked one with the same start: the session's goes first
         st = choose_start(gap, 0, parked, sibling, {}, 0, false);
         check(st.kind == Start::kBorrowSession && st.from == 0, "of equal starts a session's lends before the park's");
+    }
+    {   // 7. the disk tier
+        auto filed = [](int64_t cells, std::vector<int64_t> pos, uint64_t bytes) {   // parked in a file of `bytes`
+            Seq s = conv(cells, std::move(pos));
+            s.disk_bytes = bytes;
+            return s;
+        };
+        std::vector<Seq> evicted;
+        ConversationCache c(40000, 2, 0, kCkpt);
+        c.park(conv(1000, {1000}));              // RAM: 10,100
+        c.park(filed(3000, {3000}, 50000));
+        c.park(filed(4000, {4000}, 60000));
+        check(c.size() == 3 && c.bytes() == 10100 && c.disk_size() == 2 && c.disk_bytes() == 110000,
+              "files take no RAM: bytes() counts the RAM, disk_bytes() the files");
+        check(c.make_room(10000, evicted) && evicted.empty(), "nor slots: two of them, one conversation in RAM");
+        check(c.make_room(35000, evicted) && evicted.size() == 1 && evicted[0].kv_cells == 1000 && c.size() == 2,
+              "the RAM's evictions take conversations in RAM only");
+        if (evicted.size() != 1) return 1;
+        const size_t gone = c.evictions();
+        Seq moved = std::move(evicted[0]);
+        moved.disk_bytes = 12000;   // written to a file
+        const uint64_t stamp = moved.stamp;
+        c.readmit(std::move(moved));
+        check(c.size() == 3 && c.evictions() == gone - 1 && c.disk_size() == 3 && c.bytes() == 0,
+              "one readmitted in a file is parked again, not counted gone, and takes no RAM");
+        check(c.entries()[0].stamp == stamp && c.entries()[0].kv_cells == 1000,
+              "with its use as it was: still the least recently used");
+        evicted.clear();
+        check(c.make_disk_room(30000, 150000, evicted) && evicted.size() == 1 && evicted[0].kv_cells == 1000 &&
+                  c.disk_bytes() == 110000 && c.evictions() == gone,
+              "a file that does not fit evicts the least recently used file, counted gone");
+        c.entries()[0].pin = 3000;   // the 3,000-cell one lends its start
+        evicted.clear();
+        check(c.make_disk_room(80000, 150000, evicted) && evicted.size() == 1 && evicted[0].kv_cells == 4000,
+              "a lending conversation's file is never evicted: the next least recently used goes");
+        evicted.clear();
+        check(!c.make_disk_room(120000, 150000, evicted) && evicted.empty() && c.size() == 1,
+              "nothing is evicted when the file would not fit even so");
+        check(!c.make_disk_room(200000, 150000, evicted) && evicted.empty(), "nor for one over the whole limit");
+        ConversationCache s(1u << 30, 1, 0, kCkpt);
+        s.park(filed(3000, {3000}, 50000));
+        s.park(conv(1000, {1000}));
+        evicted.clear();
+        check(s.make_room(100, evicted) && evicted.size() == 1 && evicted[0].kv_cells == 1000 && s.disk_size() == 1,
+              "one slot: the conversation in RAM gives way, the file stays");
+        s.park(conv(2000, {2000}));
+        evicted.clear();
+        check(s.shed(-1000000, evicted) == 1 && evicted.size() == 1 && evicted[0].kv_cells == 2000 && s.size() == 1 &&
+                  s.disk_size() == 1,
+              "shed() gives the RAM back: files stay");
+        check(s.min_tokens() == 0 && ConversationCache(0, 0, 512, kCkpt).min_tokens() == 512,
+              "the shortest conversation the park keeps, for the disk tier too");
     }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;

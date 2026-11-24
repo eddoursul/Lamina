@@ -157,6 +157,12 @@ A request continues from the longest start of its prompt that the engine still h
   shares only its start with it (subagents of one agent, sessions with one system prompt) borrows that start. A
   parked conversation leaves only whole, the least recently used first and never while it lends its start, so no
   other conversation can take its checkpoints.
+- **Conversations parked on disk** (`--conversation-spill-dir`): one the RAM cannot hold, or evicts, goes to files in
+  a folder of the engine's own: its K/V from the GPU through two pinned halves of 64 MiB in turns (one half's copy
+  beside the other's write, so it is never whole in RAM), its checkpoints from their buffers, past the file cache. A
+  request matches it as one in RAM and reads it back the same way, before its prompt (the embeddings' reads from the
+  SSD during a request never wait behind it); the least recently used file goes first, within
+  `--conversation-spill-mib`.
 
 The API reports how many prompt tokens were reused (`cached_tokens`, `cache_read_input_tokens`).
 

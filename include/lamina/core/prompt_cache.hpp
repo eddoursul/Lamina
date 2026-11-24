@@ -18,6 +18,10 @@
 //     there, and the parked conversation stays whole - unless the prompt is that conversation's own next request,
 //     which a client or a template renders another way than the engine wrote it (superseded, conversation_cache.hpp):
 //     then the conversation comes out of the park cut at that checkpoint, with its chain up to there.
+//   * the DISK TIER (open_disk, an engine that names its K/V regions: kv_spans): a conversation the RAM cannot hold
+//     is written from the device to a file through a small pinned stage, never whole in RAM, and one that leaves the
+//     RAM goes from its copy; read back the same way where a request takes or borrows it.  Matched as any parked one
+//     (its tokens and checkpoint positions stay in RAM); its I/O runs in begin() and between requests only.
 //
 // Each conversation owns its checkpoints, at most `chain_cap` of them, which thin out geometrically back from its
 // newest (chain_victim); a parked conversation leaves only whole (ConversationCache, conversation_cache.hpp).  One
@@ -37,6 +41,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -54,6 +59,13 @@ public:
     SequenceCache& operator=(const SequenceCache&) = delete;
 
     bool enabled() const { return chain_cap_ > 0; }
+    /// The disk tier (--conversation-spill-dir): the parked conversations the RAM does not hold, and those that leave
+    /// it, in files of a folder of this process's own under `root`, within `budget` bytes (0: min(32 GiB, a quarter
+    /// of the disk's free space)) and never into the disk's last kSpillFloor free.  false, with `msg` saying why:
+    /// an engine whose K/V the tier cannot reach (kv_spans), the folder, too little room.  Else `msg` says where.
+    bool open_disk(const std::string& root, uint64_t budget, std::string& msg);
+    bool disk_on() const { return disk_ != nullptr; }
+    static constexpr uint64_t kSpillFloor = uint64_t(4) << 30;
     /// The elastic K/V (--kv-grow): called before any copy of `cells` K/V cells to or from the device (a parked
     /// conversation's restore, the live one's park), so the pools can grow to hold them first.  false: no room.
     std::function<bool(int64_t cells)> ensure_kv;
@@ -124,9 +136,11 @@ public:
         int64_t live_cells = 0;     ///< in every session
         size_t checkpoints = 0;     ///< of the sessions' conversations
         size_t held = 0;            ///< sessions that hold a conversation
-        size_t parked = 0;
-        uint64_t parked_bytes = 0, parked_budget = 0;
+        size_t parked = 0;          ///< in RAM and on the disk tier
+        uint64_t parked_bytes = 0, parked_budget = 0;   ///< RAM
         size_t slots = 0, evictions = 0;
+        size_t disk = 0;            ///< of the parked, those on the disk tier
+        uint64_t disk_bytes = 0, disk_budget = 0;
     };
     State state() const;
     /// One line for the log.
@@ -161,6 +175,21 @@ protected:
         (void) cells;
         return false;
     }
+    /// One device region of K/V cells.
+    struct KvSpan {
+        void* dev;
+        uint64_t bytes;
+    };
+    /// The disk tier's way to the K/V: the device regions that hold cells [lo, hi) of every K/V state (`lo` a
+    /// multiple of 4), in the order kv_copy lays a parked copy of `hi` cells out when lo is 0; those of cells [lo, n)
+    /// are the first bytes of each.  Empty: the engine keeps nothing on the disk tier.
+    virtual std::vector<KvSpan> kv_spans(int64_t lo, int64_t hi) const {
+        (void) lo;
+        (void) hi;
+        return {};
+    }
+    /// The stream of the device those regions are on: the disk tier's copies go there.
+    virtual void* kv_stream() const { return nullptr; }
 
 private:
     /// A checkpoint buffer (the header's allocator) and its return to the free list.  An idle buffer past what a
@@ -187,8 +216,33 @@ private:
     Seq& live() { return lives_[(size_t) cur_]; }
     const Seq& live() const { return lives_[(size_t) cur_]; }
 
+    // ---- the disk tier (prompt_cache.cpp: its folder, its stage, the files' layout)
+    struct Disk;
+    /// A conversation the park evicts from RAM (`why`, for the log): to the disk tier where it has room for it,
+    /// readmitted there, else gone.
+    void evict(Seq&& s, const char* why);
+    /// The live sequence, which the RAM does not hold, parked on the disk tier as stash_live parks it in RAM.
+    void park_on_disk(int64_t keep_upto);
+    /// Room on the disk tier for a file of `bytes`: within its budget and the disk's free space above kSpillFloor,
+    /// the least recently used files leaving first.
+    bool disk_room(uint64_t bytes);
+    std::unique_ptr<SeqFile, FileFree> new_file();
+    void drop_file(SeqFile* f);
+    /// Cells [lo, hi) from the device to the end of `f`'s K/V file, as one block in kv_spans' order.
+    bool disk_put_kv(SeqFile& f, int64_t lo, int64_t hi);
+    /// A parked copy in RAM (kv_copy's layout of `held` cells) to `f`, as one block of [0, held).
+    bool disk_put_copy(SeqFile& f, const uint8_t* copy, uint64_t bytes, int64_t held);
+    /// The first `cells` cells of `f`'s blocks to the device.
+    bool disk_get_kv(const SeqFile& f, int64_t cells);
+    bool disk_put_ckpt(SeqFile& f, int64_t pos, const void* host);
+    bool disk_get_ckpt(const SeqFile& f, int64_t pos, void* host);
+    /// The checkpoints of `s` up to `upto` read from its file into buffers of their own.
+    bool load_chain(Seq& s, int64_t upto);
+
     int chain_cap_;
     uint64_t ckpt_bytes_;
+    uint64_t ckpt_alloc_;   // a checkpoint buffer's bytes: ckpt_bytes_ in whole pages (written to a file whole)
+    std::unique_ptr<Disk> disk_;
     std::vector<Seq> lives_;   // each session's conversation
     int cur_ = 0;              // the session of the last begin()
     ConversationCache parked_;
@@ -221,11 +275,14 @@ protected:
     void state_zero() override;
     uint64_t kv_bytes(int64_t cells) const override;
     bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) override;
+    std::vector<KvSpan> kv_spans(int64_t lo, int64_t hi) const override { return kv_parts(lo, hi); }
+    void* kv_stream() const override { return stream_; }
 
 private:
-    /// One device region of the K/V cells, stored back to back in a parked conversation's buffer.
-    struct Part { void* dev; uint64_t bytes; };
-    std::vector<Part> kv_parts(int64_t cells) const;
+    /// The device regions of cells [lo, hi) of every K/V state, stored back to back in a parked conversation's
+    /// buffer (lo 0) and in the disk tier's blocks: each state's pages of them in every K/V array, then its
+    /// indexer's pooled rows.
+    std::vector<KvSpan> kv_parts(int64_t lo, int64_t hi) const;
 
     const ModelGeometry& g_;
     SessionState& ss_;
