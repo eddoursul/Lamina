@@ -2,9 +2,8 @@
 // the sd-cli command and environment, one process per job read for its progress and its log, the stored images.
 #include "images.hpp"
 
+#include "base64.hpp"
 #include "log.hpp"
-
-#include "common/base64.hpp"   // llama.cpp's, header-only
 
 #include <algorithm>
 #include <charconv>
@@ -860,7 +859,7 @@ json ImageGen::response(const std::vector<std::string>& images, const Job& job, 
     for (size_t i = 0; i < images.size(); ++i) {
         json item = {{"revised_prompt", job.prompt}, {"seed", job.seed + (int64_t) i}};
         if (job.response_format == "url") item["url"] = base_url + "/v1/images/files/" + store(images[i]);
-        else item["b64_json"] = base64::encode(images[i]);
+        else item["b64_json"] = b64encode(images[i]);
         data.push_back(std::move(item));
     }
     return {{"created", (int64_t) std::time(nullptr)},

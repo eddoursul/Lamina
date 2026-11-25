@@ -588,8 +588,8 @@ if(LAMINA_NATIVE_EXPERTS)
   set(CMAKE_SKIP_INSTALL_RULES ON)
   add_subdirectory(${_lamina_llama_root}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   # lamina-server's parts from the same checkout (its root skips the ggml added above): the vendored cpp-httplib (a
-  # target there with LLAMA_BUILD_COMMON alone), vendor-hash, nlohmann/json, stb_image and common/base64.hpp.  Nothing
-  # links libllama or llama-common, so neither is built (EXCLUDE_FROM_ALL): the tokenizer is lamina_text's own (the
+  # target there with LLAMA_BUILD_COMMON alone), nlohmann/json and stb_image.  Nothing links libllama, llama-common
+  # or vendor-hash, so none of them is built (EXCLUDE_FROM_ALL): the tokenizer is lamina_text's own (the
   # vocabulary from the GGUF's header through ggml's gguf, src/server/gguf_header.h; the pre-tokenizer
   # src/server/pretokenize.cpp, which pretokenize_parity checks against llama.cpp's src/unicode.cpp), and the Jinja
   # chat templates are a copy in src/server/vendor
@@ -898,15 +898,17 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   add_library(lamina_jinja STATIC ${_lamina_jinja} src/server/vendor/common/json.cpp
                                   src/server/vendor/common/unicode.cpp)
   target_include_directories(lamina_jinja SYSTEM PUBLIC src/server/vendor PRIVATE src/server/vendor/common)
-  target_link_libraries(lamina_jinja PUBLIC nlohmann ggml-base)
+  target_link_libraries(lamina_jinja PUBLIC nlohmann)
   if(MSVC)
     target_compile_options(lamina_jinja PRIVATE /w /utf-8 /bigobj)
   else()
     target_compile_options(lamina_jinja PRIVATE -w)
   endif()
-  # the code point tables (src/server/unicode_tables.inc: tools/unicode_tables.py) and the pre-tokenizers are its own
+  # the code point tables (src/server/unicode_tables.inc: tools/unicode_tables.py), the pre-tokenizers and the SHA-256
+  # (the image cache's keys) are its own
   add_library(lamina_text STATIC src/server/json.cpp src/server/log.cpp src/server/tokenizer.cpp src/server/dialect.cpp
-                                 src/server/frontend.cpp src/server/pretokenize.cpp src/server/unicode.cpp)
+                                 src/server/frontend.cpp src/server/pretokenize.cpp src/server/unicode.cpp
+                                 src/server/sha256.cpp)
   target_include_directories(lamina_text PUBLIC src/server)
   target_link_libraries(lamina_text PUBLIC lamina_jinja nlohmann ggml-base lamina_warnings)
   add_executable(lamina-check src/server/check.cpp)
@@ -933,6 +935,10 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   add_executable(tokenizer_test tests/server/tokenizer_test.cpp)
   target_link_libraries(tokenizer_test PRIVATE lamina_text lamina_artifact)
   add_test(NAME tokenizer_test COMMAND tokenizer_test)
+  # the SHA-256 against FIPS 180-4's examples and every padding case, the base64 encoder against RFC 4648's (CPU only)
+  add_executable(sha256_base64_test tests/server/sha256_base64_test.cpp)
+  target_link_libraries(sha256_base64_test PRIVATE lamina_text)
+  add_test(NAME sha256_base64_test COMMAND sha256_base64_test)
   if(TARGET lamina_program)
     # the web app and the presets (examples/*.json: lamina-server -m) inside the binary
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/server/web * web_asset
@@ -950,9 +956,8 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
                 src/server/telemetry.cpp src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
                 ${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_BINARY_DIR}/bench_files.cpp)
     target_include_directories(lamina_server_core PUBLIC src/server ${_lamina_llama_root}/vendor
-                               ${_lamina_llama_root}/vendor/cpp-httplib
-                               PRIVATE ${_lamina_llama_root})   # common/base64.hpp (images.cpp)
-    target_link_libraries(lamina_server_core PUBLIC lamina_text cpp-httplib vendor-hash lamina_program lamina_warnings)
+                               ${_lamina_llama_root}/vendor/cpp-httplib)
+    target_link_libraries(lamina_server_core PUBLIC lamina_text cpp-httplib lamina_program lamina_warnings)
     if(TARGET lamina_vision)   # the image encoder, in the server's process (src/server/vision.cpp)
       target_link_libraries(lamina_server_core PUBLIC lamina_vision)
       target_compile_definitions(lamina_server_core PRIVATE LAMINA_VISION=1)
@@ -1008,7 +1013,7 @@ if(LAMINA_BUILD_TESTS)
   foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test block_form_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
              conversation_cache_test disk_tier_test control_vector_test deterministic_adapt_help platform_memory_test
-             platform_spill_test pretokenize_parity tokenizer_test
+             platform_spill_test pretokenize_parity tokenizer_test sha256_base64_test
              ple_reader_selftest model_config_test params_test bench_test cpu_floor_test)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)

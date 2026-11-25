@@ -1,8 +1,17 @@
 #include "json.h"
 
-#include "ggml.h"
+#include <cstdio>
+#include <cstdlib>
 
-#define JSON_ASSERT GGML_ASSERT
+// nlohmann/json's own checks, on in a release build too: a failed one names itself on stderr and aborts (llama.cpp
+// has GGML_ASSERT here, which does the same)
+#define JSON_ASSERT(x)                                                                         \
+    do {                                                                                       \
+        if (!(x)) {                                                                            \
+            std::fprintf(stderr, "%s:%d: JSON_ASSERT(%s) failed\n", __FILE__, __LINE__, #x);   \
+            std::abort();                                                                      \
+        }                                                                                      \
+    } while (0)
 #include <nlohmann/json.hpp>
 
 #include <iterator>

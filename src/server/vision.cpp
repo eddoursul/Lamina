@@ -5,8 +5,8 @@
 #include "log.hpp"
 #include "process.hpp"
 #include "service.hpp"
+#include "sha256.hpp"
 
-#include "hash/hash.h"
 #include "lamina/artifact/gguf_reader.hpp"
 #if LAMINA_VISION
 #include "lamina/core/gpu_select.hpp"
@@ -758,7 +758,7 @@ std::vector<std::pair<std::string, int64_t>> Vision::encode_all(const std::vecto
 
 std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool is_bytes, const std::vector<std::string>& keep) {
     const std::string data = normalize(is_bytes ? source : load(source));
-    const std::string key = hash_sha256_hex(data.data(), data.size()).substr(0, 32);
+    const std::string key = sha256_hex(data).substr(0, 32);
     std::lock_guard<std::mutex> lk(mu_);
     for (auto it = cache_.begin(); it != cache_.end(); ++it)
         if (it->first == key) {

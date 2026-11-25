@@ -2,6 +2,8 @@
 // events -> Responses output items and typed events (serve/responses.py's port; the overview is in responses.hpp).
 #include "responses.hpp"
 
+#include "base64.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
@@ -128,22 +130,6 @@ std::string_view prefix_chars(std::string_view s, size_t chars) {
         i += n;
     }
     return s.substr(0, i);
-}
-
-constexpr std::string_view kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string b64encode(std::string_view in) {
-    std::string out;
-    for (size_t i = 0; i < in.size(); i += 3) {
-        const uint32_t b0 = (unsigned char) in[i], b1 = i + 1 < in.size() ? (unsigned char) in[i + 1] : 0,
-                       b2 = i + 2 < in.size() ? (unsigned char) in[i + 2] : 0;
-        const uint32_t v = (b0 << 16) | (b1 << 8) | b2;
-        out += kB64[(v >> 18) & 63];
-        out += kB64[(v >> 12) & 63];
-        out += i + 1 < in.size() ? kB64[(v >> 6) & 63] : '=';
-        out += i + 2 < in.size() ? kB64[v & 63] : '=';
-    }
-    return out;
 }
 
 /// base64.b64decode(s, validate=True): the alphabet only, whole quads, padding only at the end of the last one

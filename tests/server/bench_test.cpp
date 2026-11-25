@@ -6,8 +6,7 @@
 
 #include "bench.hpp"
 #include "process.hpp"
-
-#include "hash/hash.h"
+#include "sha256.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -173,8 +172,8 @@ void the_word_lists() {
     CHECK(B::long_prompt(12) == "Here is a list of words:\norbit copper canyon stone market anchor lantern velvet violet stone "
                                 "meadow garden\n\nSummarize what kinds of words appear in the list, in five sentences.");
     const std::string a = B::long_prompt(1500), b = B::long_prompt(3700);
-    CHECK(hash_sha256_hex(a.data(), a.size()) == "d0bd31d1b3008cedabf5d4bbf218cefd9cae14ab95ab0c8e0a7f29066b1b546f");
-    CHECK(hash_sha256_hex(b.data(), b.size()) == "bd47e15135f6b5e95ef2492c94fc70bc92cb719eb8e3a5622795423fd5326829");
+    CHECK(lamina::sha256_hex(a) == "d0bd31d1b3008cedabf5d4bbf218cefd9cae14ab95ab0c8e0a7f29066b1b546f");
+    CHECK(lamina::sha256_hex(b) == "bd47e15135f6b5e95ef2492c94fc70bc92cb719eb8e3a5622795423fd5326829");
 }
 
 void the_statistics() {

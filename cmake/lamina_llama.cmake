@@ -1,7 +1,7 @@
 # The llama.cpp the programs build against: ggml (the CPU experts, ggml-cuda's MMQ kernels, the image encoder's CPU
-# path, gguf, the type traits), the libraries it vendors (cpp-httplib, nlohmann/json, stb_image, SHA-256) with its
-# common/base64.hpp, and src/unicode.cpp, the reference pretokenize_parity checks the server's pre-tokenizers and
-# code point tables against (that test's alone).
+# path, gguf, the type traits), the libraries it vendors (cpp-httplib, nlohmann/json, stb_image), and src/unicode.cpp,
+# the reference pretokenize_parity checks the server's pre-tokenizers and code point tables against (that test's
+# alone).
 #
 #   lamina_llama_cpp(<var>)  ->  <var>: third_party/llama.cpp of this checkout, at the pinned commit
 #
