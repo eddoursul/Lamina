@@ -24,7 +24,7 @@
 //   the CPU's    a ggml graph on ggml's CPU backend, mtmd's operation for operation (ggml_encoder.cpp): Qwen's rows,
 //                with its letterbox, are that library's bytes on a CPU without AVX-512 (with it the attention's heads
 //                are padded, GgmlEncoder::open)
-//   a GPU's      the engine's own CUDA kernels (cuda_encoder.cu): cuBLAS products with FP16 inputs and FP32 sums, MMQ
+//   a GPU's      the engine's own CUDA kernels (cuda_encoder.cu): products with FP16 inputs and FP32 sums, MMQ
 //                for a Q8_0 projector's matrices as llama.cpp multiplies them on a GPU, and a tensor-core attention
 //                kernel.  Its rows stand as near the CPU's FP32 attention as any GPU arithmetic does (the tower
 //                amplifies a rounding to percents of some rows): 1.5e-2 of a picture's rows on average with an
@@ -58,9 +58,8 @@ struct EncoderParams {
     /// sums), in place of MMQ over its blocks (the activations rounded to q8_1, llama.cpp's arithmetic for the file).
     bool q8_fp16 = false;
     /// A GPU: memory of `device` the caller lends the encoder for its whole life, at least encoder_gpu_bytes(): the
-    /// weights and the buffers are carved from it and the encoder allocates none of its own (cuBLAS's handle and
-    /// MMQ's pool aside: 12 and 36 MiB; an F32 file's matrices pass through a staging buffer of their bytes as they
-    /// load).  Null: its own allocations.
+    /// weights and the buffers are carved from it and the encoder allocates none of its own (MMQ's pool aside: 36 MiB;
+    /// an F32 file's matrices pass through a staging buffer of their bytes as they load).  Null: its own allocations.
     void* gpu_arena = nullptr;
     uint64_t gpu_arena_bytes = 0;
 };

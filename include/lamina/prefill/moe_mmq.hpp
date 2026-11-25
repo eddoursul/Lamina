@@ -1,6 +1,6 @@
 // include/lamina/prefill/moe_mmq.hpp - prompt-speed plan step 2b: the prompt path's experts through llama.cpp's MMQ
 // kernels (ggml-cuda mmq.cuh, MIT): the weights stay quantized and the activations are rounded to q8_1, the
-// products run on int8 tensor cores.  The dequantize-to-FP16 + cuBLAS path wrote ~10 MB of FP16 per expert and
+// products run on int8 tensor cores.  The dequantize-to-FP16 path wrote ~10 MB of FP16 per expert and
 // multiplied in FP16; this reads the ~1.4-2 MB expert once.  A group of experts is multiplied in one launch per
 // product, each expert's matrices read where its blob lies (Product::tab), or gathered into one buffer (`gather_*`).
 #pragma once

@@ -24,6 +24,7 @@
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/native_moe.hpp"
@@ -43,7 +44,6 @@
 #include "lamina/kernels/cpu/pool.hpp"
 #endif
 
-#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -93,19 +93,17 @@ struct Fatal {
 };
 
 /// What a run allocates, freed when it ends (the server starts the engine again in its process after an unload): device,
-/// pinned and heap memory, streams, events, graphs and cuBLAS handles, each recorded by the helpers below.  One run at a
-/// time per process.
+/// pinned and heap memory, streams, events and graphs, each recorded by the helpers below.  One run at a time per
+/// process.
 struct Owned {
     std::mutex mu;
     std::vector<void*> dev, pinned, heap;
     std::vector<cudaStream_t> streams;
     std::vector<cudaEvent_t> events;
     std::vector<cudaGraphExec_t> graphs;
-    std::vector<cublasHandle_t> blas;
     ~Owned() {
         cudaDeviceSynchronize();
         for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
-        for (cublasHandle_t h : blas) cublasDestroy(h);
         for (cudaEvent_t e : events) cudaEventDestroy(e);
         for (cudaStream_t st : streams) cudaStreamDestroy(st);
         for (void* d : dev) cudaFree(d);
@@ -153,11 +151,6 @@ cudaError_t graph_new(cudaGraphExec_t* gx, cudaGraph_t graph) {
     if (e == cudaSuccess) own(&Owned::graphs, *gx);
     return e;
 }
-cublasStatus_t blas_new(cublasHandle_t* h) {
-    const cublasStatus_t e = cublasCreate(h);
-    if (e == CUBLAS_STATUS_SUCCESS) own(&Owned::blas, *h);
-    return e;
-}
 void* heap_new(size_t n) {
     void* h = std::malloc(n);
     if (h != nullptr) own(&Owned::heap, h);
@@ -179,7 +172,7 @@ constexpr int kConvTile = 16;     // tokens per block of the prompt conv (k_conv
 // says so before the engine loads (lamina::core::gpu_loan_ask).  This engine has no cache to lend from.  In the
 // hybrid mode the loan is the prompt path's two staging buffers, idle between prompts (place_experts).  Else it is of
 // the VRAM left free, and where the placement has a choice (a layer split's layers, the prompt chunk's size) the
-// card keeps the loan and kLoanFree (what the encoder takes beside it: cuBLAS's handle, its kernels' images) free
+// card keeps the loan and kLoanFree (what the encoder takes beside it: its kernels' images, MMQ's buffers) free
 // past the reserve: the reserve itself is not the loan's, as the engine's later allocations come out of it (the
 // 27B's split: 100 MiB in its first request).
 constexpr size_t kVramReserve = (size_t) 768 << 20;
@@ -1870,7 +1863,7 @@ struct Engine {
     float *l_part = nullptr, *l_t = nullptr, *l_dab = nullptr;   // the A stage's partials, a prompt GEMM's t, the GDN deltas
     std::vector<float> lora_default;      // stage 0: a request's scales when it names none (--lora's, --lora-scaled's)
     lamina::prefill::Gemm gemm;
-    cublasHandle_t blas = nullptr;
+    lamina::kernels::GemmScratch gscratch;   // the prompt products' scratch (a K split's partial sums)
     static constexpr int kSplitK = 16;
     float* sk_part = nullptr;          // the split-K partials of the F32 projections: [kSplitK][tmax][the widest]
     // the prompt's MMQ experts
@@ -2144,10 +2137,6 @@ struct Engine {
                     il_quant = il_quant || (w->d != nullptr && w->type != 8 && il_pays(w->type, 3));
         }
         x16 = dalloc_t<__half>(T * (size_t) max_in);
-        if (blas_new(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "lamina: cuBLAS handle failed\n");
-            throw Fatal{1};
-        }
         // the F32 projections' widest output: the router with the shared expert's gate (n_expert + 1), or GDN alpha / beta
         sk_part = dalloc((size_t) kSplitK * T * (size_t) std::max<int64_t>(g.n_expert + 1, g.ssm_v_heads));
         const bool mmq_built = MMQ::built() && std::getenv("LAMINA_Q36_NO_MMQ") == nullptr;
@@ -2181,7 +2170,6 @@ struct Engine {
         if (m->moe)
             std::fprintf(stderr, "lamina: prompt experts on %s\n", use_mmq ? "MMQ (int8)" : "the native grouped kernels");
         {
-            std::string gerr;
             int64_t big = 0;
             auto take = [&](const Layer& L) {
                 for (const Mat* w : {&L.qkv, &L.zg, &L.ssm_out, &L.wq, &L.wk, &L.wv, &L.wo, &L.sh_gate, &L.sh_up, &L.sh_down})
@@ -2192,15 +2180,13 @@ struct Engine {
                 take(m->mtp);
                 big = std::max<int64_t>(big, (int64_t) m->eh_proj.n_in * m->eh_proj.n_out);
             }
-            if (!gemm.init(st, gerr)) {
-                std::fprintf(stderr, "lamina: prompt GEMM: %s\n", gerr.c_str());
-                throw Fatal{1};
-            }
-            constexpr size_t kGemmWs = 32u << 20;   // the cuBLAS workspace, as the Flash-Next prompt path's
+            gemm.init(st);
+            constexpr size_t kGemmWs = 32u << 20;   // the products' scratch, as the Flash-Next prompt path's
             uint16_t* gscr = dalloc_t<uint16_t>((size_t) big);
             void* gws = nullptr;
             CK(dmalloc(&gws, kGemmWs));
             gemm.set_buffers(gscr, big, gws, kGemmWs);
+            gscratch = {gws, kGemmWs};
         }
         CK(dmalloc(&escr, K::native_expert_scratch_bytes((int64_t) (T * Kp), (int64_t) FF)));
         ids = dalloc_t<int32_t>(T * Kp);
@@ -2362,14 +2348,13 @@ struct Engine {
         apply(w, q8, out, T);
     }
     /// y [T][n_out] = W [n_out][n_in] (f32) x [T][n_in]: a decode batch on the warp-per-row kernel, a prompt chunk on
-    /// cuBLAS's FP32 GEMM (the router and the GDN alpha / beta stay in FP32, as llama.cpp keeps them).
+    /// an FP32 GEMM (the router and the GDN alpha / beta stay in FP32, as llama.cpp keeps them).
     void f32mm(const float* W, const float* xin, float* out, int n_in, int n_out, int T) {
         if (T <= kGemmT) {
             k_gemv_f32<<<dim3(rows8(n_out), T), kThreads, 0, st>>>(W, xin, out, n_in, n_out);
             return;
         }
-        static const bool blas_f32 = std::getenv("LAMINA_Q36_BLAS_F32") != nullptr;   // the hipBLAS / cuBLAS SGEMM (A/B)
-        if (!blas_f32 && n_in % 4 == 0) {
+        if (n_in % 4 == 0) {
             // K split so that about 128 blocks run (the partials summed in a fixed order: deterministic); TM = 4 rows per
             // thread for the 256-wide router, 1 for the narrow ones (alpha / beta 32, the gate 1)
             const int tm = n_out > 64 ? 4 : 1;
@@ -2384,12 +2369,14 @@ struct Engine {
                 k_sum_splits<<<grid1((int64_t) T * n_out), kThreads, 0, st>>>(sk_part, out, (int64_t) T * n_out, splits);
             return;
         }
-        const float one = 1.0f, zero = 0.0f;
-        if (cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n_out, T, n_in, &one, W, n_in, xin, n_in, &zero, out, n_out) !=
-            CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "lamina: cublasSgemm failed\n");
-            throw Fatal{1};
-        }
+        lamina::kernels::Gemm32 g;   // (an input that is no multiple of four values wide)
+        g.x = xin;
+        g.w = W;
+        g.y = out;
+        g.T = T;
+        g.N = n_out;
+        g.K = n_in;
+        lamina::kernels::gemm32(g, gscratch, st);
     }
 
     /// A batch above kGemmT tokens (a prompt chunk) runs its projections on llama.cpp's MMQ where it has the weight type
@@ -2866,29 +2853,38 @@ struct Engine {
         }
         if (s.n_mem > 0) launch();
     }
-    /// A prompt chunk's pairs as GEMMs (cuBLAS, FP32 accumulation): t = A x per pair, then out += s B t; the scales of the
-    /// table's first row (a prompt is one request's: every row holds them).
+    /// A prompt chunk's pairs as GEMMs (FP32 sums): t = A x per pair, then out += s B t; the scales of the table's
+    /// first row (a prompt is one request's: every row holds them).
     void lora_gemms(const float* xin, int ldx, int n_in, int T, std::initializer_list<LoraOut> outs) {
         const float* sc = h_lscale.data();
         bool f16_ready = false;
-        auto ok = [](cublasStatus_t e) {
-            if (e != CUBLAS_STATUS_SUCCESS) {
-                std::fprintf(stderr, "lamina: a LoRA GEMM failed (cuBLAS status %d)\n", (int) e);
-                throw Fatal{1};
-            }
-        };
         for (const LoraOut& o : outs) {
             if (o.lm == nullptr) continue;
             for (const LoraSeg& pr : o.lm->segs) {
                 const float us = sc[(size_t) pr.adapter];
                 if (us == 0.f) continue;
                 const float scale = q36lora::pair_scale(us, m->loras[(size_t) pr.adapter].alpha, pr.rank_true);
-                const float one = 1.f, zero = 0.f;
                 if (pr.f32) {
-                    ok(cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, pr.rank, T, n_in, &one, (const float*) pr.a, n_in,
-                                   xin, ldx, &zero, l_t, pr.rank));
-                    ok(cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, o.n, T, pr.rank, &scale, (const float*) pr.b,
-                                   pr.rank, l_t, pr.rank, &one, o.y, o.ld));
+                    lamina::kernels::Gemm32 a;   // t [T][rank] = x A^T
+                    a.x = xin;
+                    a.ldx = ldx;
+                    a.w = (const float*) pr.a;
+                    a.y = l_t;
+                    a.T = T;
+                    a.N = pr.rank;
+                    a.K = n_in;
+                    lamina::kernels::gemm32(a, gscratch, st);
+                    lamina::kernels::Gemm32 b;   // out += scale t B^T
+                    b.x = l_t;
+                    b.w = (const float*) pr.b;
+                    b.y = o.y;
+                    b.ldy = o.ld;
+                    b.T = T;
+                    b.N = o.n;
+                    b.K = pr.rank;
+                    b.alpha = scale;
+                    b.beta = 1.f;
+                    lamina::kernels::gemm32(b, gscratch, st);
                     continue;
                 }
                 if (!f16_ready) {   // the input in FP16 once for the site's F16 pairs (x16: the prompt GEMMs' buffer)
@@ -2900,10 +2896,26 @@ struct Engine {
                     f16_ready = true;
                 }
                 __half* t16 = (__half*) l_t;
-                ok(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, pr.rank, T, n_in, &one, pr.a, CUDA_R_16F, n_in, x16,
-                                CUDA_R_16F, n_in, &zero, t16, CUDA_R_16F, pr.rank, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
-                ok(cublasGemmEx(blas, CUBLAS_OP_T, CUBLAS_OP_N, o.n, T, pr.rank, &scale, pr.b, CUDA_R_16F, pr.rank, t16,
-                                CUDA_R_16F, pr.rank, &one, o.y, CUDA_R_32F, o.ld, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+                lamina::kernels::Gemm16 a;   // t [T][rank] (halves) = x A^T
+                a.x = (const uint16_t*) x16;
+                a.w = (const uint16_t*) pr.a;
+                a.y = t16;
+                a.y_half = true;
+                a.T = T;
+                a.N = pr.rank;
+                a.K = n_in;
+                lamina::kernels::gemm16(a, gscratch, st);
+                lamina::kernels::Gemm16 b;   // out += scale t B^T
+                b.x = (const uint16_t*) t16;
+                b.w = (const uint16_t*) pr.b;
+                b.y = o.y;
+                b.ldy = o.ld;
+                b.T = T;
+                b.N = o.n;
+                b.K = pr.rank;
+                b.alpha = scale;
+                b.beta = 1.f;
+                lamina::kernels::gemm16(b, gscratch, st);
             }
         }
     }
@@ -4192,7 +4204,7 @@ struct Engine {
     }
 
     /// The first prompt after load ran at about half speed (pp4096 rep 0: ~1770 tok/s against ~3290): the GPU's code
-    /// objects, the BLAS handles' kernels and the decode graph are made on first use.  A throw-away prompt of one
+    /// objects and the decode graph are made on first use.  A throw-away prompt of one
     /// chunk, a decode step and (with drafts) a speculative step at load do that before the first request; then the
     /// state, the cache position and the hybrid counters are as after load.
     bool warming = false;

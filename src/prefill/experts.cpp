@@ -26,7 +26,7 @@ static_assert(G <= mmq::kGatherGroupMax, "a batch's experts gathered in one laun
 constexpr int64_t ROWS = 8192;
 constexpr int64_t IDENT_ROWS = mmq::ids_table_rows(ROWS);   // MMQ's row map: what a launch of ROWS rows reads
 constexpr int SLOTS = 2;                 // batches in staging: the copies of one overlap the work on the other
-constexpr size_t GEMM_WS = 32u << 20;    // cuBLAS workspace
+constexpr size_t GEMM_WS = 8u << 20;     // the FP16 products' scratch (an expert in pieces: its last, short piece)
 constexpr int NPTR = 7;                  // per-expert device pointers: blob, xs, gate/up, gu, h, down, d
 // a prefetch piece: ~1 ms of copies, so an input queued behind two of them waits little (a GPU's copy engine runs
 // copies in submission order, whatever their stream)
@@ -252,10 +252,11 @@ bool ExpertRunner::init(int device, int main_device, void* stream, core::ExpertS
         m.keep.assign((size_t) n_expert, 0);
         m.pre_due.assign((size_t) n_expert, 0);
     }
-    if (!ok || !m.gemm.init(m.s, err, true)) {
+    if (!ok) {
         if (err.empty()) err = "prompt experts: streams or events";
         return false;
     }
+    m.gemm.init(m.s);
     if (mmq_any()) m.mmq_ctx = std::make_unique<mmq::Context>();
     // the input and the sums: pinned and portable, both GPUs copy them
     if (m.remote && (cudaHostAlloc((void**) &m.h_input, (size_t) max_chunk * N * 2, cudaHostAllocPortable) != cudaSuccess ||
@@ -767,14 +768,12 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         }
         gather_rows16(in, m.rows_src + r0, m.xs, rows, N, m.s);
         if (f.had_gu) lamina::kernels::hadamard_rows_f16(m.xs, rows, N, sx, m.s);
-        m.gemm.f16_grouped(dp + 1 * E + j0, dp + 2 * E + j0, (float* const*) (m.ptrs + 3 * E + j0),
-                           (const uint16_t* const*) (P + 1 * E + j0), (const uint16_t* const*) (P + 2 * E + j0),
-                           (float* const*) (P + 3 * E + j0), rows_of.data() + j0, n, FF2, N);
+        m.gemm.f16_grouped(dp + 1 * E + j0, dp + 2 * E + j0, (float* const*) (m.ptrs + 3 * E + j0), rows_of.data() + j0, n,
+                           FF2, N);
         swiglu_interleaved(m.gu, m.hh, rows, m.s);
         if (f.had_d) lamina::kernels::hadamard_rows_f16(m.hh, rows, FF, sh, m.s);
-        m.gemm.f16_grouped(dp + 4 * E + j0, dp + 5 * E + j0, (float* const*) (m.ptrs + 6 * E + j0),
-                           (const uint16_t* const*) (P + 4 * E + j0), (const uint16_t* const*) (P + 5 * E + j0),
-                           (float* const*) (P + 6 * E + j0), rows_of.data() + j0, n, N, FF);
+        m.gemm.f16_grouped(dp + 4 * E + j0, dp + 5 * E + j0, (float* const*) (m.ptrs + 6 * E + j0), rows_of.data() + j0, n,
+                           N, FF);
         const int32_t* a = m.adds + adds_at[b];
         moe_gather_add(out, m.d, r0, m.w, a, a + ntok[b], a + 2 * ntok[b] + 1, ntok[b], m.s);
     }

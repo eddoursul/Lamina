@@ -172,7 +172,7 @@ The API reports how many prompt tokens were reused (`cached_tokens`, `cache_read
 The image encoder is the engine's own code, a part of `lamina-server` (`src/vision`: the picture sized and resampled
 as the model's reference processor does it, one vision transformer for every model's projector, each model's adapter;
 its arithmetic is that of llama.cpp's multimodal library). On the CPU it is a graph on ggml, llama.cpp's tensor
-library, that library's operation for operation; on a GPU the engine's own kernels: cuBLAS products, llama.cpp's
+library, that library's operation for operation; on a GPU the engine's own kernels: its matrix products, llama.cpp's
 quantized products for a Q8_0 projector, and an attention kernel on the tensor cores. On a GPU it either keeps its
 weights there or, as the presets have it (`lend`), holds nothing between pictures and borrows VRAM for each new one
 from the engine, which runs in the same process, so the GPUs keep their VRAM for the model: between two requests the

@@ -1,9 +1,9 @@
 // src/vision/cuda_encoder.cu - the image encoder on the engine's own CUDA kernels (include/lamina/vision/encoder.hpp).
 //
-// The tower and the adapters of both projector types as products through cuBLAS (FP16 in, FP32 sums; FP32 for the
-// few FP32 matrices) or, for a Q8_0 matrix, through llama.cpp's MMQ, with small kernels between them and one
-// tensor-core kernel for the attention.  Activations are FP32 between the products; the products' inputs are rounded
-// to FP16 (to q8_1 for MMQ) and summed in FP32.
+// The tower and the adapters of both projector types as products on the tensor cores (kernels/gemm.hpp: FP16 in,
+// FP32 sums; FP32 on the float units for the few FP32 matrices) or, for a Q8_0 matrix, through llama.cpp's MMQ, with
+// small kernels between them and one tensor-core kernel for the attention.  Activations are FP32 between the
+// products; the products' inputs are rounded to FP16 (to q8_1 for MMQ) and summed in FP32.
 //
 //   patches     host: each 16x16x3 patch a row of 768 (Qwen: in the order of the 2x2 groups); device: one FP32
 //               product with the patch kernel (Qwen: its two kernels summed), the bias, the position table added
@@ -18,7 +18,7 @@
 // (src/qwen35/q36_attn.cuh), without a mask: a block takes 64 query rows of one head and walks all cells in tiles of
 // 32, double-buffered through cp.async; q, k and v are FP16 with each head's 72 values padded to 80 (five steps of
 // 16), the scores and the outputs FP32 sums, the softmax online.  LAMINA_VISION_ATTN=ref computes it instead as two
-// cuBLAS products around a plain softmax over the whole score matrix: the reference the kernel is checked against.
+// plain products around a softmax over the whole score matrix: the reference the kernel is checked against.
 //
 // On the device: the weights in one block in the file's types (BF16 turned to FP16; a Q8_0 matrix its blocks, which
 // FP16 products dequantize into a scratch a product), sized by a first pass of load(); two buffers of a row a patch
@@ -30,11 +30,11 @@
 // LAMINA_VISION_MEM=1 prints the device's free memory and the time after each step of the start.
 #include "backends.hpp"
 
+#include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/warp.cuh"
 #include "lamina/prefill/moe_mmq.hpp"
 #include "lamina/vision/projector.hpp"
 
-#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -63,9 +63,6 @@ constexpr int kF32 = 0, kF16 = 1, kQ8_0 = 8, kBF16 = 30;
 
 void ck(cudaError_t e, const char* what) {
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
-}
-void ckb(cublasStatus_t s, const char* what) {
-    if (s != CUBLAS_STATUS_SUCCESS) throw std::runtime_error(std::string(what) + ": cuBLAS status " + std::to_string((int) s));
 }
 
 constexpr int kThreads = 256;
@@ -451,9 +448,10 @@ __global__ void k_softmax_rows(float* s, int N, float scale) {
     for (int i = (int) threadIdx.x; i < N; i += (int) blockDim.x) r[i] *= inv;
 }
 
-__global__ void k_f16_to_f32(const __half* x, float* y, int64_t n) {
+/// x [rows][cols] in FP16 to its transpose [cols][rows] in FP32
+__global__ void k_f16_to_f32_t(const __half* x, float* y, int rows, int cols) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) y[i] = __half2float(x[i]);
+    if (i < (int64_t) rows * cols) y[i] = __half2float(x[(i % rows) * cols + i / rows]);
 }
 
 /// a head's outputs o [B][80] into out [N][H][D] at rows t0 ..
@@ -498,7 +496,6 @@ public:
         if (dev_ < 0) return;
         cudaSetDevice(dev_);
         mctx_.reset();
-        if (blas_ != nullptr) cublasDestroy(blas_);
         stage_free();
         for (void* p : work_) cudaFree(p);
         if (arena_ != nullptr && !lent_) cudaFree(arena_);
@@ -528,9 +525,6 @@ public:
         ck(cudaSetDevice(dev_), "cudaSetDevice");
         ck(cudaStreamCreateWithFlags(&st_, cudaStreamNonBlocking), "the encoder's stream");
         mem("the context and a stream");
-        ckb(cublasCreate(&blas_), "cublasCreate");
-        ckb(cublasSetStream(blas_, st_), "cublasSetStream");
-        mem("cublasCreate");
         ck(cudaFuncSetAttribute(va::k_vit_attn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) sizeof(va::Smem)),
            "the attention kernel's shared memory");
         settle(p);
@@ -929,6 +923,8 @@ private:
         void* const x = work(stream);
         void* const h = work(stream);
         void* const c32 = work((size_t) chunk * wide * 4);
+        const size_t gsc_bytes = std::min<size_t>(lamina::kernels::gemm_scratch_bytes(chunk, wide), (size_t) 8 << 20);
+        void* const gsc = work(gsc_bytes);
         void* const x16 = work((size_t) chunk * wide * 2);
         void* const q16 = work((size_t) n_max * H * kHeadPad * 2);
         void* const k16 = work((size_t) n_max * H * kHeadPad * 2);
@@ -948,6 +944,7 @@ private:
         x_ = (float*) x;
         h_ = (float*) h;
         c32_ = (float*) c32;
+        gsc_ = {gsc, gsc_bytes};
         x16_ = (__half*) x16;
         q16_ = (__half*) q16;
         k16_ = (__half*) k16;
@@ -966,10 +963,15 @@ private:
     /// y[T][n_out] (rows `ld` apart) = x[T][n_in] (FP32) . w^T
     void mul(const Mat& w, const float* x, int64_t T, float* y, int64_t ld) {
         if (w.type == kF32) {
-            const float one = 1.0f, zero = 0.0f;
-            ckb(cublasSgemm(blas_, CUBLAS_OP_T, CUBLAS_OP_N, (int) w.n_out, (int) T, (int) w.n_in, &one, (const float*) w.d,
-                            (int) w.n_in, x, (int) w.n_in, &zero, y, (int) ld),
-                "cublasSgemm");
+            lamina::kernels::Gemm32 p;
+            p.x = x;
+            p.w = (const float*) w.d;
+            p.y = y;
+            p.T = T;
+            p.N = w.n_out;
+            p.K = w.n_in;
+            p.ldy = ld;
+            lamina::kernels::gemm32(p, gsc_, st_);
         } else if (w.type == kF16 || w.fp16) {
             k_to_f16<<<grid1(T * w.n_in), kThreads, 0, st_>>>(x, x16_, T * w.n_in);
             mul16(w, x16_, T, y, ld);
@@ -980,16 +982,20 @@ private:
     }
     /// the same from FP16 rows, for an FP16 matrix (several of them over one input)
     void mul16(const Mat& w, const __half* x16, int64_t T, float* y, int64_t ld) {
-        const float one = 1.0f, zero = 0.0f;
         const void* values = w.d;
         if (w.type == kQ8_0) {   // its values, 0.06-0.12 ms a matrix
             k_q8_to_f16<<<grid1(w.n_out * w.n_in), kThreads, 0, st_>>>((const uint8_t*) w.d, w16_, w.n_out * w.n_in);
             values = w16_;
         }
-        ckb(cublasGemmEx(blas_, CUBLAS_OP_T, CUBLAS_OP_N, (int) w.n_out, (int) T, (int) w.n_in, &one, values, CUDA_R_16F,
-                         (int) w.n_in, x16, CUDA_R_16F, (int) w.n_in, &zero, y, CUDA_R_32F, (int) ld, CUBLAS_COMPUTE_32F,
-                         CUBLAS_GEMM_DEFAULT),
-            "cublasGemmEx");
+        lamina::kernels::Gemm16 p;
+        p.x = (const uint16_t*) x16;
+        p.w = (const uint16_t*) values;
+        p.y = y;
+        p.T = T;
+        p.N = w.n_out;
+        p.K = w.n_in;
+        p.ldy = ld;
+        lamina::kernels::gemm16(p, gsc_, st_);
     }
 
     // ---- the attention ---------------------------------------------------------------------------------------------
@@ -1001,25 +1007,33 @@ private:
                 q16_, k16_, v16_, h_, N, H, D, scale);
             return;
         }
-        // the reference: a head's scores S = Q K^T by cuBLAS (FP16 in, FP32 out), a softmax over each row, O = P V
+        // the reference: a head's scores S = Q K^T (FP16 in, FP32 out), a softmax over each row, O = P V in FP32
         const int64_t B = ref_b_;   // query rows at once
-        const float one = 1.0f, zero = 0.0f;
         for (int head = 0; head < H; ++head) {
             const __half* kh = k16_ + (size_t) head * N * kHeadPad;
-            k_f16_to_f32<<<grid1((int64_t) N * kHeadPad), kThreads, 0, st_>>>(v16_ + (size_t) head * N * kHeadPad, ref_v_,
-                                                                             (int64_t) N * kHeadPad);
+            // V's transpose [80][N]: the value product's rows of weights
+            k_f16_to_f32_t<<<grid1((int64_t) N * kHeadPad), kThreads, 0, st_>>>(v16_ + (size_t) head * N * kHeadPad, ref_v_, N,
+                                                                               kHeadPad);
             for (int64_t t0 = 0; t0 < N; t0 += B) {
                 const int64_t b = std::min<int64_t>(B, N - t0);
-                // S^T [N][b] = K (80 x N column-major, transposed) . Q^T (80 x b, columns H * 80 apart)
-                ckb(cublasGemmEx(blas_, CUBLAS_OP_T, CUBLAS_OP_N, N, (int) b, kHeadPad, &one, kh, CUDA_R_16F, kHeadPad,
-                                 q16_ + ((size_t) t0 * H + head) * kHeadPad, CUDA_R_16F, H * kHeadPad, &zero, ref_s_,
-                                 CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
-                    "the reference attention's scores");
+                lamina::kernels::Gemm16 sp;   // S [b][N] = Q (its rows H * 80 apart) K^T
+                sp.x = (const uint16_t*) (q16_ + ((size_t) t0 * H + head) * kHeadPad);
+                sp.ldx = (int64_t) H * kHeadPad;
+                sp.w = (const uint16_t*) kh;
+                sp.y = ref_s_;
+                sp.T = b;
+                sp.N = N;
+                sp.K = kHeadPad;
+                lamina::kernels::gemm16(sp, gsc_, st_);
                 k_softmax_rows<<<(unsigned) b, 256, 0, st_>>>(ref_s_, N, scale);
-                // O^T [80][b] = V^T (80 x N column-major) . P^T (N x b)
-                ckb(cublasSgemm(blas_, CUBLAS_OP_N, CUBLAS_OP_N, kHeadPad, (int) b, N, &one, ref_v_, kHeadPad, ref_s_, N,
-                                &zero, ref_o_, kHeadPad),
-                    "the reference attention's outputs");
+                lamina::kernels::Gemm32 op;   // O [b][80] = P V
+                op.x = ref_s_;
+                op.w = ref_v_;
+                op.y = ref_o_;
+                op.T = b;
+                op.N = kHeadPad;
+                op.K = N;
+                lamina::kernels::gemm32(op, gsc_, st_);
                 k_head_out<<<grid1(b * D), kThreads, 0, st_>>>(ref_o_, h_, (int) t0, (int) b, H, D, head);
             }
         }
@@ -1270,7 +1284,6 @@ private:
     Projector proj_;
     int dev_ = -1;
     cudaStream_t st_ = nullptr;
-    cublasHandle_t blas_ = nullptr;
     void* arena_ = nullptr;       // the weights' block
     size_t arena_bytes_ = 0, arena_used_ = 0;
     void* stage_ = nullptr;       // load(): the matrices' pinned staging buffer
@@ -1306,6 +1319,7 @@ private:
     float* x_ = nullptr;      // [n_max][E] the residual stream
     float* h_ = nullptr;      // [n_max][E] a norm's output, the attention's
     float* c32_ = nullptr;    // [chunk][wide] a product's output
+    lamina::kernels::GemmScratch gsc_;   // the products' scratch (a K split's partial sums)
     __half* x16_ = nullptr;   // [chunk][wide] a product's input
     __half* q16_ = nullptr;
     __half* k16_ = nullptr;

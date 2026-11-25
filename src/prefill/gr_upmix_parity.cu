@@ -1,7 +1,7 @@
 // src/prefill/gr_upmix_parity.cu - the hyper-connection read's fused up projection + mix (gr_upmix) against the pair it
-// replaces (Gemm::bf16 - cuBLAS, with the prompt path's 32 MiB workspace - writing `gated`, then gr_mix_r), on synthetic
-// inputs of the model's shapes (N = 2560, 4 streams, K = 320).  Where cuBLAS's kernel sums K as the fused kernel does,
-// the outputs are the same bits; elsewhere FP32 rounding.  Every token count of a sub-chunk (1-2048) on the current GPU:
+// replaces (Gemm::bf16, with the prompt path's scratch, writing `gated`, then gr_mix_r), on synthetic inputs of the
+// model's shapes (N = 2560, 4 streams, K = 320).  Where the product sums K in one pass, as the fused kernel does, the
+// outputs are the same bits; where it splits K, FP32 rounding.  Every token count of a sub-chunk (1-2048) on the current GPU:
 // which are bitwise, and the least count from which all are (the prompt path's kUpmixMinTokens must not be below it);
 // at a few counts also max |diff| / max |value| and both paths against an FP64 reference on sampled tokens.
 //   gr_upmix_parity            the checks
@@ -155,7 +155,7 @@ Result check(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inp
     }
     res.bad = res.bad || eb > 2.0 * ea + 1e-6 * ev;
     std::printf("%s T=%-5lld %s mixed max |diff| / max |value| %.2e, BF16 / FP16 images differing %.4f%% / %.4f%%; "
-                "vs FP64 (sampled): cuBLAS + mix %.2e, fused %.2e\n", res.bad ? "FAIL" : "ok  ", (long long) T,
+                "vs FP64 (sampled): product + mix %.2e, fused %.2e\n", res.bad ? "FAIL" : "ok  ", (long long) T,
                 res.bitwise ? "bitwise " : "        ", rel, 100.0 * (double) bf_diff / (double) n,
                 100.0 * (double) h_diff / (double) n, ea / ev, eb / ev);
     return res;
@@ -226,9 +226,8 @@ int main(int argc, char** argv) {
     cudaStream_t st = nullptr;
     if (!ck(cudaStreamCreate(&st), "stream")) return 1;
     lamina::prefill::Gemm gm;
-    std::string err;
-    if (!gm.init(st, err)) { std::printf("FAIL: %s\n", err.c_str()); return 1; }
-    constexpr size_t GEMM_WS = 32u << 20;   // the prompt path's cuBLAS workspace (prefill.cpp)
+    gm.init(st);
+    constexpr size_t GEMM_WS = 32u << 20;   // the prompt path's scratch for the products (prefill.cpp)
     void* ws = dalloc<uint8_t>(GEMM_WS);
     gm.set_buffers(nullptr, 0, ws, GEMM_WS);
     float* gated = dalloc<float>((size_t) TMAX * D);

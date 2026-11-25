@@ -790,8 +790,8 @@ void mem_mark(const char* where) {
 // The CUDA stack reservation: a context keeps cudaLimitStackSize bytes (1 KiB by default) for every thread its SMs
 // can hold, 122 MiB on the 3090 and 104 MiB on the 5070 Ti.  The engine's kernels need at most kStackBytes (cuobjdump
 // -res-usage of the build: llama.cpp's MMQ tiles, 104 bytes on sm_120 and 88 on sm_86, past a tuning-only instance;
-// from a limit of 0, requests of both models raised it to 64 on either GPU, cuBLAS's GEMMs included), so each GPU gets
-// that before the caches size themselves from the free VRAM.  Not 0: a kernel with a larger frame than the limit makes
+// the matrix products keep no frame; from a limit of 0, requests of both models raised it to 64 at most on either
+// GPU), so each GPU gets that before the caches size themselves from the free VRAM.  Not 0: a kernel with a larger frame than the limit makes
 // the driver grow the reservation at its first launch, mid-request (a resize can wait for the device's queued work).
 constexpr size_t kStackBytes = 104;
 static size_t g_stack_set[64] = {};   // the limit each GPU took (the driver rounds it up to 16 bytes)

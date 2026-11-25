@@ -3,7 +3,7 @@
 // state, the attention with its distance bias and sink over a window ring or a range of cells, the router, the experts'
 // sum, a prompt chunk's grouping of its routed entries.  A forward is T rows of consecutive positions of one sequence
 // (a decode forward's 1..kMaxT, a prompt chunk's up to thousands); row t of a buffer [T][n] is n floats at t * n.  The
-// matrix products are the shared kernels' (native_mmvq, native_mma, native_expert_grouped, MMQ, nvfp4_gemm, cuBLAS).
+// matrix products are the shared kernels' (native_mmvq, native_mma, native_expert_grouped, MMQ, nvfp4_gemm, gemm32).
 //
 // The model as llama.cpp computes it (src/models/inkling2.cpp); the numbers behind the constants are in
 // lamina/inkling2/geometry.hpp.

@@ -497,8 +497,8 @@ void Vision::start() {
                  seconds_since(t0),
                  vram == 0 ? "" : (", " + std::to_string(vram >> 20) + " MiB of VRAM for its weights and buffers").c_str());
     if (p.gpu) {
-        // A picture at the projector's limit now: what a picture takes of the GPU (the buffers, cuBLAS's, the kernels'
-        // images) is taken before the engine sizes its caches from what is left, and the first picture's time is a
+        // A picture at the projector's limit now: what a picture takes of the GPU (the buffers, the kernels' images)
+        // is taken before the engine sizes its caches from what is left, and the first picture's time is a
         // picture's.  (A square well above any limit; the encoder scales it down.)
         const auto w0 = Clock::now();
         vision::Rgb grey;

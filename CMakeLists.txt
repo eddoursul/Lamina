@@ -14,7 +14,7 @@ set_property(SOURCE src/program/main.cpp src/program/generate.cpp src/server/mai
              src/server/model_config.cpp APPEND PROPERTY COMPILE_DEFINITIONS LAMINA_VERSION="${PROJECT_VERSION}")
 
 # cmake --install: flat, as a release's two downloads extract into one folder. Component lamina: the programs, the
-# draft layer's download script and the licenses; component cudart: the CUDA runtime and cuBLAS the programs load.
+# draft layer's download script and the licenses; component cudart: the CUDA runtime the programs load.
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "the folder cmake --install fills (--prefix names another)" FORCE)
 endif()
@@ -272,6 +272,7 @@ if(LAMINA_ENABLE_CUDA)
                           src/kernels/cuda/draft_proxy.cu
                           src/kernels/cuda/iq_kernels.cu
                           src/kernels/cuda/nvfp4_gemm.cu
+                          src/kernels/cuda/gemm.cu
                           src/kernels/ngram.cpp
                           src/ngram/ple_reader.cpp
                           src/platform/direct_file.cpp)
@@ -314,11 +315,11 @@ if(LAMINA_ENABLE_CUDA)
   # `lamina generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
   # what composes them into a token.  No tokenizer - the prompt arrives as ids - because Gate C1 compares logits
   # against llama.cpp on the SAME ids and a tokenizer on one side of that comparison is a second variable.
-  # plan v0.3 P5: batched prompt processing (tensor-core GEMMs through cuBLAS).
-  add_library(lamina_prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu src/prefill/experts.cpp
+  # plan v0.3 P5: batched prompt processing (tensor-core GEMMs: lamina_kernels' gemm.cu).
+  add_library(lamina_prefill STATIC src/prefill/gemm.cpp src/prefill/kernels.cu src/prefill/experts.cpp
                                     src/prefill/prefill.cpp src/prefill/split.cpp)
   target_include_directories(lamina_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(lamina_prefill PUBLIC lamina_engine CUDA::cublas CUDA::cudart)
+  target_link_libraries(lamina_prefill PUBLIC lamina_engine CUDA::cudart)
 
   # the engine as a library: the lamina binary's main (src/program/main.cpp) and lamina-server's engine thread, which
   # speaks the --serve protocol through in-process channels (serve_io.hpp)
@@ -331,7 +332,7 @@ if(LAMINA_ENABLE_CUDA)
   # src/platform/cpu_floor.cpp: the CPU check before anything else of the program runs
   add_executable(lamina src/program/main.cpp src/platform/cpu_floor.cpp)
   target_link_libraries(lamina PRIVATE lamina_program)
-  # the hyper-connection read's fused up projection + mix against cuBLAS + gr_mix_r at every sub-chunk size (--bench)
+  # the hyper-connection read's fused up projection + mix against the product + gr_mix_r at every sub-chunk size (--bench)
   add_executable(gr_upmix_parity src/prefill/gr_upmix_parity.cu)
   target_link_libraries(gr_upmix_parity PRIVATE lamina_prefill CUDA::cudart)
   add_test(NAME gr_upmix_parity COMMAND gr_upmix_parity)
@@ -434,6 +435,10 @@ if(LAMINA_ENABLE_CUDA)
   lamina_kernel_test(mmvq_il_parity src/kernels/mmvq_il_parity.cu)
   # The qwen35 path's LoRA kernels against FP64, a row alone bitwise its window's (synthetic sites).
   lamina_kernel_test(lora_parity src/kernels/lora_parity.cu)
+  # The matrix products (halves and BF16 on the tensor cores, floats) against FP64 at shapes that take every form:
+  # tiles past the rows and the outputs, K split, ragged and unaligned, the grouped launch; bitwise from run to run.
+  lamina_kernel_test(gemm_parity src/kernels/gemm_parity.cu)
+  set_tests_properties(gemm_parity PROPERTIES SKIP_RETURN_CODE 77)   # no device, or one before sm_80
 
   # native_mmvq's multi_exact contract, bitwise: a T-column call against T single-column calls on the same Q8_1
   # bytes, with the flag off as the negative control (synthetic, GPU, no model; the control assumes 32-lane warps)
@@ -729,7 +734,7 @@ if(LAMINA_NATIVE_EXPERTS)
     target_link_libraries(lamina_engine PUBLIC lamina_mmq)   # the verify window's projections at 7-8 tokens
 
     # ---- lamina_vision: the image encoder (include/lamina/vision), a part of lamina-server ----
-    # A picture's rows from a model's projector file: on a GPU the engine's own kernels (cuda_encoder.cu: cuBLAS
+    # A picture's rows from a model's projector file: on a GPU the engine's own kernels (cuda_encoder.cu: tensor-core
     # products, MMQ for a Q8_0 projector, a tensor-core attention kernel), on the CPU a ggml graph on ggml's CPU
     # backend (ggml_encoder.cpp).  stb_image from the llama.cpp checkout's vendor folder.  LAMINA_BUILD_VISION=OFF
     # leaves it out: such a server reads no pictures, and refuses a config that has a "vision" section.
@@ -739,7 +744,7 @@ if(LAMINA_NATIVE_EXPERTS)
                                        src/vision/encoder.cpp src/vision/cuda_encoder.cu)
       target_include_directories(lamina_vision PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                  PRIVATE ${_lamina_llama_root}/vendor)
-      target_link_libraries(lamina_vision PUBLIC lamina_mmq ggml CUDA::cublas CUDA::cudart lamina_warnings)
+      target_link_libraries(lamina_vision PUBLIC lamina_mmq lamina_kernels ggml CUDA::cudart lamina_warnings)
       # the encoder as a program over picture files (READY, ENC <picture> <rows file>), for comparing its rows
       add_executable(vision_rows tools/vision/vision_rows.cpp)
       target_link_libraries(vision_rows PRIVATE lamina_vision)
@@ -810,7 +815,7 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_hy4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_hy4 PRIVATE lamina_core lamina_kernels lamina_kernels_cpu lamina_warnings lamina_serve_io
-                          lamina_spec lamina_engine lamina_mmq nlohmann CUDA::cublas CUDA::cudart)
+                          lamina_spec lamina_engine lamina_mmq nlohmann CUDA::cudart)
     target_compile_options(lamina_hy4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-hy4 src/hy4/hy4_main.cpp)
     target_link_libraries(lamina-hy4 PRIVATE lamina_hy4 CUDA::cudart)
@@ -823,7 +828,7 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_inkling2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_inkling2 PRIVATE lamina_core lamina_engine lamina_kernels lamina_kernels_cpu
-                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq lamina_spec CUDA::cublas CUDA::cudart)
+                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq lamina_spec CUDA::cudart)
     target_compile_options(lamina_inkling2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-inkling2 src/inkling2/inkling2_main.cpp)
     target_link_libraries(lamina-inkling2 PRIVATE lamina_inkling2 CUDA::cudart)
@@ -958,9 +963,8 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     install(FILES ${_lamina_llama_root}/licenses/LICENSE-jsonhpp DESTINATION . COMPONENT lamina)
     install(FILES src/server/web/fonts/OFL.txt DESTINATION . RENAME LICENSE-Outfit COMPONENT lamina)
 
-    # The CUDA runtime and cuBLAS the programs load: component cudart, with NVIDIA's license. On Windows also copied
-    # beside the programs in the build folder, which then runs as it is (on Linux they find the toolkit's by their
-    # RUNPATH there).
+    # The CUDA runtime the programs load: component cudart, with NVIDIA's license. On Windows also copied beside the
+    # programs in the build folder, which then runs as it is (on Linux they find the toolkit's by their RUNPATH there).
     if(WIN32)
       if(LAMINA_CPU_X86)
         set(_lamina_dll_dir x64)
@@ -968,10 +972,8 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
         set(_lamina_dll_dir arm64)
       endif()
       # CUDA 13 keeps them in bin/x64 (bin/arm64), CUDA 12 in bin
-      file(GLOB _lamina_cuda_runtime "${CUDAToolkit_BIN_DIR}/cudart64_*.dll" "${CUDAToolkit_BIN_DIR}/cublas64_*.dll"
-           "${CUDAToolkit_BIN_DIR}/cublasLt64_*.dll" "${CUDAToolkit_BIN_DIR}/${_lamina_dll_dir}/cudart64_*.dll"
-           "${CUDAToolkit_BIN_DIR}/${_lamina_dll_dir}/cublas64_*.dll"
-           "${CUDAToolkit_BIN_DIR}/${_lamina_dll_dir}/cublasLt64_*.dll")
+      file(GLOB _lamina_cuda_runtime "${CUDAToolkit_BIN_DIR}/cudart64_*.dll"
+           "${CUDAToolkit_BIN_DIR}/${_lamina_dll_dir}/cudart64_*.dll")
       set(_lamina_copies "")
       foreach(_f IN LISTS _lamina_cuda_runtime)
         get_filename_component(_n "${_f}" NAME)
@@ -985,7 +987,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
       add_dependencies(lamina-server lamina_cuda_runtime)
       install(FILES ${_lamina_cuda_runtime} DESTINATION . COMPONENT cudart)
     else()
-      foreach(_l cudart cublas cublasLt)   # under the sonames the programs ask for
+      foreach(_l cudart)   # under the soname the programs ask for
         set(_so "${CUDAToolkit_LIBRARY_DIR}/lib${_l}.so.${CUDAToolkit_VERSION_MAJOR}")
         if(EXISTS "${_so}")
           file(REAL_PATH "${_so}" _real)

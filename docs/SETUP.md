@@ -16,7 +16,7 @@ build.bat                        (Windows)
 ```
 
 They build the preset `native` of `CMakePresets.json` into `build/`: `lamina-server` (the image encoder is a part of
-it) and `lamina` (the engine alone, for tests and measurements), on Windows with the CUDA runtime's DLLs beside them (on Linux they take the toolkit's), for this PC's
+it) and `lamina` (the engine alone, for tests and measurements), on Windows with the CUDA runtime's DLL beside them (on Linux they take the toolkit's), for this PC's
 CPU and its GPUs of the RTX 30 series and newer, as `nvidia-smi` names them at each build (after a card is added, build
 again). The programs run from there: `build\lamina-server -m MODEL.gguf` ([below](#a-model-file)).
 `build.bat portable` (`./build.sh portable`) builds them for other PCs into `build-portable/`, as the releases are: RTX
@@ -63,8 +63,8 @@ The CUDA toolkit's Visual Studio integration is not needed.
 
 `cmake --install build --prefix <folder>` puts the server into a folder of its own, flat, as a release's two
 downloads extract: `lamina-server`, `download-draft-layer.bat` (`.sh` on Linux) and the licenses (the component
-`lamina`), and the CUDA runtime and cuBLAS it loads, with NVIDIA's license (`cudart`; `--component` installs
-one). Installed on Linux, the server loads the libraries in its own folder.
+`lamina`), and the CUDA runtime it loads, with NVIDIA's license (`cudart`; `--component` installs one). Installed
+on Linux, the server loads the library in its own folder.
 
 **The image encoder** is a part of `lamina-server` (half a megabyte of it): on the CPU a graph on ggml, on a GPU the
 engine's own kernels, so a GPU it runs on is one the engine runs on (an RTX 30 or newer). A config's `vision` section
@@ -195,8 +195,8 @@ arm64, in two downloads a platform:
 - `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server with the engine and the image encoder (`lamina-server`),
   with the licenses, and the script that downloads Flash-Next's draft layer (`download-draft-layer.bat`, `.sh` on
   Linux);
-- `cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>`: the CUDA runtime and cuBLAS it loads, beside it (the same in every
-  release of that CUDA version: one download serves the next releases).
+- `cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>`: the CUDA runtime it loads, beside it (the same in every release of
+  that CUDA version: one download serves the next releases).
 
 Both are flat: extract them into one folder, and `lamina-server -m` runs a model file from there
 ([above](#a-model-file)). The server is built for RTX 30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.x, the

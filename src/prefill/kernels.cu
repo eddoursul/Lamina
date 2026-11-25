@@ -100,8 +100,8 @@ __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __rest
 // The read's up projection (lo16 . w_up^T, BF16 in, FP32 sums over K = 320) with gr_mix_r_kernel as its epilogue
 // (upstream's gr_upmix_cuda_kernel, cffe31d4): `gated` (T x 10240 FP32) is neither written nor read back.  A block: 128
 // tokens x 32 columns x the 4 streams, K in slices of 32 (cp.async, double-buffered); 8 warps of 32 tokens x 16 columns
-// x 4 streams on mma.m16n8k16 (ldmatrix), K summed in order as cuBLAS's kernels do (gr_upmix_parity checks the T where
-// cuBLAS takes such a kernel); a lane then mixes its (token, column) pairs of all 4 streams in registers in
+// x 4 streams on mma.m16n8k16 (ldmatrix), K summed in order as the product's kernel does where it keeps K whole
+// (gr_upmix_parity checks those T); a lane then mixes its (token, column) pairs of all 4 streams in registers in
 // gr_mix_r_kernel's order.  PF: the epilogue's R rows are asked into L2 at the start, where the L2 holds those of the
 // blocks in flight (the 5070 Ti's 48 MB: 1.71x the pair at 2048 tokens against 1.41x without; on the 3090's 6 MB it
 // costs 8%).  The last tile's missing rows are zeros (a cp.async of 0 bytes): read from one row, they ran 2-3x slower.

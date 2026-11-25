@@ -35,13 +35,14 @@ constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
 constexpr int64_t C = 10240, ZV = 6144, HV = 48;
 constexpr int64_t SUB = 2048;                 // tokens of a sub-chunk: everything but the routed experts
 constexpr int64_t SEL_BATCH = 256;            // queries per block-score launch
-// a hyper-connection read's up projection and mix in one kernel (gr_upmix) from this many tokens: bitwise the cuBLAS
-// GEMM + gr_mix_r pair from 185 on the 3090 and from 33 on the 5070 Ti (gr_upmix_parity), faster from ~128 / ~512
+// a hyper-connection read's up projection and mix in one kernel (gr_upmix) from this many tokens: bitwise the
+// product + gr_mix_r pair wherever the product keeps K whole (gr_upmix_parity: every count up to a sub-chunk's on an
+// RTX 3090 and an RTX 5070 Ti), and from here the faster of the two on both
 constexpr int64_t UPMIX_MIN = 512;
 // A layer's quantized projections, dequantized to FP16 once for all its sub-chunks: the PLE key, or the mixer's
 // (GDN: qkv, gate, out; QSA: q, k, v, out) and the shared expert's
 constexpr int64_t W16 = std::max(D * N, std::max(C + ZV + ZV, 12288 + 512 + 512 + ZV) * N + 3 * 640 * N);
-constexpr size_t GEMM_WS = 32u << 20;         // cuBLAS workspace
+constexpr size_t GEMM_WS = 32u << 20;         // the products' scratch: the partial sums of a K split
 constexpr int GGML_Q8_0 = 8;
 
 // Bump allocation from a region; without one it only counts (bytes_needed).
@@ -304,8 +305,8 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     int dev = 0;
     cudaGetDevice(&dev);
     if (mmq::built()) m.mmq = std::make_unique<mmq::Context>();
-    return m.gemm.init(stream, err) &&
-           m.local.init(dev, dev, stream, src, cache, host_res, NE, max_chunk, offload == nullptr, err);
+    m.gemm.init(stream);
+    return m.local.init(dev, dev, stream, src, cache, host_res, NE, max_chunk, offload == nullptr, err);
 }
 
 void set_hc_q8(bool on) { g_hc_q8 = on; }
@@ -459,7 +460,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     auto native_proj = [&](const core::WeightRef* w, const uint16_t* X, float* Y, int64_t T, const std::string& name,
                            std::string& e) {
         // a matrix of 2048+ rows: its GGUF blocks on the int8 tensor cores (MMQ, the input rounded to q8_1), faster
-        // than cuBLAS on its FP16 copy (1.06-1.67x by format at 2048 tokens); smaller ones lose
+        // than the FP16 product on its dequantized copy; smaller ones lose
         if (m.mmq && w->native_data && w->ne1 >= 2048 && w->ne0 <= ZV && mmq::supported(w->native_type)) {
             mmq::quantize_f16(X, nullptr, b.xq, w->native_type, w->ne0, w->ne0, T, m.cs);
             m.mmq->run_dense(w->native_data, w->native_type, w->ne1, w->ne0, b.xq, T, Y, w->ne1, m.cs);

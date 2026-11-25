@@ -11,8 +11,8 @@ GPU, and the release archives from cmake --install.
     python .github/ci.py package [--version V]  dist/lamina-V-bin-<os>-cuda-<x.y>-<cpu>.zip (.tar.gz on Linux): the
                                                  server, the script that downloads Flash-Next's draft layer and the
                                                  licenses (cmake --install's component lamina), and
-                                                 dist/cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>.zip: the CUDA runtime and
-                                                 cuBLAS (component cudart); both flat, for one folder. On Linux the
+                                                 dist/cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>.zip: the CUDA runtime
+                                                 (component cudart); both flat, for one folder. On Linux the
                                                  server's libraries are checked first (GLIBC_MAX, SYSTEM_LIBS)
 """
 from __future__ import annotations
@@ -37,12 +37,11 @@ WIN = os.name == "nt"
 EXE = ".exe" if WIN else ""
 ARM = platform.machine().lower() in ("arm64", "aarch64")
 BUILD = ROOT / "build-portable"   # the portable preset's (CMakePresets.json)
-# NVIDIA's redistributable CUDA 13.4.1 (redistrib_13.4.1.json): nvcc 13.4.59, cuBLAS 13.7.0.27, the toolkit the PC
-# Lamina is developed on builds with.  The parts the engine's build takes, nothing else.
+# NVIDIA's redistributable CUDA 13.4.1 (redistrib_13.4.1.json): nvcc 13.4.59, the toolkit the PC Lamina is developed
+# on builds with.  The parts the engine's build takes, nothing else.
 CUDA_REDIST = "13.4.1"
 REDIST_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
-COMPONENTS = ("cuda_nvcc", "cuda_crt", "libnvvm", "cuda_cudart", "libcublas", "cccl")
-SKIP = {"libcublas_static.a", "libcublasLt_static.a"}   # ~1 GB the engine does not link
+COMPONENTS = ("cuda_nvcc", "cuda_crt", "libnvvm", "cuda_cudart", "cccl")
 # What each archive holds (cmake --install's components): checked before it is written.  The server alone: the
 # engine runs in its process (the engine alone, lamina, is for tests and measurements)
 EXECUTABLES = [f"lamina-server{EXE}"]
@@ -132,7 +131,7 @@ def extract(arc: Path, dest: Path):
         with zipfile.ZipFile(arc) as z:
             for m in z.infolist():
                 rel = m.filename.split("/", 1)[1] if "/" in m.filename else ""
-                if not rel or m.is_dir() or Path(rel).name in SKIP:
+                if not rel or m.is_dir():
                     continue
                 out = dest / rel
                 out.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +141,7 @@ def extract(arc: Path, dest: Path):
     with tarfile.open(arc) as t:
         for m in t.getmembers():
             rel = m.name.split("/", 1)[1] if "/" in m.name else ""
-            if not rel or Path(rel).name in SKIP:
+            if not rel:
                 continue
             m.name = rel
             if m.islnk():
@@ -288,8 +287,7 @@ def package(version: str):
     shutil.rmtree(stage, ignore_errors=True)
     for component in ("lamina", "cudart"):
         run([tool("cmake"), "--install", BUILD, "--component", component, "--prefix", stage / component])
-    runtime = ([f"cudart64_{major}.dll", f"cublas64_{major}.dll", f"cublasLt64_{major}.dll"] if WIN else
-               [f"libcudart.so.{major}", f"libcublas.so.{major}", f"libcublasLt.so.{major}"])
+    runtime = [f"cudart64_{major}.dll"] if WIN else [f"libcudart.so.{major}"]
     for component, names in (("lamina", PROGRAMS), ("cudart", runtime)):
         missing = [n for n in names if not (stage / component / n).is_file()]
         if missing:

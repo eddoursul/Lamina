@@ -26,6 +26,7 @@
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mma.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
@@ -43,7 +44,6 @@
 
 #include "ggml.h"
 
-#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -1289,6 +1289,8 @@ struct Rows {
     bool have[4][3] = {};
     float *gu = nullptr, *h = nullptr;
     float* wf = nullptr;   // a BF16 matrix widened to floats for a GEMM
+    uint8_t* gsc = nullptr;   // the float products' scratch (a K split's partial sums: few rows fill the card that way)
+    size_t gsc_bytes = 0;
     float *tqs = nullptr, *hqs = nullptr;   // the entries' row scales where the experts run on FP4 tensor cores
     float *cz = nullptr, *cs1 = nullptr, *cs2 = nullptr;   // the loop gates' normed pair [T][2 N] and their two products
     // with the drafter: the rows' mixes of the target's states [its layers + 1][cap][N] (normed in place), a layer's
@@ -1481,8 +1483,7 @@ struct Engine {
         float* cpin_back = nullptr;        // and on their way back, where chunks run in stages
         int carry_rows = 0, back_rows = 0; // the rows those two hold: the largest chunk's so far (kept across sizes)
         // what the engine swaps for its own while that card is the current one: st, il_buf, il_att, conv_all,
-        // win_raw, main_sms_, main_arch_, il_proj_min, blas, mmq, tc_on, nan_at
-        cublasHandle_t blas = nullptr;
+        // win_raw, main_sms_, main_arch_, il_proj_min, mmq, tc_on, nan_at
         std::unique_ptr<MMQ::Context> mmq;
         bool tc_on = false;
         cudaStream_t st = nullptr;
@@ -1715,7 +1716,7 @@ struct Engine {
     bool chain_cross = true;         // LAMINA_INK_CHAIN=0: the host waits for a card's segment before it launches the other's
     bool stage_log = false;          // LAMINA_INK_STAGE_LOG=1: a line a segment of a part (staged, or why not)
     int group_rows = 1024;           // LAMINA_INK_GROUP=N: a chunk of up to N rows grouped by expert on the card (0: never)
-    int gate_fuse = 1;               // LAMINA_INK_GATE_FUSE=N: a chunk's loop gates in three launches from N rows (0: cuBLAS's)
+    int gate_fuse = 1;               // LAMINA_INK_GATE_FUSE=N: a chunk's loop gates in three launches from N rows (0: as products)
     static constexpr int kLag = 3;   // (the host's queue on the card's grouping: kLag - 1 applications)
     cudaEvent_t lag_ev[2][kLag] = {};   // a card's grouping done, an application each: this card's, the split's
     int lag_n[2] = {};
@@ -1734,7 +1735,6 @@ struct Engine {
     std::unique_ptr<MMQ::Context> mmq;
     bool lay_used[3] = {};           // the MMQ activation layouts the dense formats take
     bool bf16_chunks = false;        // a BF16 matrix among a chunk's products
-    cublasHandle_t blas = nullptr;   // a chunk's float products (the loop gates, the router)
     ~Engine() {
         if (stage_thread.joinable()) {
             {
@@ -1745,14 +1745,11 @@ struct Engine {
             stage_thread.join();
         }
         if (route_f != nullptr) std::fclose(route_f);
-        // (each card's cuBLAS handle and lot images with that card current; a run that ended on the split's card has
-        // the handles swapped)
-        cublasHandle_t here = at_sat ? sat->blas : blas, there = !sat ? nullptr : at_sat ? blas : sat->blas;
-        if (here != nullptr && cudaSetDevice(main_dev) == cudaSuccess) cublasDestroy(here);
-        for (const LotImage& im : lot_img)
-            if (im.here != nullptr) (void) cudaFree(im.here);
+        // (each card's lot images with that card current)
+        if (cudaSetDevice(main_dev) == cudaSuccess)
+            for (const LotImage& im : lot_img)
+                if (im.here != nullptr) (void) cudaFree(im.here);
         if (sat && cudaSetDevice(sat->dev) == cudaSuccess) {
-            if (there != nullptr) cublasDestroy(there);
             for (const LotImage& im : lot_img)
                 if (im.there != nullptr) (void) cudaFree(im.there);
         }
@@ -1915,6 +1912,8 @@ struct Engine {
         R.h = dzero<float>(n_ent * F);
         R.cz = dzero<float>(T * 2 * N);
         if (bf16_chunks) R.wf = dzero<float>(std::max(Q * N, 2 * F * N));
+        R.gsc_bytes = std::min<size_t>(lamina::kernels::gemm_scratch_bytes((int64_t) T, (int64_t) N), (size_t) 4 << 20);
+        R.gsc = dzero<uint8_t>(R.gsc_bytes);
         R.cs1 = dzero<float>(T * N);
         R.cs2 = dzero<float>(T * N);
         R.ids_rows = MMQ::ids_table_rows((int64_t) n_ent);
@@ -2733,8 +2732,9 @@ struct Engine {
 
     bool elastic() const { return prefill > 0 && prefill_max > prefill; }
     int chunk_most() const { return elastic() ? prefill_max : prefill; }
-    /// VRAM a chunk's buffers take a row, as measured (896 MiB at 1,024 rows, cuBLAS's and MMQ's 125 among them:
-    /// 0.753 MiB a row; with the drafter the rows' mixes of the target's states and their context projections too)
+    /// VRAM a chunk's buffers take a row, as measured (896 MiB at 1,024 rows, the products' scratch and MMQ's
+    /// buffers among them: 0.753 MiB a row; with the drafter the rows' mixes of the target's states and their context
+    /// projections too)
     uint64_t chunk_bytes(int rows) const { return (uint64_t) rows * ((771ull + (sp ? 52 : 0)) << 10); }
     static constexpr int kStageRows = 2048;   // the rows a staged stretch's chunk grows to at most
     /// A split's prompt chunks run in stages (not while the steps are timed or probed, which wait after each)
@@ -3207,7 +3207,7 @@ struct Engine {
                     const int64_t want_ctx = max_ctx > 0 ? std::min<int64_t>(max_ctx, m->trained_ctx) : kContextFloor;
                     const uint64_t want = (uint64_t) (m->in_ram ? std::min(want_ctx, kContextFloor) : want_ctx);
                     // (still to come beside the cells: the window rings and the cache's image of them; a chunk's rows
-                    // with cuBLAS and MMQ beside them, as measured: 896 MiB at 1,024 rows)
+                    // with the products' scratch and MMQ's buffers beside them, as measured: 896 MiB at 1,024 rows)
                     const uint64_t ring = (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell_bytes * (uint64_t) ring_cells(g);
                     const uint64_t rest = ring * (cache_on ? 2 : 1) + (32ull << 20);
                     size_t fr = 0, fs = 0, tot = 0;
@@ -3232,20 +3232,11 @@ struct Engine {
             }
             if (prefill > 0) {
                 mmq = std::make_unique<MMQ::Context>();
-                if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
-                    std::fprintf(stderr, "lamina: cuBLAS could not start\n");
-                    throw Fatal{1};
-                }
                 if (sat) {
                     const OnDev dv(sat->dev);
                     sat->mmq = std::make_unique<MMQ::Context>();
-                    if (cublasCreate(&sat->blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(sat->blas, sat->st) != CUBLAS_STATUS_SUCCESS) {
-                        std::fprintf(stderr, "lamina: cuBLAS could not start on the split's card\n");
-                        throw Fatal{1};
-                    }
                 }
                 chunk_alloc(prefill);
-                gemm(m->layers[0].router, (int) g.n_expert, (int) g.n_embd, P.nrm, 1, P.probs);   // cuBLAS's start, not a first prompt's
                 if (m->in_ram) {   // the experts' scratch and its uploads, the start's rates for a chunk's split
                     size_t most = 0;
                     for (const Layer& L : m->layers) most = std::max(most, (size_t) g.n_expert * L.stride);
@@ -4741,7 +4732,7 @@ struct Engine {
         if (W.type == 30) {   // BF16: its floats, then a GEMM
             const long long n = (long long) W.n_out * W.n_in;
             ik::bf16_floats_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>((const uint16_t*) W.d, R.wf, n);
-            gemm(R.wf, W.n_out, W.n_in, xf, T, y);
+            gemm(R, R.wf, W.n_out, W.n_in, xf, T, y);
             return;
         }
         const int lay = MMQ::ds_layout(W.type);
@@ -4788,21 +4779,21 @@ struct Engine {
         const dim3 grid((unsigned) ((4 * (unsigned) a.N + ik::kTB - 1) / ik::kTB), (unsigned) T, (unsigned) a.n);
         ik::ctrl_apply_kernel<<<grid, ik::kTB, 0, st>>>(a);
     }
-    /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (cuBLAS, a chunk's float products)
-    void gemm(const float* A, int m_, int k, const float* B, int T, float* C) {
-        const float one = 1.f, zero = 0.f;
-        if (const cublasStatus_t cs = cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, m_, T, k, &one, A, k, B, k, &zero, C, m_);
-            cs != CUBLAS_STATUS_SUCCESS) {
-            int dev = -1;
-            cudaGetDevice(&dev);
-            std::fprintf(stderr, "lamina: a cuBLAS product failed (status %d on GPU %d: %d x %d x %d)\n", (int) cs, dev, m_, T, k);
-            throw Fatal{1};
-        }
+    /// C [T][m] = B's rows [T][k] against A's rows [m][k]: c[t][i] = A[i] . b[t] (a chunk's float products)
+    void gemm(Rows& R, const float* A, int m_, int k, const float* B, int T, float* C) {
+        lamina::kernels::Gemm32 p;
+        p.x = B;
+        p.w = A;
+        p.y = C;
+        p.T = T;
+        p.N = m_;
+        p.K = k;
+        lamina::kernels::gemm32(p, {R.gsc, R.gsc_bytes}, st);
     }
     /// A chunk's loop gate of one input: out = (1 - tanh(F h)) u + tanh(G h) m, h = D [u / rms(u); m / rms(m)].  At
     /// the model's rank of 64 in three launches (gate_h_part_kernel, gate_h_join_kernel, gate_apply_rows_kernel): u
-    /// and m read twice, h the only array between them; else through cuBLAS (z = the rows over their rms, h, F h and
-    /// G h written and read back).
+    /// and m read twice, h the only array between them; else as three products (z = the rows over their rms, h, F h
+    /// and G h written and read back).
     void ctrl_batch(Rows& R, const float* u, const float* msg, const float* Dm, const float* G, const float* F, float* out,
                     int T) {
         const int N = (int) m->g.n_embd, rank = (int) m->g.gate_rank;
@@ -4819,9 +4810,9 @@ struct Engine {
             return;
         }
         ik::ctrl_cat_kernel<<<(unsigned) T, ik::kTB, 0, st>>>(u, msg, R.cz, N);
-        gemm(Dm, rank, 2 * N, R.cz, T, R.ctl_h);
-        gemm(G, N, rank, R.ctl_h, T, R.cs1);
-        gemm(F, N, rank, R.ctl_h, T, R.cs2);
+        gemm(R, Dm, rank, 2 * N, R.cz, T, R.ctl_h);
+        gemm(R, G, N, rank, R.ctl_h, T, R.cs1);
+        gemm(R, F, N, rank, R.ctl_h, T, R.cs2);
         const long long cnt = (long long) T * N;
         ik::ctrl_gate_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>(u, msg, R.cs1, R.cs2, out, cnt);
     }
@@ -5140,7 +5131,7 @@ struct Engine {
                 if (n == 0) continue;
                 const long long cnt = (long long) w_rows * w_cols;
                 ik::bf16_floats_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>((const uint16_t*) (blob_at(i) + off), R.wf, cnt);
-                gemm(R.wf, w_rows, w_cols, x + (size_t) b0 * w_cols, n, y + (size_t) b0 * w_rows);
+                gemm(R, R.wf, w_rows, w_cols, x + (size_t) b0 * w_cols, n, y + (size_t) b0 * w_rows);
             }
         };
         if (L.gl.gu_type == 30) {   // the entries' inputs in their experts' order first
@@ -5650,7 +5641,7 @@ struct Engine {
         const int n_ent = T * top_k;
         const float w_scale = g.w_scale != 0.f ? g.w_scale : 1.0f;
         if (batch) {
-            gemm(L.router, E, N, R.nrm, T, R.probs);
+            gemm(R, L.router, E, N, R.nrm, T, R.probs);
             ik::PickIn a{R.probs, L.route_bias, R.ids, R.w, E, top_k, w_scale};
             ik::pick_kernel<<<(unsigned) T, 32, 0, st>>>(a);
             tick("MoE input and router");
@@ -5960,7 +5951,7 @@ struct Engine {
                     if (W->type == 30) {
                         const long long cnt = (long long) W->n_out * W->n_in;
                         ik::bf16_floats_kernel<<<(unsigned) ((cnt + 255) / 256), 256, 0, st>>>((const uint16_t*) W->d, sp_wf, cnt);
-                        gemm(sp_wf, W->n_out, W->n_in, cx, T, out);
+                        gemm(R, sp_wf, W->n_out, W->n_in, cx, T, out);
                         continue;
                     }
                     if (const int lay = MMQ::ds_layout(W->type); lay != have) {
@@ -6213,7 +6204,6 @@ struct Engine {
         std::swap(main_sms_, sat->sms);
         std::swap(main_arch_, sat->arch);
         std::swap(il_proj_min, sat->il_proj_min);
-        std::swap(blas, sat->blas);
         std::swap(mmq, sat->mmq);
         std::swap(tc_on, sat->tc_on);
         std::swap(nan_at, sat->nan_at);

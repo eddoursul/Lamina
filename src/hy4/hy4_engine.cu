@@ -27,6 +27,7 @@
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/ngram/ple_reader.hpp"
@@ -40,7 +41,6 @@
 
 #include "ggml.h"
 
-#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -4028,7 +4028,8 @@ struct Prompt {
     static constexpr int kSub = 512;          // rows a pass of Engram's and the dense FFN's products
     int R = 0;                // the indexer's rows a pass
     int streamer = 0;         // the devs index that runs the experts no GPU holds
-    cublasHandle_t blas = nullptr;
+    uint8_t* gsc = nullptr;   // the router product's scratch (a K split's partial sums: few rows fill the card that way)
+    size_t gsc_bytes = 0;
     cudaStream_t st = nullptr;
     cudaEvent_t routed = nullptr, routed2 = nullptr;   // a half's routing on the host (routed2: the second half's)
     // the main GPU's rows
@@ -4123,10 +4124,6 @@ struct Prompt {
             CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
             own(&Owned::events, *e);
         }
-        if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "lamina: cuBLAS did not start: prompts read %d rows a forward\n", kMaxT);
-            return false;
-        }
         const size_t T = (size_t) cap, N = (size_t) g.n_embd, hc = (size_t) g.hc, Ld = (size_t) g.n_latent,
                      F = (size_t) g.n_ff_exp, Ex = (size_t) g.n_expert, K = (size_t) g.top_k;
         const size_t PR = (size_t) pass;   // a pass's rows: the streams' buffers and the MoE pass's
@@ -4179,6 +4176,8 @@ struct Prompt {
         lalloc(fu, sub * (size_t) g.n_ff);
         lalloc(fh, sub * (size_t) g.n_ff);
         lalloc(logits_r, T * Ex);
+        gsc_bytes = std::min<size_t>(lamina::kernels::gemm_scratch_bytes((int64_t) T, (int64_t) Ex), (size_t) 8 << 20);
+        lalloc(gsc, gsc_bytes);
         lalloc(ids, T * K);
         lalloc(wts, T * K);
         lalloc(rin, T * Ld);
@@ -5057,12 +5056,14 @@ struct Prompt {
     void moe_a(Layer& l, int ts, int r0, bool shared) {
         const auto& g = m->g;
         const int N = (int) g.n_embd, nE = (int) g.n_expert, K = (int) g.top_k, Ld = (int) g.n_latent;
-        const float one = 1.f, zero = 0.f;
-        if (cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, nE, ts, N, &one, l.router, N, xn, N, &zero, logits_r, nE) !=
-            CUBLAS_STATUS_SUCCESS) {
-            std::fprintf(stderr, "lamina: cublasSgemm (the router) failed\n");
-            throw Fatal{1};
-        }
+        lamina::kernels::Gemm32 rp;   // the router's logits [ts][nE], in floats
+        rp.x = xn;
+        rp.w = l.router;
+        rp.y = logits_r;
+        rp.T = ts;
+        rp.N = nE;
+        rp.K = N;
+        lamina::kernels::gemm32(rp, {gsc, gsc_bytes}, st);
         hy4k::k_route<<<ts, std::max(32, ((nE + 31) / 32) * 32), 0, st>>>(logits_r, l.bias, nE, K, g.w_norm, g.w_scale,
                                                                            ids + (size_t) r0 * K, wts + (size_t) r0 * K);
         dense(l.r_down, xq, ts, rin + (size_t) r0 * Ld);

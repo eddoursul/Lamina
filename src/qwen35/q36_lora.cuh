@@ -2,7 +2,7 @@
 //
 // A site is up to three products that read one input (q / k / v, gate / up, GDN alpha / beta) with every adapter
 // that has a pair for them: one launch of k_lora_a and one of k_lora_b cover it, whatever the number of adapters.
-// A decode batch (T <= kRows rows) runs here; a prompt chunk runs its pairs as cuBLAS GEMMs (the engine).
+// A decode batch (T <= kRows rows) runs here; a prompt chunk runs its pairs as GEMMs (the engine, kernels/gemm.hpp).
 //   k_lora_a: the partial dot products A_seg x of every segment (the site's adapters, their ranks side by side), a K
 //             split a block: its A rows and input loaded at once, one barrier, no atomics.
 //   k_lora_b: t = the K splits' partials summed in a fixed order (a row's t does not depend on T or on the other rows,
