@@ -18,6 +18,7 @@
 //
 // Modes: --serve (lamina-server's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS or --tokens-file F
 // [--n N] [--force IDS] [--dump-full-logits F] (tools/qwen35/kl.py's reference interface), --bench-pp N / --bench-tg N.
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/family_layout.hpp"
@@ -5755,17 +5756,17 @@ static int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--no-graph") graph = false;
         else if (a == "--no-warmup") warm = false;
         else if (a == "--drafts-per-step") mtp_d = std::atoi(next().c_str());   // the GGUF's own MTP block's drafts
-        else if (a == "--mtp") {
-            // Flash-Next's draft layer file, which this family has no use for; a number is the earlier releases'
+        else if (a == "--drafter" || a == "--mtp" || a == "--dspark" || a == "--dfly") {
+            // a drafter file, which this family has no use for; --mtp N, a number, is the earlier releases'
             // --drafts-per-step, taken with a warning so their configs still start
             const std::string v = next();
-            if (!v.empty() && std::isdigit((unsigned char) v[0])) {
+            if (!lamina::is_drafter_flag(a, v)) {
                 mtp_d = std::atoi(v.c_str());
-                std::fprintf(stderr, "lamina: --mtp %s is --drafts-per-step %s on this path (--mtp names Flash-Next's "
-                                     "draft layer)\n", v.c_str(), v.c_str());
+                std::fprintf(stderr, "lamina: --mtp %s is --drafts-per-step %s on this path (--drafter names a drafter "
+                                     "file)\n", v.c_str(), v.c_str());
             } else {
-                std::fprintf(stderr, "lamina: ignoring --mtp %s (this family drafts with the GGUF's own MTP block: "
-                                     "--drafts-per-step N)\n", v.c_str());
+                std::fprintf(stderr, "lamina: ignoring %s %s (this family drafts with the GGUF's own MTP block: "
+                                     "--drafts-per-step N)\n", a.c_str(), v.c_str());
             }
         }
         else if (a == "--draft-vocab") draft_vocab = std::atoi(next().c_str());   // the MTP drafts pick among the first N token ids

@@ -1,6 +1,7 @@
 // src/server/model_config.cpp - lamina-server -m's config, --write-config and --check (model_config.hpp).
 #include "model_config.hpp"
 
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/embedded.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -280,13 +281,14 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
     const std::optional<std::vector<std::string>> preset_cards = gpu_cards(p);
     bool main_named = preset_cards.has_value();   // the cards name it (below)
     for (size_t i = 0; pa.is_array() && i < pa.size(); ++i) {
-        const std::string a = str_of(pa[i]);
+        const std::string a = str_of(pa[i]), v = i + 1 < pa.size() ? str_of(pa[i + 1]) : std::string();
         if (a == "--native" && i + 1 < pa.size()) {
             args.push_back(a);
             args.push_back(m.path);
             ++i;
-        } else if ((a == "--mtp" || a == "--expert-profile") && i + 1 < pa.size()) {
-            // Flash-Next's draft layer is found beside the model (resolve_draft_layer), its profile is the engine's own
+        } else if ((a == "--expert-profile" || is_drafter_flag(a, v)) && i + 1 < pa.size()) {
+            // the preset's drafter (--drafter, or an earlier name of it) is found beside the model (resolve_draft_layer,
+            // resolve_drafter), its profile is the engine's own
             ++i;
         } else if (a == "--main-gpu" && i + 1 < pa.size()) {
             if (main_gpu >= 0) {
@@ -501,9 +503,9 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 json probe = c;   // the draft layer as the start finds it
                 const std::string line = resolve_draft_layer(probe, m.arch);
                 const std::vector<std::string> pa = engine_args(probe);
-                const auto mtp = std::find(pa.begin(), pa.end(), "--mtp");
+                const std::string layer = drafter_arg(pa);   // (--drafter, or an earlier name of it)
                 if (!line.empty()) say("  " + std::string(starts_with(line, "[lamina] ") ? line.substr(9) : line));
-                else if (mtp != pa.end() && mtp + 1 != pa.end()) say("  draft layer: " + *(mtp + 1));
+                else if (!layer.empty()) say("  draft layer: " + layer);
             } else if (inkling) {
                 // The whole file and ~1.5 GiB beside it (the window layers' cells, a prompt chunk's buffers, the
                 // graphs) on the first card; K and V of the 8 full-attention layer applications in what is left of it
@@ -520,7 +522,8 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 // (its reach over the context: 131,072 cells, 32,768 with experts in RAM, no more than a set context)
                 const int64_t reach_set = arg("--dspark-reach").empty() ? -1 : std::atoll(arg("--dspark-reach").c_str()),
                               ctx_set = std::atoll(arg("--max-context").c_str());
-                auto drafter_at = [&, ds = arg("--dspark")](bool in_ram) {
+                const std::string named = drafter_arg(pa);   // (--drafter, or an earlier name of it)
+                auto drafter_at = [&, ds = named](bool in_ram) {
                     if (ds.empty()) return 0.0;
                     std::error_code ec;
                     const auto size = std::filesystem::file_size(u8_path(ds), ec);
@@ -537,7 +540,7 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 };
                 const double drafter = drafter_at(false);
                 auto bare = [](const std::string& l) { return starts_with(l, "[lamina] ") ? l.substr(9) : l; };
-                if (!arg("--dspark").empty()) say(!line.empty() ? "  " + bare(line) : "  drafter: " + arg("--dspark"));
+                if (!named.empty()) say(!line.empty() ? "  " + bare(line) : "  drafter: " + named);
                 else if (!line.empty()) say("  " + bare(line));
                 // (a card's reserve= in place of the VRAM it leaves free by its use: 0.7 GiB, 1.5 where it draws the
                 // desktop; ~1.5 GiB of buffers beside the model on the first card, ~1 GiB on another)

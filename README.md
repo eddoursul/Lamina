@@ -44,17 +44,17 @@ download-draft-layer.bat MODEL_FOLDER      (Windows)
 ./download-draft-layer.sh MODEL_FOLDER     (Linux)
 ```
 
-Load with `--mtp <file>` or the configuration line:
-`"--mtp", "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`
+Load with `--drafter <file>` or the configuration line:
+`"--drafter", "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`
 
-`--mtp` does not accept other MTP formats.
+For Flash-Next, `--drafter` does not accept other MTP formats. `--mtp`, its earlier name, still works.
 
 ## Run
 
 ```
 lamina-server --help
 lamina-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf
-lamina-server -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --mtp Lamina-Qwen3.8-Flash-Next-MTP.gguf
+lamina-server -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --drafter Lamina-Qwen3.8-Flash-Next-MTP.gguf
 ```
 
 Generate a configuration file:

@@ -4,6 +4,7 @@
 // the model loaded and takes requests on stdin, or on lamina-server's in-process channels (serve_io.hpp).
 
 #include "lamina/artifact/draft_layer.hpp"
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_split.hpp"
 #if defined(LAMINA_HAVE_QWEN35)
 #include "lamina/artifact/gguf_reader.hpp"
@@ -192,7 +193,8 @@ struct Options {
     int top_k = 20;
     unsigned long long seed = 0;
     /// Plan v0.3 P6: the MTP draft layer's file (artifact/draft_layer.hpp, tools/mtp_rt.py); drafts come from it.
-    std::string mtp;
+    /// --drafter FILE, or an earlier name of it (artifact/drafter.hpp): `mtp_flag` the one the line used.
+    std::string mtp, mtp_flag = "--drafter";
     int64_t mtp_window = 32768;   ///< the draft layer attends to the last N cells (0 = every cell)
     /// the CUDA device (of the visible ones) the engine runs on: --main-gpu names it as find_gpu (gpu_select.hpp) reads
     /// it, an ordinal, a UUID, a PCI bus id or a name
@@ -1377,7 +1379,15 @@ int parse_options(int argc, char** argv, Options& o, bool& help, bool usage_on_e
             else if (a == "--top-k") o.top_k = std::atoi(next("--top-k"));
             else if (a == "--min-p") o.min_p = std::atof(next("--min-p"));
             else if (a == "--seed") o.seed = std::strtoull(next("--seed"), nullptr, 10);
-            else if (a == "--mtp") o.mtp = next("--mtp");
+            else if (a == "--drafter" || a == "--mtp" || a == "--dspark" || a == "--dfly") {
+                o.mtp_flag = a;
+                o.mtp = next(a.c_str());
+                if (!lamina::is_drafter_flag(a, o.mtp)) {   // --mtp N: the other paths' earlier draft count
+                    std::fprintf(stderr, "lamina: %s %s is no file: Flash-Next's drafts a window are --spec T (T-1 drafts)\n",
+                                 a.c_str(), o.mtp.c_str());
+                    return 2;
+                }
+            }
             else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
             else if (a == "--main-gpu") { o.main_gpu_name = next("--main-gpu"); last_main = i; }
             else if (a == "--second-gpu-min-mb") o.second_gpu_min_mb = std::atof(next("--second-gpu-min-mb"));
@@ -2645,9 +2655,18 @@ int lamina::program::run(int argc, char** argv) {
     lamina::core::MtpDrafter mtp;
     if (!o.mtp.empty()) {
         if (o.spec < 2) {
-            std::fprintf(stderr, "lamina: --mtp is ignored without --spec T (T >= 2)\n");
+            std::fprintf(stderr, "lamina: %s is ignored without --spec T (T >= 2)\n", o.mtp_flag.c_str());
             o.mtp.clear();
         }
+        // a file that is not there, or another model's drafter: said as that
+        if (!o.mtp.empty())
+            if (const std::string e = lamina::drafter_mismatch(o.mtp_flag, o.mtp, lamina::DrafterKind::DraftLayer,
+                                                               "Qwen3.8-Flash-Next",
+                                                               (std::string("its draft layer, ") + kDraftLayerFile).c_str());
+                !e.empty()) {
+                std::fprintf(stderr, "lamina: %s\n", e.c_str());
+                return 1;
+            }
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
         if (!o.mtp.empty() && !mtp.load(o.mtp, g, ss, o.max_window(), err, o.mtp_window)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
@@ -2656,7 +2675,7 @@ int lamina::program::run(int argc, char** argv) {
         mtp.set_max_drafts(o.spec - 1);
     } else if (o.serve) {
         // the server says the same in its window (resolve_draft_layer: this line goes to the engine's log there)
-        std::fprintf(stderr, "lamina: WARNING: no draft layer (--mtp FILE): every verify window holds one token, or "
+        std::fprintf(stderr, "lamina: WARNING: no draft layer (--drafter FILE): every verify window holds one token, or "
                              "prompt lookup's drafts (--spec-lookup), and generation is slower. Download it with  %s "
                              "FOLDER  (or from %s)\n", kDraftLayerScript, kDraftLayerUrl);
     }
@@ -3771,7 +3790,7 @@ int lamina::program::run(int argc, char** argv) {
         // lookup's drafts: the same tokens, a window each
         const bool use_mtp = !o.mtp.empty();
         if (!use_mtp && !o.dump_draft_data.empty()) {
-            std::fprintf(stderr, "lamina serve: --dump-draft-data needs the draft layer (--mtp FILE)\n");
+            std::fprintf(stderr, "lamina serve: --dump-draft-data needs the draft layer (--drafter FILE)\n");
             return 2;
         }
         lamina::prefill::Prefill prefill;

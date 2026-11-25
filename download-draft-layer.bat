@@ -5,7 +5,7 @@ rem
 rem   download-draft-layer.bat FOLDER
 rem
 rem lamina-server takes the file from beside the model or beside the program; elsewhere name it in the config's
-rem "args": "--mtp", "FOLDER\Lamina-Qwen3.8-Flash-Next-MTP.gguf". A download that broke off goes on from where it
+rem "args": "--drafter", "FOLDER\Lamina-Qwen3.8-Flash-Next-MTP.gguf". A download that broke off goes on from where it
 rem stopped. HF_ENDPOINT names a mirror. It needs curl.exe and certutil.exe, which Windows 10 (1803) and newer have.
 setlocal
 set "NAME=Lamina-Qwen3.8-Flash-Next-MTP.gguf"
@@ -50,7 +50,7 @@ echo %NAME%: downloaded, checked
 echo.
 echo The draft layer is "%FILE%"
 echo lamina-server takes it from beside the model or the program; elsewhere name it in the config's "args":
-echo   "--mtp", "%FILE:\=/%"
+echo   "--drafter", "%FILE:\=/%"
 exit /b 0
 
 :usage

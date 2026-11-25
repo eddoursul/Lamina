@@ -15,6 +15,7 @@
 #include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
 
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/expert_cache.hpp"
@@ -1643,7 +1644,7 @@ struct Engine {
     }
     Rows& sat_rows(Rows& R) { return &R == &P || &R == &P2 ? sat->P : sat->D; }
 
-    // ---- the drafter (--dspark): its weights, a ring of context cells a layer (K and V of every position the target
+    // ---- the drafter (--drafter): its weights, a ring of context cells a layer (K and V of every position the target
     // ran, made from the target's states in that forward: positions as slots, so a block's own rows at the sequence's
     // end go in after them and are written over by the rows that stay), the block's buffers, the head's product.
     const Spark* sp = nullptr;
@@ -8031,7 +8032,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     std::string expert_profile, expert_save;
     double expert_save_every = 1.0;
     float spec_min_p = 0.5f;
-    std::string dspark;
+    std::string dspark, dspark_flag = "--drafter";   // (the name the line gave it: --drafter or an earlier one)
     int64_t dspark_reach = -1;   // (not set: 131,072 cells, 32,768 with experts in RAM, no more than a set context)
     lamina::program::Sampling gen_smp;   // generate mode's sampling (greedy)
     CacheOpts copt;
@@ -8091,7 +8092,16 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--main-cells") main_cells = std::max<int64_t>(0, std::atoll(next()));   // (tests: fewer on this card)
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
-        else if (a == "--dspark") dspark = next();   // the model's block drafter (dspark-*.gguf or mtp.safetensors)
+        else if (a == "--drafter" || a == "--dspark" || a == "--mtp" || a == "--dfly") {
+            // the model's block drafter (dspark-*.gguf or mtp.safetensors)
+            dspark_flag = a;
+            dspark = next();
+            if (!lamina::is_drafter_flag(a, dspark)) {   // --mtp N: another path's earlier draft count
+                std::fprintf(stderr, "lamina: %s %s is no file: Inkling 2's drafts a window are --drafts-per-step N\n",
+                             a.c_str(), dspark.c_str());
+                return 2;
+            }
+        }
         else if (a == "--expert-vram") expert_vram = (uint64_t) (std::max(0.0, std::atof(next())) * 1073741824.0);   // (in GiB, as the hy4 path's)
         else if (a == "--expert-cache") {   // the experts' VRAM at most: auto (what the card has), or a size (6G, 9500M)
             const std::string v = next();
@@ -8129,6 +8139,13 @@ int run_engine(int argc, char** argv, bool check_only) {
     if (model.empty()) { std::fprintf(stderr, "lamina: --native MODEL is required\n"); return 2; }
     if (kv != "fp16" && kv != "q8_0") { std::fprintf(stderr, "lamina: --kv takes fp16 or q8_0 on this path\n"); return 2; }
     if (max_ctx < 0) { std::fprintf(stderr, "lamina: --max-context takes a number of tokens\n"); return 2; }
+    if (!dspark.empty() && drafts != 0)   // a file that is not there, or another model's drafter: said as that
+        if (const std::string e = lamina::drafter_mismatch(dspark_flag, dspark, lamina::DrafterKind::DSpark, "Inkling 2",
+                                                           "DSpark, a dspark-*.gguf or the checkpoint's mtp.safetensors");
+            !e.empty()) {
+            std::fprintf(stderr, "lamina: %s\n", e.c_str());
+            return 2;
+        }
     int split_dev = -1, split_a = 0, split_b = -1, n_dev = 0;   // --layer-split DEV:A-B
     if (cudaGetDeviceCount(&n_dev) != cudaSuccess) n_dev = 0;
     if (!layer_split.empty() && layer_split != "0" &&

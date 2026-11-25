@@ -1,4 +1,4 @@
-"""tools/mtp_rt.py - the MTP draft layer as the one GGUF file the engine reads (`--mtp FILE`).
+"""tools/mtp_rt.py - the MTP draft layer as the one GGUF file the engine reads (`--drafter FILE`).
 
     python tools/mtp_rt.py --rt mtp/rt-distilled --out mtp/Lamina-Qwen3.8-Flash-Next-MTP.gguf
     python tools/mtp_rt.py --gguf mtp-q2_0.gguf --draft-vocab data/draft_vocab.bin --out layer.gguf

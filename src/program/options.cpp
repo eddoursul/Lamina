@@ -147,10 +147,17 @@ const std::vector<OptionHelp>& engine_options() {
          "the first request loads the prompt path's kernels"},
 
         {"", "", 0, "Drafts"},
-        {"--mtp", "FILE", C | S,
-         "Flash-Next: the draft layer, Lamina-Qwen3.8-Flash-Next-MTP.gguf (the download-draft-layer script fetches "
-         "it; lamina-server finds it beside the model or the program), or a folder of its earlier layout; without "
-         "it, a token a verify window, or prompt lookup's drafts"},
+        {"--drafter", "FILE", C | S,
+         "the model's drafter, a file of its own (--mtp, --dspark and --dfly, its earlier names, the same option on "
+         "every path; another model's drafter is refused, named). Flash-Next: its draft layer, "
+         "Lamina-Qwen3.8-Flash-Next-MTP.gguf (the download-draft-layer script fetches it; lamina-server finds it "
+         "beside the model or the program), or a folder of its earlier layout; without it, a token a verify window, "
+         "or prompt lookup's drafts. Inkling 2: its block drafter, a dspark-*.gguf or the checkpoint's "
+         "mtp.safetensors (lamina-server takes the smallest dspark-*.gguf beside the model, else in its dspark/ "
+         "folder, else mtp.safetensors beside it): ~1.2 GiB of VRAM with its cells and buffers. Hy4-flash: Tencent's "
+         "DFly2 drafter (the tencent/Hy4-flash checkpoint's last shard, its config.json beside it) in place of the "
+         "file's MTP block: ~0.8 GiB of the main GPU, the block's 3.6 GiB of RAM saved. Qwen3.6 and Qwen3.8-27B: "
+         "none (they draft with the file's own MTP block; a file named is ignored)"},
         {"--spec", "T", C | S,
          "Flash-Next: verify windows of up to T tokens, the last one and T-1 drafts (2-8, default 4): every further "
          "token routes its own experts"},
@@ -165,23 +172,16 @@ const std::vector<OptionHelp>& engine_options() {
          "Flash-Next: the context cells the draft layer attends to (default 32768; 0: every cell)"},
         {"--drafts-per-step", "N", S,
          "Qwen3.6, Qwen3.8-27B and Hy4-flash: at most N drafts (0-7) of the model file's own MTP block a step "
-         "(default 0: none; Hy4-flash with --dfly: 0-5); Inkling 2: its drafter's drafts a window at most (default 7; "
-         "0: no drafter). An earlier config's --mtp N is taken as it"},
+         "(default 0: none; Hy4-flash with --drafter: 0-5); Inkling 2: its drafter's drafts a window at most (default "
+         "7; 0: no drafter). An earlier config's --mtp N (a number) is taken as it"},
         {"--draft-vocab", "N", S,
          "Qwen3.6 and Qwen3.8-27B: the draft head scores the first N token ids only (default: all): quicker drafts "
          "that miss the other tokens"},
-        {"--dspark", "FILE", S,
-         "Inkling 2: the model's block drafter, a dspark-*.gguf or the checkpoint's mtp.safetensors (lamina-server "
-         "takes the smallest dspark-*.gguf beside the model, else in its dspark/ folder, else mtp.safetensors beside "
-         "it): ~1.2 GiB of VRAM with its cells and buffers"},
         {"--dspark-reach", "N", S,
          "Inkling 2: the context cells the drafter's layer without a window keeps, 4.5 KiB each (default 131,072; "
          "32,768 with experts in RAM; no more than a set --max-context)"},
-        {"--dfly", "FILE", S,
-         "Hy4-flash: Tencent's DFly2 drafter (the tencent/Hy4-flash checkpoint's last shard, its config.json beside "
-         "it) in place of the file's MTP block: ~0.8 GiB of the main GPU, the block's 3.6 GiB of RAM saved"},
         {"--no-mtp", "", S,
-         "Hy4-flash: the file's MTP block left out (no drafts without --dfly; 3.6 GiB of RAM saved)"},
+         "Hy4-flash: the file's MTP block left out (no drafts without --drafter; 3.6 GiB of RAM saved)"},
 
         {"", "", 0, "The prompt cache (--serve)"},
         {"--prompt-cache", "N", S,

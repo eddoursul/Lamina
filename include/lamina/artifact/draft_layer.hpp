@@ -1,5 +1,5 @@
 // include/lamina/artifact/draft_layer.hpp - Qwen3.8-Flash-Next's draft layer as a file: the GGUF tools/mtp_rt.py
-// writes and the engine reads (--mtp FILE), its name where lamina-server looks for it, and where it comes from.
+// writes and the engine reads (--drafter FILE), its name where lamina-server looks for it, and where it comes from.
 #pragma once
 
 namespace lamina {

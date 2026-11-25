@@ -3,6 +3,7 @@
 
 #include "lamina/artifact/model_family.hpp"
 #include "lamina/artifact/draft_layer.hpp"
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -216,6 +217,20 @@ std::string draft_layer_script(const json& cfg) {
 #endif
 }
 
+/// The args' drafter flags (--drafter and its earlier names, artifact/drafter.hpp) down to the last one, the one the
+/// engine takes, the others taken out: its index (its file after it), or -1 where none names a file
+ptrdiff_t last_drafter(json& args) {
+    std::vector<size_t> at;
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i].is_string() && lamina::is_drafter_flag(args[i].get<std::string>(), arg_str(args[i + 1]))) at.push_back(i++);
+    if (at.empty()) return -1;
+    for (size_t k = at.size() - 1; k-- > 0;) {   // the earlier ones, from the back: the indices before them hold
+        args.erase(at[k]);
+        args.erase(at[k]);
+    }
+    return (ptrdiff_t) (at.back() - 2 * (at.size() - 1));
+}
+
 }  // namespace
 
 std::string resolve_draft_layer(json& cfg, const std::string& arch) {
@@ -227,40 +242,38 @@ std::string resolve_draft_layer(json& cfg, const std::string& arch) {
     // the warning's parts: why, the folder the download goes to, what the config needs then
     std::string why, into = shell_word(u8_str(model_dir)), then = ": the server takes it from beside the model";
     bool named = false;
-    for (size_t i = 0; i + 1 < args.size(); ++i) {
-        if (args[i] != "--mtp") continue;
-        const std::string name = arg_str(args[i + 1]);
+    if (const ptrdiff_t i = last_drafter(args); i >= 0) {
+        const std::string flag = arg_str(args[i]), name = arg_str(args[i + 1]);
         const fs::path at = fs::absolute(u8_path(here_path(cfg, name)), ec).lexically_normal();
-        if (fs::is_regular_file(at, ec)) return "";   // the engine reads it (and refuses a file of another layout)
+        if (fs::is_regular_file(at, ec)) return "";   // the engine reads it (and refuses a file of another kind)
         const bool folder = fs::is_directory(at, ec);
         std::string gone;   // a folder of the earlier layout: what the engine cannot do without
         for (const char* f : {"dense.txt", "dense.bin", "experts.bin"})
             if (folder && !fs::is_regular_file(at / f, ec)) gone += (gone.empty() ? "" : ", ") + std::string(f);
         if (folder && gone.empty()) return "";
         named = true;
-        why = "--mtp " + name + (folder ? " is a folder without " + gone + " (the layer's earlier layout)" : " is not there");
+        why = flag + " " + name + (folder ? " is a folder without " + gone + " (the layer's earlier layout)" : " is not there");
         if (!folder && at.filename() == kDraftLayerFile) {   // download it where the config names it
             into = shell_word(u8_str(at.parent_path()));
             then.clear();
         } else {
-            then = ",\n         then take \"--mtp\", \"" + name + "\" out of the config's \"args\": the server takes the file "
-                   "from beside the model";
+            then = ",\n         then take \"" + flag + "\", \"" + name + "\" out of the config's \"args\": the server takes "
+                   "the file from beside the model";
         }
-        args.erase(i);   // the engine stops at a file it cannot read
-        args.erase(i);
-        break;
+        args.erase((size_t) i);   // the engine stops at a file it cannot read
+        args.erase((size_t) i);
     }
     if (!named) {   // none named: the layer's file beside the model, else beside the program
         for (const fs::path& dir : {model_dir, u8_path(self_dir())}) {
             const fs::path at = (dir / kDraftLayerFile).lexically_normal();
             if (fs::is_regular_file(at, ec)) {
-                args.push_back("--mtp");
+                args.push_back(lamina::kDrafterFlag);
                 args.push_back(u8_str(at));
                 return "[lamina] draft layer: " + u8_str(at);
             }
         }
         why = std::string("no ") + kDraftLayerFile + " beside the model or the program, and the config's \"args\" name no "
-              "--mtp";
+              "--drafter";
     }
     return "[lamina] WARNING: no draft layer (" + why + "): generation runs without its drafts, a verify window a "
            "token, and is slower.\n         Download it (0.8 GB) with  " + draft_layer_script(cfg) + " " + into +
@@ -272,14 +285,16 @@ std::string resolve_drafter(json& cfg, const std::string& arch) {
     namespace fs = std::filesystem;
     json& args = cfg["args"];
     std::error_code ec;
-    for (size_t i = 0; i + 1 < args.size(); ++i) {
-        if (args[i] == "--drafts-per-step" && arg_str(args[i + 1]) == "0") return "";
-        if (args[i] != "--dspark") continue;
-        const std::string name = arg_str(args[i + 1]);
+    std::string per_step;   // the last --drafts-per-step, the one the engine takes (0: no drafter)
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == "--drafts-per-step") per_step = arg_str(args[i + 1]);
+    if (per_step == "0") return "";
+    if (const ptrdiff_t i = last_drafter(args); i >= 0) {
+        const std::string flag = arg_str(args[i]), name = arg_str(args[i + 1]);
         if (fs::is_regular_file(fs::absolute(u8_path(here_path(cfg, name)), ec), ec)) return "";
-        args.erase(i);   // the engine stops at a file it cannot read
-        args.erase(i);
-        return "[lamina] WARNING: no drafter (--dspark " + name + " is not there): generation runs without its drafts";
+        args.erase((size_t) i);   // the engine stops at a file it cannot read
+        args.erase((size_t) i);
+        return "[lamina] WARNING: no drafter (" + flag + " " + name + " is not there): generation runs without its drafts";
     }
     const fs::path model_dir = fs::absolute(u8_path(model_file(cfg)), ec).parent_path().lexically_normal();
     fs::path best;
@@ -303,7 +318,7 @@ std::string resolve_drafter(json& cfg, const std::string& arch) {
         best.empty() && fs::is_regular_file(mtp, ec) && lamina::inkling2::mtp_file(u8_str(mtp)))
         best = mtp;
     if (best.empty()) return "";
-    args.push_back("--dspark");
+    args.push_back(lamina::kDrafterFlag);
     args.push_back(u8_str(best.lexically_normal()));
     return "[lamina] drafter: " + u8_str(best.lexically_normal());
 }
@@ -696,14 +711,22 @@ void apply_engine_options(json& cfg, const std::vector<EngineOption>& opts) {
     if (opts.empty()) return;
     auto flag = [](const std::string& s) { return s.size() > 2 && starts_with(s, "--"); };
     std::set<std::string> drop;
+    bool drafter = false;   // the line names a drafter: the args' own go under any of its names
     for (const EngineOption& o : opts) {
         drop.insert(o[0]);
-        drop.insert(starts_with(o[0], "--no-") ? "--" + o[0].substr(5) : "--no-" + o[0].substr(2));
+        const bool file = lamina::is_drafter_flag(o[0], o.size() > 1 ? o[1] : "");
+        drafter = drafter || file;
+        // its other form; not between a drafter's --mtp FILE and Hy4-flash's --no-mtp (the file's MTP block left
+        // out), which are no one option's two forms
+        const std::string other = starts_with(o[0], "--no-") ? "--" + o[0].substr(5) : "--no-" + o[0].substr(2);
+        const auto& names = lamina::drafter_flags();
+        if (!file && std::find(names.begin(), names.end(), other) == names.end()) drop.insert(other);
     }
     const std::vector<std::string> args = args_of(cfg);
     json out = json::array();
     for (size_t i = 0; i < args.size();) {
-        if (flag(args[i]) && drop.count(args[i]) > 0) {
+        if (flag(args[i]) && (drop.count(args[i]) > 0 ||
+                              (drafter && lamina::is_drafter_flag(args[i], i + 1 < args.size() ? args[i + 1] : "")))) {
             for (++i; i < args.size() && !flag(args[i]);) ++i;   // its values
             continue;
         }

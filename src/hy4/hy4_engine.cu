@@ -15,6 +15,7 @@
 #include "hy4_place.hpp"
 #include "hy4_prompt.cuh"
 
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/artifact/gguf_split.hpp"
 #include "lamina/core/conversation_cache.hpp"
@@ -223,7 +224,7 @@ struct Model {
     Layer mtp;
     Mat eh_proj;
     const float *mtp_enorm = nullptr, *mtp_hnorm = nullptr, *mtp_shnorm = nullptr;
-    // DFly2 (--dfly FILE; the MTP block is then not loaded): layers as the trunk's sparse ones with dense FFNs, each on
+    // DFly2 (--drafter FILE; the MTP block is then not loaded): layers as the trunk's sparse ones with dense FFNs, each on
     // the K/V and the index picks of its trunk layer (target); the block's first row fused with the trunk's state, each
     // draft's state corrected with the last draft's embedding
     struct DFly {
@@ -5513,7 +5514,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     bool arena_place = false;
     std::string kv = "fp16";
     bool use_mtp = true;
-    std::string dfly_path;
+    std::string dfly_path, dfly_flag = "--drafter";   // (the name the line gave it: --drafter or an earlier one)
     int drafts = 0;
     float spec_min_p = 0.f;
     int lookup = 16;
@@ -5567,7 +5568,19 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--no-file-cache") file_cache = false;
         else if (a == "--kv") kv = next();   // the sparse layers' K / V: fp16 or q8_0
         else if (a == "--no-mtp") use_mtp = false;   // the MTP block not loaded (no drafts)
-        else if (a == "--dfly") dfly_path = next();   // DFly2's drafts (the checkpoint's last shard); no MTP block
+        else if (a == "--drafter" || a == "--dfly" || a == "--mtp" || a == "--dspark") {
+            // DFly2's drafts (the checkpoint's last shard) in place of the MTP block; --mtp N, a number, is the earlier
+            // releases' --drafts-per-step, taken with a warning so their configs still start
+            const std::string v = next();
+            if (!lamina::is_drafter_flag(a, v)) {
+                drafts = std::max(0, std::min(kMaxT - 1, std::atoi(v.c_str())));
+                std::fprintf(stderr, "lamina: --mtp %s is --drafts-per-step %s on this path (--drafter names a drafter "
+                                     "file)\n", v.c_str(), v.c_str());
+            } else {
+                dfly_flag = a;
+                dfly_path = v;
+            }
+        }
         else if (a == "--drafts-per-step") drafts = std::max(0, std::min(kMaxT - 1, std::atoi(next())));
         else if (a == "--spec-min-p") spec_min_p = (float) std::atof(next());
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
@@ -5590,6 +5603,14 @@ int run_engine(int argc, char** argv, bool check_only) {
     if (kv != "fp16" && kv != "q8_0") { std::fprintf(stderr, "lamina: --kv takes fp16 or q8_0 on this path\n"); return 2; }
     std::string err;
     if (!dfly_path.empty()) {   // DFly's file read now: its config and the shard's header
+        if (const std::string e = lamina::drafter_mismatch(
+                dfly_flag, dfly_path, lamina::DrafterKind::DFly2, "Hy4-flash",
+                "DFly2, the tencent/Hy4-flash checkpoint's last shard with its config.json beside it (the model file's "
+                "MTP block without one)");
+            !e.empty()) {
+            std::fprintf(stderr, "lamina: %s\n", e.c_str());
+            return 2;
+        }
         lamina::hy4::DFlyConfig c;
         lamina::SafeTensors st;
         if (!lamina::hy4::read_dfly_config(std::filesystem::path(dfly_path).parent_path().string(), c, err) ||

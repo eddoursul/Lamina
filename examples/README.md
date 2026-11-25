@@ -23,7 +23,8 @@ which takes the model file, the GPU, the draft layer, the projector and the file
   and V it has no room for), `"max-context"` in `"args"` to set one. A card smaller than the file keeps the experts
   in RAM (~14 GB) and the ones used most on the card; `expert_profile_save` is where it writes the ranking its runs
   learn (a card that holds every expert writes none). Drafts from the prompt lookup and from the
-  model's drafter, a `dspark-*.gguf` beside the model (`"drafts-per-step": 0` in `"args"`: without it). Pictures
+  model's drafter, a `dspark-*.gguf` or the checkpoint's `mtp.safetensors` beside the model (`"drafter": "<file>"`
+  in `"args"` names another; `"drafts-per-step": 0`: without it). Pictures
   through the repository's `mmproj-F32.gguf` (a picture is up to 4,096 tokens, a token a 40 x 40 px patch).
 
 `lamina-server -m MODEL.gguf --write-config FILE` writes one with the PC's own files and GPUs. `run-<model>.bat.example`
@@ -115,7 +116,7 @@ prompt chunks run on both at once, so the prompts read ~11% faster than in the o
     `timings.expert_tiers` has the measure over its rounds, `third_awake_us` predicted while the tier works and
     `third_asleep_us` measured while it sleeps, beside the rounds it slept through: start from what a thinking text
     shows, and compare whole sessions with and without the switch, several each (single runs differ by 2%).
-- **`dfly`** (Hy4-flash): Tencent's DFly2 drafter, a download of its own (the tencent/Hy4-flash checkpoint's last
-  shard, `model-00148-of-00148.safetensors`, 1.7 GB, with its `config.json` beside it), drafts in place of the file's
-  MTP block, which the example drafts with: `"dfly": "<the shard>"` in the args. Here, over an agent's session
+- **`drafter`** (Hy4-flash; `dfly`, its earlier name): Tencent's DFly2 drafter, a download of its own (the
+  tencent/Hy4-flash checkpoint's last shard, `model-00148-of-00148.safetensors`, 1.7 GB, with its `config.json` beside
+  it), drafts in place of the file's MTP block, which the example drafts with: `"drafter": "<the shard>"` in the args. Here, over an agent's session
   replayed, 2.2% less time a token and 5.2% less energy, 3.6 GiB less RAM (no MTP block), 0.8 GiB more of the main GPU.

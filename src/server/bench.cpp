@@ -936,7 +936,7 @@ std::vector<std::string> log_excerpt(const std::string& path, uint64_t from, siz
     f.seekg((std::streamoff) from);
     const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     static const char* const keep[] = {"expert cache", "slots", "vram", "ready", "resident", "kv ", "context", "backend",
-                                       "gpu", "prefill", "mtp", "spec", "batch", "version", "hit"};
+                                       "gpu", "prefill", "mtp", "drafter", "dfly", "spec", "batch", "version", "hit"};
     for (const std::string_view line : splitlines(text)) {
         if (out.size() >= limit) break;
         const std::string l = lower(line);

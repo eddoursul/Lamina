@@ -135,11 +135,13 @@ the command line or in a config's `args`, or the file renamed over the quant's t
 **The draft layer.** `download-draft-layer.bat FOLDER` (`./download-draft-layer.sh FOLDER` on Linux; a release's archive
 has its platform's script beside the programs) downloads `Lamina-Qwen3.8-Flash-Next-MTP.gguf` from
 [eddoursul/Lamina-Qwen3.8-Flash-Next-MTP](https://huggingface.co/eddoursul/Lamina-Qwen3.8-Flash-Next-MTP) into a folder,
-at a pinned revision, checked by its SHA-256 and a broken download resumed. A config whose `args` name no `mtp` takes
-`Lamina-Qwen3.8-Flash-Next-MTP.gguf` from beside the model, else from beside the server, and the server's window says
-which; elsewhere the `args` name it: `"mtp": "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`. A folder of the layer's
-earlier layout (`dense.txt`, `dense.bin`, `experts.bin`, `draft_vocab.bin`), as earlier versions downloaded it to
-`mtp/rt-distilled`, still works as `--mtp`. Flash-Next's server starts without the layer too, when none is found or the
+at a pinned revision, checked by its SHA-256 and a broken download resumed. A config whose `args` name no `drafter`
+takes `Lamina-Qwen3.8-Flash-Next-MTP.gguf` from beside the model, else from beside the server, and the server's window
+says which; elsewhere the `args` name it: `"drafter": "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"` (`"mtp"`, its
+earlier name, still works: `--drafter` is every model's drafter file, `--mtp`, `--dspark` and `--dfly` its earlier
+names on every path, and a model refuses another model's drafter by name). A folder of the layer's earlier layout
+(`dense.txt`, `dense.bin`, `experts.bin`, `draft_vocab.bin`), as earlier versions downloaded it to
+`mtp/rt-distilled`, still works as `--drafter`. Flash-Next's server starts without the layer too, when none is found or the
 named file or folder is not there, and warns in its window with the script's command. It then generates a token a verify
 window, or prompt lookup's drafts (`--spec-lookup`). On the development PC, new text came at 44-61% of IQ3_S's speed
 with the layer and 50-68% of UD-Q4_K_XL's, an edit that quotes its prompt at 92-96%. The layer's file holds its draft
@@ -321,7 +323,8 @@ name the file with `"model"` like the others. It reads the GGUF as it is (no exp
 file's own MTP block). K and V are fp16 (~22 KB a cell for Qwen3.6, ~68 KB for the 27B), or with `--kv q8_0` 8 bits
 in llama.cpp's q8_0 rounding, about half: the 27B's full 262,144 cells then take ~9 GiB.
 
-The drafts: `--drafts-per-step N` at most a step (an earlier config's `--mtp N` is taken as it, with a warning);
+The drafts: `--drafts-per-step N` at most a step (an earlier config's `--mtp N`, a number, is taken as it, with a
+warning; a drafter file, `--drafter FILE`, is ignored: these models draft with their files' own MTP block);
 `--spec-min-p P` ends a step's drafts before one whose joint probability with the drafts before it, under the draft
 head, is below P; `--draft-vocab N` lets the draft head score only the first N token ids (a draft outside them is a
 rejected draft, nothing else). The 27B's example takes 7, 0.3 and 65,536: up to 8 tokens a step on text that repeats
@@ -419,7 +422,7 @@ occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the m
 `lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
 `dspark-Inkling-2-Mini-Q8_0.gguf`; either of its layouts, mainline llama.cpp's or unsloth's first), else the checkpoint's
 own `mtp.safetensors` beside it (Thinking Machines' file, the same weights in BF16, which Lucebox's files come with:
-its matrices made Q8_0 as it loads, the GGUF's bytes), `--dspark FILE` names one, `--drafts-per-step 0` runs without (N: its drafts a
+its matrices made Q8_0 as it loads, the GGUF's bytes), `--drafter FILE` names one (`--dspark FILE`, its earlier name), `--drafts-per-step 0` runs without (N: its drafts a
 window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.5).
 It takes 0.40 GiB of VRAM for its weights and ~0.8 GiB for its context cells (made from the model's own states of
 every position; `--dspark-reach N`: those its layer without a window keeps - 131,072, 4.5 KiB each, 32,768 with

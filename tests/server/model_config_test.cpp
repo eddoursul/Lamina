@@ -177,6 +177,17 @@ int main() {
     json flip = {{"args", {"--no-kv-grow", "--spec", "4"}}};
     lamina::apply_engine_options(flip, {{"--kv-grow"}});
     CHECK((args(flip) == std::vector<std::string>{"--spec", "4", "--kv-grow"}));
+    // a drafter under any of its names (--drafter; --mtp, --dspark, --dfly) in place of the args' own under any;
+    // --mtp N, the qwen35 path's earlier draft count, is no drafter
+    json dr = {{"args", {"--mtp", "a.gguf", "--spec", "4", "--dfly", "b", "--mtp", "7", "--dspark", "c"}}};
+    lamina::apply_engine_options(dr, {{"--drafter", "d.gguf"}});
+    CHECK((args(dr) == std::vector<std::string>{"--spec", "4", "--mtp", "7", "--drafter", "d.gguf"}));
+    json dr_back = {{"args", {"--drafter", "d.gguf", "--spec", "4", "--no-mtp"}}};
+    lamina::apply_engine_options(dr_back, {{"--mtp", "a.gguf"}});
+    CHECK((args(dr_back) == std::vector<std::string>{"--spec", "4", "--no-mtp", "--mtp", "a.gguf"}));
+    json dr_block = {{"args", {"--dfly", "b", "--no-mtp"}}};   // (Hy4-flash's --no-mtp: no form of a drafter's flag)
+    lamina::apply_engine_options(dr_block, {{"--no-mtp"}});
+    CHECK((args(dr_block) == std::vector<std::string>{"--dfly", "b", "--no-mtp"}));
 
     // projectors: for the model's width only, the smallest first; not one: another architecture, not a GGUF
     std::error_code ec;
@@ -439,6 +450,66 @@ int main() {
         fs::remove(md / "dspark-old.gguf", ec);
         json e = {{"model", (md / "m.gguf").string()}, {"args", json::array()}};
         CHECK(lamina::resolve_drafter(e, "inkling2_loop").empty() && e["args"].empty());
+
+        // --drafter and its earlier names: a file's kind from its contents, another model's drafter refused by name,
+        // the last of several names the one taken (the engines take the last)
+        CHECK(lamina::is_drafter_flag("--drafter", "x") && lamina::is_drafter_flag("--dspark", "x") &&
+              lamina::is_drafter_flag("--dfly", "x") && lamina::is_drafter_flag("--mtp", "x.gguf") &&
+              lamina::is_drafter_flag("--mtp", "7b/x.gguf") && !lamina::is_drafter_flag("--mtp", "7") &&
+              !lamina::is_drafter_flag("--spec", "4") && !lamina::is_drafter_flag("--no-mtp", ""));
+        const fs::path layer = dir / "layer.gguf", plain = dir / "dflash.gguf", rt = dir / "rt",
+                       dfly = dir / "model-00148-of-00148.safetensors", gone = dir / "gone.gguf";
+        fixture::write(layer, {fixture::str("general.architecture", lamina::kDraftLayerArch)}, {{"draft_vocab", {4}, 0, 3}});
+        fixture::write(plain, {fixture::str("general.architecture", "dflash")}, {{"blk.0.attn_q.weight", {4, 8}, 0, 4}});
+        safetensors(dfly, "{\"model.dfly_layers.0.input_layernorm.weight\":{\"dtype\":\"BF16\",\"shape\":[32],"
+                          "\"data_offsets\":[0,64]}}", 64);
+        fs::create_directories(rt, ec);
+        using K = lamina::DrafterKind;
+        CHECK(lamina::drafter_kind(layer.string()) == K::DraftLayer && lamina::drafter_kind(rt.string()) == K::Other);
+        for (const char* f : {"dense.txt", "dense.bin", "experts.bin"}) std::ofstream(rt / f) << "\n";
+        CHECK(lamina::drafter_kind(rt.string()) == K::DraftLayer);
+        CHECK(lamina::drafter_kind((dir / "dspark-old.gguf").string()) == K::DSpark &&
+              lamina::drafter_kind((dir / "dspark-new.gguf").string()) == K::DSpark);
+        CHECK(lamina::drafter_kind(dfly.string()) == K::DFly2 && lamina::drafter_kind(plain.string()) == K::Other &&
+              lamina::drafter_kind(mtp.string()) == K::Other && lamina::drafter_kind(gone.string()) == K::Missing);
+        CHECK(lamina::drafter_mismatch("--dfly", (dir / "dspark-old.gguf").string(), K::DFly2, "Hy4-flash", "DFly2") ==
+              "--dfly " + (dir / "dspark-old.gguf").string() +
+                  " is Inkling 2's block drafter (DSpark), another model's: Hy4-flash's drafter is DFly2");
+        CHECK(lamina::drafter_mismatch("--drafter", dfly.string(), K::DFly2, "Hy4-flash", "DFly2").empty() &&
+              lamina::drafter_mismatch("--drafter", plain.string(), K::DSpark, "Inkling 2", "DSpark").empty());
+        CHECK(lamina::drafter_mismatch("--drafter", gone.string(), K::DraftLayer, "Qwen3.8-Flash-Next", "its layer") ==
+              "--drafter " + gone.string() + " is not there");
+
+        const fs::path md2 = dir / "ink2", mtp2 = md2 / "mtp.safetensors";
+        fs::create_directories(md2, ec);
+        safetensors(mtp2, "{\"markov_head.markov_w1.weight\":{\"dtype\":\"BF16\",\"shape\":[16,64],\"data_offsets\":[0,"
+                          "2048]}}", 2048);
+        json f2 = {{"model", (md2 / "m.gguf").string()},
+                   {"args", {"--dspark", gone.string(), "--spec-lookup", "16", "--drafter", mtp2.string()}}};
+        CHECK(lamina::resolve_drafter(f2, "inkling2").empty() &&
+              (args(f2) == std::vector<std::string>{"--spec-lookup", "16", "--drafter", mtp2.string()}));
+        json f3 = {{"model", (md2 / "m.gguf").string()}, {"args", {"--drafter", mtp2.string(), "--mtp", gone.string()}}};
+        CHECK(lamina::resolve_drafter(f3, "inkling2").find("no drafter (--mtp " + gone.string() + " is not there)") !=
+                  std::string::npos &&
+              args(f3).empty());
+        json f4 = {{"model", (md2 / "m.gguf").string()}, {"args", {"--drafts-per-step", "7", "--drafts-per-step", "0"}}};
+        CHECK(lamina::resolve_drafter(f4, "inkling2").empty() && args(f4).size() == 4);   // (no drafter: none found)
+
+        // Flash-Next's draft layer: found beside the model as --drafter; of several named, the last one
+        const fs::path fl = dir / "flash";
+        fs::create_directories(fl, ec);
+        fs::copy_file(layer, fl / lamina::kDraftLayerFile, ec);
+        json g1 = {{"model", (fl / "m.gguf").string()}, {"args", json::array()}};
+        CHECK(lamina::resolve_draft_layer(g1, "qwen4exp").find("draft layer: ") != std::string::npos &&
+              (args(g1) == std::vector<std::string>{"--drafter", (fl / lamina::kDraftLayerFile).lexically_normal().string()}));
+        json g2 = {{"model", (fl / "m.gguf").string()},
+                   {"args", {"--mtp", (fl / lamina::kDraftLayerFile).string(), "--drafter", gone.string()}}};
+        CHECK(lamina::resolve_draft_layer(g2, "qwen4exp").find("no draft layer (--drafter " + gone.string() + " is not there)") !=
+                  std::string::npos &&
+              args(g2).empty());
+        json g3 = {{"model", (fl / "m.gguf").string()}, {"args", {"--drafter", gone.string(), "--mtp", rt.string()}}};
+        CHECK(lamina::resolve_draft_layer(g3, "qwen4exp").empty() &&
+              (args(g3) == std::vector<std::string>{"--mtp", rt.string()}));   // (a folder of the earlier layout)
     }
 
     fs::remove_all(dir, ec);

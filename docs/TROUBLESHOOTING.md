@@ -101,15 +101,19 @@ ran on older cards too). Name such a card in the `vision` section's `cuda_device
 encoder then runs on the CPU.
 
 **"WARNING: no draft layer (...)".** Qwen3.8-Flash-Next's draft layer, `Lamina-Qwen3.8-Flash-Next-MTP.gguf`, is
-neither beside the model nor beside the server, or the config's `args` name a file that is not there (`"--mtp",
-"<file>"`), or a folder without the files of the layer's earlier layout (`dense.txt`, `dense.bin`, `experts.bin`). The
+neither beside the model nor beside the server, or the config's `args` name a file that is not there (`"--drafter",
+"<file>"`, or `"--mtp"`, its earlier name), or a folder without the files of the layer's earlier layout (`dense.txt`, `dense.bin`, `experts.bin`). The
 server runs, and the model writes new text at
 roughly half to two thirds of its speed. Run the command the warning gives (`download-draft-layer.bat FOLDER`,
 `./download-draft-layer.sh FOLDER` on Linux: 0.8 GB), do what it adds about the config, and start the server again
 ([SETUP.md](SETUP.md#a-model-file), The draft layer).
 
-**"mtp: ... is not a draft layer this engine reads".** The file `--mtp` names is another GGUF (a model, a projector) or
-the draft layer of another format: download the layer again with the script.
+**"mtp: ... is not a draft layer this engine reads".** The file `--drafter` names is another GGUF (a model, a
+projector) or the draft layer of another format: download the layer again with the script.
+
+**"--drafter FILE is ... another model's: ...'s drafter is ...".** The file is a drafter, but another model's (Inkling 2's
+DSpark, Hy4-flash's DFly2, Qwen3.8-Flash-Next's draft layer): the line names the model's own. Every model takes its
+drafter as `--drafter`, a config's `"drafter"`; `--mtp`, `--dspark` and `--dfly` are its earlier names.
 
 **"this build has no kernels for its compute capability, ...".** The engine was built for other GPUs: a card added after
 the build, or a release's programs on a card other than the RTX 30, 40 and 50 series. Build again from the source

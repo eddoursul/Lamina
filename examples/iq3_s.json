@@ -5,7 +5,7 @@
     "auto"
   ],
   "args": {
-    "mtp": "../Lamina-data/mtp/Lamina-Qwen3.8-Flash-Next-MTP.gguf",
+    "drafter": "../Lamina-data/mtp/Lamina-Qwen3.8-Flash-Next-MTP.gguf",
     "kv": "k8v4",
     "prompt-shift": 0.2
   },

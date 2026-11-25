@@ -17,13 +17,12 @@
 // names differ only where `Geometry::mainline` says.  Header-only and GPU-free.
 #pragma once
 
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <set>
 #include <string>
 #include <utility>
@@ -452,12 +451,8 @@ inline std::string mtp_tensor_name(const std::string& n) {
 inline constexpr const char* kMtpTable = "\"markov_head.markov_w1.weight\"";
 /// `path`'s safetensors header where it names the Markov head's table, else "" (its header alone is read)
 inline std::string mtp_header(const std::string& path) {
-    std::ifstream in(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
-    uint64_t n = 0;
-    if (!in || !in.read(reinterpret_cast<char*>(&n), 8) || n < 2 || n > (uint64_t{64} << 20)) return {};
-    std::string head((size_t) n, '\0');
-    if (!in.read(head.data(), (std::streamsize) n) || head[0] != '{' || head.find(kMtpTable) == std::string::npos) return {};
-    return head;
+    std::string head = safetensors_header(path);
+    return head.find(kMtpTable) == std::string::npos ? std::string() : head;
 }
 /// Whether `path` is that file: a safetensors file whose header names the Markov head's table
 inline bool mtp_file(const std::string& path) { return !mtp_header(path).empty(); }

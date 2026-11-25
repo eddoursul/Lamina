@@ -345,7 +345,7 @@ bool MtpDrafter::load_folder(const std::string& dir, const ModelGeometry& g, uin
     {
         std::ifstream idx(dir + "/dense.txt");
         if (!idx) {
-            err = "mtp: " + dir + " is a folder without dense.txt: --mtp takes the draft layer's file, " + kDraftLayerFile +
+            err = "mtp: " + dir + " is a folder without dense.txt: --drafter takes the draft layer's file, " + kDraftLayerFile +
                   " (" + kDraftLayerScript + " downloads it), or a folder of its earlier layout (dense.txt, dense.bin, "
                   "experts.bin, draft_vocab.bin)";
             return false;
