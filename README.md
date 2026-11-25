@@ -1,6 +1,6 @@
 # Lamina
 
-Lamina is an inference engine, forked from [Strata](https://github.com/Niko1221/Strata) and meticulously optimized to run on several consumer cards, 5070 Ti + two 3090s in my case. Single card setups benefit from some optimizations as well.
+Lamina is an inference engine, meticulously optimized to run on several consumer cards, 5070 Ti + two 3090s in my case. Single card setups benefit from some optimizations as well.
 
 Supported models:
 - [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) (unsloth UD-IQ1_M through Q8_0, ISTA-DASLab's GSQ-RCO IQ3_S, Gyro-L)
@@ -44,17 +44,17 @@ download-draft-layer.bat MODEL_FOLDER      (Windows)
 ./download-draft-layer.sh MODEL_FOLDER     (Linux)
 ```
 
-Load with `--drafter <file>` or the configuration line:
-`"--drafter", "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`
+Load with `--mtp <file>` or the configuration line:
+`"--mtp", "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`
 
-For Flash-Next, `--drafter` does not accept other MTP formats. `--mtp`, its earlier name, still works.
+For Flash-Next, `--mtp` does not accept other MTP formats.
 
 ## Run
 
 ```
 lamina-server --help
 lamina-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf
-lamina-server -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --drafter Lamina-Qwen3.8-Flash-Next-MTP.gguf
+lamina-server -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --mtp Lamina-Qwen3.8-Flash-Next-MTP.gguf
 ```
 
 Generate a configuration file:
