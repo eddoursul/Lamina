@@ -21,6 +21,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <utility>
@@ -374,20 +377,116 @@ inline DrafterRing drafter_ring(int64_t see) {
     const int chunk = (int) (std::max<int64_t>(3, std::min<int64_t>(30, tiles)) * kDrafterTile);
     return {chunk, (see + kDrafterRows + kDrafterSlack + 2 * chunk - 1) / chunk * chunk};
 }
-/// The bytes the rings of the drafter with metadata `f` take at `reach` context cells (its window layers see their
-/// window), in halves or q8_0 blocks; 0 where it names no layers
+/// The bytes the rings of a drafter's layers take at `reach` context cells (`pat`: a layer's window or not; a window
+/// layer sees `swa`), in halves or q8_0 blocks
+inline uint64_t drafter_rings_bytes(int64_t HK, int64_t D, int64_t swa, const std::vector<uint64_t>& pat, int64_t reach,
+                                    bool q8) {
+    const uint64_t cell = (uint64_t) (q8 ? HK * (D / 32) * 34 : HK * D * 2);
+    uint64_t n = 0;
+    for (const uint64_t w : pat) n += (uint64_t) drafter_ring(w ? swa : std::max(reach, swa)).cap * 2 * cell;
+    return n;
+}
+/// The same for the drafter with metadata `f`; 0 where it names no layers
 inline uint64_t drafter_rings_bytes(const GgufFile& f, int64_t reach, bool q8) {
     auto num = [&](const char* k) {
         const MetaValue* v = f.get(std::string("dflash.") + k);
         return v && v->is_num() ? (int64_t) v->u : (int64_t) 0;
     };
-    const int64_t HK = num("attention.head_count_kv"), D = num("attention.key_length"), swa = drafter_window(f);
     std::vector<uint64_t> pat;
     f.numbers("dflash.attention.sliding_window_pattern", &pat);
-    const uint64_t cell = (uint64_t) (q8 ? HK * (D / 32) * 34 : HK * D * 2);
+    return drafter_rings_bytes(num("attention.head_count_kv"), num("attention.key_length"), drafter_window(f), pat, reach,
+                               q8);
+}
+
+// ---- the drafter as Thinking Machines' checkpoint ships it: mtp.safetensors (the same weights as the dspark GGUFs,
+// in BF16 under the checkpoint's names; Lucebox's Inkling-2-Mini-Fast-GGUF carries the same file).  The file holds
+// tensors alone: the settings no shape says are the checkpoint's (its config.json's mtp_config), below.  The engine
+// reads it as unsloth's first layout, its matrices made Q8_0 as the GGUF files have them.
+struct MtpSettings {
+    int64_t block = 8;                       ///< block_size: a block's rows
+    int64_t window = 1024;                   ///< sliding_window_size: the cells a window layer sees
+    std::vector<uint64_t> pattern{1, 0, 1};  ///< local_layer_ids [0, 2]: a layer's window or not
+    std::vector<uint64_t> taps{5, 23, 41, 48};   ///< target_layer_ids: the target's states it reads
+    double rope_base = 1000000.0;            ///< rope_theta
+    float eps = 1e-6f;                       ///< rms_norm_eps
+    int64_t HK = 8, D = 128;                 ///< num_key_value_heads, head_dim
+};
+inline const MtpSettings& mtp_settings() {
+    static const MtpSettings s;
+    return s;
+}
+/// The name the engine reads a drafter's tensor by (the dspark GGUFs' in unsloth's first layout) in the checkpoint's
+/// mtp.safetensors; "" for one it does not have
+inline std::string mtp_tensor_name(const std::string& n) {
+    static const std::pair<const char*, const char*> layer[] = {
+        {"attn_q.weight", "self_attn.q_proj.weight"},       {"attn_k.weight", "self_attn.k_proj.weight"},
+        {"attn_v.weight", "self_attn.v_proj.weight"},       {"attn_output.weight", "self_attn.o_proj.weight"},
+        {"attn_k_ctx.weight", "self_attn.k_proj_ctx.weight"}, {"attn_v_ctx.weight", "self_attn.v_proj_ctx.weight"},
+        {"ffn_gate.weight", "mlp.gate_proj.weight"},         {"ffn_up.weight", "mlp.up_proj.weight"},
+        {"ffn_down.weight", "mlp.down_proj.weight"},         {"attn_norm.weight", "input_layernorm.weight"},
+        {"ffn_norm.weight", "post_attention_layernorm.weight"}, {"dflare_norm.weight", "dflare_norm.weight"},
+        {"attn_q_norm.weight", "self_attn.q_norm.weight"},   {"attn_k_norm.weight", "self_attn.k_norm.weight"},
+        {"attn_k_ctx_norm.weight", "self_attn.k_norm_ctx.weight"}};
+    static const std::pair<const char*, const char*> top[] = {
+        {"output_norm.weight", "norm.weight"},
+        {"mask_embd.weight", "mask_embed"},
+        {"dspark_fuse.weight", "fuse_weight"},
+        {"dspark_norm.weight", "markov_head.dflare_norm.weight"},
+        {"joint_proj.weight", "markov_head.rnn_proj.weight"},
+        {"joint_proj.bias", "markov_head.rnn_proj.bias"},
+        {"dspark_hidden_out.weight", "markov_head.hidden_out.weight"},
+        {"dspark_hidden_out.bias", "markov_head.hidden_out.bias"},
+        {"markov_w1.weight", "markov_head.markov_w1.weight"}};
+    if (n.rfind("blk.", 0) == 0) {
+        const size_t dot = n.find('.', 4);
+        if (dot == std::string::npos) return {};
+        for (const auto& [g, m] : layer)
+            if (n.compare(dot + 1, std::string::npos, g) == 0) return "layers." + n.substr(4, dot - 4) + "." + m;
+        return {};
+    }
+    for (const auto& [g, m] : top)
+        if (n == g) return m;
+    return {};
+}
+/// The Markov head's table in a safetensors header ("": not that file)
+inline constexpr const char* kMtpTable = "\"markov_head.markov_w1.weight\"";
+/// `path`'s safetensors header where it names the Markov head's table, else "" (its header alone is read)
+inline std::string mtp_header(const std::string& path) {
+    std::ifstream in(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);
     uint64_t n = 0;
-    for (const uint64_t w : pat) n += (uint64_t) drafter_ring(w ? swa : std::max(reach, swa)).cap * 2 * cell;
-    return n;
+    if (!in || !in.read(reinterpret_cast<char*>(&n), 8) || n < 2 || n > (uint64_t{64} << 20)) return {};
+    std::string head((size_t) n, '\0');
+    if (!in.read(head.data(), (std::streamsize) n) || head[0] != '{' || head.find(kMtpTable) == std::string::npos) return {};
+    return head;
+}
+/// Whether `path` is that file: a safetensors file whose header names the Markov head's table
+inline bool mtp_file(const std::string& path) { return !mtp_header(path).empty(); }
+/// The VRAM the engine takes for that file's weights: its matrices as Q8_0 (34 bytes a 32 values against BF16's 64),
+/// the Markov table as the file has it (BF16; its data_offsets in the header), the rest (a few MB) as matrices
+inline uint64_t mtp_weights_bytes(const std::string& path, uint64_t file_bytes) {
+    const std::string h = mtp_header(path);
+    uint64_t table = 0;
+    if (const size_t at = h.find(kMtpTable); at != std::string::npos) {
+        const size_t end = h.find('}', at), off = h.find("\"data_offsets\"", at);
+        if (off < end) {
+            const size_t a = h.find('[', off);
+            unsigned long long b0 = 0, b1 = 0;
+            if (a < end && std::sscanf(h.c_str() + a, "[%llu ,%llu", &b0, &b1) == 2 && b1 > b0) table = b1 - b0;
+        }
+    }
+    return file_bytes > table ? table + (file_bytes - table) * 34 / 64 : file_bytes;
+}
+/// A drafter file's VRAM before its rings, whichever form it has (a dspark GGUF: its size)
+inline uint64_t drafter_weights_bytes(const std::string& path, uint64_t file_bytes) {
+    return mtp_file(path) ? mtp_weights_bytes(path, file_bytes) : file_bytes;
+}
+/// A drafter file's rings at `reach` context cells, whichever form it has; 0 where it names no layers
+inline uint64_t drafter_file_rings_bytes(const std::string& path, int64_t reach, bool q8) {
+    if (mtp_file(path)) {
+        const MtpSettings& s = mtp_settings();
+        return drafter_rings_bytes(s.HK, s.D, s.window, s.pattern, reach, q8);
+    }
+    return drafter_rings_bytes(GgufFile(path), reach, q8);
 }
 
 }  // namespace lamina::inkling2

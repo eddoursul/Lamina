@@ -5,6 +5,7 @@
 #include "lamina/artifact/draft_layer.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/inkling2/geometry.hpp"
 #include "lamina/program/engine.hpp"
 #include "lamina/program/gpu_cards.hpp"
 #include "lamina/program/options.hpp"
@@ -296,6 +297,11 @@ std::string resolve_drafter(json& cfg, const std::string& arch) {
         }
         if (!best.empty()) break;
     }
+    // else the checkpoint's own file beside the model: mtp.safetensors (the same weights in BF16; Lucebox's files carry
+    // it), made Q8_0 as the engine loads it
+    if (const fs::path mtp = model_dir / "mtp.safetensors";
+        best.empty() && fs::is_regular_file(mtp, ec) && lamina::inkling2::mtp_file(u8_str(mtp)))
+        best = mtp;
     if (best.empty()) return "";
     args.push_back("--dspark");
     args.push_back(u8_str(best.lexically_normal()));

@@ -32,8 +32,9 @@ void lift_reasoning_effort_arg(json& cfg);
 std::string resolve_draft_layer(json& cfg, const std::string& arch);
 /// Inkling 2's block drafter (`arch` "inkling2" or "inkling2_loop"), a file of its own beside the model: args that
 /// name none (--dspark FILE) and do not turn the drafts off (--drafts-per-step 0) take the smallest dspark-*.gguf in
-/// the model's folder, else in its dspark/ folder (unsloth's layout); a named file that is not there is taken out of
-/// them.  The line for the server's window: the file found, or the warning; empty where none is found or one is named.
+/// the model's folder, else in its dspark/ folder (unsloth's layout), else the checkpoint's mtp.safetensors in the
+/// model's folder (Lucebox's layout); a named file that is not there is taken out of them.  The line for the server's
+/// window: the file found, or the warning; empty where none is found or one is named.
 std::string resolve_drafter(json& cfg, const std::string& arch);
 /// the config's "args" as the engine's words: a list as it is, an object's flags in its order (true a switch, false
 /// its --no- form, null left out, a list the flag's values; a value that is no text as JSON writes it)

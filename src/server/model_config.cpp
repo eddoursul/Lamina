@@ -529,10 +529,11 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     if (reach_set < 0 && ctx_set > 0) reach = std::min(reach, ctx_set);
                     uint64_t rings = 0;
                     try {
-                        rings = inkling2::drafter_rings_bytes(GgufFile(ds), reach, q8);
+                        rings = inkling2::drafter_file_rings_bytes(ds, reach, q8);
                     } catch (const std::exception&) {
                     }
-                    return (double) size + (double) rings + 0.16 * gibi;
+                    // (the checkpoint's mtp.safetensors: its matrices as the engine makes them, Q8_0)
+                    return (double) inkling2::drafter_weights_bytes(ds, size) + (double) rings + 0.16 * gibi;
                 };
                 const double drafter = drafter_at(false);
                 auto bare = [](const std::string& l) { return starts_with(l, "[lamina] ") ? l.substr(9) : l; };

@@ -171,8 +171,9 @@ const std::vector<OptionHelp>& engine_options() {
          "Qwen3.6 and Qwen3.8-27B: the draft head scores the first N token ids only (default: all): quicker drafts "
          "that miss the other tokens"},
         {"--dspark", "FILE", S,
-         "Inkling 2: the model's block drafter, a dspark-*.gguf (lamina-server takes the smallest beside the model, "
-         "else in its dspark/ folder): ~1.2 GiB of VRAM with its cells and buffers"},
+         "Inkling 2: the model's block drafter, a dspark-*.gguf or the checkpoint's mtp.safetensors (lamina-server "
+         "takes the smallest dspark-*.gguf beside the model, else in its dspark/ folder, else mtp.safetensors beside "
+         "it): ~1.2 GiB of VRAM with its cells and buffers"},
         {"--dspark-reach", "N", S,
          "Inkling 2: the context cells the drafter's layer without a window keeps, 4.5 KiB each (default 131,072; "
          "32,768 with experts in RAM; no more than a set --max-context)"},

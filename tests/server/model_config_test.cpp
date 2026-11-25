@@ -400,6 +400,45 @@ int main() {
         for (const bool q8 : {false, true})
             CHECK(lamina::inkling2::drafter_rings_bytes(old_f, 32768, q8) == lamina::inkling2::drafter_rings_bytes(new_f, 32768, q8) &&
                   lamina::inkling2::drafter_rings_bytes(new_f, 32768, q8) > 0);
+
+        // and the checkpoint's own file (mtp.safetensors, the settings its config.json has: those of the GGUFs above):
+        // the same rings; its matrices weighed as Q8_0, its Markov table as it is; found beside a model that has no
+        // dspark GGUF, after one that has
+        const fs::path md = dir / "ink", mtp = md / "mtp.safetensors";
+        fs::create_directories(md, ec);
+        auto safetensors = [](const fs::path& p, const std::string& head, size_t data) {
+            std::ofstream o(p, std::ios::binary);
+            const uint64_t n = head.size();
+            o.write(reinterpret_cast<const char*>(&n), 8);
+            o << head << std::string(data, '\0');
+        };
+        safetensors(mtp,
+                    "{\"__metadata__\":{\"format\":\"pt\"},\"layers.0.self_attn.q_proj.weight\":{\"dtype\":\"BF16\","
+                    "\"shape\":[64,32],\"data_offsets\":[0,4096]},\"markov_head.markov_w1.weight\":{\"dtype\":\"BF16\","
+                    "\"shape\":[16,64],\"data_offsets\":[4096,6144]}}",
+                    6144);
+        const std::string ms = mtp.string();
+        CHECK(lamina::inkling2::mtp_file(ms) && !lamina::inkling2::mtp_file((dir / "dspark-old.gguf").string()));
+        for (const bool q8 : {false, true})
+            CHECK(lamina::inkling2::drafter_file_rings_bytes(ms, 32768, q8) == lamina::inkling2::drafter_rings_bytes(old_f, 32768, q8));
+        const uint64_t file = (uint64_t) fs::file_size(mtp, ec);
+        CHECK(lamina::inkling2::drafter_weights_bytes(ms, file) == 2048 + (file - 2048) * 34 / 64);
+        CHECK(lamina::inkling2::drafter_weights_bytes((dir / "dspark-old.gguf").string(), 1000) == 1000);
+        CHECK(lamina::inkling2::mtp_tensor_name("blk.2.attn_k_ctx_norm.weight") == "layers.2.self_attn.k_norm_ctx.weight" &&
+              lamina::inkling2::mtp_tensor_name("dspark_fuse.weight") == "fuse_weight" &&
+              lamina::inkling2::mtp_tensor_name("blk.0.ctx_mix.weight").empty());
+        json c = {{"model", (md / "m.gguf").string()}, {"args", json::array()}};
+        CHECK(lamina::resolve_drafter(c, "inkling2_loop").find("mtp.safetensors") != std::string::npos &&
+              c["args"].size() == 2 && c["args"][1].get<std::string>().find("mtp.safetensors") != std::string::npos);
+        fs::copy_file(dir / "dspark-old.gguf", md / "dspark-old.gguf", ec);
+        json d = {{"model", (md / "m.gguf").string()}, {"args", json::array()}};
+        lamina::resolve_drafter(d, "inkling2_loop");
+        CHECK(d["args"].size() == 2 && d["args"][1].get<std::string>().find("dspark-old.gguf") != std::string::npos);
+        // (a safetensors file without the Markov head's table is not taken)
+        safetensors(mtp, "{\"layers.0.self_attn.q_proj.weight\":{\"dtype\":\"BF16\",\"shape\":[64,32],\"data_offsets\":[0,4096]}}", 4096);
+        fs::remove(md / "dspark-old.gguf", ec);
+        json e = {{"model", (md / "m.gguf").string()}, {"args", json::array()}};
+        CHECK(lamina::resolve_drafter(e, "inkling2_loop").empty() && e["args"].empty());
     }
 
     fs::remove_all(dir, ec);

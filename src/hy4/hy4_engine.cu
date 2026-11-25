@@ -742,7 +742,7 @@ bool load_dfly(const std::string& path, Model& m, std::string& err) {
     const auto t0 = Clock::now();
     const auto& g = m.g;
     lamina::hy4::DFlyConfig c;
-    lamina::hy4::SafeTensors st;
+    lamina::SafeTensors st;
     if (!lamina::hy4::read_dfly_config(std::filesystem::path(path).parent_path().string(), c, err) ||
         !st.open(path, err))
         return false;
@@ -5591,7 +5591,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     std::string err;
     if (!dfly_path.empty()) {   // DFly's file read now: its config and the shard's header
         lamina::hy4::DFlyConfig c;
-        lamina::hy4::SafeTensors st;
+        lamina::SafeTensors st;
         if (!lamina::hy4::read_dfly_config(std::filesystem::path(dfly_path).parent_path().string(), c, err) ||
             !st.open(dfly_path, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());

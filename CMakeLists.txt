@@ -829,13 +829,18 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(lamina-q36ref PRIVATE lamina_kernels lamina_warnings CUDA::cudart_static)
 
+    # A safetensors file's header and tensors: the checkpoints' drafters (Hy4-flash's DFly2, Inkling 2's mtp.safetensors)
+    add_library(lamina_safetensors STATIC src/core/safetensors.cpp)
+    target_include_directories(lamina_safetensors PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(lamina_safetensors PRIVATE nlohmann lamina_warnings)
+
     # Hy4-flash (GGUF architecture hy_v4_flash): its own engine path, a library `lamina` switches to for such a model as
     # it does for Qwen3.6, and lamina-hy4 wraps on its own.  Fast math as ggml-cuda (llama.cpp's PR, the reference).
     add_library(lamina_hy4 STATIC src/hy4/hy4_engine.cu src/hy4/hy4_dfly_file.cpp src/hy4/hy4_place.cpp)
     target_include_directories(lamina_hy4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_hy4 PRIVATE lamina_core lamina_kernels lamina_kernels_cpu lamina_warnings lamina_serve_io
-                          lamina_spec lamina_engine lamina_mmq nlohmann CUDA::cudart_static)
+                          lamina_spec lamina_engine lamina_mmq lamina_safetensors nlohmann CUDA::cudart_static)
     target_compile_options(lamina_hy4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-hy4 src/hy4/hy4_main.cpp)
     target_link_libraries(lamina-hy4 PRIVATE lamina_hy4 CUDA::cudart_static)
@@ -848,7 +853,8 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_inkling2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_inkling2 PRIVATE lamina_core lamina_engine lamina_kernels lamina_kernels_cpu
-                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq lamina_spec CUDA::cudart_static)
+                          lamina_warnings lamina_serve_io lamina_cards lamina_mmq lamina_spec lamina_safetensors
+                          CUDA::cudart_static)
     target_compile_options(lamina_inkling2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
     add_executable(lamina-inkling2 src/inkling2/inkling2_main.cpp)
     target_link_libraries(lamina-inkling2 PRIVATE lamina_inkling2 CUDA::cudart_static)

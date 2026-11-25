@@ -20,6 +20,7 @@
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/prompt_cache.hpp"
+#include "lamina/core/safetensors.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/inkling2/engine.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -1086,50 +1087,173 @@ struct Spark {
 static_assert(lamina::inkling2::kDrafterRows == kMaxT && lamina::inkling2::kDrafterTile == ik::kTcCells,
               "the drafter's rings as geometry.hpp sizes them");
 
-/// The drafter of model `m` from `path`, in either layout (lamina/inkling2/geometry.hpp, the model's block drafter).
-/// False with `err`: not such a file, or not one this path's kernels run.
+/// A drafter file's tensors by the names of the dspark GGUFs (unsloth's first layout's where the layouts differ): read
+/// from such a GGUF, or from the checkpoint's mtp.safetensors by its own names (lamina/inkling2/geometry.hpp), its
+/// matrices made Q8_0 as the GGUF files have them (the same bytes) and its floats the same values
+struct SparkFile {
+    Loader* L = nullptr;                // a GGUF's
+    lamina::SafeTensors* st = nullptr;  // else the checkpoint's file
+    [[noreturn]] static void missing(const std::string& name) {
+        std::fprintf(stderr, "lamina: missing %s\n", name.c_str());
+        throw Fatal{1};
+    }
+    const lamina::SafeTensors::Tensor* mtp(const std::string& name) const {
+        const std::string n = lamina::inkling2::mtp_tensor_name(name);
+        return n.empty() ? nullptr : st->find(n);
+    }
+    bool has(const std::string& name) const { return L ? L->has(name) : mtp(name) != nullptr; }
+    /// its shape, the innermost dimension first (the GGUF's order); empty where it has no such tensor
+    std::vector<int64_t> shape(const std::string& name) const {
+        if (L) {
+            const lamina::TensorInfo* t = L->gm.find(name);
+            return t ? std::vector<int64_t>(t->shape.begin(), t->shape.end()) : std::vector<int64_t>();
+        }
+        const lamina::SafeTensors::Tensor* t = mtp(name);
+        return t ? std::vector<int64_t>(t->shape.rbegin(), t->shape.rend()) : std::vector<int64_t>();
+    }
+    std::vector<float> floats(const std::string& name) {
+        if (L) return L->floats(name);
+        std::vector<float> v;
+        std::vector<int64_t> sh;
+        if (!st->read(lamina::inkling2::mtp_tensor_name(name), v, sh)) missing(name);
+        return v;
+    }
+    const float* f32(const std::string& name) { return f32_dev(floats(name)); }
+    Mat mat(const std::string& name) {
+        if (L) return L->mat(name);
+        const std::vector<int64_t> sh = shape(name);
+        if (sh.size() != 2 || sh[0] % 32 != 0) {
+            std::fprintf(stderr, "lamina: %s is not a matrix of rows the Q8_0 blocks take\n", name.c_str());
+            throw Fatal{1};
+        }
+        const std::vector<float> w = floats(name);
+        Mat m;
+        m.type = GGML_TYPE_Q8_0;
+        m.n_in = (int) sh[0];
+        m.n_out = (int) sh[1];
+        const size_t n = ggml_row_size(GGML_TYPE_Q8_0, m.n_in) * (size_t) m.n_out;
+        std::vector<uint8_t> q(n);
+        // (the rows over a few threads: ~260M values for the three layers)
+        const int parts = (int) std::max<int64_t>(1, std::min<int64_t>(8, m.n_out / 256));
+        std::vector<std::thread> pool;
+        for (int i = 0; i < parts; ++i)
+            pool.emplace_back([&, i] {
+                const int64_t r0 = (int64_t) m.n_out * i / parts, r1 = (int64_t) m.n_out * (i + 1) / parts;
+                ggml_quantize_chunk(GGML_TYPE_Q8_0, w.data() + r0 * m.n_in,
+                                    q.data() + ggml_row_size(GGML_TYPE_Q8_0, m.n_in) * (size_t) r0, 0, r1 - r0, m.n_in,
+                                    nullptr);
+            });
+        for (std::thread& t : pool) t.join();
+        uint8_t* d = dalloc<uint8_t>(n + kWeightPad);
+        CK(cudaMemcpy(d, q.data(), n, cudaMemcpyHostToDevice));
+        CK(cudaMemset(d + n, 0, kWeightPad));
+        m.d = d;
+        return m;
+    }
+    /// a bfloat16 tensor's bytes on the device; nullptr where it is of another type
+    uint16_t* bf16(const std::string& name) {
+        if (L) {
+            const lamina::TensorInfo* t = nullptr;
+            const uint8_t* src = L->host(name, &t);
+            if (t->type != 30) return nullptr;
+            uint16_t* d = dalloc<uint16_t>((size_t) t->elements());
+            CK(cudaMemcpy(d, src, (size_t) t->elements() * 2, cudaMemcpyHostToDevice));
+            return d;
+        }
+        const lamina::SafeTensors::Tensor* t = mtp(name);
+        std::vector<uint8_t> b;
+        if (t == nullptr || !st->bytes(lamina::inkling2::mtp_tensor_name(name), b)) missing(name);
+        if (t->dtype != "BF16") return nullptr;
+        uint16_t* d = dalloc<uint16_t>(b.size() / 2);
+        CK(cudaMemcpy(d, b.data(), b.size(), cudaMemcpyHostToDevice));
+        return d;
+    }
+};
+
+/// The drafter of model `m` from `path`: a dspark GGUF in either layout, or the checkpoint's mtp.safetensors
+/// (lamina/inkling2/geometry.hpp, the model's block drafter).  False with `err`: not such a file, or not one this
+/// path's kernels run.
 bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& err) {
     const auto t0 = Clock::now();
-    const lamina::GgufModel gm = lamina::GgufModel::open(path);
-    const auto& f = gm.meta();
-    if (const lamina::MetaValue* a = f.get("general.architecture"); a == nullptr || a->s != "dflash") {
-        err = path + " is not a block drafter (general.architecture dflash)";
-        return false;
-    }
-    const bool folded = lamina::inkling2::drafter_folded(f);   // mainline llama.cpp's layout
-    auto num = [&](const char* k, double def) {
-        const lamina::MetaValue* v = f.get(std::string("dflash.") + k);
-        return v && v->is_num() ? v->num() : def;
-    };
-    s.n_layer = (int) num("block_count", 0);
-    s.N = (int) num("embedding_length", 0);
-    s.F = (int) num("feed_forward_length", 0);
-    s.H = (int) num("attention.head_count", 0);
-    s.HK = (int) num("attention.head_count_kv", 0);
-    s.D = (int) num("attention.key_length", 0);
-    s.R = (int) num("dspark.markov_rank", 0);
-    s.block = (int) num("block_size", 0);
-    s.n_swa = (int) lamina::inkling2::drafter_window(f);
-    s.V = (int) num("vocab_size_unpadded", 0);
-    s.eps = (float) num("attention.layer_norm_rms_epsilon", 1e-6);
-    s.cap = (float) num("final_logit_softcapping", 0);
-    s.rope_base = num("rope.freq_base", 10000.0);
-    int Vp = (int) num("vocab_size", 0);
-    // (a file without the rank and the vocabulary's keys: markov_w1 [rank, its vocabulary] says them)
-    if (const lamina::TensorInfo* t = gm.find("markov_w1.weight"); t != nullptr && t->shape.size() == 2) {
-        if (s.R == 0) s.R = (int) t->shape[0];
-        if (Vp == 0) Vp = (int) t->shape[1];
-        if (s.V == 0) s.V = Vp;
-    }
-    std::vector<uint64_t> tl, pat;
-    f.numbers("dflash.target_layers", &tl);
-    f.numbers("dflash.attention.sliding_window_pattern", &pat);
     const Geometry& g = m.g;
     auto no = [&](const std::string& what) {
         err = "the drafter " + path + ": " + what;
         return false;
     };
-    if (s.R != 256 || gm.find("markov_w1.weight") == nullptr) return no("no Markov head of rank 256 (the model's own DSpark has one)");
+    const bool mtp = lamina::inkling2::mtp_file(path);
+    std::unique_ptr<lamina::GgufModel> gm;
+    std::unique_ptr<Loader> loader;
+    lamina::SafeTensors st;
+    bool folded = false;   // mainline llama.cpp's layout
+    int Vp = 0;
+    std::vector<uint64_t> tl, pat;
+    if (mtp) {   // the settings the checkpoint's config.json has; the sizes its tensors' shapes say
+        if (!st.open(path, err)) return false;
+        const SparkFile F{nullptr, &st};
+        const lamina::inkling2::MtpSettings& c = lamina::inkling2::mtp_settings();
+        while (F.has("blk." + std::to_string(s.n_layer) + ".attn_q.weight")) ++s.n_layer;
+        const std::vector<int64_t> q = F.shape("blk.0.attn_q.weight"), k = F.shape("blk.0.attn_k.weight"),
+                                   qn = F.shape("blk.0.attn_q_norm.weight"), gt = F.shape("blk.0.ffn_gate.weight"),
+                                   w1 = F.shape("markov_w1.weight");
+        if (q.size() != 2 || k.size() != 2 || qn.size() != 1 || gt.size() != 2 || w1.size() != 2)
+            return no("not the model's own DSpark in the checkpoint's form (its tensors are not there)");
+        s.N = (int) q[0];
+        s.D = (int) qn[0];
+        s.H = s.D > 0 ? (int) (q[1] / s.D) : 0;
+        s.HK = s.D > 0 ? (int) (k[1] / s.D) : 0;
+        s.F = (int) gt[1];
+        s.R = (int) w1[0];
+        Vp = (int) w1[1];
+        s.V = (int) g.n_vocab;
+        s.block = (int) c.block;
+        s.n_swa = (int) c.window;
+        s.eps = c.eps;
+        s.cap = g.softcap;
+        s.rope_base = c.rope_base;
+        tl = c.taps;
+        pat = c.pattern;
+        if (s.D != c.D || s.HK != c.HK || (int) pat.size() != s.n_layer)
+            return no("heads or layers other than the checkpoint's settings say (Inkling 2 Mini's own DSpark)");
+    } else {
+        gm = std::make_unique<lamina::GgufModel>(lamina::gguf_split_paths(path));
+        const auto& f = gm->meta();
+        if (const lamina::MetaValue* a = f.get("general.architecture"); a == nullptr || a->s != "dflash") {
+            err = path + " is not a block drafter (general.architecture dflash, or the checkpoint's mtp.safetensors)";
+            return false;
+        }
+        folded = lamina::inkling2::drafter_folded(f);
+        auto num = [&](const char* k, double def) {
+            const lamina::MetaValue* v = f.get(std::string("dflash.") + k);
+            return v && v->is_num() ? v->num() : def;
+        };
+        s.n_layer = (int) num("block_count", 0);
+        s.N = (int) num("embedding_length", 0);
+        s.F = (int) num("feed_forward_length", 0);
+        s.H = (int) num("attention.head_count", 0);
+        s.HK = (int) num("attention.head_count_kv", 0);
+        s.D = (int) num("attention.key_length", 0);
+        s.R = (int) num("dspark.markov_rank", 0);
+        s.block = (int) num("block_size", 0);
+        s.n_swa = (int) lamina::inkling2::drafter_window(f);
+        s.V = (int) num("vocab_size_unpadded", 0);
+        s.eps = (float) num("attention.layer_norm_rms_epsilon", 1e-6);
+        s.cap = (float) num("final_logit_softcapping", 0);
+        s.rope_base = num("rope.freq_base", 10000.0);
+        Vp = (int) num("vocab_size", 0);
+        // (a file without the rank and the vocabulary's keys: markov_w1 [rank, its vocabulary] says them)
+        if (const lamina::TensorInfo* t = gm->find("markov_w1.weight"); t != nullptr && t->shape.size() == 2) {
+            if (s.R == 0) s.R = (int) t->shape[0];
+            if (Vp == 0) Vp = (int) t->shape[1];
+            if (s.V == 0) s.V = Vp;
+        }
+        f.numbers("dflash.target_layers", &tl);
+        f.numbers("dflash.attention.sliding_window_pattern", &pat);
+        for (const char* k : {"dflash.attention.causal", "dflash.sample_from_anchor"})
+            if (const lamina::MetaValue* v = f.get(k); v && v->u != 0) return no(std::string(k) + " set");
+        loader.reset(new Loader{*gm, {}, nullptr});
+    }
+    SparkFile L{loader.get(), mtp ? &st : nullptr};
+    if (s.R != 256 || !L.has("markov_w1.weight")) return no("no Markov head of rank 256 (the model's own DSpark has one)");
     if (s.block != kMaxT) return no("a block of " + std::to_string(s.block) + " rows, where the kernels take " + std::to_string(kMaxT));
     if (s.N != g.n_embd || s.V != g.n_vocab || Vp < s.V) return no("another model's (its rows or its vocabulary are not this model's)");
     if (s.D != 128 || s.HK <= 0 || s.H % s.HK != 0 || s.H / s.HK > ik::kQH || s.H * s.D % 256 != 0)
@@ -1141,9 +1265,6 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
         if (i > 0 && tl[i] <= tl[i - 1]) return no("states of the target out of order");
         s.taps.push_back((int) tl[i]);
     }
-    for (const char* k : {"dflash.attention.causal", "dflash.sample_from_anchor"})
-        if (const lamina::MetaValue* v = f.get(k); v && v->u != 0) return no(std::string(k) + " set");
-    Loader L{gm, {}, nullptr};
     size_t fr0 = 0, tot = 0;
     CK(cudaMemGetInfo(&fr0, &tot));
     const size_t nt = s.taps.size();
@@ -1180,20 +1301,19 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
     s.rnn_norm = vec(folded ? "markov_ctx_norm.weight" : "dspark_norm.weight", (size_t) s.N);
     s.joint_b = vec("joint_proj.bias", (size_t) 3 * s.R);
     {
-        const lamina::TensorInfo* t = L.find("joint_proj.weight");
-        if (t->shape.size() != 2 || (int64_t) t->shape[0] != 2 * s.R + 2 * s.N || (int64_t) t->shape[1] != 3 * s.R)
-            return no("a head projection of another shape");
+        const std::vector<int64_t> t = L.shape("joint_proj.weight");
+        if (t.size() != 2 || t[0] != 2 * s.R + 2 * s.N || t[1] != 3 * s.R) return no("a head projection of another shape");
         s.joint_w = L.f32("joint_proj.weight");
     }
     if (folded) {   // the head's product as the file folds it: markov_w2 [R -> V], its bias [V]
-        const lamina::TensorInfo* t = L.find("markov_w2.weight");
-        if (t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != s.V) return no("a folded head of another shape");
+        const std::vector<int64_t> t = L.shape("markov_w2.weight");
+        if (t.size() != 2 || t[0] != s.R || t[1] != s.V) return no("a folded head of another shape");
         s.w2 = L.floats("markov_w2.weight");
         s.w2_bias = L.floats("markov_w2.bias");
         if (s.w2_bias.size() != (size_t) s.V) return no("a folded head's bias of another length");
     } else {   // hidden_out [R -> N] by columns, its bias after them
-        const lamina::TensorInfo* t = L.find("dspark_hidden_out.weight");
-        if (t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != s.N) return no("a head output of another shape");
+        const std::vector<int64_t> t = L.shape("dspark_hidden_out.weight");
+        if (t.size() != 2 || t[0] != s.R || t[1] != s.N) return no("a head output of another shape");
         const std::vector<float> w = L.floats("dspark_hidden_out.weight"), b = L.floats("dspark_hidden_out.bias");
         if (b.size() != (size_t) s.N) return no("a head output's bias of another length");
         s.hidden_cols.resize((size_t) (s.R + 1) * s.N);
@@ -1203,13 +1323,9 @@ bool load_spark(const std::string& path, const Model& m, Spark& s, std::string& 
         }
     }
     {
-        const lamina::TensorInfo* t = nullptr;
-        const uint8_t* src = L.host("markov_w1.weight", &t);
-        if (t->type != 30 || t->shape.size() != 2 || (int64_t) t->shape[0] != s.R || (int64_t) t->shape[1] != Vp)
+        const std::vector<int64_t> t = L.shape("markov_w1.weight");
+        if (t.size() != 2 || t[0] != s.R || t[1] != Vp || (s.w1 = L.bf16("markov_w1.weight")) == nullptr)
             return no("a Markov table that is not [rank, vocabulary] bfloat16");
-        uint16_t* d = dalloc<uint16_t>((size_t) Vp * s.R);
-        CK(cudaMemcpy(d, src, (size_t) Vp * s.R * 2, cudaMemcpyHostToDevice));
-        s.w1 = d;
     }
     s.layers.resize((size_t) s.n_layer);
     for (int i = 0; i < s.n_layer; ++i) {
@@ -7975,7 +8091,7 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--main-cells") main_cells = std::max<int64_t>(0, std::atoll(next()));   // (tests: fewer on this card)
         else if (a == "--cell-spread") cell_spread = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
-        else if (a == "--dspark") dspark = next();   // the model's block drafter (dspark-*.gguf)
+        else if (a == "--dspark") dspark = next();   // the model's block drafter (dspark-*.gguf or mtp.safetensors)
         else if (a == "--expert-vram") expert_vram = (uint64_t) (std::max(0.0, std::atof(next())) * 1073741824.0);   // (in GiB, as the hy4 path's)
         else if (a == "--expert-cache") {   // the experts' VRAM at most: auto (what the card has), or a size (6G, 9500M)
             const std::string v = next();
@@ -8136,8 +8252,9 @@ int run_engine(int argc, char** argv, bool check_only) {
             // (a chunk of 128 rows at least, the rings and the cache's image of them, the graphs)
             const uint64_t rest = ring * (serve && copt.chain > 0 ? 2 : 1) + (prefill > 0 ? 230ull << 20 : 0) + (64ull << 20);
             const uint64_t its =
-                ec ? 0 : file + lamina::inkling2::drafter_rings_bytes(lamina::GgufModel::open(dspark).meta(), reach, kv == "q8_0") +
-                             (160ull << 20);
+                ec ? 0
+                   : lamina::inkling2::drafter_weights_bytes(dspark, file) +
+                         lamina::inkling2::drafter_file_rings_bytes(dspark, reach, kv == "q8_0") + (160ull << 20);
             room = ec || its + want + rest + *reserve <= fr;
             if (!room)
                 std::fprintf(stderr, "lamina: the drafter is left out: beside it this GPU's VRAM would hold a context under "
