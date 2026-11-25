@@ -6,7 +6,8 @@ Qwen3.6-35B-A3B and Qwen3.8-27B, and Inkling 2 Mini.
 
 ## Building
 
-From a clone of this repository, with the CUDA toolkit 13.0 or newer and, on Windows, Visual Studio 2022's C++ tools
+From a clone of this repository, with the CUDA toolkit 13.0 or newer (its compiler, runtime and headers: the build
+takes no other library of it, cuBLAS included) and, on Windows, Visual Studio 2022's C++ tools
 (its free Build Tools with the workload "Desktop development with C++" do, or MSVC without Visual Studio, below), on
 Linux GCC 11 or newer, CMake 3.22 or newer and Ninja (Ubuntu 22.04's own packages do):
 

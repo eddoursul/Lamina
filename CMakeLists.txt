@@ -62,6 +62,8 @@ endif()
 option(LAMINA_ENABLE_CUDA "Build the CUDA targets" OFF)
 option(LAMINA_BUILD_TESTS "Build the test suite" OFF)
 option(LAMINA_WERROR "Treat compiler warnings as errors" OFF)
+# (a check of the build a CUDA toolkit without cuBLAS gets, on a PC whose toolkit has it)
+option(LAMINA_CUBLAS_NAMES "ggml-cuda's headers take cuBLAS's names from src/prefill/cublas_names even where the toolkit has cuBLAS" OFF)
 
 if(LAMINA_ENABLE_CUDA)
   # nvcc: CMAKE_CUDA_COMPILER or CUDACXX, else the PATH's, CUDA_PATH's or NVIDIA's Linux install's
@@ -727,6 +729,21 @@ if(LAMINA_NATIVE_EXPERTS)
     if(MSVC)
       target_compile_options(lamina_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
       target_compile_options(lamina_mmq_fp4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+    endif()
+    # ggml-cuda's headers name a few of cuBLAS's types and functions (a handle its context could make); the engine
+    # calls none of them and links no cuBLAS.  A CUDA toolkit installed without it (NVIDIA's redistributable
+    # components: the build needs nvcc, the runtime and their headers) gets those declarations from
+    # src/prefill/cublas_names; one that has cublas_v2.h uses its own.
+    set(_lamina_cublas_h OFF)
+    foreach(_d ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+      if(EXISTS "${_d}/cublas_v2.h")
+        set(_lamina_cublas_h ON)
+      endif()
+    endforeach()
+    if(NOT _lamina_cublas_h OR LAMINA_CUBLAS_NAMES)
+      message(STATUS "Lamina: cuBLAS's names for ggml-cuda's headers from src/prefill/cublas_names")
+      target_include_directories(lamina_mmq PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/cublas_names)
+      target_include_directories(lamina_mmq_fp4 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/cublas_names)
     endif()
     target_link_libraries(lamina_mmq PUBLIC ggml-base CUDA::cudart)
     target_link_libraries(lamina_mmq_fp4 PRIVATE ggml-base)
