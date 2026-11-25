@@ -6,7 +6,7 @@
 #include "keepawake.hpp"
 #include "telemetry.hpp"
 #include "vision.hpp"
-#include "src/unicode.h"   // llama.cpp's: code point classes and lower case (the loop check's words)
+#include "unicode.hpp"     // code point classes and lower case (the loop check's words)
 
 #include <algorithm>
 #include <cmath>
@@ -278,7 +278,7 @@ double reasoning_repeat_coverage(const std::string& text) {
     std::vector<uint32_t> cps;
     for (size_t i = 0; i < text.size();) {
         size_t n = 1;
-        cps.push_back(unicode_tolower(utf8_at(text, i, &n)));
+        cps.push_back(cp_lower(utf8_at(text, i, &n)));
         i += n;
     }
     if (cps.size() >= kTailChars) {
@@ -290,9 +290,7 @@ double reasoning_repeat_coverage(const std::string& text) {
     std::vector<std::string> words;
     std::string cur;
     auto word_char = [](uint32_t c) {
-        if (c == '_') return true;
-        const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(c);
-        return (bool) f.is_letter || (bool) f.is_number;
+        return c == '_' || (cp_class(c) & (kCpLetter | kCpNumber)) != 0;
     };
     auto flush = [&] {
         if (!cur.empty()) words.push_back(std::move(cur));

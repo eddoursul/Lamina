@@ -1,7 +1,7 @@
 #include "json.hpp"
 
 #include "jinja/value.h"   // py_float_repr
-#include "src/unicode.h"   // llama.cpp's: code point classes (str.isprintable)
+#include "unicode.hpp"     // code point classes (str.isprintable)
 
 #include <charconv>
 #include <cmath>
@@ -323,8 +323,7 @@ bool after_unicode_15(uint32_t cp) {
 bool py_isprintable(uint32_t cp) {
     if (cp < 0x7F) return cp >= 0x20;
     if (after_unicode_15(cp)) return false;
-    const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(cp);
-    return !(f.is_undefined || f.is_control || f.is_separator);
+    return !(cp_class(cp) & (kCpUndefined | kCpControl | kCpSeparator));
 }
 
 uint32_t utf8_at(std::string_view s, size_t i, size_t* n) {

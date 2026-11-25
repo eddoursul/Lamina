@@ -27,9 +27,8 @@
 // sre_extra_cases is CPython 3.12's re/_casefix.py.
 #include "structured.hpp"
 
-#include "frontend.hpp"         // RequestError
-#include "src/unicode-data.h"   // llama.cpp's code point tables (Unicode 15.1)
-#include "src/unicode.h"
+#include "frontend.hpp"   // RequestError
+#include "unicode.hpp"    // code point classes and case mappings (Unicode 15.1)
 
 #include <algorithm>
 #include <charconv>
@@ -309,15 +308,13 @@ bool is_ascii_letter(uint32_t c) { return (c >= 'a' && c <= 'z') || (c >= 'A' &&
 /// str.isalpha() of one character
 bool py_alpha(uint32_t cp) {
     if (cp < 0x80) return is_ascii_letter(cp);
-    return !after_unicode_15(cp) && unicode_cpt_flags_from_cpt(cp).is_letter;
+    return !after_unicode_15(cp) && (cp_class(cp) & kCpLetter) != 0;
 }
 
 /// str.isalnum() or "_": re's \w
 bool py_word(uint32_t cp) {
     if (cp < 0x80) return is_digit(cp) || is_ascii_letter(cp) || cp == '_';
-    if (after_unicode_15(cp)) return false;
-    const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(cp);
-    return f.is_letter || f.is_number;
+    return !after_unicode_15(cp) && (cp_class(cp) & (kCpLetter | kCpNumber)) != 0;
 }
 
 /// the Nd category (str.isdecimal(), re's \d), Unicode 15.0
@@ -347,7 +344,7 @@ int py_decimal(uint32_t cp) {
 }
 
 /// sre's lower case (the simple mapping)
-uint32_t sre_lower(uint32_t cp) { return unicode_tolower(cp); }
+uint32_t sre_lower(uint32_t cp) { return cp_lower(cp); }
 
 /// sre's upper case: the simple mapping, or the first character of a multi-character one
 uint32_t sre_upper(uint32_t cp) {
@@ -367,9 +364,7 @@ uint32_t sre_upper(uint32_t cp) {
         {0xFB15, 0x544}, {0xFB16, 0x54E}, {0xFB17, 0x544}};
     auto by_first = [](const std::pair<uint32_t, uint32_t>& p, uint32_t c) { return p.first < c; };
     const auto e = std::lower_bound(std::begin(kExtended), std::end(kExtended), cp, by_first);
-    if (e != std::end(kExtended) && e->first == cp) return e->second;
-    const auto u = std::lower_bound(unicode_map_uppercase.begin(), unicode_map_uppercase.end(), cp, by_first);
-    return u != unicode_map_uppercase.end() && u->first == cp ? u->second : cp;
+    return e != std::end(kExtended) && e->first == cp ? e->second : cp_upper(cp);
 }
 
 bool sre_iscased(uint32_t cp) { return sre_lower(cp) != cp || sre_upper(cp) != cp; }
@@ -1367,7 +1362,6 @@ int flag_of(const std::u32string& t) {
     }
 }
 
-/// str.isidentifier(), with llama.cpp's letters and numbers for XID_Start and XID_Continue
 // str.isidentifier()'s characters, Python 3.12.13 (Unicode 15.0.0)
 constexpr uint32_t kXidStart[][2] = {
     {0x41, 0x5A}, {0x5F, 0x5F}, {0x61, 0x7A}, {0xAA, 0xAA}, {0xB5, 0xB5}, {0xBA, 0xBA}, {0xC0, 0xD6}, {0xD8, 0xF6},

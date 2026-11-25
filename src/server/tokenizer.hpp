@@ -1,12 +1,14 @@
-// src/server/tokenizer.hpp - the model's tokenizer, from its GGUF: byte-level BPE with the qwen35 pre-tokenizer.
+// src/server/tokenizer.hpp - the model's tokenizer, from its GGUF: byte-level BPE after the model's pre-tokenizer.
 //
-// A port of tools/lamina_tokenizer.py (checked against llama.cpp's tokenizer as its oracle): the pre-tokenizer split
-// is llama.cpp's own (unicode_regex_split), the merges are applied lowest rank first, and the literals (GGUF token
-// types 3 CONTROL and 4 USER_DEFINED) are matched on the raw text first: type 4 always, type 3 with parse_special.
-// Text positions are byte offsets into UTF-8 text.
+// A port of tools/lamina_tokenizer.py (checked against llama.cpp's tokenizer as its oracle): the pre-tokenizer splits
+// as llama.cpp's does (pretokenize.hpp), the merges are applied lowest rank first (for inkling2 a piece that is a
+// token is that token, as llama.cpp's ignore_merges has it, where the merges would build it of others), and the
+// literals (GGUF token types 3 CONTROL and 4 USER_DEFINED) are matched on the raw text first: type 4 always, type 3
+// with parse_special. Text positions are byte offsets into UTF-8 text.
 #pragma once
 
 #include "dialect.hpp"
+#include "pretokenize.hpp"
 
 #include <array>
 #include <cstdint>
@@ -80,7 +82,9 @@ private:
     std::unordered_map<uint64_t, std::pair<int32_t, int32_t>> merges_;   ///< (left, right) -> (rank, merged id)
     std::array<int32_t, 256> byte_token_{};    ///< a byte's single-symbol token
     size_t max_special_len_ = 1;
-    std::vector<std::string> regex_;           ///< the pre-tokenizer's patterns, in turn (llama.cpp's for `pre`)
+    PreTokenizer split_ = PreTokenizer::Qwen35;   ///< `pre`'s
+    /// inkling2's: each token's bytes (a view of bytes_) -> the token, which such a piece is without its merges
+    std::unordered_map<std::string_view, int32_t> whole_;
 
     mutable std::mutex cache_mu_;
     mutable std::unordered_map<std::string, std::vector<int32_t>> piece_cache_;

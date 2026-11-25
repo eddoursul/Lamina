@@ -3,7 +3,6 @@
 #include "json.hpp"
 
 #include "gguf_header.h"
-#include "src/unicode.h"   // llama.cpp's: the pre-tokenizer split (unicode_regex_split)
 
 #include <algorithm>
 #include <cstdio>
@@ -70,24 +69,6 @@ FILE* open_utf8(const std::string& path) {
 #endif
 }
 
-// the pre-tokenizers this tokenizer runs, as llama.cpp's llama-vocab.cpp spells them (its splitter has a custom
-// implementation for each)
-const char* kQwen35Regex =
-    "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s"
-    "\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
-// hy_v4 (Hy4-flash): DeepSeek-V3's three, applied in turn (LLAMA_VOCAB_PRE_TYPE_HY_V4)
-const char* const kHyV4Regex[] = {
-    "\\p{N}{1,3}",
-    "[一-龥぀-ゟ゠-ヿ]+",
-    "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+",
-};
-
-// inkling2 (Inkling 2 Mini): llama.cpp's GPT-4o expression (LLAMA_VOCAB_PRE_TYPE_GPT4O), through its general path
-const char* kGpt4oRegex =
-    "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL]"
-    "[lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'"
-    "[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
-
 constexpr size_t kHeapMin = 64;          // longer words merge through a heap (same order as the scan)
 constexpr size_t kPieceCacheMax = 200000;
 
@@ -118,14 +99,9 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
     auto t = std::make_unique<Tokenizer>();
     t->pre = str("tokenizer.ggml.pre");
     if (t->pre.empty()) t->pre = "qwen35";
-    if (t->pre == "hy_v4")
-        t->regex_.assign(std::begin(kHyV4Regex), std::end(kHyV4Regex));
-    else if (t->pre == "qwen35" || t->pre == "qwen2" || t->pre == "qwen3")
-        t->regex_ = {kQwen35Regex};
-    else if (t->pre == "inkling2")
-        t->regex_ = {kGpt4oRegex};
-    else
-        throw std::runtime_error(path + ": the pre-tokenizer '" + t->pre + "' is not one this server runs");
+    const std::optional<PreTokenizer> split = pre_tokenizer(t->pre);
+    if (!split) throw std::runtime_error(path + ": the pre-tokenizer '" + t->pre + "' is not one this server runs");
+    t->split_ = *split;
     t->chat_template = str("tokenizer.chat_template");
     t->hy4 = Hy4Tags::from_template(t->chat_template);
     if (!t->hy4) t->blocks = BlockTags::from_template(t->chat_template);
@@ -164,6 +140,8 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
 
     // each token's bytes; a literal (types 3 and 4) is its text as written
     t->bytes_.resize(n_tok);
+    // llama.cpp's ignore_merges, set for inkling2: a piece whose text in the byte alphabet is a token's is that token
+    const bool whole_pieces = t->pre == "inkling2";
     std::string raw;
     for (size_t i = 0; i < n_tok; ++i) {
         if (types[i] == 3 || types[i] == 4) {
@@ -174,11 +152,13 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
             t->max_special_len_ = std::max(t->max_special_len_, texts[i].size());
         }
         // a literal's text is in the byte alphabet as well (ASCII), so its bytes come the same way
-        if (!alphabet_to_bytes(texts[i], raw)) {
+        const bool decoded = alphabet_to_bytes(texts[i], raw);
+        if (!decoded) {
             if (types[i] == 3 || types[i] == 4) raw = texts[i];
             else raw.clear();   // not decodable: such a token decodes to nothing (none in these vocabularies)
         }
         t->bytes_[i] = raw;
+        if (whole_pieces && decoded && !raw.empty()) t->whole_.emplace(t->bytes_[i], (int32_t) i);
     }
     for (uint32_t k = 0; k < (uint32_t) t->lits_.size(); ++k)
         t->by_first_[(unsigned char) t->lits_[k].text[0]].push_back(k);
@@ -297,8 +277,11 @@ void Tokenizer::bpe(const std::string& piece, std::vector<int32_t>& out) const {
 
 void Tokenizer::encode_plain(std::string_view text, std::vector<int32_t>& out) const {
     if (text.empty()) return;
+    // an invalid UTF-8 byte is U+FFFD's bytes, as llama.cpp's tokenizer reads it
+    const std::optional<std::string> fixed = replace_invalid_utf8(text);
     // a piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
-    for (const std::string& piece : unicode_regex_split(std::string(text), regex_, false)) {
+    for (const std::string_view view : pretokenize(split_, fixed ? std::string_view(*fixed) : text)) {
+        const std::string piece(view);
         {
             std::lock_guard<std::mutex> lk(cache_mu_);
             const auto it = piece_cache_.find(piece);
@@ -308,7 +291,8 @@ void Tokenizer::encode_plain(std::string_view text, std::vector<int32_t>& out) c
             }
         }
         std::vector<int32_t> got;
-        bpe(piece, got);
+        if (const auto w = whole_.find(piece); w != whole_.end()) got.push_back(w->second);
+        else bpe(piece, got);
         out.insert(out.end(), got.begin(), got.end());
         std::lock_guard<std::mutex> lk(cache_mu_);
         if (piece_cache_.size() < kPieceCacheMax) piece_cache_.emplace(piece, std::move(got));
