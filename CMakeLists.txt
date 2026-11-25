@@ -144,6 +144,10 @@ if(LAMINA_ENABLE_CUDA)
                         "wrong for RTX 50 GPUs (sm_120): their answers are garbage. Use CUDA 13.0, 13.1 or 13.2.2 and "
                         "newer (CUDACXX or -DCMAKE_CUDA_COMPILER, in a fresh build folder), or build for older GPUs only.")
   endif()
+  # nvcc packs a fatbin's PTX alone and stores its machine code (SASS), nearly all of a program, unpacked; size packs
+  # every entry with zstd: lamina-server 170 -> 44 MB built for 86-real;120-real, the same code unpacked. The driver
+  # unpacks an entry when it loads its module, once per process: ~65 ms more per GPU had it loaded every module.
+  add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CUDA_COMPILER_ID:NVIDIA>>:-compress-mode=size>)
   # `enable_language(CUDA)` gives the .cu compile rules but NOT the imported targets, so `CUDA::cudart` has to
   # be brought in explicitly for the host-side tests that call cudaMalloc themselves.
   find_package(CUDAToolkit REQUIRED)
