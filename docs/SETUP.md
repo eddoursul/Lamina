@@ -138,15 +138,15 @@ has its platform's script beside the programs) downloads `Lamina-Qwen3.8-Flash-N
 at a pinned revision, checked by its SHA-256 and a broken download resumed. A config whose `args` name no `drafter`
 takes `Lamina-Qwen3.8-Flash-Next-MTP.gguf` from beside the model, else from beside the server, and the server's window
 says which; elsewhere the `args` name it: `"drafter": "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"` (`"mtp"`, its
-earlier name, still works: `--drafter` is every model's drafter file, `--mtp`, `--dspark` and `--dfly` its earlier
-names on every path, and a model refuses another model's drafter by name). A folder of the layer's earlier layout
-(`dense.txt`, `dense.bin`, `experts.bin`, `draft_vocab.bin`), as earlier versions downloaded it to
-`mtp/rt-distilled`, still works as `--drafter`. Flash-Next's server starts without the layer too, when none is found or the
-named file or folder is not there, and warns in its window with the script's command. It then generates a token a verify
-window, or prompt lookup's drafts (`--spec-lookup`). On the development PC, new text came at 44-61% of IQ3_S's speed
-with the layer and 50-68% of UD-Q4_K_XL's, an edit that quotes its prompt at 92-96%. The layer's file holds its draft
-vocabulary, the 40,525 tokens it proposes from; `tools/mtp_rt.py --gguf <the file> --draft-vocab <ids> --out <new file>`
-writes one over another (`data/draft_vocab_fr.bin`, `draft_vocab_cyrillic.bin`, `tools/draft_vocab.py`).
+earlier name, still works: `--drafter` is every model's drafter file, `--mtp`, `--dspark` and `--dfly` its earlier names
+on every path, and a model refuses another model's drafter by name). A folder of the layer's earlier layout
+(`dense.txt`, `dense.bin`, `experts.bin`, `draft_vocab.bin`), as earlier versions downloaded it to `mtp/rt-distilled`,
+still works as `--drafter`. Flash-Next's server starts without the layer too, when none is found or the named file or
+folder is not there, and warns in its window with the script's command. It then generates a token a verify window, or
+prompt lookup's drafts (`--spec-lookup`). On the development PC, new text came at 44-61% of IQ3_S's speed with the layer
+and 50-68% of UD-Q4_K_XL's, an edit that quotes its prompt at 92-96%. The layer's file holds its draft vocabulary, the
+40,525 tokens it proposes from; `tools/mtp_rt.py --gguf <the file> --draft-vocab <ids> --out <new file>` writes one over
+another (`data/draft_vocab_fr.bin`, `draft_vocab_cyrillic.bin`, `tools/draft_vocab.py`).
 
 Every key of a config is an option of the command line too ([PARAMETERS.md](PARAMETERS.md#how-options-are-given)), and a value given there
 takes the place of the config file's, the file's that of the preset: `lamina-server -m MODEL.gguf --port 8090
@@ -413,22 +413,22 @@ which `-m` sets; `--expert-profile-save-every MIN`, 1) keeps the ranking a run's
 `--expert-cache SIZE` (the first card's `cache=SIZE`: `6G`) caps the experts' VRAM. With experts in RAM a request
 sent again may write another text: which experts the CPU computes follows the routing counted so far.
 
-Drafts: a generated token is a window of rows through the model, the last token and up to 7 drafts after it; a
-draft stays while it is the token the request's sampler picks (the sampler runs on the GPU, a row's draw by its
-token's position), and a window's rows leave what a row at a time leaves, to the bit, up to 5 rows (from 6 its
-Q8_0 products take the int8 tensor cores and round apart: a greedy text with drafts may part from the one without at
-a near tie; `LAMINA_INK_MMA=0`: every window to the bit). The drafts are the tokens that followed the text's last 16 tokens or more where they
-occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the model's block drafter, DSpark:
+Drafts: a generated token is a window of rows through the model, the last token and up to 7 drafts after it; a draft
+stays while it is the token the request's sampler picks (the sampler runs on the GPU, a row's draw by its token's
+position), and a window's rows leave what a row at a time leaves, to the bit, up to 5 rows (from 6 its Q8_0 products
+take the int8 tensor cores and round apart: a greedy text with drafts may part from the one without at a near tie;
+`LAMINA_INK_MMA=0`: every window to the bit). The drafts are the tokens that followed the text's last 16 tokens or more
+where they occurred before (`--spec-lookup N`, prompt lookup; 0: none), else those of the model's block drafter, DSpark:
 `lamina-server` takes the smallest `dspark-*.gguf` beside the model, else in its `dspark/` folder (unsloth's
-`dspark-Inkling-2-Mini-Q8_0.gguf`; either of its layouts, mainline llama.cpp's or unsloth's first), else the checkpoint's
-own `mtp.safetensors` beside it (Thinking Machines' file, the same weights in BF16, which Lucebox's files come with:
-its matrices made Q8_0 as it loads, the GGUF's bytes), `--drafter FILE` names one (`--dspark FILE`, its earlier name), `--drafts-per-step 0` runs without (N: its drafts a
-window at most, 7). Its drafts go on while their joint probability under its head stays at `--spec-min-p` (0.5).
-It takes 0.40 GiB of VRAM for its weights and ~0.8 GiB for its context cells (made from the model's own states of
-every position; `--dspark-reach N`: those its layer without a window keeps - 131,072, 4.5 KiB each, 32,768 with
-experts in RAM and no more than a context set lower) and buffers, and is left out where the card alone holds the
-context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX 3090: 119-123 tok/s without drafts, 152
-after a short prompt, 190 thinking, 356 where the answer quotes its prompt.
+`dspark-Inkling-2-Mini-Q8_0.gguf`; either of its layouts, mainline llama.cpp's or unsloth's first), else the
+checkpoint's own `mtp.safetensors` beside it (Thinking Machines' file, the same weights in BF16, which Lucebox's files
+come with: its matrices made Q8_0 as it loads, the GGUF's bytes), `--drafter FILE` names one (`--dspark FILE`, its
+earlier name), `--drafts-per-step 0` runs without (N: its drafts a window at most, 7). Its drafts go on while their
+joint probability under its head stays at `--spec-min-p` (0.5). It takes 0.40 GiB of VRAM for its weights and ~0.8 GiB
+for its context cells (made from the model's own states of every position; `--dspark-reach N`: those its layer without a
+window keeps - 131,072, 4.5 KiB each, 32,768 with experts in RAM and no more than a context set lower) and buffers, and
+is left out where the card alone holds the context and would hold under 32,768 tokens beside it. UD-IQ4_XS on an RTX
+3090: 119-123 tok/s without drafts, 152 after a short prompt, 190 thinking, 356 where the answer quotes its prompt.
 
 A prompt is read in chunks of `--prefill N` rows (1,024; their buffers take ~0.8 GiB of VRAM; 0: 8 rows at a time
 through the generation's kernels), which grow to `--prefill-max N` rows (4,096: 2.3 GiB more, 14% faster at 21K

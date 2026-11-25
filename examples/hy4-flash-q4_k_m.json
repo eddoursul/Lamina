@@ -6,6 +6,7 @@
   ],
   "args": {
     "max-context": 524288,
+    "kv": "q8_0",
     "drafts-per-step": 4,
     "spec-min-p": 0.3
   },

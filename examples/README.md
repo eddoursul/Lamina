@@ -12,9 +12,9 @@ which takes the model file, the GPU, the draft layer, the projector and the file
 - `qwen38-27b-ud-q6_k_m.json`: Qwen3.8-27B, unsloth's UD-Q6_K_M, on the same path, its layers split over the fewest
   GPUs that hold it at the full 262,144 cells, K and V in q8_0 (~36 GB of VRAM: a 24 GB and a 16 GB GPU).
 - `hy4-flash-q4_k_m.json`: Hy4-flash, AngelSlim's Q4_K_M (both shards), on the engine's hy4 path: its dense weights
-  and 524,288 cells of K and V on the main GPU (~16 GB of VRAM; `"kv": "q8_0"` in `"args"` takes them in 4.4 GiB
-  instead of 7.5, which leaves more of the routed experts to the GPU at long contexts), the routed experts in RAM for
-  the CPU (~90 GB), the Engram table (59 GiB) read from the drive.
+  and 524,288 cells of K and V on the main GPU (~16 GB of VRAM; K and V in q8_0, `"kv": "q8_0"` in `"args"`: 4.4 GiB
+  instead of FP16's 7.5, which leaves more of the routed experts to the GPU at long contexts), the routed experts in
+  RAM for the CPU (~90 GB), the Engram table (59 GiB) read from the drive.
 
 - `inkling2-mini-ud-iq4_xs.json`: Inkling 2 Mini, unsloth's UD-IQ4_XS (the preset of the model's other quants too), on the engine's
   inkling2 path: the whole model on the main GPU (UD-IQ4_XS: ~16 GiB of VRAM at a short context, ~1 GB of RAM), the context what the VRAM left holds
@@ -118,5 +118,6 @@ prompt chunks run on both at once, so the prompts read ~11% faster than in the o
     shows, and compare whole sessions with and without the switch, several each (single runs differ by 2%).
 - **`drafter`** (Hy4-flash; `dfly`, its earlier name): Tencent's DFly2 drafter, a download of its own (the
   tencent/Hy4-flash checkpoint's last shard, `model-00148-of-00148.safetensors`, 1.7 GB, with its `config.json` beside
-  it), drafts in place of the file's MTP block, which the example drafts with: `"drafter": "<the shard>"` in the args. Here, over an agent's session
-  replayed, 2.2% less time a token and 5.2% less energy, 3.6 GiB less RAM (no MTP block), 0.8 GiB more of the main GPU.
+  it), drafts in place of the file's MTP block, which the example drafts with: `"drafter": "<the shard>"` in the
+  args. Here, over an agent's session replayed, 2.2% less time a token and 5.2% less energy, 3.6 GiB less RAM (no MTP
+  block), 0.8 GiB more of the main GPU.
