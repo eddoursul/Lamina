@@ -155,8 +155,9 @@ const std::vector<OptionHelp>& engine_options() {
          "or prompt lookup's drafts. Inkling 2: its block drafter, a dspark-*.gguf or the checkpoint's "
          "mtp.safetensors (lamina-server takes the smallest dspark-*.gguf beside the model, else in its dspark/ "
          "folder, else mtp.safetensors beside it): ~1.2 GiB of VRAM with its cells and buffers. Hy4-flash: Tencent's "
-         "DFly2 drafter (the tencent/Hy4-flash checkpoint's last shard, its config.json beside it) in place of the "
-         "file's MTP block: ~0.8 GiB of the main GPU, the block's 3.6 GiB of RAM saved. Qwen3.6 and Qwen3.8-27B: "
+         "DFly2 drafter (the tencent/Hy4-flash checkpoint's last shard, its config.json beside it; lamina-server takes "
+         "one beside the model, else in a folder inside the model's, where --drafts-per-step asks for drafts) in place "
+         "of the file's MTP block: ~0.8 GiB of the main GPU, the block's 3.6 GiB of RAM saved. Qwen3.6 and Qwen3.8-27B: "
          "none (they draft with the file's own MTP block; a file named is ignored)"},
         {"--spec", "T", C | S,
          "Flash-Next: verify windows of up to T tokens, the last one and T-1 drafts (2-8, default 4): every further "

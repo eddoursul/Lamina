@@ -18,6 +18,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <regex>
 #include <set>
 
@@ -231,6 +232,66 @@ ptrdiff_t last_drafter(json& args) {
     return (ptrdiff_t) (at.back() - 2 * (at.size() - 1));
 }
 
+/// Inkling 2's DSpark beside the model: the smallest dspark-*.gguf in its folder, else in its dspark/ folder (unsloth's
+/// layout), else the checkpoint's own mtp.safetensors beside it (the same weights in BF16; Lucebox's files carry it),
+/// made Q8_0 as the engine loads it; empty where none is
+std::filesystem::path find_dspark(const std::filesystem::path& model_dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path best;
+    std::uintmax_t best_size = 0;
+    for (const fs::path& dir : {model_dir, model_dir / "dspark"}) {
+        if (!fs::is_directory(dir, ec)) continue;
+        for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+            const std::string n = u8_str(e.path().filename());
+            if (!e.is_regular_file(ec) || !starts_with(n, "dspark-") || !ends_with(n, ".gguf")) continue;
+            const std::uintmax_t size = e.file_size(ec);
+            if (best.empty() || size < best_size) {
+                best = e.path();
+                best_size = size;
+            }
+        }
+        if (!best.empty()) return best;
+    }
+    if (const fs::path mtp = model_dir / "mtp.safetensors"; fs::is_regular_file(mtp, ec) && lamina::inkling2::mtp_file(u8_str(mtp)))
+        return mtp;
+    return {};
+}
+
+/// Hy4-flash's DFly2 in `dir` as the tencent/Hy4-flash checkpoint has it: a safetensors shard of model.dfly_layers.*
+/// (the checkpoint's last, model-00148-of-00148.safetensors) with the checkpoint's config.json beside it, which names
+/// DFly's layers (dfly_target_kv_layers); of several shards the first by name; empty where none is
+std::filesystem::path dfly_in(const std::filesystem::path& dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::ifstream in(dir / "config.json", std::ios::binary);
+    if (!in) return {};
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (text.find("\"dfly_target_kv_layers\"") == std::string::npos) return {};
+    std::vector<fs::path> shards;
+    for (const fs::directory_entry& e : fs::directory_iterator(dir, ec))   // (each shard's header alone is read)
+        if (e.is_regular_file(ec) && e.path().extension() == ".safetensors" &&
+            lamina::drafter_kind(u8_str(e.path())) == lamina::DrafterKind::DFly2)
+            shards.push_back(e.path());
+    std::sort(shards.begin(), shards.end());
+    return shards.empty() ? fs::path() : shards.front();
+}
+
+/// Hy4-flash's DFly2 beside the model, else in a folder inside the model's (the first by name that holds one; the
+/// hidden ones not looked into); empty where none is
+std::filesystem::path find_dfly(const std::filesystem::path& model_dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (fs::path p = dfly_in(model_dir); !p.empty()) return p;
+    std::vector<fs::path> dirs;
+    for (const fs::directory_entry& e : fs::directory_iterator(model_dir, ec))
+        if (e.is_directory(ec) && !starts_with(u8_str(e.path().filename()), ".")) dirs.push_back(e.path());
+    std::sort(dirs.begin(), dirs.end());
+    for (const fs::path& d : dirs)
+        if (fs::path p = dfly_in(d); !p.empty()) return p;
+    return {};
+}
+
 }  // namespace
 
 std::string resolve_draft_layer(json& cfg, const std::string& arch) {
@@ -281,46 +342,33 @@ std::string resolve_draft_layer(json& cfg, const std::string& arch) {
 }
 
 std::string resolve_drafter(json& cfg, const std::string& arch) {
-    if (lamina::model_family_from_arch(arch) != lamina::ModelFamily::Inkling2 || !jget(cfg, "args").is_array()) return "";
+    const lamina::ModelFamily family = lamina::model_family_from_arch(arch);
+    const bool inkling = family == lamina::ModelFamily::Inkling2, hy4 = family == lamina::ModelFamily::HyV4Flash;
+    if ((!inkling && !hy4) || !jget(cfg, "args").is_array()) return "";
     namespace fs = std::filesystem;
     json& args = cfg["args"];
     std::error_code ec;
-    std::string per_step;   // the last --drafts-per-step, the one the engine takes (0: no drafter)
+    std::string per_step;   // the last --drafts-per-step, the one the engine takes
     for (size_t i = 0; i + 1 < args.size(); ++i)
         if (args[i] == "--drafts-per-step") per_step = arg_str(args[i + 1]);
-    if (per_step == "0") return "";
+    // drafts asked for: Inkling 2's 7 by default, Hy4-flash's none (its preset's 4)
+    const bool drafts = per_step.empty() ? inkling : per_step != "0";
     if (const ptrdiff_t i = last_drafter(args); i >= 0) {
         const std::string flag = arg_str(args[i]), name = arg_str(args[i + 1]);
         if (fs::is_regular_file(fs::absolute(u8_path(here_path(cfg, name)), ec), ec)) return "";
-        args.erase((size_t) i);   // the engine stops at a file it cannot read
+        args.erase((size_t) i);   // the engine stops at a file that is not there (Hy4-flash's with no drafts asked too)
         args.erase((size_t) i);
-        return "[lamina] WARNING: no drafter (" + flag + " " + name + " is not there): generation runs without its drafts";
+        if (!drafts) return "";
+        return "[lamina] WARNING: no drafter (" + flag + " " + name + " is not there): " +
+               (hy4 ? "the model file's MTP block drafts instead (none with --no-mtp)" : "generation runs without its drafts");
     }
+    if (!drafts) return "";
     const fs::path model_dir = fs::absolute(u8_path(model_file(cfg)), ec).parent_path().lexically_normal();
-    fs::path best;
-    std::uintmax_t best_size = 0;
-    for (const fs::path& dir : {model_dir, model_dir / "dspark"}) {
-        if (!fs::is_directory(dir, ec)) continue;
-        for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
-            const std::string n = u8_str(e.path().filename());
-            if (!e.is_regular_file(ec) || !starts_with(n, "dspark-") || !ends_with(n, ".gguf")) continue;
-            const std::uintmax_t size = e.file_size(ec);
-            if (best.empty() || size < best_size) {
-                best = e.path();
-                best_size = size;
-            }
-        }
-        if (!best.empty()) break;
-    }
-    // else the checkpoint's own file beside the model: mtp.safetensors (the same weights in BF16; Lucebox's files carry
-    // it), made Q8_0 as the engine loads it
-    if (const fs::path mtp = model_dir / "mtp.safetensors";
-        best.empty() && fs::is_regular_file(mtp, ec) && lamina::inkling2::mtp_file(u8_str(mtp)))
-        best = mtp;
-    if (best.empty()) return "";
+    const fs::path found = inkling ? find_dspark(model_dir) : find_dfly(model_dir);
+    if (found.empty()) return "";
     args.push_back(lamina::kDrafterFlag);
-    args.push_back(u8_str(best.lexically_normal()));
-    return "[lamina] drafter: " + u8_str(best.lexically_normal());
+    args.push_back(u8_str(found.lexically_normal()));
+    return "[lamina] drafter: " + u8_str(found.lexically_normal());
 }
 
 namespace {

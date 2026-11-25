@@ -695,6 +695,26 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                     say("  RAM: the experts the GPUs cannot hold, up to " + gib((double) m.expert_bytes));
                     if (ram.too_much()) stops.push_back(ram.say("the model's experts", "a smaller quant of the model takes less"));
                 }
+                if (hy4) {   // its drafts as the start takes them: DFly2 named or found beside the model, else its MTP block
+                    json probe = c;
+                    const std::string line = resolve_drafter(probe, m.arch);
+                    const std::vector<std::string> pa = engine_args(probe);
+                    std::string per_step;
+                    for (size_t i = 0; i + 1 < pa.size(); ++i)
+                        if (pa[i] == "--drafts-per-step") per_step = pa[i + 1];
+                    const std::string dfly = drafter_arg(pa);
+                    if (!line.empty()) say("  " + (starts_with(line, "[lamina] ") ? line.substr(9) : line));
+                    if (per_step.empty() || per_step == "0")
+                        say("  drafts: none (--drafts-per-step N: up to N a window)");
+                    else if (!dfly.empty())
+                        say("  drafts: DFly2 (" + dfly + "), up to " + per_step + " a window, in place of the file's MTP "
+                            "block (its 3.6 GiB of RAM not loaded; ~0.8 GiB of the first GPU)");
+                    else if (std::find(pa.begin(), pa.end(), "--no-mtp") != pa.end())
+                        say("  drafts: none (--no-mtp, and no DFly2 beside the model)");
+                    else
+                        say("  drafts: the file's MTP block, up to " + per_step + " a window (no DFly2 beside the model: "
+                            "its shard and config.json there, or in a folder inside the model's, draft in its place)");
+                }
             }
             // pictures
             const json& v = jget(c, "vision");

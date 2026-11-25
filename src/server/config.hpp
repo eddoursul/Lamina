@@ -30,12 +30,15 @@ void lift_reasoning_effort_arg(json& cfg);
 /// the args name a file or a folder of the earlier layout that is there, or the model is another (Qwen3.6-35B-A3B and
 /// Qwen3.8-27B draft with their files' own MTP block)
 std::string resolve_draft_layer(json& cfg, const std::string& arch);
-/// Inkling 2's block drafter (`arch` "inkling2" or "inkling2_loop"), a file of its own beside the model: args that
-/// name none (--drafter FILE, or an earlier name of it, as above) and do not turn the drafts off (--drafts-per-step
-/// 0) take the smallest dspark-*.gguf in the model's folder, else in its dspark/ folder (unsloth's layout), else the
-/// checkpoint's mtp.safetensors in the model's folder (Lucebox's layout); a named file that is not there is taken out
-/// of them.  The line for the server's
-/// window: the file found, or the warning; empty where none is found or one is named.
+/// The drafter file beside the model of Inkling 2 (`arch` "inkling2" or "inkling2_loop") and of Hy4-flash
+/// ("hy_v4_flash"), for args that name none (--drafter FILE, or an earlier name of it, as above) and ask for drafts
+/// (--drafts-per-step: Inkling 2's 7 by default, Hy4-flash's none). Inkling 2: the smallest dspark-*.gguf in the
+/// model's folder, else in its dspark/ folder (unsloth's layout), else the checkpoint's mtp.safetensors in the model's
+/// folder (Lucebox's layout). Hy4-flash: DFly2, a safetensors shard of model.dfly_layers.* with the checkpoint's
+/// config.json beside it (dfly_target_kv_layers), in the model's folder, else in a folder inside it (the first by
+/// name; hidden ones not looked into), in place of the model file's MTP block. A named file that is not there is
+/// taken out of them. The line for the server's window: the file found, or the warning; empty where none is found or
+/// one is named.
 std::string resolve_drafter(json& cfg, const std::string& arch);
 /// the config's "args" as the engine's words: a list as it is, an object's flags in its order (true a switch, false
 /// its --no- form, null left out, a list the flag's values; a value that is no text as JSON writes it)

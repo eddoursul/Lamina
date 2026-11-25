@@ -118,6 +118,7 @@ prompt chunks run on both at once, so the prompts read ~11% faster than in the o
     shows, and compare whole sessions with and without the switch, several each (single runs differ by 2%).
 - **`drafter`** (Hy4-flash; `dfly`, its earlier name): Tencent's DFly2 drafter, a download of its own (the
   tencent/Hy4-flash checkpoint's last shard, `model-00148-of-00148.safetensors`, 1.7 GB, with its `config.json` beside
-  it), drafts in place of the file's MTP block, which the example drafts with: `"drafter": "<the shard>"` in the
+  it), drafts in place of the file's MTP block, which the example drafts with: put the two files beside the model,
+  or in a folder inside the model's (`dfly/`), and the server takes them; elsewhere `"drafter": "<the shard>"` in the
   args. Here, over an agent's session replayed, 2.2% less time a token and 5.2% less energy, 3.6 GiB less RAM (no MTP
   block), 0.8 GiB more of the main GPU.

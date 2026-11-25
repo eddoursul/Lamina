@@ -510,6 +510,47 @@ int main() {
         json g3 = {{"model", (fl / "m.gguf").string()}, {"args", {"--drafter", gone.string(), "--mtp", rt.string()}}};
         CHECK(lamina::resolve_draft_layer(g3, "qwen4exp").empty() &&
               (args(g3) == std::vector<std::string>{"--mtp", rt.string()}));   // (a folder of the earlier layout)
+
+        // Hy4-flash's DFly2: a shard of model.dfly_layers.* with the checkpoint's config.json beside it, found beside the
+        // model, else in a folder inside the model's (not a hidden one), where drafts are asked for (its default: none)
+        const std::string dfly_head = "{\"model.dfly_layers.0.input_layernorm.weight\":{\"dtype\":\"BF16\",\"shape\":[32],"
+                                      "\"data_offsets\":[0,64]}}";
+        const fs::path hy = dir / "hy4", hy_sub = hy / "dfly", shard = hy_sub / "model-00148-of-00148.safetensors";
+        fs::create_directories(hy_sub, ec);
+        safetensors(shard, dfly_head, 64);
+        auto hy_cfg = [&](json a) { return json{{"model", (hy / "h.gguf").string()}, {"args", std::move(a)}}; };
+        json h0 = hy_cfg({"--drafts-per-step", "4"});   // (no config.json beside the shard: not taken)
+        CHECK(lamina::resolve_drafter(h0, "hy_v4_flash").empty() && args(h0).size() == 2);
+        std::ofstream(hy_sub / "config.json") << "{\"dfly_target_kv_layers\": [25, 29, 33, 37, 41]}";
+        json h1 = hy_cfg({"--drafts-per-step", "4"});
+        CHECK(lamina::resolve_drafter(h1, "hy_v4_flash") == "[lamina] drafter: " + shard.lexically_normal().string() &&
+              (args(h1) == std::vector<std::string>{"--drafts-per-step", "4", "--drafter", shard.lexically_normal().string()}));
+        json h2 = hy_cfg(json::array());   // (no drafts asked: no drafter)
+        CHECK(lamina::resolve_drafter(h2, "hy_v4_flash").empty() && args(h2).empty());
+        json h3 = hy_cfg({"--drafts-per-step", "4", "--dfly", gone.string()});
+        CHECK(lamina::resolve_drafter(h3, "hy_v4_flash").find("is not there): the model file's MTP block drafts instead") !=
+                  std::string::npos &&
+              args(h3).size() == 2);
+        json h4 = hy_cfg({"--drafts-per-step", "0", "--dfly", gone.string()});   // (taken out, unsaid: the engine stops at it)
+        CHECK(lamina::resolve_drafter(h4, "hy_v4_flash").empty() && args(h4).size() == 2);
+        // the checkpoint's other shards and a config.json beside the model are not DFly2's; one beside the model comes first
+        safetensors(hy / "model-00001-of-00148.safetensors",
+                    "{\"model.layers.0.mlp.gate.weight\":{\"dtype\":\"BF16\",\"shape\":[32],\"data_offsets\":[0,64]}}", 64);
+        std::ofstream(hy / "config.json") << "{\"dfly_target_kv_layers\": [25]}";
+        json h5 = hy_cfg({"--drafts-per-step", "4"});
+        CHECK(lamina::resolve_drafter(h5, "hy_v4_flash") == "[lamina] drafter: " + shard.lexically_normal().string());
+        fs::copy_file(shard, hy / "model-00148-of-00148.safetensors", ec);
+        json h6 = hy_cfg({"--drafts-per-step", "4"});
+        CHECK(lamina::resolve_drafter(h6, "hy_v4_flash") ==
+              "[lamina] drafter: " + (hy / "model-00148-of-00148.safetensors").lexically_normal().string());
+        json i1 = {{"model", (hy / "i.gguf").string()}, {"args", json::array()}};   // (not Inkling 2's drafter)
+        CHECK(lamina::resolve_drafter(i1, "inkling2").empty() && args(i1).empty());
+        const fs::path hy2 = dir / "hy4-hidden", hidden = hy2 / ".cache";
+        fs::create_directories(hidden, ec);
+        safetensors(hidden / "model-00148-of-00148.safetensors", dfly_head, 64);
+        std::ofstream(hidden / "config.json") << "{\"dfly_target_kv_layers\": [25]}";
+        json h7 = {{"model", (hy2 / "h.gguf").string()}, {"args", {"--drafts-per-step", "4"}}};
+        CHECK(lamina::resolve_drafter(h7, "hy_v4_flash").empty() && args(h7).size() == 2);
     }
 
     fs::remove_all(dir, ec);
