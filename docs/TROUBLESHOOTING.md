@@ -120,7 +120,7 @@ a tier it is left out.
 another first in `"gpu"`.
 
 **"no CUDA device is visible (CUDA driver version is insufficient for CUDA runtime version)".** The NVIDIA driver is
-older than the CUDA runtime the programs come with: install a driver for CUDA 13 or newer.
+older than the CUDA runtime linked into the programs: install a driver for CUDA 13 or newer.
 
 **Linux: "version `GLIBC_2.34' not found", or "libssl.so.3: cannot open shared object file".** A release's programs
 need glibc 2.34 and OpenSSL 3, as Ubuntu 22.04, Debian 12, RHEL 9 and newer systems have them (OpenSSL 3 is the

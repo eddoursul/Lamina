@@ -1,6 +1,6 @@
 # Lamina for Windows and Linux on x64 and arm64.  The runners have no GPU: the CUDA code compiles, and the tests that
-# need no GPU run.  A v* tag publishes a release with, for each of them, the programs and the CUDA runtime as separate
-# downloads.  The steps are .github/ci.py's, which runs the same way on a PC.
+# need no GPU run.  A v* tag publishes a release with, for each of them, a download of the programs (the CUDA runtime
+# linked in).  The steps are .github/ci.py's, which runs the same way on a PC.
 name: Build
 
 on:
@@ -82,7 +82,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           NOTES: |
-            Each platform has two downloads: `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`, the server, and `cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>`, the CUDA runtime it loads (the same in every release of that CUDA version). Extract both into one folder and run `lamina-server -m MODEL.gguf` ([docs/SETUP.md](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/docs/SETUP.md#a-model-file)). It is built for RTX 30, 40 and 50 GPUs.
+            Each platform has one download, `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server, with the CUDA runtime linked in (it needs the NVIDIA driver alone, one for CUDA 13 or newer). Extract it into a folder and run `lamina-server -m MODEL.gguf` ([docs/SETUP.md](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/docs/SETUP.md#a-model-file)). It is built for RTX 30, 40 and 50 GPUs.
         run: |
           ls -l dist
           pre=; [[ "$TAG" == *-* ]] && pre=--prerelease

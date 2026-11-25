@@ -335,7 +335,7 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
             cfg[k] = m.path;
         } else if (k == "gpu" && preset_cards) {
             cfg[k] = cards;
-        } else if (k == "cwd" || k == "lib_dirs") {   // the paths are absolute; the release finds its CUDA runtime itself
+        } else if (k == "cwd" || k == "lib_dirs") {   // the paths are absolute; the release loads no library of its own
         } else if (k == "model_name") {
             cfg[k] = name;
         } else if (k == "log") {

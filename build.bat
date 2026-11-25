@@ -1,7 +1,7 @@
 @echo off
 rem Builds Lamina from this clone with a preset of CMakePresets.json: native (the default: this PC's GPUs and CPU,
 rem into build\) or portable (the releases' build for other PCs, into build-portable\). lamina-server.exe and lamina.exe
-rem run from there, with the CUDA runtime beside them.
+rem run from there (the CUDA runtime is linked in).
 rem   build.bat [native or portable] [CMake options, e.g. -DLAMINA_BUILD_TESTS=ON; quote one that holds a ;]
 rem It takes the MSVC the shell has set up (a developer prompt, or a portable MSVC's setup_x64.bat: cl.exe on the PATH,
 rem INCLUDE and LIB), else Visual Studio's C++ tools (2022, else 2019 or 2026) and, unless the PATH has others, their

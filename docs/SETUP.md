@@ -17,15 +17,15 @@ build.bat                        (Windows)
 ```
 
 They build the preset `native` of `CMakePresets.json` into `build/`: `lamina-server` (the image encoder is a part of
-it) and `lamina` (the engine alone, for tests and measurements), on Windows with the CUDA runtime's DLL beside them (on Linux they take the toolkit's), for this PC's
-CPU and its GPUs of the RTX 30 series and newer, as `nvidia-smi` names them at each build (after a card is added, build
-again). The programs run from there: `build\lamina-server -m MODEL.gguf` ([below](#a-model-file)).
-`build.bat portable` (`./build.sh portable`) builds them for other PCs into `build-portable/`, as the releases are: RTX
-30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.0, with PTX for newer ones), any x64 CPU with AVX2 or arm64 CPU
-with Armv8.2's dot product and FP16 instructions, the C++ runtime linked in. CMake options after the preset's name go
-to its configure (`build.bat native -DLAMINA_BUILD_TESTS=ON`, `--fresh` for a new start of the build folder). The
-presets work with CMake alone too: `cmake --preset native`, `cmake --build --preset native` (on Windows in a Visual
-Studio developer prompt).
+it) and `lamina` (the engine alone, for tests and measurements), the CUDA runtime linked in (they load the NVIDIA
+driver alone), for this PC's CPU and its GPUs of the RTX 30 series and newer, as `nvidia-smi` names them at each build
+(after a card is added, build again). The programs run from there: `build\lamina-server -m MODEL.gguf`
+([below](#a-model-file)). `build.bat portable` (`./build.sh portable`) builds them for other PCs into
+`build-portable/`, as the releases are: RTX 30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.0, with PTX for
+newer ones), any x64 CPU with AVX2 or arm64 CPU with Armv8.2's dot product and FP16 instructions, the C++ runtime
+linked in. CMake options after the preset's name go to its configure (`build.bat native -DLAMINA_BUILD_TESTS=ON`,
+`--fresh` for a new start of the build folder). The presets work with CMake alone too: `cmake --preset native`,
+`cmake --build --preset native` (on Windows in a Visual Studio developer prompt).
 
 - **llama.cpp**: the first configure downloads it at the commit the engine is built against, checks its SHA-256 and
   unpacks it into `third_party/llama.cpp`, without llama.cpp's web app (`tools/ui`, whose deep paths pass Windows'
@@ -62,10 +62,9 @@ build.bat
 
 The CUDA toolkit's Visual Studio integration is not needed.
 
-`cmake --install build --prefix <folder>` puts the server into a folder of its own, flat, as a release's two
-downloads extract: `lamina-server`, `download-draft-layer.bat` (`.sh` on Linux) and the licenses (the component
-`lamina`), and the CUDA runtime it loads, with NVIDIA's license (`cudart`; `--component` installs one). Installed
-on Linux, the server loads the library in its own folder.
+`cmake --install build --prefix <folder>` puts the server into a folder of its own, flat, as a release's download
+extracts: `lamina-server`, `download-draft-layer.bat` (`.sh` on Linux) and the licenses, NVIDIA's for the CUDA runtime
+in the server among them (the component `lamina`).
 
 **The image encoder** is a part of `lamina-server` (half a megabyte of it): on the CPU a graph on ggml, on a GPU the
 engine's own kernels, so a GPU it runs on is one the engine runs on (an RTX 30 or newer). A config's `vision` section
@@ -191,23 +190,16 @@ stops it before anything loads: the two would share the GPUs.
 ## Release binaries
 
 Each [release](https://github.com/eddoursul/Lamina/releases) has the programs built for Windows and Linux, on x64 and
-arm64, in two downloads a platform:
-
-- `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server with the engine and the image encoder (`lamina-server`),
-  with the licenses, and the script that downloads Flash-Next's draft layer (`download-draft-layer.bat`, `.sh` on
-  Linux);
-- `cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>`: the CUDA runtime it loads, beside it (the same in every release of
-  that CUDA version: one download serves the next releases).
-
-Both are flat: extract them into one folder, and `lamina-server -m` runs a model file from there
-([above](#a-model-file)). The server is built for RTX 30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.x, the
-GB10's among them, with PTX for newer ones), any x64 CPU with AVX2 (the AVX-512 kernels where the CPU has them) or arm64
-CPU with Armv8.2's dot product and FP16 instructions, and a driver for CUDA 13; on Linux for glibc 2.34 and OpenSSL 3,
-as Ubuntu 22.04, Debian 12, RHEL 9 (and Rocky Linux, AlmaLinux), Amazon Linux 2023, openSUSE Leap 15.6 and newer
-systems have them (the C++ runtime is linked in), and without the runtime archive it takes the CUDA 13 libraries of
-the system (`LD_LIBRARY_PATH`). Other GPUs (an A100's 8.0, a GH200's 9.0) and a native build for the PC's CPU need a
-build from the source ([above](#building)). The arm64 builds are made and their CPU tests run on each release, not yet
-run with a GPU.
+arm64, one download a platform: `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`, the server with the engine, the image
+encoder and the CUDA runtime linked in (`lamina-server`), with the licenses, and the script that downloads
+Flash-Next's draft layer (`download-draft-layer.bat`, `.sh` on Linux). It is flat: extract it into a folder, and
+`lamina-server -m` runs a model file from there ([above](#a-model-file)). The server is built for RTX 30, 40 and 50
+GPUs (compute capability 8.6, 8.9 and 12.x, the GB10's among them, with PTX for newer ones), any x64 CPU with AVX2
+(the AVX-512 kernels where the CPU has them) or arm64 CPU with Armv8.2's dot product and FP16 instructions, and a
+driver for CUDA 13; on Linux for glibc 2.34 and OpenSSL 3, as Ubuntu 22.04, Debian 12, RHEL 9 (and Rocky Linux,
+AlmaLinux), Amazon Linux 2023, openSUSE Leap 15.6 and newer systems have them (the C++ runtime is linked in too).
+Other GPUs (an A100's 8.0, a GH200's 9.0) and a native build for the PC's CPU need a build from the source
+([above](#building)). The arm64 builds are made and their CPU tests run on each release, not yet run with a GPU.
 
 The releases come from the GitHub workflow `.github/workflows/build.yml` at a `v*` tag; it also builds every push to
 `main` and every pull request, and runs the tests that need no GPU. Its steps are `.github/ci.py`'s, which runs on a PC

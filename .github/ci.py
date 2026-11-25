@@ -8,12 +8,11 @@ GPU, and the release archives from cmake --install.
     python .github/ci.py build                  build-portable/: every program and test, and the image encoder (the
                                                  portable preset: the release's GPUs, for other PCs)
     python .github/ci.py test                   the tests that need no GPU: ctest -L cpu, the tools' unit tests
-    python .github/ci.py package [--version V]  dist/lamina-V-bin-<os>-cuda-<x.y>-<cpu>.zip (.tar.gz on Linux): the
-                                                 server, the script that downloads Flash-Next's draft layer and the
-                                                 licenses (cmake --install's component lamina), and
-                                                 dist/cudart-lamina-bin-<os>-cuda-<x.y>-<cpu>.zip: the CUDA runtime
-                                                 (component cudart); both flat, for one folder. On Linux the
-                                                 server's libraries are checked first (GLIBC_MAX, SYSTEM_LIBS)
+    python .github/ci.py package [--version V]  dist/lamina-V-bin-<os>-cuda-<x.y>-<cpu>.zip (.tar.gz on Linux), flat:
+                                                 the server with the CUDA runtime linked in, the script that
+                                                 downloads Flash-Next's draft layer and the licenses, NVIDIA's among
+                                                 them (cmake --install's component lamina). On Linux the server's
+                                                 libraries are checked first (GLIBC_MAX, SYSTEM_LIBS)
 """
 from __future__ import annotations
 
@@ -46,10 +45,10 @@ COMPONENTS = ("cuda_nvcc", "cuda_crt", "libnvvm", "cuda_cudart", "cccl")
 # engine runs in its process (the engine alone, lamina, is for tests and measurements)
 EXECUTABLES = [f"lamina-server{EXE}"]
 PROGRAMS = [*EXECUTABLES, "download-draft-layer.bat" if WIN else "download-draft-layer.sh", "LICENSE",
-            "LICENSE-llama.cpp", "LICENSE-cpp-httplib", "LICENSE-jsonhpp", "LICENSE-Outfit"]
+            "LICENSE-llama.cpp", "LICENSE-cpp-httplib", "LICENSE-jsonhpp", "LICENSE-Outfit", "LICENSE-cuda"]
 # What the Linux programs may take from the system (docs/SETUP.md, Release binaries): glibc 2.34 at most (Ubuntu
-# 22.04, Debian 12, RHEL 9, Amazon Linux 2023), OpenSSL 3; the C++ runtime is linked in (the portable preset) and the CUDA runtime is the archive's,
-# beside them (RUNPATH $ORIGIN)
+# 22.04, Debian 12, RHEL 9, Amazon Linux 2023), OpenSSL 3; the C++ runtime (the portable preset) and the CUDA runtime
+# are linked in, and the driver's libcuda is loaded by name at run time
 GLIBC_MAX = (2, 34)
 SYSTEM_LIBS = {"libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0", "librt.so.1", "ld-linux-x86-64.so.2",
                "ld-linux-aarch64.so.1", "libssl.so.3", "libcrypto.so.3"}
@@ -235,9 +234,10 @@ def readelf(*args: str) -> str:
     return r.stdout
 
 
-def check_linux_floor(folder: Path, runtime: list[str]):
-    """The programs in `folder` against SYSTEM_LIBS, GLIBC_MAX and RUNPATH $ORIGIN, and the C++ runtime they link in
-    unexported (the CUDA runtime's libstdc++ would bind to it), as readelf reads them."""
+def check_linux_floor(folder: Path):
+    """The programs in `folder` against SYSTEM_LIBS and GLIBC_MAX, with no RUNPATH (nothing loaded from their folder or
+    the build machine's), and the C++ runtime they link in unexported (a system library's libstdc++ would bind to
+    it), as readelf reads them."""
     problems, libs, newest = [], set(), (0, 0)
     for name in EXECUTABLES:
         exe = str(folder / name)
@@ -254,11 +254,11 @@ def check_linux_floor(folder: Path, runtime: list[str]):
         dynamic = readelf("-d", exe)
         for lib in re.findall(r"\(NEEDED\)\s+Shared library: \[(.+?)\]", dynamic):
             libs.add(lib)
-            if lib not in SYSTEM_LIBS and lib not in runtime:
+            if lib not in SYSTEM_LIBS:
                 problems.append(f"{name} needs {lib}")
         paths = re.findall(r"\((?:RUNPATH|RPATH)\)\s+Library r(?:un)?path: \[(.*?)\]", dynamic)
-        if paths != ["$ORIGIN"]:
-            problems.append(f"{name}'s RUNPATH is {', '.join(paths) or 'not set'}, not $ORIGIN")
+        if paths:
+            problems.append(f"{name} has a RUNPATH, {', '.join(paths)}")
         lib = "?"
         for line in readelf("-V", exe).splitlines():   # the version needs: "File: libc.so.6", "Name: GLIBC_2.34"
             if m := re.search(r"File: (\S+)", line):
@@ -285,19 +285,15 @@ def package(version: str):
     name = f"{'win' if WIN else 'linux'}-cuda-{major}.{v.group(2)}-{'arm64' if ARM else 'x64'}"
     stage = BUILD / "package"
     shutil.rmtree(stage, ignore_errors=True)
-    for component in ("lamina", "cudart"):
-        run([tool("cmake"), "--install", BUILD, "--component", component, "--prefix", stage / component])
-    runtime = [f"cudart64_{major}.dll"] if WIN else [f"libcudart.so.{major}"]
-    for component, names in (("lamina", PROGRAMS), ("cudart", runtime)):
-        missing = [n for n in names if not (stage / component / n).is_file()]
-        if missing:
-            fail(f"cmake --install's component {component} lacks " + ", ".join(missing))
+    run([tool("cmake"), "--install", BUILD, "--component", "lamina", "--prefix", stage])
+    missing = [n for n in PROGRAMS if not (stage / n).is_file()]
+    if missing:
+        fail("cmake --install's component lamina lacks " + ", ".join(missing))
     if not WIN:
-        check_linux_floor(stage / "lamina", runtime)
+        check_linux_floor(stage)
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
-    write_archive(dist / f"lamina-{version}-bin-{name}", stage / "lamina")
-    write_archive(dist / f"cudart-lamina-bin-{name}", stage / "cudart")
+    write_archive(dist / f"lamina-{version}-bin-{name}", stage)
 
 
 def default_version() -> str:
