@@ -2,6 +2,7 @@
 #include "params.hpp"
 
 #include "config.hpp"
+#include "remote_model.hpp"
 #include "lamina/program/options.hpp"
 
 #include <algorithm>
@@ -22,7 +23,8 @@ const std::vector<Param> kParams = {
     {"--model", "-m", "model", K::Path, "GGUF",
      "the model's file (a split one by any shard). Without the config's \"args\" the preset for it (examples/*.json, "
      "picked by the file's header) gives them, with this PC's GPUs and the files beside the model; with them, it takes "
-     "the place of their --native"},
+     "the place of their --native. With --check also a URL: a Hugging Face repository's, a folder's or a file's in it, "
+     "or a GGUF file's (its files' headers alone are read; several models: a table)"},
     {"--mmproj", "", "vision.mmproj", K::Path, "FILE",
      "pictures: the image projector (with -m by default the mmproj*.gguf made for the model beside it)"},
     {"--no-mmproj", "", "vision", K::Off, "", "no pictures"},
@@ -267,7 +269,7 @@ json parse_value(const Param& p, const std::string& flag, const std::string& v) 
             if (py_loads(v, j) && !j.is_string()) return j;
             return v;
         }
-        case K::Path: return u8_str(std::filesystem::absolute(u8_path(v)).lexically_normal());
+        case K::Path: return is_url(v) ? v : u8_str(std::filesystem::absolute(u8_path(v)).lexically_normal());   // (-m URL: --check reads it)
         case K::Str:
         case K::Off: break;
     }

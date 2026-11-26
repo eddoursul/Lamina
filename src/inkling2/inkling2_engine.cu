@@ -20,6 +20,7 @@
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/core/model_check.hpp"
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/core/safetensors.hpp"
 #include "lamina/core/vmm.hpp"
@@ -476,33 +477,15 @@ struct Loader {
     const float* f32(const std::string& name) { return f32_dev(floats(name)); }
 };
 
-/// What the kernels take of a geometry; "" or the first limit it passes
-std::string kernel_limits(const Geometry& g) {
-    auto no = [](const std::string& what) { return "Inkling 2's path does not run " + what; };
-    if (g.head_dim != 128) return no("a head of " + std::to_string(g.head_dim) + " values (its kernels take 128)");
-    if (g.n_head / g.n_head_kv > ik::kQH) return no("more than 4 query heads a K/V head");
-    if (g.n_rel > ik::kRelMax) return no("a distance bias of more than 32 values a head");
-    if (g.n_head > ik::kRingHeads || g.n_head * g.n_rel > ik::kRingRs) return no("that many heads");
-    if (g.n_expert > ik::kExpertMax || g.top_k * kMaxT > ik::kTB) return no("that many experts a layer or a token");
-    if (g.n_pass > 1 && (g.gate_rank > ik::kRankMax || g.gate_rank % 16 != 0))
-        return no("a loop gate of that rank");
-    if ((g.n_layers + g.res_block - 1) / g.res_block > ik::kBlk) return no("more than 4 blocks of layers");
-    if (g.n_embd % 256 != 0 || g.q_width() % 256 != 0) return no("rows that are no multiple of 256 values");
-    if (g.n_embd > 4 * ik::kWide) return no("rows of more than 4,096 values");
-    if (g.rel_extent % ik::kTcCells != 0 || g.n_swa % ik::kTcCells != 0)
-        return no("a window or a table of distances that is no multiple of 32 cells");
-    return {};
-}
-
 bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err) {
     const int threads = o.threads;
     const bool file_cache = o.file_cache;
     const size_t reserve = o.reserve;
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
+    // what the file must hold for this path (lamina-server --check says the same of it)
+    if (std::string e = lamina::core::inkling2_file_problem(gm); !e.empty()) { err = e; return false; }
     if (std::string e = lamina::inkling2::read_geometry(gm.meta(), m.g); !e.empty()) { err = e; return false; }
-    if (std::string e = lamina::inkling2::check_layout(gm, m.g); !e.empty()) { err = e; return false; }
-    if (std::string e = kernel_limits(m.g); !e.empty()) { err = e; return false; }
     const Geometry& g = m.g;
     if (const lamina::MetaValue* v = gm.meta().get("tokenizer.ggml.eos_token_id"); v && v->is_num()) m.eos = (int32_t) v->u;
     if (const lamina::MetaValue* v = gm.meta().get(g.arch + ".context_length"); v && v->is_num() && v->u > 0)

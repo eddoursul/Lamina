@@ -30,7 +30,7 @@ same in short.
 | --- | --- |
 | `--config FILE` | Start from this config file. |
 | `--write-config FILE` | Write the config the command line runs (the preset's, the file's and the command line's settings in one) to FILE and stop. An earlier FILE is kept as `FILE.bak`, and its keys outside the preset stay. |
-| `--check` | Say what the PC has and, with `-m` or `--config`, what the model needs, where it would run and whether it starts (exit code 1: it would not). Nothing is loaded. |
+| `--check` | Say what the PC has and, with `-m` or `--config`, what the model needs, where it would run and whether it starts (exit code 1: it would not). Nothing is loaded. With `-m URL`, a model not downloaded yet: a Hugging Face repository's URL, a folder's or a file's in it, or a GGUF file's at any address; its files' headers alone are read, and a URL of several models gets a table of them ([SETUP.md](SETUP.md#a-model-at-a-url)). |
 | `--bench` | Measure the model through the server's own API on a port of its own: short questions, prompts of ~4K and ~16K tokens and a coding agent's session, three runs each (3-10 minutes); write a report into `bench-results/` beside the program, with personal details removed, and stop. |
 | `--bench-url URL` | The same against a Lamina server that runs; nothing is loaded. |
 | `--bench-runs N` | Runs per test (default 3). |
@@ -48,7 +48,7 @@ same in short.
 
 | Option | Key | Default | What it does |
 | --- | --- | --- | --- |
-| `-m`, `--model GGUF` | `model` | | The model's file, a split one by any shard. Without the config's `"args"`, the file's preset supplies the engine's options, and the server picks the GPUs and finds the files beside the model ([SETUP.md](SETUP.md#a-model-file)). |
+| `-m`, `--model GGUF` | `model` | | The model's file, a split one by any shard. Without the config's `"args"`, the file's preset supplies the engine's options, and the server picks the GPUs and finds the files beside the model ([SETUP.md](SETUP.md#a-model-file)). With `--check`, also a URL. |
 | `--mmproj FILE` | `vision.mmproj` | with `-m`: the `mmproj*.gguf` made for the model beside it | The image projector: pictures on ([USING.md](USING.md#pictures)). |
 | `--no-mmproj` | `vision` (`false`) | | No pictures. |
 | `--vision-gpu` | `vision.gpu` | on with `-m` | The image encoder on a GPU; `--no-vision-gpu`: on the CPU, 8-10 s for a picture of ~1,000 tokens instead of 0.3-0.6 s. |

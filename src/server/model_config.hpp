@@ -88,8 +88,19 @@ std::vector<std::string> write_config(const std::string& path, json cfg, const s
 
 /// --check: this PC (its CPU, RAM and GPUs) and, given a config (built from -m or read), its model, what the model
 /// needs and how the config runs it, all said in the window; `preset` the one -m's config came from, `model_error` why
-/// -m's model gave none.  False when the model would not start.
+/// -m's model gave none; `ready` the last line where it would start.  False when the model would not start.
 bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::string& preset = "",
-                  const std::string& model_error = "");
+                  const std::string& model_error = "", const std::string& ready = "It can start.");
+
+/// --check's lines of this PC (said): its CPU, RAM and GPUs; why no model would start on it
+std::vector<std::string> check_pc(const std::vector<GpuInfo>& gpus);
+/// What --check finds of a config's model
+struct ModelCheck {
+    std::string refused;              ///< why the engine refuses the model's file ("" where it reads it)
+    std::vector<std::string> stops;   ///< why it would not start here as the config runs it (`refused` among them)
+};
+/// --check's lines of a config's model (said): the file the engine's load reads (core::model_file_problem, with the
+/// config's engine options), what it takes of this PC, how the config runs it
+ModelCheck check_model(const json& cfg, const std::vector<GpuInfo>& gpus, const std::string& preset = "");
 
 }  // namespace lamina

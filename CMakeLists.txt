@@ -304,7 +304,7 @@ if(LAMINA_ENABLE_CUDA)
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/prompt_cache.cpp src/core/adaptive_tier.cpp src/core/second_gpu.cpp src/core/arena_place.cpp
     src/core/split_head.cpp src/core/vmm.cpp src/core/gpu_select.cpp src/core/gpu_usable.cu src/core/pack_image.cpp
-    src/core/control_vector.cpp ${CMAKE_CURRENT_BINARY_DIR}/embedded_profile.cpp)
+    src/core/control_vector.cpp src/core/model_check.cpp ${CMAKE_CURRENT_BINARY_DIR}/embedded_profile.cpp)
   # the architectures a GPU the build has no kernels for is told of (a definition's value cannot hold a ';')
   string(REPLACE ";" "," _lamina_archs "${CMAKE_CUDA_ARCHITECTURES}")
   set_source_files_properties(src/core/gpu_usable.cu PROPERTIES
@@ -957,7 +957,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_library(lamina_server_core STATIC src/server/api.cpp src/server/bench.cpp src/server/config.cpp
                 src/server/engine.cpp src/server/engine_batch.cpp src/server/http_client.cpp src/server/http_server.cpp
                 src/server/images.cpp src/server/keepawake.cpp src/server/mcp.cpp src/server/model_config.cpp
-                src/server/net.cpp src/server/params.cpp src/server/process.cpp src/server/prometheus.cpp
+                src/server/net.cpp src/server/params.cpp src/server/process.cpp src/server/prometheus.cpp src/server/remote_model.cpp
                 src/server/responses.cpp src/server/runconfig.cpp src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp
                 src/server/telemetry.cpp src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
                 ${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_BINARY_DIR}/bench_files.cpp)
@@ -988,6 +988,9 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_executable(bench_test tests/server/bench_test.cpp)
     target_link_libraries(bench_test PRIVATE lamina_server_core)
     add_test(NAME bench_test COMMAND bench_test)
+    add_executable(remote_model_test tests/server/remote_model_test.cpp)
+    target_link_libraries(remote_model_test PRIVATE lamina_server_core)
+    add_test(NAME remote_model_test COMMAND remote_model_test)
     # the releases' programs: the server, with the engine in its process (the engine alone, `lamina`, is for tests
     # and measurements and stays in the build folder)
     install(TARGETS lamina-server RUNTIME DESTINATION . COMPONENT lamina)
@@ -1020,7 +1023,7 @@ if(LAMINA_BUILD_TESTS)
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
              conversation_cache_test disk_tier_test control_vector_test deterministic_adapt_help platform_memory_test
              platform_spill_test pretokenize_parity tokenizer_test sha256_base64_test
-             ple_reader_selftest model_config_test params_test bench_test cpu_floor_test)
+             ple_reader_selftest model_config_test params_test bench_test remote_model_test cpu_floor_test)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)
     endif()

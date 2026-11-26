@@ -175,7 +175,36 @@ learned profile then go beside FILE. An earlier FILE is kept as `FILE.bak`, and 
 `--check` says what this PC has (the CPU, the RAM, the GPUs) and, with `-m` or `--config`, the model's file, the preset,
 the GPUs it runs on, the RAM its experts take, the draft layer, the pictures, the port and the engine's command line,
 then whether it would start; it loads nothing and exits with 1 when the model would not start (no usable GPU, too
-little RAM, a file the engine does not read, a missing encoder or projector).
+little RAM, a file the engine does not read, a missing encoder or projector). Whether the engine reads the file is
+decided as its load decides it, from the files' headers: the architecture and the shapes its kernels are built for,
+every tensor its path reads, each one's format (an expert format no kernel computes, a layer whose gate and up differ),
+the shards; the engine's start makes the same check first, in the same words.
+
+### A model at a URL
+
+`lamina-server --check -m URL` says the same of a model before it is downloaded: of the files at the URL only their
+headers are read (a GGUF's metadata and tensor list, a few MB a file, never its weights), laid out in a temporary folder
+as a download keeps them, and checked as a file on disk is.
+
+```
+lamina-server --check -m https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF
+lamina-server --check -m https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/main/UD-Q4_K_XL
+lamina-server --check -m https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-UD-IQ4_XS.gguf
+```
+
+- **A Hugging Face URL**: a repository's, a folder's in it (`.../tree/REVISION/FOLDER`) or a file's (`.../blob/...`,
+  `.../resolve/...`); its files are listed at the revision's commit, which the report names. A file's URL takes its
+  split model's other shards, and the files the server would find beside it: projectors, drafters, Hy4-flash's DFly2.
+- **Any other URL** is a GGUF file itself (its split model's other shards beside it by name), read from a server that
+  answers ranges, or one that does not (the reply is cut where the header ends).
+- **One model**: the report a downloaded file gets, with `<download>` for the folder the download keeps its files in,
+  and the model's URL. **Several** (a repository, a folder of quants): a table of them, each with whether the engine
+  reads it, whether it would start on this PC once downloaded, and why not; then the other GGUF files (projectors,
+  drafters, adapters). Exit code 0 when one can start.
+- **A private or gated repository** needs a token: `HF_TOKEN`, else the file `hf auth login` writes (as
+  huggingface_hub finds it). It goes to the Hub alone, not to the download host the Hub redirects to. `HF_ENDPOINT`
+  names a mirror of the Hub.
+- **Not checked from the headers**: a file's values (a weight that is not finite stops the start as it is converted).
 
 `--bench` measures the model the way it is used and writes a report to share: `lamina-server -m MODEL.gguf --bench`
 (or `--config FILE --bench`) loads it on a port of its own, sends a fixed suite through the server's API, three runs of

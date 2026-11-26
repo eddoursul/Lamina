@@ -363,9 +363,9 @@ void native_down_rows(const NativeFmt&, const uint8_t*, const void* const*, int,
 #endif
 
 namespace {
-/// A native_experts.txt read from `in` into the process-wide layout.
-bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, std::string& err) {
-    ExpertLayout L;
+/// A native_experts.txt read from `in` into `L` (the process-wide layout untouched).
+bool native_layout_parse(std::istream& in, int64_t n_layers, int64_t n_expert, ExpertLayout& L, std::string& err) {
+    L = ExpertLayout{};
     L.n_layers = n_layers;
     L.n_expert = n_expert;
 #if !defined(LAMINA_NATIVE_EXPERTS)
@@ -436,16 +436,23 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
         at += L.bytes[(size_t) l] * (uint64_t) L.n_expert;
     }
     L.total = at;
-    g_layout = L;
     return true;
 #endif
 }
 }  // namespace
 
+bool expert_layout_parse_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert, ExpertLayout& out,
+                              std::string& err) {
+    std::istringstream in(native_experts);
+    return native_layout_parse(in, n_layers, n_expert, out, err);
+}
+
 bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert,
                              std::string& err) {
-    std::istringstream in(native_experts);
-    return native_layout_load(in, n_layers, n_expert, err);
+    ExpertLayout L;
+    if (!expert_layout_parse_text(native_experts, n_layers, n_expert, L, err)) return false;
+    g_layout = std::move(L);
+    return true;
 }
 
 }  // namespace lamina::kernels::cpu

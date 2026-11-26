@@ -88,6 +88,10 @@ const ExpertLayout& expert_layout();
 /// process-wide layout.  Versions up to kExpertLayoutVersion are read; a newer one is refused.
 bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert,
                              std::string& err);
+/// The same text read into `out` alone, the process-wide layout left as it is: what a model's experts would be
+/// (core::model_file_problem's check of a file)
+bool expert_layout_parse_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert, ExpertLayout& out,
+                              std::string& err);
 /// The newest native_experts.txt this engine reads: v3, each layer's expert formats, offset and blob size.
 inline constexpr int kExpertLayoutVersion = 3;
 

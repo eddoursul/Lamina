@@ -3,6 +3,7 @@
 
 #include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/model_check.hpp"
 #include "lamina/embedded.hpp"
 #include "lamina/inkling2/geometry.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
@@ -391,10 +392,8 @@ std::vector<std::string> write_config(const std::string& path, json cfg, const s
     return kept;
 }
 
-bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::string& preset,
-                  const std::string& model_error) {
-    std::vector<std::string> stops;   // why the model would not start
-    if (!model_error.empty()) stops.push_back(model_error);
+std::vector<std::string> check_pc(const std::vector<GpuInfo>& gpus) {
+    std::vector<std::string> stops;   // why no model would start
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
     say("Lamina " LAMINA_VERSION ", lamina-server in " + self_dir());
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -421,13 +420,19 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 (g.cc != 0 && g.cc < 80 ? " (older than the RTX 30 series: the engine leaves it out)" : ""));
         if (pick_main_gpu(gpus, {}) < 0) stops.push_back("no GPU of compute capability 8.0 or newer (the RTX 30 series)");
     }
-    if (cfg != nullptr) {
-        const json& c = *cfg;
+    return stops;
+}
+
+ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus, const std::string& preset) {
+    ModelCheck out;
+    std::vector<std::string>& stops = out.stops;   // why the model would not start
+    {
         const std::string path = model_file(c);
         ModelFacts m;
         try {
             m = read_model(path);
         } catch (const std::exception& e) {
+            out.refused = e.what();
             stops.push_back(path + ": " + e.what());
         }
         if (!m.path.empty()) {
@@ -436,7 +441,18 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
                 (m.quantized_by.empty() ? "" : ", quantized by " + m.quantized_by) + ": " +
                 std::to_string(m.shards.size()) + (m.shards.size() == 1 ? " file, " : " shards, ") + gb((double) m.bytes));
             if (!preset.empty()) say("  preset: " + preset + " (examples/" + preset + ".json)");
-            if (!m.unsupported.empty()) stops.push_back(m.path + ": " + m.unsupported);
+            if (m.unsupported.empty()) {
+                // what the engine's load refuses of the file, read from its headers as it reads them: the options the
+                // start would give it, the drafter found beside the model among them
+                json probe = c;
+                (void) resolve_draft_layer(probe, m.arch);
+                (void) resolve_drafter(probe, m.arch);
+                m.unsupported = core::model_file_problem(m.path, core::file_check_options(engine_args(probe)));
+            }
+            if (!m.unsupported.empty()) {
+                out.refused = m.unsupported;
+                stops.push_back(m.path + ": " + m.unsupported);
+            }
             try {
                 (void) Tokenizer::from_gguf(m.path);
             } catch (const std::exception& e) {
@@ -747,8 +763,18 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
             say("  engine: " + line);
         }
     }
+    return out;
+}
+
+bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::string& preset,
+                  const std::string& model_error, const std::string& ready) {
+    std::vector<std::string> stops;   // why the model would not start
+    if (!model_error.empty()) stops.push_back(model_error);
+    for (std::string& s : check_pc(gpus)) stops.push_back(std::move(s));
+    if (cfg != nullptr)
+        for (std::string& s : check_model(*cfg, gpus, preset).stops) stops.push_back(std::move(s));
     if (stops.empty()) {
-        say(cfg != nullptr ? "It can start." : "This PC runs Lamina; -m MODEL.gguf or --config FILE checks a model.");
+        say(cfg != nullptr ? ready : "This PC runs Lamina; -m MODEL.gguf or --config FILE checks a model.");
         return true;
     }
     say("It would not start:");

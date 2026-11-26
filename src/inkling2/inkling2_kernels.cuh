@@ -9,6 +9,7 @@
 // lamina/inkling2/geometry.hpp.
 #pragma once
 
+#include "lamina/inkling2/kernel_sizes.hpp"
 #include "lamina/kernels/q8_1_finite.hpp"
 #include "lamina/kernels/q8_1_il16.hpp"
 #include "lamina/kernels/q8_halves.cuh"
@@ -36,10 +37,10 @@ using lamina::kernels::mma16816;
 using lamina::kernels::warp_max;
 using lamina::kernels::warp_sum;
 
-constexpr int kMaxT = 8;      // rows a forward takes at most (native_mmvq's columns)
-constexpr int kBlk = 4;       // block inputs a mix reads at most (the embedding and three blocks' outputs)
-constexpr int kTB = 256;      // threads of the row kernels
-constexpr int kWide = 1024;   // of those whose time is their threads' loop over a row: the mix, the norm, the bias
+constexpr int kMaxT = lamina::inkling2::sizes::kMaxT;   // rows a forward takes at most (native_mmvq's columns)
+constexpr int kBlk = lamina::inkling2::sizes::kBlk;     // block inputs a mix reads at most (the embedding and three blocks' outputs)
+constexpr int kTB = lamina::inkling2::sizes::kTB;       // threads of the row kernels
+constexpr int kWide = lamina::inkling2::sizes::kWide;   // of those whose time is their threads' loop over a row: the mix, the norm, the bias
 
 /// a q8_1 block as ggml has it: the scale and the values' sum as halves, 32 values
 struct Q81 {
@@ -222,7 +223,7 @@ struct CtrlIn {
     float* h;   // [n][T][R]
     int n, N, R;
 };
-constexpr int kRankMax = 64;
+constexpr int kRankMax = lamina::inkling2::sizes::kRankMax;
 /// h: a block a row, an input and RB of the R outputs (grid (R / RB, T, n)); a thread four values of each half
 template <int RB>
 __global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
@@ -541,7 +542,7 @@ __global__ void tau_kernel(const int32_t* __restrict__ pos, float* __restrict__ 
     if (t < T) tau[t] = 1.0f + alpha * logf(fmaxf(1.0f, ((float) pos[t] + 1.0f) / floor_));
 }
 
-constexpr int kRelMax = 32;   // the distance bias's values a head at most
+constexpr int kRelMax = lamina::inkling2::sizes::kRelMax;   // the distance bias's values a head at most
 
 /// r of a prompt chunk's rows, for bias_ring_kernel: the projection times the layer's scale, clipped to `clip` a
 /// head, times tau: rc [T][H][R] (raw's place too: each value is read before it is written).  A warp a row and head.
@@ -568,8 +569,8 @@ struct RingIn {
     long long first;      // the position of the cells' slot 0
     int H, R, ext;
 };
-constexpr int kRingRs = 1024;    // a row's r values, every head's
-constexpr int kRingHeads = 64;
+constexpr int kRingRs = lamina::inkling2::sizes::kRingRs;         // a row's r values, every head's
+constexpr int kRingHeads = lamina::inkling2::sizes::kRingHeads;
 template <int R4>
 __global__ void __launch_bounds__(256) bias_ring_kernel(RingIn a) {
     const int t = blockIdx.x, i = threadIdx.x;
@@ -824,7 +825,7 @@ __host__ __device__ __forceinline__ int stretches(long long cells) {
     return 96 + (int) ((cells - 36864 + 2047) / 2048);
 }
 __host__ __device__ __forceinline__ int stretch_of(long long cell) { return stretches(cell + 1) - 1; }
-constexpr int kQH = 4;      // query heads a K/V head at most
+constexpr int kQH = lamina::inkling2::sizes::kQH;   // query heads a K/V head at most
 
 /// The stretches' partial sums joined with the zero sink, times sigmoid(gate): the attention's output of T rows as
 /// floats ([T][H * D]) and as its q8_1 image.  A block a row and a query head; D threads (a warp a q8_1 block).
@@ -1022,7 +1023,7 @@ struct PlanIn {
     int T, E, top_k;
     float scale;
 };
-constexpr int kExpertMax = 256;
+constexpr int kExpertMax = lamina::inkling2::sizes::kExpertMax;
 constexpr int kTopMax = 32;
 /// An expert's score as the picks rank it (a non-finite router row picks each expert once: NaN as the least of the
 /// finite), and the mark of one picked
@@ -1543,7 +1544,7 @@ __device__ __forceinline__ uint2 q8_widen4(uint32_t w, __half2 d) {
     return make_uint2(*reinterpret_cast<const unsigned*>(&lo), *reinterpret_cast<const unsigned*>(&hi));
 }
 
-constexpr int kTcCells = 32;   // cells a tile
+constexpr int kTcCells = lamina::inkling2::sizes::kTcCells;   // cells a tile
 constexpr int kTcPad = 136;    // a row of 128 halves in shared memory (272 bytes)
 constexpr int kTcRows = 32;    // a decode forward's rows and query heads a block (attn_rows_kernel)
 constexpr int kTcPPad = 40;    // its probability row, halves (80 bytes)

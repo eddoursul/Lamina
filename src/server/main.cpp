@@ -19,6 +19,7 @@
 #include "net.hpp"
 #include "process.hpp"
 #include "prometheus.hpp"
+#include "remote_model.hpp"
 #include "runconfig.hpp"
 #include "service.hpp"
 #include "telemetry.hpp"
@@ -35,6 +36,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <optional>
 #include <thread>
 
 #ifdef _WIN32
@@ -285,6 +289,156 @@ void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string&
         }
 }
 
+/// a line on the console as say() writes it, past a SayRedirect
+void print_line(std::FILE* f, std::string_view text) {
+    std::fwrite(text.data(), 1, text.size(), f);
+    if (text.empty() || text.back() != '\n') std::fputc('\n', f);
+    std::fflush(f);
+}
+
+/// what --check -m URL read: the URL, the commit, the files and bytes, the time
+std::string remote_read(const RemoteModels& r) {
+    char secs[32];
+    std::snprintf(secs, sizeof secs, "%.1f", r.seconds);
+    char mb[32];
+    std::snprintf(mb, sizeof mb, "%.1f", (double) r.copies->bytes_read() / 1e6);
+    const size_t files = r.copies->files_read();
+    return r.listing.url + (r.listing.commit.empty() ? "" : " at commit " + r.listing.commit.substr(0, 12)) +
+           ": the headers of " + std::to_string(files) + (files == 1 ? " file, " : " files, ") + mb + " MB, read in " +
+           secs + " s";
+}
+
+/// --check -m URL where the URL holds several models: this PC, then a row of each model - whether the engine reads its
+/// files, whether it would start here once downloaded (its config built as -m builds one, with the file's and the
+/// command line's settings) - and why not.  0 when one can start.
+int check_table(const RemoteModels& r, const json& file_cfg, const json& given, const CommandLine& cl,
+                std::vector<GpuInfo>& gpus) {
+    const std::vector<std::string> pc_stops = check_pc(gpus);
+    const std::vector<const RemoteFound*> models = r.models();
+    say(remote_read(r));
+    json settings = cl.settings, file = file_cfg;   // the model each row's own
+    settings.erase("model");
+    file.erase("model");
+    const bool from_preset = !jget(file_cfg, "args").is_array();
+    struct Row {
+        std::string path;
+        size_t shards = 0;
+        uint64_t bytes = 0;
+        bool reads = false;
+        std::string here;                 // "can start", "would not start", "-"
+        std::vector<std::string> why;
+    };
+    std::vector<Row> rows;
+    size_t can = 0;
+    for (const RemoteFound* f : models) {
+        Row row;
+        row.path = f->model.path;
+        row.shards = f->model.shards.size();
+        row.bytes = f->model.bytes;
+        const std::string local = r.copies->local(f->model.path);
+        auto plain = [&](std::string why) {   // without the copy's path before it, the download's paths in it
+            if (!local.empty() && starts_with(why, local + ": ")) why = why.substr(local.size() + 2);
+            return shown_remote(r, why);
+        };
+        if (!f->error.empty() || local.empty()) {
+            row.here = "-";
+            row.why.push_back(plain(f->error.empty() ? "not read" : f->error));
+            rows.push_back(std::move(row));
+            continue;
+        }
+        json cfg = json::object();
+        std::string preset, why;
+        ModelCheck mc;
+        {
+            const SayRedirect quiet(nullptr);   // the model's lines: none, its verdict in the row
+            try {
+                if (from_preset) {
+                    ModelOptions mo;
+                    mo.model = local;
+                    const json& v = jget(given, "vision");
+                    mo.no_mmproj = v.is_boolean() && !v.get<bool>();
+                    mo.mmproj = v.is_object() ? jstr(v, "mmproj") : "";
+                    mo.written = cl.config;
+                    mo.allowed_gpus = gpu_list(given);
+                    ModelConfig built = config_from_model(mo, gpus);
+                    cfg = std::move(built.cfg);
+                    preset = built.preset;
+                    const json base = cfg;
+                    merge_settings(cfg, file);
+                    merge_settings(cfg, settings);
+                    if (!gpu_list(cfg).empty() && gpu_cards(base)) cfg["gpu"] = base["gpu"];
+                } else {
+                    merge_settings(cfg, file);
+                    merge_settings(cfg, settings);
+                    use_model(cfg, local);
+                }
+                split_joined_args(cfg);
+                lift_reasoning_effort_arg(cfg);
+                if (!cl.engine.empty()) {
+                    apply_engine_options(cfg, cl.engine);
+                    if (!engine_options_ok(cfg, cl.engine)) why = "the engine of this model does not take an option of the command line";
+                }
+                if (why.empty()) {
+                    settle_vision(cfg);
+                    std::string lend_no;
+                    settle_vision_gpu(cfg, gpus, read_model(local).arch, lend_no);
+                    mc = check_model(cfg, gpus, preset);
+                }
+            } catch (const std::exception& e) {   // (ConfigError: a model no preset is for, one the guard refuses)
+                mc.refused = e.what();
+            }
+        }
+        row.reads = mc.refused.empty();
+        if (!row.reads) {
+            row.here = "-";
+            row.why.push_back(plain(mc.refused));
+        } else {
+            if (!why.empty()) mc.stops.push_back(why);
+            const bool starts = mc.stops.empty() && pc_stops.empty();
+            row.here = starts ? "can start" : "would not start";
+            can += starts;
+            for (const std::string& s : mc.stops) row.why.push_back(plain(s));
+        }
+        rows.push_back(std::move(row));
+    }
+    // the table
+    size_t w = 5;
+    for (const Row& row : rows) w = std::max(w, row.path.size());
+    auto pad = [](std::string s, size_t n) {
+        if (s.size() < n) s.append(n - s.size(), ' ');
+        return s;
+    };
+    auto gb = [](uint64_t b) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%.1f GB", (double) b / 1e9);
+        return std::string(buf);
+    };
+    say("  " + pad("model", w) + "  shards  " + pad("size", 9) + "  Lamina  this PC");
+    for (const Row& row : rows) {
+        const std::string shards = std::to_string(row.shards);
+        say("  " + pad(row.path, w) + "  " + std::string(shards.size() < 6 ? 6 - shards.size() : 0, ' ') + shards + "  " +
+            pad(gb(row.bytes), 9) + "  " + pad(row.reads ? "yes" : "no", 6) + "  " + row.here);
+        for (const std::string& y : row.why) say("      " + y);
+    }
+    // the other GGUF files, by what they are
+    std::map<std::string, std::vector<std::string>> others;
+    for (const RemoteFound& f : r.found)
+        if (f.kind != "model") others[f.kind].push_back(f.model.path);
+    for (const auto& [kind, paths] : others) {
+        std::string list;
+        for (const std::string& p : paths) list += (list.empty() ? "" : ", ") + p;
+        say("  " + kind + (paths.size() == 1 ? ": " : "s: ") + list);
+    }
+    if (!pc_stops.empty()) {
+        say("This PC would start none of them:");
+        for (const std::string& s : pc_stops) say("  - " + s);
+    } else {
+        say(std::to_string(can) + " of the " + std::to_string(rows.size()) + " models can start once downloaded; " +
+            "lamina-server --check -m <a model's URL> says more of one.");
+    }
+    return can > 0 ? 0 : 1;
+}
+
 int run(int argc, char** argv) {
     no_throttle_self();   // #691: a minimized console window must not slow the engine down
     CommandLine cl;
@@ -368,6 +522,40 @@ int run(int argc, char** argv) {
     if (engine_kind != "lamina" && engine_kind != "mock")
         usage_error("engine (--engine): lamina or mock, not '" + engine_kind + "'");
     const bool mock = engine_kind == "mock";
+    std::vector<GpuInfo> gpus;   // nvidia-smi's: the preset's main GPU, --check's list
+    // -m URL, --check alone: the model's files' headers read into copies laid out as a download keeps them (the Hub's
+    // listing at one commit, or the file the URL names); one model is then checked as a file on disk is, its lines with
+    // the download's paths, several in a table
+    std::unique_ptr<RemoteModels> remote;
+    std::optional<SayRedirect> remote_lines;
+    if (const std::string url = jstr(given, "model"); !mock && is_url(url)) {
+        if (!cl.check)
+            usage_error("-m " + url + ": a model at a URL is checked (--check -m URL) but not run here: download its "
+                        "files, then name the first one's path");
+        gpus = nvidia_gpus();
+        say_err("[lamina] reading the GGUF files' headers at " + url);
+        try {
+            remote = std::make_unique<RemoteModels>(read_remote_models(url));
+        } catch (const std::exception& e) {
+            return check_report(nullptr, gpus, "", e.what()) ? 0 : 1;
+        }
+        const std::vector<const RemoteFound*> found = remote->models();
+        if (found.size() > 1) return check_table(*remote, file_cfg, given, cl, gpus);
+        if (found.empty()) {
+            std::string what;
+            for (const RemoteFound& f : remote->found) what += (what.empty() ? "" : ", ") + f.model.path + " (" + f.kind + ")";
+            return check_report(nullptr, gpus, "", url + ": no model among its GGUF files: " + what) ? 0 : 1;
+        }
+        const RemoteFound& one = *found.front();
+        const std::string local = remote->copies->local(one.model.path);
+        if (!one.error.empty() || local.empty())
+            return check_report(nullptr, gpus, "", one.error.empty() ? one.model.path + ": not read" : one.error) ? 0 : 1;
+        const RemoteModels& r = *remote;
+        remote_lines.emplace([&r](std::string_view text, bool err) { print_line(err ? stderr : stdout, shown_remote(r, text)); });
+        say(remote_read(r) + "; below, <download> is the folder a download of it keeps its files in");
+        for (json* j : {&given, &cl.settings, &file_cfg})
+            if (j->contains("model")) (*j)["model"] = local;
+    }
     const std::string model = jstr(given, "model");
     if (mock) {
         if (cl.check || !cl.write_config.empty() || !cl.engine.empty())
@@ -379,13 +567,12 @@ int run(int argc, char** argv) {
     }
     const bool from_preset = !mock && !model.empty() && !jget(file_cfg, "args").is_array();
     json cfg = json::object();
-    std::vector<GpuInfo> gpus;   // nvidia-smi's: the preset's main GPU, --check's list
     std::string model_arch;      // the preset's model's general.architecture
     std::string preset;          // the preset
     std::vector<std::string> preset_keys;   // its keys, which --write-config renews
     std::vector<std::string> notes;   // the preset's lines for the window: the model, the pictures, the log
     json preset_base = json::object();   // the preset's settings, under the file's (the Settings view compares)
-    if (from_preset || cl.check) gpus = nvidia_gpus();
+    if ((from_preset || cl.check) && gpus.empty()) gpus = nvidia_gpus();
     try {
         if (from_preset) {
             // a relative path of the file's starts from its cwd (the command line's are absolute already)
@@ -467,7 +654,9 @@ int run(int argc, char** argv) {
         }
         return 0;
     }
-    if (cl.check) return check_report(cl.config.empty() && model.empty() ? nullptr : &cfg, gpus, preset) ? 0 : 1;
+    if (cl.check)
+        return check_report(cl.config.empty() && model.empty() ? nullptr : &cfg, gpus, preset, "",
+                            remote ? "Once downloaded, it can start." : "It can start.") ? 0 : 1;
     // --bench: the config as the report shows it, then this run's own server: this PC only, on a port of its own (not
     // the one the user's clients use), loaded at once and kept loaded, the expert profile saved into a copy
     json bench_cfg;

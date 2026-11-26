@@ -55,6 +55,7 @@
 #include "lamina/spec/suffix_drafter.hpp"
 #include "lamina/core/control_vector.hpp"
 #include "lamina/core/native_dense.hpp"
+#include "lamina/core/model_check.hpp"
 #include "lamina/core/pack_image.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 #include "lamina/kernels/cpu/hadamard.hpp"
@@ -2096,6 +2097,17 @@ int lamina::program::run(int argc, char** argv) {
         return 2;
     }
 
+    {   // what the file must hold for this path, before anything is allocated or read (lamina-server --check says the
+        // same of it): its pack, its experts' and dense matrices' formats, its tables and the tensors the windows read
+        lamina::core::FileCheckOptions fo;
+        fo.ple_gguf = o.ple_gguf;
+        fo.hc_q8 = o.hc_q8;
+        fo.expert_exact = lamina::kernels::expert_math() == lamina::kernels::ExpertMath::Exact;
+        if (const std::string e = lamina::core::flash_file_problem(native_shards, fo); !e.empty()) {
+            std::fprintf(stderr, "lamina: %s\n", e.c_str());
+            return 1;
+        }
+    }
     std::string err;
     // The pack, computed from --native's GGUF here (core::PackImage: the index and the expert table, dense.bin's bytes
     // made as the loader reads them; nothing on disk).

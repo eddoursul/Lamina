@@ -22,6 +22,7 @@
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/family_layout.hpp"
+#include "lamina/core/model_check.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
@@ -1618,6 +1619,8 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     const auto t0 = Clock::now();
     m.file = std::make_shared<lamina::GgufModel>(lamina::GgufModel::open(path));
     const lamina::GgufModel& gm = *m.file;
+    // what the file must hold for this path, before anything is placed (lamina-server --check says the same of it)
+    if (err = lamina::core::qwen35_file_problem(gm); !err.empty()) return false;
     if (!lamina::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
     if (m.g.family != lamina::ModelFamily::Qwen35Moe && m.g.family != lamina::ModelFamily::Qwen35) {
         err = "this path runs Qwen3.6-35B-A3B (qwen35moe) and Qwen3.8-27B (qwen35) files";

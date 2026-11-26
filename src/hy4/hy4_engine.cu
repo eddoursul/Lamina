@@ -22,6 +22,7 @@
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/disk_tier.hpp"
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/core/model_check.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/hy4/engine.hpp"
 #include "lamina/hy4/geometry.hpp"
@@ -410,8 +411,12 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
           const std::vector<std::string>& profiles, std::string& err) {
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
+    {   // what the file must hold for this path, before anything is read (lamina-server --check says the same of it)
+        lamina::core::FileCheckOptions fo;
+        fo.mtp = want_mtp;
+        if (std::string e = lamina::core::hy4_file_problem(gm, fo); !e.empty()) { err = e; return false; }
+    }
     if (std::string e = lamina::hy4::read_geometry(gm.meta(), m.g); !e.empty()) { err = e; return false; }
-    if (std::string e = lamina::hy4::check_layout(gm, m.g); !e.empty()) { err = e; return false; }
     if (const lamina::MetaValue* v = gm.meta().get("tokenizer.ggml.eos_token_id"); v && v->is_num())
         m.eos = (int32_t) v->u;
     m.image_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_image\xE2\x96\x81pad");

@@ -310,13 +310,18 @@ struct TensorInfo {
     const char* type_name() const { return ggml_type_name(type); }
 };
 
+/// A header that runs past the bytes given: a truncated file, or the first bytes of one (gguf_header_length)
+struct GgufTruncated : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 // A bounds-checked cursor over the mmapped header region. Every read is checked, so a truncated or
 // corrupt file produces a precise error rather than a segfault.
 class Cursor {
 public:
     Cursor(const uint8_t* base, size_t size) : base_(base), size_(size) {}
     void need(size_t n) const {
-        if (pos_ + n > size_) throw std::runtime_error("GGUF: unexpected end of file in header");
+        if (n > size_ - pos_) throw GgufTruncated("GGUF: unexpected end of file in header");
     }
     template <class T> T read() {
         need(sizeof(T));
@@ -416,6 +421,72 @@ inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
         throw std::runtime_error("GGUF: unknown metadata value type");
     }
     return v;
+}
+
+/// A GGUF v3 header: its metadata and tensor directory, and where the directory ends (`end`: the data section
+/// starts at the next multiple of `alignment`)
+struct GgufHeader {
+    uint32_t version = 0;
+    std::map<std::string, MetaValue> meta;
+    std::vector<TensorInfo> tensors;
+    uint64_t alignment = 32;
+    uint64_t end = 0;
+};
+
+/// The header at the start of the `size` bytes at `base` (a file's, `path` in the errors).  Throws GgufTruncated where
+/// those bytes end inside it, std::runtime_error where they are no GGUF v3 header.
+inline void read_gguf_header(const uint8_t* base, uint64_t size, const std::string& path, GgufHeader& h) {
+    Cursor c(base, (size_t) size);
+    const uint32_t magic = c.read<uint32_t>();
+    if (magic != 0x46554747u) throw std::runtime_error("not a GGUF file (bad magic)");
+    h.version = c.read<uint32_t>();
+    if (h.version != 3) throw std::runtime_error("GGUF v" + std::to_string(h.version) + ", this reader handles v3");
+    const uint64_t n_tensors = c.read<uint64_t>();
+    const uint64_t n_kv = c.read<uint64_t>();
+
+    for (uint64_t i = 0; i < n_kv; ++i) {
+        std::string key = c.str();
+        MetaType t = (MetaType) c.read<uint32_t>();
+        h.meta.emplace(std::move(key), read_value(c, t));
+    }
+    // (a count no file could hold is refused before a reservation for it)
+    if (n_tensors > size / 24) throw GgufTruncated("GGUF: unexpected end of file in header");
+    h.tensors.reserve((size_t) n_tensors);
+    // GGUF has no index to arbitrate between two tensors of one name: find() is first-match, so a
+    // duplicate would silently win by position.  Refuse the file at open instead, naming both.
+    std::set<std::string> names;
+    for (uint64_t i = 0; i < n_tensors; ++i) {
+        TensorInfo t;
+        t.name = c.str();
+        if (!names.insert(t.name).second) throw std::runtime_error("GGUF: duplicate tensor name '" + t.name + "' in " + path);
+        const uint32_t nd = c.read<uint32_t>();
+        if (nd == 0 || nd > 4) throw std::runtime_error("GGUF: bad n_dims for " + t.name);
+        t.shape.resize(nd);
+        for (uint32_t d = 0; d < nd; ++d) t.shape[d] = c.read<uint64_t>();
+        t.type = c.read<uint32_t>();
+        t.offset = c.read<uint64_t>();
+        h.tensors.push_back(std::move(t));
+    }
+    h.alignment = 32;
+    if (const auto a = h.meta.find("general.alignment"); a != h.meta.end()) {   // as llama.cpp's gguf takes it: a uint32 power of two
+        if (a->second.type != MetaType::U32 || a->second.u == 0 || (a->second.u & (a->second.u - 1)) != 0)
+            throw std::runtime_error("GGUF: general.alignment is not a power-of-two uint32 in " + path);
+        h.alignment = a->second.u;
+    }
+    h.end = c.pos();
+}
+
+/// How many bytes the GGUF header at the start of the `n` bytes at `p` takes (its metadata and tensor directory), or 0
+/// while those bytes end inside it: how much of a file to fetch before its header can be read.  Throws
+/// std::runtime_error where they are no GGUF v3 header.
+inline uint64_t gguf_header_length(const uint8_t* p, uint64_t n) {
+    GgufHeader h;
+    try {
+        read_gguf_header(p, n, "", h);
+    } catch (const GgufTruncated&) {
+        return 0;
+    }
+    return h.end;
 }
 
 class GgufFile {
@@ -559,51 +630,19 @@ private:
     }
 
     void parse() {
-        Cursor c(base_, size_);
-        const uint32_t magic = c.read<uint32_t>();
-        if (magic != 0x46554747u) throw std::runtime_error("not a GGUF file (bad magic)");
-        version_ = c.read<uint32_t>();
-        if (version_ != 3)
-            throw std::runtime_error("GGUF v" + std::to_string(version_) + ", this reader handles v3");
-        const uint64_t n_tensors = c.read<uint64_t>();
-        const uint64_t n_kv = c.read<uint64_t>();
-
-        for (uint64_t i = 0; i < n_kv; ++i) {
-            std::string key = c.str();
-            MetaType t = (MetaType)c.read<uint32_t>();
-            meta_.emplace(std::move(key), read_value(c, t));
-        }
-        tensors_.reserve((size_t)n_tensors);
-        // GGUF has no index to arbitrate between two tensors of one name: find() is first-match, so a
-        // duplicate would silently win by position.  Refuse the file at open instead, naming both.
-        std::set<std::string> names;
-        for (uint64_t i = 0; i < n_tensors; ++i) {
-            TensorInfo t;
-            t.name = c.str();
-            if (!names.insert(t.name).second)
-                throw std::runtime_error("GGUF: duplicate tensor name '" + t.name + "' in " + path_);
-            const uint32_t nd = c.read<uint32_t>();
-            if (nd == 0 || nd > 4) throw std::runtime_error("GGUF: bad n_dims for " + t.name);
-            t.shape.resize(nd);
-            for (uint32_t d = 0; d < nd; ++d) t.shape[d] = c.read<uint64_t>();
-            t.type = c.read<uint32_t>();
-            t.offset = c.read<uint64_t>();
-            tensors_.push_back(std::move(t));
-        }
-        uint64_t align = 32;
-        if (const MetaValue* a = get("general.alignment")) {   // as llama.cpp's gguf takes it: a uint32 power of two
-            if (a->type != MetaType::U32 || a->u == 0 || (a->u & (a->u - 1)) != 0)
-                throw std::runtime_error("GGUF: general.alignment is not a power-of-two uint32 in " + path_);
-            align = a->u;
-        }
-        alignment_ = align;
-        data_start_ = (c.pos() + align - 1) / align * align;
+        GgufHeader h;
+        read_gguf_header(base_, size_, path_, h);
+        version_ = h.version;
+        meta_ = std::move(h.meta);
+        tensors_ = std::move(h.tensors);
+        alignment_ = h.alignment;
+        data_start_ = (h.end + alignment_ - 1) / alignment_ * alignment_;
         if (data_start_ > size_) {
             // A file with tensors needs its data section.  One without (a split model's metadata-only first
             // shard) may end at its header, before the aligned start - unsloth's UD-Q5_K_XL and Dynamic 3.1
             // UD-Q4_K_XL shard 1 end 6 bytes short, and llama.cpp's gguf-py reads them.  Nothing is read there; the
             // clamp keeps `file_size() - data_start()` (the payload checks downstream) at 0 instead of wrapping.
-            if (n_tensors != 0) throw std::runtime_error("GGUF: data section starts past EOF");
+            if (!tensors_.empty()) throw std::runtime_error("GGUF: data section starts past EOF");
             data_start_ = size_;
         }
     }

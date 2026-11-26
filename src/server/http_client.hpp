@@ -28,11 +28,13 @@ struct HttpError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-/// One request; redirects are followed. `timeout_s` bounds the connection and each read. `max_bytes` > 0: an
-/// HttpError once the body is larger. `on_data` takes the body as it arrives (returning false stops reading) instead
-/// of collecting it. A reply of any status is returned (an HTTP error status is not an exception here).
+/// One request; redirects are followed (with the same headers, to any host), but with `follow` false: a redirect is
+/// then the reply, its "location" header where it points. `timeout_s` bounds the connection and each read.
+/// `max_bytes` > 0: an HttpError once the body is larger. `on_data` takes the body as it arrives (returning false
+/// stops reading: the connection is closed, the rest not read) instead of collecting it. A reply of any status is
+/// returned (an HTTP error status is not an exception here).
 HttpReply http_request(const std::string& method, const std::string& url, const HttpHeaders& headers,
                        const std::string& body, double timeout_s, size_t max_bytes = 0,
-                       const std::function<bool(std::string_view)>& on_data = nullptr);
+                       const std::function<bool(std::string_view)>& on_data = nullptr, bool follow = true);
 
 }  // namespace lamina

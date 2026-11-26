@@ -54,7 +54,7 @@ struct Handle {
 
 HttpReply http_request(const std::string& method, const std::string& url, const HttpHeaders& headers,
                        const std::string& body, double timeout_s, size_t max_bytes,
-                       const std::function<bool(std::string_view)>& on_data) {
+                       const std::function<bool(std::string_view)>& on_data, bool follow) {
     const std::wstring wurl = widen(url);
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof uc;
@@ -75,6 +75,10 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
                                       WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                       uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0));
     if (request.h == nullptr) throw HttpError(win_error("the request could not be made"));
+    if (!follow) {
+        DWORD off = WINHTTP_DISABLE_REDIRECTS;
+        WinHttpSetOption(request.h, WINHTTP_OPTION_DISABLE_FEATURE, &off, sizeof off);
+    }
     std::wstring head;
     for (const auto& [k, v] : headers) head += widen(k + ": " + v + "\r\n");
     if (!WinHttpSendRequest(request.h, head.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : head.c_str(), (DWORD) -1L,
@@ -132,7 +136,7 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
 
 HttpReply http_request(const std::string& method, const std::string& url, const HttpHeaders& headers,
                        const std::string& body, double timeout_s, size_t max_bytes,
-                       const std::function<bool(std::string_view)>& on_data) {
+                       const std::function<bool(std::string_view)>& on_data, bool follow) {
     const size_t scheme_end = url.find("://");
     if (scheme_end == std::string::npos) throw HttpError("not an http(s) URL: " + url);
     const size_t path_at = url.find('/', scheme_end + 3);
@@ -144,7 +148,7 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
     cli.set_connection_timeout(sec, usec);
     cli.set_read_timeout(sec, usec);
     cli.set_write_timeout(sec, usec);
-    cli.set_follow_location(true);
+    cli.set_follow_location(follow);
     httplib::Headers h;
     for (const auto& [k, v] : headers) h.emplace(k, v);
     HttpReply reply;
@@ -158,6 +162,7 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
     req.response_handler = [&](const httplib::Response& r) {   // the status and headers, before the body
         reply.status = r.status;
         reply.reason = r.reason;
+        reply.headers.clear();   // (a redirect's reply, where one came before it, is not this one's)
         for (const auto& [k, v] : r.headers) reply.headers.emplace_back(lower(k), v);
         return true;
     };
