@@ -6,6 +6,7 @@
 // the Hub's host alone, one read for files of one id, a file's data not read.  (CPU only.)
 #include <httplib.h>
 
+#include "json.hpp"
 #include "remote_model.hpp"
 
 #include "../core/gguf_fixture.hpp"
@@ -442,7 +443,7 @@ void test_hub(const fs::path& dir) {
 }  // namespace
 
 int main() {
-    const fs::path dir = fs::temp_directory_path() / ("remote_model_test_" + std::to_string(std::rand()));
+    const fs::path dir = fs::temp_directory_path() / ("remote_model_test_" + lamina::random_hex(8));   // (a run's own)
     fs::create_directories(dir);
     // (each part's name first: a part that ends the process is named by the last line)
     std::fprintf(stderr, "urls\n");
