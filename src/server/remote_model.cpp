@@ -3,6 +3,7 @@
 
 #include "http_client.hpp"
 #include "json.hpp"
+#include "model_config.hpp"
 #include "process.hpp"
 
 #include "lamina/artifact/draft_layer.hpp"
@@ -662,6 +663,24 @@ void RemoteCopies::fetch(const std::vector<std::string>& paths) {
     }
 }
 
+bool RemoteCopies::alias(const std::string& as, const std::string& from) {
+    const RemoteFile* f = listing_.find(from);
+    if (f == nullptr) return false;
+    Read r;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        const auto it = by_id_.find(f->id);
+        if (it == by_id_.end() || !it->second.error.empty()) return false;
+        r = it->second;
+    }
+    try {
+        write_copy(as, r);
+    } catch (const RemoteError&) {
+        return false;
+    }
+    return true;
+}
+
 std::string RemoteCopies::local(const std::string& path) const {
     std::lock_guard<std::mutex> lk(mu_);
     const auto it = local_.find(path);
@@ -751,23 +770,22 @@ std::vector<const RemoteFound*> RemoteModels::models() const {
 
 namespace {
 
-/// what a GGUF file is, by its header: a model, or a file a model is run with
-std::string gguf_kind(const std::string& local, std::string& error) {
+/// what a GGUF file is, by its header: a model, or a file a model is run with (a drafter: `found`'s what and read)
+std::string gguf_kind(const std::string& local, RemoteFound& found) {
     try {
-        const GgufFile g(local);
-        const MetaValue* arch = g.get("general.architecture");
-        const MetaValue* type = g.get("general.type");
-        if (arch != nullptr && arch->s == "clip") return "image projector";
-        const DrafterKind k = drafter_kind(local);
-        if (k == DrafterKind::DraftLayer || k == DrafterKind::DSpark) return "drafter";
-        if (type != nullptr && type->s == "adapter") return "LoRA adapter";
-        if (type != nullptr && type->s == "imatrix") return "importance matrix";
-        if (arch == nullptr) return "other";
-        return "model";
+        const GgufFile g(local);   // (one the reader refuses: a model's row says why)
+        (void) g;
     } catch (const std::exception& e) {
-        error = e.what();
+        found.error = e.what();
         return "model";
     }
+    const GgufRole role = gguf_role(local);
+    if (role.kind.empty()) return "model";
+    found.what = role.what;
+    found.use = role.use;
+    found.problem = role.problem;
+    found.read = role.problem.empty();
+    return role.kind;
 }
 
 std::string slurp(const std::string& path) {
@@ -807,9 +825,54 @@ RemoteModels read_remote_models(const std::string& url) {
             f.kind = "model";
             f.error = m.path + ": " + e;
         } else {
-            f.kind = gguf_kind(r.copies->local(m.path), f.error);
+            f.kind = gguf_kind(r.copies->local(m.path), f);
         }
         r.found.push_back(std::move(f));
+    }
+    // A split model's shard the listing holds under another name - one table shard for several builds (DeepSeek
+    // V4.1's Engram) - by its split keys: its number and count, the model's tensor count, no architecture of its own.
+    // Its copy goes under the shard's own name, as a download renames it.
+    for (RemoteFound& f : r.found) {
+        while (f.kind == "model" && f.error.empty() && !f.model.missing.empty() && f.model.missing != f.model.path) {
+            uint64_t total = 0;
+            try {
+                const GgufFile first(r.copies->local(f.model.path));
+                const MetaValue* t = first.get("split.tensors.count");
+                total = t != nullptr && t->is_num() ? t->u : 0;
+            } catch (const std::exception&) {
+                break;
+            }
+            int no = 0, count = 0;
+            size_t at = 0;
+            if (total == 0 || !split_name(name_of(f.model.missing), no, count, at)) break;
+            const RemoteFound* match = nullptr;
+            for (const RemoteFound& o : r.found) {
+                const std::string local = o.kind == "model" || o.model.shards.size() != 1 ? "" : r.copies->local(o.model.path);
+                if (local.empty()) continue;
+                try {
+                    const GgufFile g(local);
+                    const MetaValue *sno = g.get("split.no"), *scount = g.get("split.count"), *stc = g.get("split.tensors.count");
+                    if (sno != nullptr && scount != nullptr && stc != nullptr && g.get("general.architecture") == nullptr &&
+                        sno->u + 1 == (uint64_t) no && scount->u == (uint64_t) count && stc->u == total)
+                        match = &o;
+                } catch (const std::exception&) {
+                }
+                if (match != nullptr) break;
+            }
+            if (match == nullptr || !r.copies->alias(f.model.missing, match->model.path)) break;
+            const std::string shard = "shard " + std::to_string(no) + " of " + std::to_string(count);
+            f.notes.push_back("its " + shard + " is " + match->model.path + " (its split keys): a download keeps it under the "
+                              "shard's name");
+            if (const RemoteFile* src = r.listing.find(match->model.path)) f.model.bytes += src->size;
+            for (RemoteFound& o : r.found)
+                if (&o == match) o.notes.push_back(shard + " of " + f.model.path);
+            f.model.missing.clear();
+            for (const std::string& s : f.model.shards)
+                if (r.listing.find(s) == nullptr && r.copies->local(s).empty()) {
+                    f.model.missing = s;
+                    break;
+                }
+        }
     }
     // each model's other shards and the files beside it (a folder's config.json first: DFly2's shards are named by it)
     std::vector<std::string> more, configs;

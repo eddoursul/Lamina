@@ -5,7 +5,8 @@
 //   * geometry_from_gguf reads Qwen3.6-35B-A3B's real metadata values (hidden 2048, 40 + 1 MTP layers, 32 GDN V
 //     heads, conv 8192, no hyper-connections, no indexer) and Flash-Next's as exactly the compiled defaults;
 //   * the layout tables, on tiny files of either family: a complete file passes, a wrong shape, a missing tensor
-//     and (qwen35moe) a tensor the table does not name are refused, naming the tensor.
+//     and (qwen35moe) a tensor the table does not name are refused, naming the tensor; a qwen35moe file without
+//     nextn_predict_layers (converted without its MTP block) is its trunk alone.
 //
 // `model_family_test --real SHARD`: the same view of a real model (headers only): family, geometry, the kernels'
 // verdict and the layout check over every shard.
@@ -55,6 +56,8 @@ const Dims kFlashNext = {48, 2560, 24, 2, 256, 512, 10, 640, 640, 4, 128, 16, 48
 // tiny models of each family for the layout checks (every tensor F32, a few KB)
 const Dims kTiny36 = {5, 64, 2, 1, 16, 4, 2, 32, 32, 4, 8, 2, 4, 32, 4, 1, 0, 0, 0, 0};
 const Dims kTinyFlash = {8, 64, 2, 1, 16, 4, 2, 32, 32, 4, 8, 2, 4, 32, 4, 0, 2, 8, 2, 8};
+// a `nextn` the metadata does not carry (qwen35moe: no nextn_predict_layers key)
+const uint64_t kNoKey = ~0ull;
 
 std::vector<Kv> metadata(const char* arch, const Dims& d, uint64_t vocab) {
     const std::string p = std::string(arch) + ".";
@@ -76,7 +79,7 @@ std::vector<Kv> metadata(const char* arch, const Dims& d, uint64_t vocab) {
                           fixture::u32(p + "ssm.inner_size", d.inner),
                           fixture::u32(p + "full_attention_interval", d.interval)};
     if (std::string(arch) == "qwen35moe") {
-        kv.push_back(fixture::u32(p + "nextn_predict_layers", d.nextn));
+        if (d.nextn != kNoKey) kv.push_back(fixture::u32(p + "nextn_predict_layers", d.nextn));
     } else {
         kv.push_back(fixture::u32(p + "hyper_connection.count", d.hc));
         kv.push_back(fixture::u32(p + "hyper_connection.low_rank", d.hc_lr));
@@ -276,6 +279,16 @@ int main(int argc, char** argv) {
                 if (it->name == "blk.4.nextn.eh_proj.weight") { ts.erase(it); break; }
         });
         check(e == "missing blk.4.nextn.eh_proj.weight", "a missing MTP tensor is refused");
+        Dims bare = kTiny36;   // converted without its MTP block: no nextn_predict_layers, block_count the trunk's
+        bare.block_count = 4;
+        bare.nextn = kNoKey;
+        const std::string eb = layout_error(d.path, "qwen35moe", bare, 16, nullptr);
+        lamina::core::ModelGeometry gb;
+        int64_t kb = 0;
+        std::string errb;
+        check(eb.empty() && geometry_of(d.path / "meta.gguf", gb, kb, errb) && gb.n_mtp_layers == 0 && gb.n_layers == 4,
+              "a qwen35moe file without nextn_predict_layers is its trunk alone, no MTP block" +
+                  (eb.empty() ? std::string() : ": " + eb));
         e = layout_error(d.path, "qwen35moe", kTiny36, 16, [](std::vector<Tensor>& ts) {
             ts.push_back({"blk.0.hc_attn_norm.weight", {64}, F32, 99});
         });

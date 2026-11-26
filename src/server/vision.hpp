@@ -102,6 +102,10 @@ std::string projector_type(const std::string& mmproj);
 /// the types the encoder reads: qwen3vl_merger (Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B), hy_v4_flash and
 /// inkling2v (Inkling 2 Mini)
 bool projector_type_read(const std::string& type);
+/// why the image encoder would refuse the projector file, from its header as its load reads it (vision::Projector's
+/// open: its type, its tower's shape, tensors the encoder does not read); "" where it reads it, or in a build without
+/// the encoder
+std::string projector_refusal(const std::string& mmproj);
 /// a path to another computer (\\host\share, //host/share, \\?\UNC\..., \??\UNC\...): Windows would sign in to it
 bool network_path(const std::string& path);
 /// #874: where one request's combined image-embeddings file goes: on Linux /dev/shm when it has room (the engine

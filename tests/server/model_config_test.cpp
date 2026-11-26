@@ -7,6 +7,7 @@
 #include "model_config.hpp"
 #include "process.hpp"
 #include "runconfig.hpp"
+#include "vision.hpp"
 
 #include "../core/gguf_fixture.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -35,22 +36,37 @@ static int fails = 0;
 
 namespace {
 
-/// a GGUF v3 header without tensors: string, bool and uint32 keys
+/// a GGUF v3 header without tensors: string, bool, uint32, float and float-array keys
 struct Header {
     std::vector<std::pair<std::string, std::string>> strs;
     std::vector<std::pair<std::string, bool>> bools;
     std::vector<std::pair<std::string, uint32_t>> u32s;
+    std::vector<std::pair<std::string, float>> f32s;
+    std::vector<std::pair<std::string, std::vector<float>>> f32_arrays;
     void write(const fs::path& path, size_t pad_to = 0) const {
         std::string b = "GGUF";
         auto u32 = [&](uint32_t v) { b.append((const char*) &v, 4); };
         auto u64 = [&](uint64_t v) { b.append((const char*) &v, 8); };
+        auto f32 = [&](float v) { b.append((const char*) &v, 4); };
         auto str = [&](const std::string& s) {
             u64(s.size());
             b += s;
         };
         u32(3);
         u64(0);
-        u64(strs.size() + bools.size() + u32s.size());
+        u64(strs.size() + bools.size() + u32s.size() + f32s.size() + f32_arrays.size());
+        for (const auto& [k, v] : f32s) {
+            str(k);
+            u32(6);
+            f32(v);
+        }
+        for (const auto& [k, v] : f32_arrays) {
+            str(k);
+            u32(9);
+            u32(6);
+            u64(v.size());
+            for (const float x : v) f32(x);
+        }
         for (const auto& [k, v] : strs) {
             str(k);
             u32(8);
@@ -71,11 +87,17 @@ struct Header {
     }
 };
 
+/// a projector's header as the image encoder reads one (vision::Projector's open: its tower's keys), made for a model
+/// `dim` wide
 void projector(const fs::path& path, uint32_t dim, size_t size = 0, const char* type = "qwen3vl_merger") {
     Header h;
     h.strs = {{"general.architecture", "clip"}, {"clip.projector_type", type}};
-    h.bools = {{"clip.has_vision_encoder", true}};
-    h.u32s = {{"clip.vision.projection_dim", dim}};
+    h.bools = {{"clip.has_vision_encoder", true}, {"clip.use_gelu", true}};
+    h.u32s = {{"clip.vision.projection_dim", dim},   {"clip.vision.embedding_length", 1152},
+              {"clip.vision.attention.head_count", 16}, {"clip.vision.block_count", 2},
+              {"clip.vision.patch_size", 16},           {"clip.vision.spatial_merge_size", 2}};
+    h.f32s = {{"clip.vision.attention.layer_norm_epsilon", 1e-6f}};
+    h.f32_arrays = {{"clip.vision.image_mean", {0.5f, 0.5f, 0.5f}}, {"clip.vision.image_std", {0.5f, 0.5f, 0.5f}}};
     h.write(path, size);
 }
 
@@ -205,6 +227,21 @@ int main() {
     projector(dir / "vision.gguf", 2560);   // not named as a projector: not looked at
     projector(dir / "mmproj-other-type.gguf", 2560, 1024, "llava_mlp");   // a type the encoder does not read
     std::ofstream(dir / "mmproj-broken.gguf") << "not a GGUF";
+    {   // a tower the image encoder does not read, by its own header check (vision::Projector's open), where it is built
+        projector(dir / "mmproj-no-gelu.gguf", 2560, 512);
+        Header h;
+        h.strs = {{"general.architecture", "clip"}, {"clip.projector_type", "qwen3vl_merger"}};
+        h.bools = {{"clip.has_vision_encoder", true}, {"clip.use_gelu", false}};
+        h.u32s = {{"clip.vision.projection_dim", 2560}, {"clip.vision.embedding_length", 1152},
+                  {"clip.vision.attention.head_count", 16}, {"clip.vision.block_count", 2}, {"clip.vision.patch_size", 16}};
+        h.f32s = {{"clip.vision.attention.layer_norm_epsilon", 1e-6f}};
+        h.f32_arrays = {{"clip.vision.image_mean", {0.5f, 0.5f, 0.5f}}, {"clip.vision.image_std", {0.5f, 0.5f, 0.5f}}};
+        h.write(dir / "mmproj-no-gelu.gguf", 512);
+        const std::string refused = lamina::projector_problem(lamina::u8_str(dir / "mmproj-no-gelu.gguf"), m);
+        CHECK(lamina::vision_built() ? refused.find("GELU") != std::string::npos : refused.empty());
+        int64_t width = 0;
+        CHECK(lamina::projector_check(lamina::u8_str(dir / "MMPROJ-other.gguf"), &width).empty() && width == 2048);
+    }
     CHECK(lamina::projector_problem(lamina::u8_str(dir / "mmproj-Q8_0.gguf"), m).empty());
     CHECK(!lamina::projector_problem(lamina::u8_str(dir / "MMPROJ-other.gguf"), m).empty());
     CHECK(lamina::projector_problem(lamina::u8_str(dir / "mmproj-other-type.gguf"), m).find("llava_mlp") != std::string::npos);

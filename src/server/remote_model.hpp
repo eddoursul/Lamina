@@ -87,6 +87,9 @@ public:
 
     /// reads those of `paths` (the listing's) not read yet, several at once; one that cannot be read keeps its error
     void fetch(const std::vector<std::string>& paths);
+    /// a copy of `from` (read) under the path `as`, which the listing lacks: a split model's shard the listing holds
+    /// under another name, as a download would rename it; false where `from` has no copy
+    bool alias(const std::string& as, const std::string& from);
     /// the copy of `path` ("" where it has none: not read, or it failed)
     std::string local(const std::string& path) const;
     /// why `path` could not be read ("" where it was, or it was not tried)
@@ -138,8 +141,13 @@ std::vector<std::string> files_beside(const RemoteListing& listing, const std::s
 /// each model its other shards and the files the server reads beside it read too
 struct RemoteFound {
     RemoteModel model;
-    std::string kind;    ///< "model", "image projector", "drafter", "LoRA adapter", "importance matrix", "other"
-    std::string error;   ///< why its files could not be read (a model's: a shard missing or refused)
+    std::string kind;      ///< "model", or a GgufRole's: "projector", "drafter", "LoRA", "control vector", "engram", ...
+    std::string what;      ///< what it is (GgufRole's)
+    std::string use;       ///< how Lamina reads it, where it does
+    std::string problem;   ///< why Lamina does not read it ("" where it does)
+    bool read = false;     ///< Lamina reads it (a projector's and a LoRA's model aside)
+    std::vector<std::string> notes;   ///< a split model's shard found under another name, and the like
+    std::string error;     ///< why its files could not be read (a model's: a shard missing or refused)
 };
 struct RemoteModels {
     RemoteListing listing;

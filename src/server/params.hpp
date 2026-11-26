@@ -46,6 +46,7 @@ struct CommandLine {
     std::string config;                  ///< --config
     std::string write_config;            ///< --write-config
     bool check = false, help = false, version = false;   ///< --check, -h / --help, -v / --version
+    bool verbose = false;                ///< --verbose: --check's table with what each file is and why not
     // --bench (src/server/bench.hpp): the suite against this server, or a running one (--bench-url)
     bool bench = false;
     std::string bench_url;               ///< --bench-url

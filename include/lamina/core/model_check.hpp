@@ -11,6 +11,7 @@
 #include <vector>
 
 namespace lamina {
+class GgufFile;
 class GgufModel;
 }
 
@@ -40,5 +41,17 @@ std::string qwen35_file_problem(const GgufModel& m);
 std::string hy4_file_problem(const GgufModel& m, const FileCheckOptions& o);
 /// Inkling 2's (inkling2, inkling2_loop)
 std::string inkling2_file_problem(const GgufModel& m, const FileCheckOptions& o = {});
+
+/// Why the Qwen3.6 / Qwen3.8-27B path refuses the LoRA adapter whose GGUF is `adapter` for the model `model` (its
+/// load calls this first, its words): the adapter's own rules (general.type adapter, adapter.type lora, no aLoRA,
+/// lora_a / lora_b pairs that pair, F32, F16, BF16 or Q8_0) and, with a model, its architecture and each pair's
+/// target (a product the path computes, of the pair's widths, inputs a multiple of 8, a rank up to 512).  No model: an
+/// architecture of the families that take adapters (qwen35moe, qwen35).  "" where it takes it.
+std::string lora_file_problem(const GgufFile& adapter, const GgufModel* model = nullptr);
+
+/// Why Qwen3.8-Flash-Next's path refuses the file at `path` as its PLE table (--ple-gguf, or the model's shard that
+/// holds it): its per_layer_token_embd.weight of 160-value rows in IQ4_NL, Q5_1, Q8_0 or BF16 filling its span
+/// (PleTable::open, nothing of the table read); "" where it takes it
+std::string ple_table_problem(const std::string& path);
 
 }  // namespace lamina::core

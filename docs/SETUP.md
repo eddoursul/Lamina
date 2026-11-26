@@ -198,9 +198,17 @@ lamina-server --check -m https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob
 - **Any other URL** is a GGUF file itself (its split model's other shards beside it by name), read from a server that
   answers ranges, or one that does not (the reply is cut where the header ends).
 - **One model**: the report a downloaded file gets, with `<download>` for the folder the download keeps its files in,
-  and the model's URL. **Several** (a repository, a folder of quants): a table of them, each with whether the engine
-  reads it, whether it would start on this PC once downloaded, and why not; then the other GGUF files (projectors,
-  drafters, adapters). Exit code 0 when one can start.
+  and the model's URL. **Several**, or one beside files its report does not take up: a table of the GGUF files, a row
+  each by path: what it is, its architecture, its shards and size, whether Lamina reads it and whether a model would
+  start on this PC once downloaded. A file is a model; a drafter (one of Lamina's, or another engine's: EAGLE-3,
+  DFlash, DFly, a model's MTP head); an image projector; a LoRA adapter (`--lora`, on Qwen3.6-35B-A3B and
+  Qwen3.8-27B, checked against a model of its architecture in the table); a control vector (`--control-vector`, on
+  Qwen3.8-Flash-Next); an Engram table (a model's per-layer token embeddings alone: Qwen3.8-Flash-Next's PLE table,
+  `--ple-gguf`); an importance matrix, a split model's later shard, or a GGUF of no architecture. `--verbose` says
+  under each row what the file is and why Lamina does not read it or how it does (a projector: which model it is made
+  for, whether it lies beside one). A split model's shard kept under another name (one table for several quants) is
+  found by its split keys and read as the shard. A URL of no model exits with 0 when Lamina reads one of its files,
+  of models when one can start.
 - **A private or gated repository** needs a token: `HF_TOKEN`, else the file `hf auth login` writes (as
   huggingface_hub finds it). It goes to the Hub alone, not to the download host the Hub redirects to. `HF_ENDPOINT`
   names a mirror of the Hub.
@@ -357,7 +365,8 @@ warning; a drafter file, `--drafter FILE`, is ignored: these models draft with t
 `--spec-min-p P` ends a step's drafts before one whose joint probability with the drafts before it, under the draft
 head, is below P; `--draft-vocab N` lets the draft head score only the first N token ids (a draft outside them is a
 rejected draft, nothing else). The 27B's example takes 7, 0.3 and 65,536: up to 8 tokens a step on text that repeats
-its prompt, fewer where the drafts are unsure.
+its prompt, fewer where the drafts are unsure. A file without the block (a model converted without it, as a merged
+fine-tune often is: no `nextn_predict_layers` in its header) runs too, a token a step; `--check` says which.
 
 With more cards than one in `"gpu"` (named as above, or `auto` after the first: every other GPU in CUDA's order; the
 examples have the main GPU, then `auto`) the path splits the layers over the fewest of those GPUs, in order, that hold

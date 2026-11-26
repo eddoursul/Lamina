@@ -352,6 +352,10 @@ CommandLine parse_command_line(int argc, char** argv) {
             cl.check = true;
             continue;
         }
+        if (o == "--verbose") {
+            cl.verbose = true;
+            continue;
+        }
         static const char* const bench_flags[] = {"--bench",       "--bench-url",   "--bench-runs", "--bench-clients",
                                                   "--bench-long",  "--bench-think", "--bench-out",  "--bench-compare"};
         if (std::find(std::begin(bench_flags), std::end(bench_flags), o) != std::end(bench_flags)) {
@@ -481,6 +485,8 @@ std::string params_help() {
                                      "kept as FILE.bak, and its keys outside the preset stay"},
              {"--check", "say what this PC has and, for the model, what it needs, how it would run and whether it "
                          "starts (exit code 1: it would not); nothing is loaded"},
+             {"--verbose", "with --check of a URL that holds several files: what each one is and why it cannot start "
+                           "or is not read, under its row"},
              {"--bench", "measure the model the way it is used: load it, send a fixed suite through this server's own "
                          "API on a port of its own (short questions, 4K and 16K prompts, a coding agent's session; 3-10 "
                          "minutes), write a report to share into bench-results beside the program, and stop"},

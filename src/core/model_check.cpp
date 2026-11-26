@@ -22,7 +22,9 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -211,12 +213,8 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
                 }
         // the PLE table (PleTable::open: its shape, its row format, its span in the file) and the PLE's weights
         {
-            K::PleTable table;
-            K::PleIoOptions io;
-            io.mode = K::PleIo::Mmap;   // (the header's checks alone: nothing of the table is read)
-            const std::string ple = o.ple_gguf.empty() ? K::ple_table_shard(shards) : o.ple_gguf;
-            if (!table.open(ple, err, io)) return err;
-            table.close();
+            if (std::string e = ple_table_problem(o.ple_gguf.empty() ? K::ple_table_shard(shards) : o.ple_gguf); !e.empty())
+                return e;
             for (const char* n : {"blk.1.ple_key.weight", "blk.1.ple_value.weight", "blk.1.ple_norm_key.weight",
                                   "blk.1.ple_norm_query.weight", "blk.1.ple_norm_conv.weight", "blk.1.ple_conv1d.weight"})
                 if (m.find(n) == nullptr)
@@ -523,6 +521,102 @@ std::string inkling2_file_problem(const GgufModel& m, const FileCheckOptions& o)
         if (pad < 0)
             return "the model's chat template names no token for a picture's rows, so --vision has no cells to fill";
     }
+    return {};
+}
+
+std::string lora_file_problem(const GgufFile& f, const GgufModel* m) {
+    auto str = [&](const char* k) -> std::string {
+        const MetaValue* v = f.get(k);
+        return v != nullptr && v->type == MetaType::STRING ? v->s : "";
+    };
+    // the adapter's own (q36_engine.cu's lora_read)
+    if (str("general.type") != "adapter")
+        return "general.type is '" + str("general.type") + "', not 'adapter' (a LoRA adapter's GGUF)";
+    if (str("adapter.type") != "lora") return "adapter.type is '" + str("adapter.type") + "', not 'lora'";
+    const std::string arch = str("general.architecture");
+    ModelGeometry g;
+    if (m != nullptr) {
+        int64_t top_k = 0;
+        std::string err;
+        if (!geometry_from_gguf(m->meta(), g, top_k, err)) return "the model: " + err;
+        if (arch != model_family_arch(g.family)) return "an adapter of " + arch + ", the model is " + model_family_arch(g.family);
+    } else if (const ModelFamily fam = model_family_from_arch(arch); fam != ModelFamily::Qwen35 && fam != ModelFamily::Qwen35Moe) {
+        return "an adapter of " + (arch.empty() ? std::string("no architecture") : arch) +
+               ": Lamina takes LoRA adapters on Qwen3.6-35B-A3B and Qwen3.8-27B (qwen35moe, qwen35)";
+    }
+    if (f.get("adapter.alora.invocation_tokens") != nullptr) return "an activated LoRA (aLoRA), which this path does not run";
+    struct Pair {
+        const TensorInfo *a = nullptr, *b = nullptr;
+    };
+    std::map<std::string, Pair> pairs;
+    for (const TensorInfo& t : f.tensors()) {
+        const std::string& n = t.name;
+        auto ends = [&](const char* s) {
+            const size_t k = std::char_traits<char>::length(s);
+            return n.size() > k && n.compare(n.size() - k, k, s) == 0;
+        };
+        if (ends(".lora_a") || ends(".lora_b")) (ends(".lora_a") ? pairs[n.substr(0, n.size() - 7)].a : pairs[n.substr(0, n.size() - 7)].b) = &t;
+        else if (!ends("_norm.weight")) return "the tensor " + n + " has an unexpected suffix";
+    }
+    for (const auto& [name, p] : pairs) {
+        if (p.a == nullptr || p.b == nullptr) return "the pair of " + name + " lacks its " + (p.a ? "lora_b" : "lora_a");
+        if (p.a->shape.size() != 2 || p.b->shape.size() != 2 || p.a->shape[1] != p.b->shape[0] || p.a->shape[1] == 0)
+            return name + ": lora_a and lora_b do not pair (an adapter of llama.cpp's old finetune example?)";
+        for (const TensorInfo* t : {p.a, p.b})
+            if (t->type != 0 && t->type != 1 && t->type != 8 && t->type != 30)
+                return t->name + " is " + t->type_name() + ": F32, F16, BF16 or Q8_0 pairs only";
+    }
+    if (pairs.empty()) return "no LoRA pairs";
+    if (m == nullptr) return {};
+    // each pair's product in the model (lora_target, load_loras): a matrix the path computes, of the pair's widths
+    for (const auto& [name, p] : pairs) {
+        int64_t n_in = 0, n_out = 0;
+        std::string why;
+        const int64_t l = name.rfind("blk.", 0) == 0 ? std::strtoll(name.c_str() + 4, nullptr, 10) : -1;
+        const size_t dot = name.find('.', 4);
+        const std::string s = dot == std::string::npos ? std::string() : name.substr(dot + 1);
+        static const std::set<std::string> mats = {
+            "attn_qkv.weight", "attn_gate.weight", "ssm_out.weight", "attn_q.weight", "attn_k.weight",
+            "attn_v.weight", "attn_output.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+            "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"};
+        const TensorInfo* t = m->find(name);
+        auto take = [&] {
+            if (t == nullptr || t->shape.size() < 2) {
+                why = "the model has no such tensor";
+                return;
+            }
+            n_in = (int64_t) t->shape[0];
+            n_out = (int64_t) t->shape[1];
+        };
+        if (name == "output.weight") take();
+        else if (name == "token_embd.weight") why = "this path takes no pair for the embedding";
+        else if (l < 0 || l > g.n_layers || (l == g.n_layers && g.n_mtp_layers == 0) || dot == std::string::npos)
+            why = "the model has no such tensor";
+        else if (mats.count(s) != 0 || (s == "nextn.eh_proj.weight" && l == g.n_layers)) take();
+        else if ((s == "ssm_alpha.weight" || s == "ssm_beta.weight") && t != nullptr && l < g.n_layers && !is_qsa_layer(g, l)) {
+            n_in = g.n_embd;
+            n_out = g.ssm_v_heads;
+        } else if (s.find("_exps.") != std::string::npos) why = "this path takes no pair for the routed experts";
+        else if (s.rfind("ffn_gate_inp", 0) == 0) why = "this path takes no pair for the router or the shared expert's gate";
+        else why = "the model has no such tensor";
+        if (!why.empty()) return name + ": " + why;
+        const int64_t rank = (int64_t) p.a->shape[1], padded = (rank + 7) / 8 * 8;
+        if ((int64_t) p.a->shape[0] != n_in || (int64_t) p.b->shape[1] != n_out)
+            return name + " is " + std::to_string(n_in) + " x " + std::to_string(n_out) + " in the model, its pair " +
+                   std::to_string(p.a->shape[0]) + " x " + std::to_string(p.b->shape[1]) + " (an adapter of another model?)";
+        if (n_in % 8 != 0 || padded > 512)
+            return name + ": rank " + std::to_string(rank) + " over " + std::to_string(n_in) +
+                   " inputs (ranks up to 512, inputs a multiple of 8)";
+    }
+    return {};
+}
+
+std::string ple_table_problem(const std::string& path) {
+    K::PleTable table;
+    K::PleIoOptions io;
+    io.mode = K::PleIo::Mmap;   // (the header's checks alone: nothing of the table is read)
+    std::string err;
+    if (!table.open(path, err, io)) return err;
     return {};
 }
 

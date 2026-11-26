@@ -59,13 +59,18 @@ all fit in VRAM: more GPUs (cards in `"gpu"`) or a shorter context avoid it.
 beside it: other programs hold the rest, or the model leaves little. Windows pages them out to disk while the model
 runs, and Linux may end the engine. Close other programs, or use a smaller quant.
 
-**"...: not a model Lamina runs (its architecture '...'; ...)".** `-m` names a GGUF that is no model of these families:
-an image projector (`mmproj-*.gguf`), the draft layer, another model. Name the model's file, a split one's first shard
-or any other.
+**"...: not a model Lamina runs: its architecture is ...", or "...: a drafter, not a model: ..." (a LoRA adapter, a
+control vector, an Engram table ...).** `-m` names a GGUF that is no model of these families: an image projector
+(`mmproj-*.gguf`), a drafter (the draft layer, DSpark, another engine's MTP head or drafter), a file a model is run
+with (a LoRA adapter: `--lora`; a control vector: `--control-vector`; Qwen3.8-Flash-Next's PLE table: `--ple-gguf`),
+another model. Name the model's file, a split one's first shard or any other; the message says whether Lamina reads
+the file beside a model, and how.
 
-**"--mmproj ...: the projector of a model N wide, and this one is M", or "... not an image projector".** The file
-`--mmproj` names belongs to another model, or is no projector: name the one of the model's repository, or leave
-`--mmproj` out and the server takes the one beside the model.
+**"--mmproj ...: the projector of a model N wide, and this one is M", "... not an image projector", or "its type is
+...".** The file `--mmproj` names belongs to another model, is no projector, or is a projector of a type or a tower the
+image encoder does not read: name the one of the model's repository, or leave `--mmproj` out and the server takes the
+one beside the model. `--check` says why a projector beside the model is not taken (`pictures: off (...)`), and
+`--check -m URL` which of a repository's projectors the encoder reads.
 
 **"unknown argument: ..." and "the engine of this model does not take an option of the command line (above)".** An
 option on `lamina-server`'s command line that is not the server's goes to the engine, whose parser refused it: a typo,

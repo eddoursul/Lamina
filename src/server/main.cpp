@@ -25,7 +25,9 @@
 #include "telemetry.hpp"
 #include "vision.hpp"
 
+#include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/artifact/model_family.hpp"
+#include "lamina/core/model_check.hpp"
 #include "lamina/program/engine.hpp"
 
 #include <atomic>
@@ -39,7 +41,9 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <thread>
+#include <tuple>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -247,8 +251,9 @@ std::string no_lending(const json& cfg, const std::string& arch, std::vector<Gpu
 /// card's UUID (the encoder finds its card among this process's CUDA devices, whose order is another).  With
 /// "lend", a section that names no card gets the engine's main GPU, where every engine lends; for one that names its
 /// card `lend_no` is why the engine cannot lend there (no_lending; "": it can), and the encoder then keeps its VRAM
-/// on that card.
-void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string& arch, std::string& lend_no) {
+/// on that card.  `tell`: the card picked said (not where --check's pictures line names it).
+void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string& arch, std::string& lend_no,
+                       bool tell = true) {
     lend_no.clear();
     // "gpu" naming a card (a name, a UUID's start, a PCI bus id, a number): the encoder on it, by its UUID
     if (const json& g = jget(jget(cfg, "vision"), "gpu"); g.is_string() && !strip(g.get<std::string>()).empty()) {
@@ -283,9 +288,10 @@ void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string&
     for (const GpuInfo& g : gpus)
         if (g.index == pick) {
             cfg["vision"]["cuda_device"] = g.uuid;
-            say("[lamina] the image encoder on GPU " + std::to_string(g.index) + ", " + g.name +
-                (lend ? ", the engine's main one, which lends it VRAM for a picture" : "") +
-                " (--vision-cuda-device names another)");
+            if (tell)
+                say("[lamina] the image encoder on GPU " + std::to_string(g.index) + ", " + g.name +
+                    (lend ? ", the engine's main one, which lends it VRAM for a picture" : "") +
+                    " (--vision-cuda-device names another)");
         }
 }
 
@@ -313,7 +319,7 @@ std::string remote_read(const RemoteModels& r) {
 /// command line's settings) - and why not.  0 when one can start.
 int check_table(const RemoteModels& r, const json& file_cfg, const json& given, const CommandLine& cl,
                 std::vector<GpuInfo>& gpus) {
-    const std::vector<std::string> pc_stops = check_pc(gpus);
+    const std::vector<std::string> pc_stops = check_pc(gpus, false);   // (said in the verdict alone)
     const std::vector<const RemoteFound*> models = r.models();
     say(remote_read(r));
     json settings = cl.settings, file = file_cfg;   // the model each row's own
@@ -321,36 +327,55 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
     file.erase("model");
     const bool from_preset = !jget(file_cfg, "args").is_array();
     struct Row {
-        std::string path;
+        std::string path, kind, arch;     // the file (a split model's first shard), what it is, its architecture
         size_t shards = 0;
         uint64_t bytes = 0;
-        bool reads = false;
-        std::string here;                 // "can start", "would not start", "-"
-        std::vector<std::string> why;
+        std::string reads = "-";          // "yes", "no": the engine, the drafter's path or the image encoder reads it
+        std::string here = "-";           // a model's: "can start", "would not start"
+        std::vector<std::string> why;     // said with --verbose
+    };
+    // a file's general.architecture, from its copy
+    auto arch_of = [&](const std::string& local) -> std::string {
+        try {
+            const GgufFile g(local);
+            const MetaValue* a = g.get("general.architecture");
+            return a != nullptr && a->type == MetaType::STRING && !a->s.empty() ? a->s : "-";
+        } catch (const std::exception&) {
+            return "-";
+        }
     };
     std::vector<Row> rows;
-    size_t can = 0;
+    size_t can = 0, models_n = 0;
+    std::set<int64_t> widths;        // the models' that the engine reads
+    std::set<std::string> folders;   // their folders
+    std::vector<std::tuple<std::string, std::string, std::string>> read_models;   // their architectures, copies, paths
     for (const RemoteFound* f : models) {
         Row row;
         row.path = f->model.path;
+        row.kind = "model";
         row.shards = f->model.shards.size();
         row.bytes = f->model.bytes;
+        ++models_n;
         const std::string local = r.copies->local(f->model.path);
+        row.arch = local.empty() ? "-" : arch_of(local);
         auto plain = [&](std::string why) {   // without the copy's path before it, the download's paths in it
             if (!local.empty() && starts_with(why, local + ": ")) why = why.substr(local.size() + 2);
             return shown_remote(r, why);
         };
         if (!f->error.empty() || local.empty()) {
-            row.here = "-";
+            row.reads = "no";
             row.why.push_back(plain(f->error.empty() ? "not read" : f->error));
             rows.push_back(std::move(row));
             continue;
         }
         json cfg = json::object();
-        std::string preset, why;
+        std::string why;
         ModelCheck mc;
         {
-            const SayRedirect quiet(nullptr);   // the model's lines: none, its verdict in the row
+            // the model's lines: none, its verdict in the row (an error's line, a usage error's before it exits, said)
+            const SayRedirect quiet([](std::string_view text, bool err) {
+                if (err) print_line(stderr, text);
+            });
             try {
                 if (from_preset) {
                     ModelOptions mo;
@@ -362,7 +387,6 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
                     mo.allowed_gpus = gpu_list(given);
                     ModelConfig built = config_from_model(mo, gpus);
                     cfg = std::move(built.cfg);
-                    preset = built.preset;
                     const json base = cfg;
                     merge_settings(cfg, file);
                     merge_settings(cfg, settings);
@@ -381,16 +405,26 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
                 if (why.empty()) {
                     settle_vision(cfg);
                     std::string lend_no;
-                    settle_vision_gpu(cfg, gpus, read_model(local).arch, lend_no);
-                    mc = check_model(cfg, gpus, preset);
+                    settle_vision_gpu(cfg, gpus, read_model(local).arch, lend_no, false);
+                    mc = check_model(cfg, gpus);
                 }
             } catch (const std::exception& e) {   // (ConfigError: a model no preset is for, one the guard refuses)
                 mc.refused = e.what();
             }
         }
-        row.reads = mc.refused.empty();
-        if (!row.reads) {
-            row.here = "-";
+        const bool reads = mc.refused.empty();
+        row.reads = reads ? "yes" : "no";
+        if (reads) {   // (its width and folder: which projectors are made for it, and beside it; its LoRAs)
+            try {
+                widths.insert(read_model(local).n_embd);
+            } catch (const std::exception&) {
+            }
+            read_models.emplace_back(row.arch, local, f->model.path);
+            folders.insert(f->model.path.rfind('/') == std::string::npos ? std::string()
+                                                                         : f->model.path.substr(0, f->model.path.rfind('/')));
+        }
+        for (const std::string& n : f->notes) row.why.push_back(n);
+        if (!reads) {
             row.why.push_back(plain(mc.refused));
         } else {
             if (!why.empty()) mc.stops.push_back(why);
@@ -401,40 +435,114 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
         }
         rows.push_back(std::move(row));
     }
-    // the table
-    size_t w = 5;
-    for (const Row& row : rows) w = std::max(w, row.path.size());
+    // the other GGUF files beside them in the table: drafters, projectors, adapters, control vectors, Engram tables ...
+    // (what each is, how Lamina reads it or why not: --verbose)
+    for (const RemoteFound& f : r.found) {
+        if (f.kind == "model") continue;
+        Row row;
+        row.path = f.model.path;
+        row.kind = f.kind;
+        row.shards = f.model.shards.size();
+        row.bytes = f.model.bytes;
+        const std::string local = r.copies->local(f.model.path);
+        row.arch = local.empty() ? "-" : arch_of(local);
+        std::string what = f.what, problem = f.problem, use = f.use;
+        if (f.kind == "drafter") {   // (its architecture is the row's own column: "DFly drafter")
+            if (const std::string tail = ", architecture " + row.arch; ends_with(what, tail)) {
+                what.resize(what.size() - tail.size());
+                if (what.find("drafter") == std::string::npos) what += " drafter";
+            }
+        } else if (f.kind == "projector") {   // the image encoder's verdict, and the models it is made for
+            int64_t width = 0;
+            problem = local.empty() ? (f.error.empty() ? "not read" : f.error) : projector_check(local, &width);
+            if (problem.empty()) {
+                const std::string folder = f.model.path.rfind('/') == std::string::npos
+                                               ? std::string() : f.model.path.substr(0, f.model.path.rfind('/'));
+                std::string list;   // the models' widths
+                for (const int64_t each : widths) list += (list.empty() ? "" : ", ") + std::to_string(each);
+                what = widths.empty()              ? "made for a model " + std::to_string(width) + " wide"
+                       : widths.count(width) == 0 ? "made for another model, " + std::to_string(width) + " wide; these are " + list
+                       : widths.size() == 1       ? "made for these models"
+                                                  : "made for the models " + std::to_string(width) + " wide";
+                if (widths.count(width) != 0 && folders.count(folder) == 0)
+                    what += "; in no model's folder: pictures take one beside the model";
+                use.clear();
+            }
+        } else if (f.kind == "LoRA" && problem.empty() && !local.empty()) {   // against a model here of its architecture
+            for (const auto& [arch, model_local, model_path] : read_models) {
+                if (arch != row.arch) continue;
+                try {
+                    const GgufModel model = GgufModel::open(model_local);
+                    problem = core::lora_file_problem(GgufFile(local), &model);
+                    what += problem.empty() ? "; made for " + model_path : "";
+                    if (!problem.empty()) problem = "for " + model_path + ": " + problem;
+                } catch (const std::exception& e) {
+                    problem = e.what();
+                }
+                break;
+            }
+        }
+        const bool judged = f.kind == "drafter" || f.kind == "projector" || f.kind == "LoRA" || f.kind == "control vector" ||
+                            f.kind == "engram";
+        if (judged) row.reads = problem.empty() ? "yes" : "no";
+        row.why.push_back(what + (!problem.empty() ? "; Lamina does not read it: " + problem
+                                  : !use.empty() ? "; Lamina reads it: " + use : ""));
+        for (const std::string& n : f.notes) row.why.push_back(n);
+        rows.push_back(std::move(row));
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.path < b.path; });
+    // the table: a file a row, by path
+    size_t w_path = 4, w_kind = 4, w_arch = 12;
+    for (const Row& row : rows) {
+        w_path = std::max(w_path, row.path.size());
+        w_kind = std::max(w_kind, row.kind.size());
+        w_arch = std::max(w_arch, row.arch.size());
+    }
     auto pad = [](std::string s, size_t n) {
         if (s.size() < n) s.append(n - s.size(), ' ');
         return s;
     };
-    auto gb = [](uint64_t b) {
+    auto gb = [](uint64_t b) {   // GB, MB under one, KB under one of those
         char buf[32];
-        std::snprintf(buf, sizeof buf, "%.1f GB", (double) b / 1e9);
+        if (b >= 1000000000ull) std::snprintf(buf, sizeof buf, "%.1f GB", (double) b / 1e9);
+        else if (b >= 1000000ull) std::snprintf(buf, sizeof buf, "%.1f MB", (double) b / 1e6);
+        else std::snprintf(buf, sizeof buf, "%.1f KB", (double) b / 1e3);
         return std::string(buf);
     };
-    say("  " + pad("model", w) + "  shards  " + pad("size", 9) + "  Lamina  this PC");
+    size_t w_here = 7;   // "this PC"
+    for (const Row& row : rows) w_here = std::max(w_here, row.here.size());
+    say("");   // (an empty line before the table and after it)
+    say("  " + pad("file", w_path) + "  " + pad("kind", w_kind) + "  Lamina  " + pad("this PC", w_here) + "  " +
+        pad("architecture", w_arch) + "  shards  size");
+    bool why_models = false, what_files = false;   // what --verbose would add
     for (const Row& row : rows) {
         const std::string shards = std::to_string(row.shards);
-        say("  " + pad(row.path, w) + "  " + std::string(shards.size() < 6 ? 6 - shards.size() : 0, ' ') + shards + "  " +
-            pad(gb(row.bytes), 9) + "  " + pad(row.reads ? "yes" : "no", 6) + "  " + row.here);
-        for (const std::string& y : row.why) say("      " + y);
+        say("  " + pad(row.path, w_path) + "  " + pad(row.kind, w_kind) + "  " + pad(row.reads, 6) + "  " +
+            pad(row.here, w_here) + "  " + pad(row.arch, w_arch) + "  " +
+            std::string(shards.size() < 6 ? 6 - shards.size() : 0, ' ') + shards + "  " + gb(row.bytes));
+        if (cl.verbose)
+            for (const std::string& y : row.why) say("      " + y);
+        else if (!row.why.empty())
+            (row.kind == "model" ? why_models : what_files) = true;
     }
-    // the other GGUF files, by what they are
-    std::map<std::string, std::vector<std::string>> others;
-    for (const RemoteFound& f : r.found)
-        if (f.kind != "model") others[f.kind].push_back(f.model.path);
-    for (const auto& [kind, paths] : others) {
-        std::string list;
-        for (const std::string& p : paths) list += (list.empty() ? "" : ", ") + p;
-        say("  " + kind + (paths.size() == 1 ? ": " : "s: ") + list);
+    say("");
+    const std::string more = why_models && what_files ? " --verbose says why the rest cannot, and what the other files are."
+                             : !why_models && what_files && models_n == 0 ? " --verbose says what each is."
+                             : why_models             ? " --verbose says why the rest cannot."
+                             : what_files             ? " --verbose says what the other files are."
+                                                      : "";
+    if (models_n == 0) {   // the files a model is run with: 0 where Lamina reads one
+        const bool any = std::any_of(rows.begin(), rows.end(), [](const Row& row) { return row.reads == "yes"; });
+        say(std::string("No model here; Lamina reads ") + (any ? "the files marked yes beside one." : "none of these files.") +
+            more);
+        return any ? 0 : 1;
     }
     if (!pc_stops.empty()) {
         say("This PC would start none of them:");
         for (const std::string& s : pc_stops) say("  - " + s);
     } else {
-        say(std::to_string(can) + " of the " + std::to_string(rows.size()) + " models can start once downloaded; " +
-            "lamina-server --check -m <a model's URL> says more of one.");
+        say(std::to_string(can) + " of the " + std::to_string(models_n) + " models can start once downloaded." + more +
+            " lamina-server --check -m <a model's URL> says more of one.");
     }
     return can > 0 ? 0 : 1;
 }
@@ -456,6 +564,7 @@ int run(int argc, char** argv) {
         return 0;
     }
     if (!cl.write_config.empty() && cl.check) usage_error("--write-config or --check: not both");
+    if (cl.verbose && !cl.check) usage_error("--verbose goes with --check");
     const bool attached = !cl.bench_url.empty();   // --bench-url: a server that runs, measured from here
     if (cl.bench_compare.size() == 2) {            // two reports side by side, nothing run
         if (cl.bench || attached || cl.bench_options) usage_error("--bench-compare OLD NEW compares two reports: no --bench with it");
@@ -537,19 +646,20 @@ int run(int argc, char** argv) {
         try {
             remote = std::make_unique<RemoteModels>(read_remote_models(url));
         } catch (const std::exception& e) {
-            return check_report(nullptr, gpus, "", e.what()) ? 0 : 1;
+            return check_report(nullptr, gpus, e.what()) ? 0 : 1;
         }
         const std::vector<const RemoteFound*> found = remote->models();
-        if (found.size() > 1) return check_table(*remote, file_cfg, given, cl, gpus);
-        if (found.empty()) {
-            std::string what;
-            for (const RemoteFound& f : remote->found) what += (what.empty() ? "" : ", ") + f.model.path + " (" + f.kind + ")";
-            return check_report(nullptr, gpus, "", url + ": no model among its GGUF files: " + what) ? 0 : 1;
-        }
+        // A table where the URL holds no model or several, or files beside the one model that its report does not take
+        // up (a LoRA adapter, a control vector, an Engram table ...); a model's own report where it holds one, with
+        // the projectors and drafters it says it takes
+        const bool others = std::any_of(remote->found.begin(), remote->found.end(), [](const RemoteFound& f) {
+            return f.kind != "model" && f.kind != "projector" && f.kind != "drafter";
+        });
+        if (found.size() != 1 || others) return check_table(*remote, file_cfg, given, cl, gpus);
         const RemoteFound& one = *found.front();
         const std::string local = remote->copies->local(one.model.path);
         if (!one.error.empty() || local.empty())
-            return check_report(nullptr, gpus, "", one.error.empty() ? one.model.path + ": not read" : one.error) ? 0 : 1;
+            return check_report(nullptr, gpus, one.error.empty() ? one.model.path + ": not read" : one.error) ? 0 : 1;
         const RemoteModels& r = *remote;
         remote_lines.emplace([&r](std::string_view text, bool err) { print_line(err ? stderr : stdout, shown_remote(r, text)); });
         say(remote_read(r) + "; below, <download> is the folder a download of it keeps its files in");
@@ -568,7 +678,6 @@ int run(int argc, char** argv) {
     const bool from_preset = !mock && !model.empty() && !jget(file_cfg, "args").is_array();
     json cfg = json::object();
     std::string model_arch;      // the preset's model's general.architecture
-    std::string preset;          // the preset
     std::vector<std::string> preset_keys;   // its keys, which --write-config renews
     std::vector<std::string> notes;   // the preset's lines for the window: the model, the pictures, the log
     json preset_base = json::object();   // the preset's settings, under the file's (the Settings view compares)
@@ -591,7 +700,6 @@ int run(int argc, char** argv) {
             cfg = std::move(mc.cfg);
             preset_base = cfg;
             model_arch = mc.model.arch;
-            preset = mc.preset;
             preset_keys = std::move(mc.preset_keys);
             notes = std::move(mc.notes);
         }
@@ -601,7 +709,7 @@ int run(int argc, char** argv) {
         if (from_preset && !gpu_list(cfg).empty() && gpu_cards(preset_base)) cfg["gpu"] = preset_base["gpu"];
         if (!from_preset && !model.empty()) use_model(cfg, model);
     } catch (const ConfigError& e) {
-        if (cl.check) return check_report(nullptr, gpus, "", e.what()) ? 0 : 1;
+        if (cl.check) return check_report(nullptr, gpus, e.what()) ? 0 : 1;
         say_err(std::string("[lamina] ") + e.what());
         return 1;
     }
@@ -627,7 +735,7 @@ int run(int argc, char** argv) {
             } catch (const std::exception&) {   // (the start says what is wrong with the file)
             }
         }
-        settle_vision_gpu(cfg, gpus, arch, lend_no);
+        settle_vision_gpu(cfg, gpus, arch, lend_no, !cl.check);   // (--check: its pictures line names the card)
     }
     if (!cl.write_config.empty()) {
         json out;
@@ -655,7 +763,7 @@ int run(int argc, char** argv) {
         return 0;
     }
     if (cl.check)
-        return check_report(cl.config.empty() && model.empty() ? nullptr : &cfg, gpus, preset, "",
+        return check_report(cl.config.empty() && model.empty() ? nullptr : &cfg, gpus, "",
                             remote ? "Once downloaded, it can start." : "It can start.") ? 0 : 1;
     // --bench: the config as the report shows it, then this run's own server: this PC only, on a port of its own (not
     // the one the user's clients use), loaded at once and kept loaded, the expert profile saved into a copy

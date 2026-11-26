@@ -1021,7 +1021,7 @@ endif()
 if(LAMINA_BUILD_TESTS)
   foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test block_form_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
-             conversation_cache_test disk_tier_test control_vector_test deterministic_adapt_help platform_memory_test
+             conversation_cache_test disk_tier_test control_vector_test model_family_test deterministic_adapt_help platform_memory_test
              platform_spill_test pretokenize_parity tokenizer_test sha256_base64_test
              ple_reader_selftest model_config_test params_test bench_test remote_model_test cpu_floor_test)
     if(TEST ${_t})

@@ -11,6 +11,7 @@
 #if LAMINA_VISION
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/vision/encoder.hpp"
+#include "lamina/vision/projector.hpp"
 #endif
 
 #include <algorithm>
@@ -360,6 +361,22 @@ std::string projector_type(const std::string& mmproj) {
 
 bool projector_type_read(const std::string& type) {
     return type == "qwen3vl_merger" || type == "hy_v4_flash" || type == "inkling2v";
+}
+
+std::string projector_refusal(const std::string& mmproj) {
+#if LAMINA_VISION
+    try {
+        vision::EncoderParams p;
+        p.mmproj = mmproj;
+        vision::Projector header;
+        header.open(p);
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+#else
+    (void) mmproj;
+#endif
+    return {};
 }
 
 bool vision_built() {

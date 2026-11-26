@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -108,6 +109,65 @@ inline std::string drafter_mismatch(const std::string& flag, const std::string& 
     if (k == DrafterKind::Missing) return flag + " " + path + " is not there";
     if (k == want || k == DrafterKind::Other) return {};
     return flag + " " + path + " is " + drafter_kind_name(k) + ", another model's: " + model + "'s drafter is " + its;
+}
+
+/// A GGUF file that is a drafter rather than a model, and whether this engine reads it
+struct GgufDrafter {
+    std::string what;    ///< what drafter it is, a phrase for one file or several ("" where the file is none)
+    bool read = false;   ///< one this engine's paths read (drafter_kind's)
+};
+/// Whether the GGUF file at `path` is a drafter, by its header: a kind this engine reads (drafter_kind), another
+/// engine's by its architecture (EAGLE-3, DFlash, a DFly drafter, an "-mtp" one), or a model's MTP head - a single file
+/// whose layers are its architecture's next-token layers alone (nextn_predict_layers: llama.cpp's mtp-*.gguf); else,
+/// for an architecture of no such kind, by llama.cpp's names for a model's side files (mtp-, eagle3-, dflash-,
+/// dspark-).  A model's file, a split model's first shard among them, is none.
+inline GgufDrafter gguf_drafter(const std::string& path) {
+    GgufDrafter d;
+    if (const DrafterKind k = drafter_kind(path); k == DrafterKind::DraftLayer || k == DrafterKind::DSpark) {
+        d.what = k == DrafterKind::DraftLayer ? "Qwen3.8-Flash-Next's draft layer" : "Inkling 2's DSpark";
+        d.read = true;
+        return d;
+    }
+    try {
+        const GgufFile f(path);
+        const MetaValue* a = f.get("general.architecture");
+        if (a == nullptr || a->type != MetaType::STRING) return d;
+        const std::string& arch = a->s;
+        if (arch == "eagle3" || arch == "eagle") {
+            d.what = "EAGLE-3, architecture " + arch;
+        } else if (arch == "dflash") {
+            d.what = "DFlash, architecture dflash without DSpark's table";
+        } else if (arch.ends_with("_dfly") || arch.ends_with("-dfly")) {
+            d.what = "DFly, architecture " + arch;
+        } else if (arch.ends_with("_mtp") || arch.ends_with("-mtp")) {
+            d.what = "MTP, architecture " + arch;
+        } else {
+            // an MTP head: the next-token layers alone, in a file of its own
+            const MetaValue* n = f.get(arch + ".nextn_predict_layers");
+            const MetaValue* layers = f.get(arch + ".block_count");
+            const MetaValue* split = f.get("split.count");
+            if (n != nullptr && layers != nullptr && n->is_num() && layers->is_num() && n->u > 0 && n->u < layers->u &&
+                (split == nullptr || split->u <= 1)) {
+                bool any = false, trunk = false;
+                for (const TensorInfo& t : f.tensors())
+                    if (t.name.rfind("blk.", 0) == 0) {
+                        any = true;
+                        trunk = trunk || std::strtoull(t.name.c_str() + 4, nullptr, 10) < layers->u - n->u;
+                    }
+                if (any && !trunk) d.what = "MTP head, " + arch + "'s next-token layers alone";
+            }
+            if (d.what.empty() && model_family_from_arch(arch) == ModelFamily::Unknown) {
+                const std::u8string file = std::filesystem::path(std::u8string(path.begin(), path.end())).filename().u8string();
+                std::string name(file.begin(), file.end());
+                for (char& c : name) c = (char) std::tolower((unsigned char) c);
+                for (const char* side : {"mtp-", "eagle3-", "dflash-", "dspark-"})
+                    if (name.find(side) != std::string::npos)
+                        d.what = "named as llama.cpp names a drafter, architecture " + arch;
+            }
+        }
+    } catch (const std::exception&) {
+    }
+    return d;
 }
 
 }  // namespace lamina

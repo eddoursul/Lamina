@@ -768,12 +768,13 @@ inline ModelFamily model_family(const GgufFile& g) {
 
 /// The guard of Qwen3.6-35B-A3B (qwen35moe) and Qwen3.8-27B (qwen35, a dense FFN): every key the geometry is read
 /// from must be present (core::geometry_from_gguf), and the few that the layer pattern depends on must have the values
-/// the models have.
+/// the models have.  nextn_predict_layers alone may be absent: a file converted without the MTP block (a merged
+/// fine-tune's) has none, as llama.cpp reads it.
 inline std::string check_architecture_qwen35(const GgufFile& g, const std::string& arch, bool moe) {
     static const char* const common[] = {
         "block_count", "embedding_length", "attention.head_count", "attention.head_count_kv", "attention.key_length",
         "attention.value_length", "ssm.conv_kernel", "ssm.state_size", "ssm.group_count", "ssm.time_step_rank",
-        "ssm.inner_size", "full_attention_interval", "nextn_predict_layers",
+        "ssm.inner_size", "full_attention_interval",
     };
     static const char* const experts[] = {
         "expert_count", "expert_used_count", "expert_feed_forward_length", "expert_shared_feed_forward_length",
@@ -795,8 +796,10 @@ inline std::string check_architecture_qwen35(const GgufFile& g, const std::strin
             if (std::string e = need(k); !e.empty()) return e;
     }
     const MetaValue* nl = g.get(arch + ".block_count");
-    const MetaValue* mtp = g.get(arch + ".nextn_predict_layers");
-    if (mtp->u >= nl->u) return arch + ".nextn_predict_layers is not smaller than " + arch + ".block_count";
+    if (const MetaValue* mtp = g.get(arch + ".nextn_predict_layers")) {
+        if (!mtp->is_num()) return arch + ".nextn_predict_layers is not a number";
+        if (mtp->u >= nl->u) return arch + ".nextn_predict_layers is not smaller than " + arch + ".block_count";
+    }
     if (g.get(arch + ".full_attention_interval")->u < 2)
         return arch + ".full_attention_interval must be at least 2 (the GDN / attention pattern)";
     return {};

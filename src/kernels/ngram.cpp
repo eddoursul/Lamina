@@ -225,7 +225,10 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
     }
     // [160, 320001536]: ne0 = 160 is the FAST axis, so the ROW index is shape[1] and a row is contiguous.
     if (t->shape.size() != 2 || t->shape[0] != (uint64_t) PLE_HEAD_DIM) {
-        err = "per_layer_token_embd.weight has an unexpected shape";
+        err = "per_layer_token_embd.weight has " +
+              (t->shape.size() != 2 ? std::to_string(t->shape.size()) + " dimensions"
+                                    : "rows of " + std::to_string(t->shape[0]) + " values") +
+              ", and the PLE's are rows of " + std::to_string(PLE_HEAD_DIM) + " values";
         close();
         return false;
     }

@@ -46,6 +46,25 @@ bool parse_control_vectors(const std::string& list, bool scaled, std::vector<Con
     }
 }
 
+std::string control_vector_problem(const lamina::GgufFile& gguf, int64_t n_embd) {
+    int found = 0;
+    for (const lamina::TensorInfo& t : gguf.tensors()) {
+        long l = -1;
+        char* end = nullptr;
+        if (t.name.rfind("direction.", 0) == 0 && t.name[10] >= '0' && t.name[10] <= '9')
+            l = std::strtol(t.name.c_str() + 10, &end, 10);
+        if (l < 1 || end == nullptr || *end != '\0') return t.name + " is not a direction.<layer> tensor of a layer from 1 on";
+        if (t.type != 0 || t.shape.size() != 1 || t.shape[0] != (uint64_t) n_embd)
+            return t.name + " must be " + std::to_string((long long) n_embd) + " F32 values (the model's n_embd)";
+        const uint64_t bytes = (uint64_t) n_embd * 4;
+        if (t.offset > gguf.file_size() || gguf.data_start() + t.offset + bytes > gguf.file_size())
+            return t.name + " lies past the end of the file";
+        ++found;
+    }
+    if (found == 0) return "no direction.<layer> tensors (not a control vector)";
+    return {};
+}
+
 bool control_vector_tables(const ControlVectorSpec& spec, int64_t n_layers, int64_t n_embd, ControlVectorTables& out,
                            std::string& err) {
     out = ControlVectorTables{};
@@ -62,27 +81,14 @@ bool control_vector_tables(const ControlVectorSpec& spec, int64_t n_layers, int6
             if (const lamina::MetaValue* hint = gguf.get("controlvector.model_hint"))
                 if (hint->type == lamina::MetaType::STRING && hint->s != "qwen4exp")
                     out.warnings.push_back(f.path + " was made for '" + hint->s + "', not qwen4exp");
-            int found = 0;
+            // its header (lamina-server --check says the same of it), then its values
+            if (std::string e = control_vector_problem(gguf, n_embd); !e.empty()) {
+                err = f.path + ": " + e;
+                return false;
+            }
             for (const lamina::TensorInfo& t : gguf.tensors()) {
-                long l = -1;
-                char* end = nullptr;
-                if (t.name.rfind("direction.", 0) == 0 && t.name[10] >= '0' && t.name[10] <= '9')
-                    l = std::strtol(t.name.c_str() + 10, &end, 10);
-                if (l < 1 || end == nullptr || *end != '\0') {
-                    err = f.path + ": " + t.name + " is not a direction.<layer> tensor of a layer from 1 on";
-                    return false;
-                }
-                if (t.type != 0 || t.shape.size() != 1 || t.shape[0] != (uint64_t) n_embd) {
-                    err = f.path + ": " + t.name + " must be " + std::to_string((long long) n_embd) +
-                          " F32 values (the model's n_embd)";
-                    return false;
-                }
+                const long l = std::strtol(t.name.c_str() + 10, nullptr, 10);
                 const uint64_t bytes = (uint64_t) n_embd * 4;
-                if (t.offset > gguf.file_size() || gguf.data_start() + t.offset + bytes > gguf.file_size()) {
-                    err = f.path + ": " + t.name + " lies past the end of the file";
-                    return false;
-                }
-                ++found;
                 if (l >= n_layers) continue;   // past the model's layers: llama.cpp ignores it too
                 std::vector<float> v((size_t) n_embd);
                 std::memcpy(v.data(), gguf.tensor_data(t), bytes);
@@ -94,10 +100,6 @@ bool control_vector_tables(const ControlVectorSpec& spec, int64_t n_layers, int6
                     sum[(size_t) (l * n_embd + j)] += (double) f.scale * v[(size_t) j];
                 }
                 have[(size_t) l] = true;
-            }
-            if (found == 0) {
-                err = f.path + ": no direction.<layer> tensors (not a control vector)";
-                return false;
             }
         } catch (const std::exception& e) {
             err = f.path + ": " + e.what();

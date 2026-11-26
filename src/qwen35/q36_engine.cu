@@ -1640,6 +1640,19 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     if (const lamina::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
+    // each adapter against the model, from their headers, before anything is placed (lamina-server --check says the same)
+    for (const LoraSpec& sp : lora_specs) {
+        try {
+            const lamina::GgufFile adapter(sp.path);
+            if (std::string e = lamina::core::lora_file_problem(adapter, &gm); !e.empty()) {
+                err = sp.path + ": " + e;
+                return false;
+            }
+        } catch (const std::exception& e) {
+            err = sp.path + ": " + e.what();
+            return false;
+        }
+    }
     std::vector<uint64_t> lora_cost;
     if (!lora_scan(lora_specs, m.g.n_layers, lora_cost, err)) return false;
     if (!plan_stages(m, gm, devs, split, ctx, chunk, lora_cost, err)) return false;
@@ -5909,7 +5922,8 @@ static int run_engine(int argc, char** argv, bool check_only) {
         for (size_t i = 0; i < stages.size(); ++i)
             where += std::string(i ? ", " : "") + "layers " + std::to_string(stages[i]->l0) + "-" + std::to_string(stages[i]->l1 - 1) +
                      " on GPU " + std::to_string(stages[i]->dev);
-        std::fprintf(stderr, "lamina: the layer split: %s (the head and the MTP block on the last)\n", where.c_str());
+        std::fprintf(stderr, "lamina: the layer split: %s (the head%s on the last)\n", where.c_str(),
+                     m.has_mtp ? " and the MTP block" : "");
         if (chunk == 0) chunk = 2048;   // every expert in VRAM: MMQ's rows at a 2048-token chunk
     }
     if (chunk == 0) {

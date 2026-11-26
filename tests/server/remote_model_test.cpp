@@ -1,16 +1,23 @@
 // lamina-server --check -m URL's pieces (src/server/remote_model.hpp), no model and no GPU: Hugging Face URLs as the
 // server reads them, a GGUF header's length from its first bytes, a listing's models and the files read beside a model,
-// and against a Hub played here (cpp-httplib: its API's revision and paged tree, resolve's redirect to a download host
-// that serves ranges, a gated repository, a server without ranges, a direct URL's missing shard) the listing and the
-// headers' copies: sparse files of each file's size that the GGUF reader reads as it reads the file, the token sent to
-// the Hub's host alone, one read for files of one id, a file's data not read.  (CPU only.)
+// the GGUF files that are no model by their headers (drafters, LoRA adapters, control vectors, Engram tables ...) and
+// the checks a load makes of them, and against a Hub played here (cpp-httplib: its API's revision and paged tree,
+// resolve's redirect to a download host that serves ranges, a gated repository, a server without ranges, a direct
+// URL's missing shard) the listing and the headers' copies: sparse files of each file's size that the GGUF reader
+// reads as it reads the file, the token sent to the Hub's host alone, one read for files of one id, a file's data not
+// read; a split model's shard the listing holds under another name.  (CPU only.)
 #include <httplib.h>
 
 #include "json.hpp"
 #include "remote_model.hpp"
 
 #include "../core/gguf_fixture.hpp"
+#include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/control_vector.hpp"
+#include "lamina/core/geometry.hpp"
+#include "lamina/core/model_check.hpp"
+#include "model_config.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -145,6 +152,133 @@ void test_header_length(const fs::path& dir) {
         threw = true;
     }
     CHECK(threw);
+}
+
+/// gguf_drafter: a drafter told from a model by its header (or, for an architecture of no family, its name)
+void test_drafters(const fs::path& dir) {
+    using namespace fixture;
+    auto file = [&](const std::string& name, std::vector<Kv> kv, std::vector<Tensor> ts) {
+        const fs::path p = dir / name;
+        write(p, kv, ts);
+        return lamina::gguf_drafter(p.string());
+    };
+    const std::vector<Kv> q = {str("general.architecture", "qwen4exp"), u32("qwen4exp.block_count", 49),
+                               u32("qwen4exp.nextn_predict_layers", 1)};
+    // an MTP head (unsloth's mtp-*.gguf): layer 48 of 49 alone, with or without the embedding and the head
+    lamina::GgufDrafter d = file("head.gguf", q, {{"blk.48.attn_q.weight", {32, 2}, 0, 1}, {"token_embd.weight", {32, 4}, 0, 2}});
+    CHECK(d.what.find("MTP head") != std::string::npos && !d.read);
+    // a model with its MTP block: its trunk too
+    d = file("model.gguf", q, {{"blk.0.attn_q.weight", {32, 2}, 0, 1}, {"blk.48.attn_q.weight", {32, 2}, 0, 2}});
+    CHECK(d.what.empty());
+    // a split model's first shard (the metadata, no tensor) and a shard of the head's layer
+    std::vector<Kv> s1 = q;
+    for (const Kv& k : split_keys(0, 2, 1)) s1.push_back(k);
+    CHECK(file("m-00001-of-00002.gguf", s1, {}).what.empty());
+    std::vector<Kv> s2 = q;
+    for (const Kv& k : split_keys(1, 2, 1)) s2.push_back(k);
+    CHECK(file("m-00002-of-00002.gguf", s2, {{"blk.48.attn_q.weight", {32, 2}, 0, 1}}).what.empty());
+    // another engine's drafters by their architecture
+    d = file("hy4-flash_dfly_Q8_0.gguf", {str("general.architecture", "hy_v4_next_dfly")}, {{"blk.0.x.weight", {32}, 0, 1}});
+    CHECK(d.what.find("DFly") != std::string::npos && !d.read);
+    CHECK(file("e.gguf", {str("general.architecture", "eagle3")}, {{"x.weight", {32}, 0, 1}}).what.find("EAGLE-3") != std::string::npos);
+    CHECK(file("f.gguf", {str("general.architecture", "dflash")}, {{"x.weight", {32}, 0, 1}}).what.find("DFlash") != std::string::npos);
+    // an architecture of no family: by llama.cpp's side files' names alone
+    CHECK(file("mtp-other.gguf", {str("general.architecture", "llama")}, {{"x.weight", {32}, 0, 1}}).what.find("named as llama.cpp names a drafter") != std::string::npos);
+    CHECK(file("other.gguf", {str("general.architecture", "llama")}, {{"x.weight", {32}, 0, 1}}).what.empty());
+    // a model of a family this engine runs is a model, whatever its name
+    CHECK(file("mtp-model.gguf", q, {{"blk.0.attn_q.weight", {32, 2}, 0, 1}}).what.empty());
+}
+
+/// gguf_role: the GGUF files that are no model, by their headers, and whether Lamina reads them (the checks each load
+/// makes: lora_file_problem, control_vector_problem, ple_table_problem)
+void test_roles(const fs::path& dir) {
+    using namespace fixture;
+    auto role = [&](const std::string& name, std::vector<Kv> kv, std::vector<Tensor> ts) {
+        const fs::path p = dir / name;
+        write(p, kv, ts);
+        return lamina::gguf_role(p.string());
+    };
+    const uint32_t F32 = 0, F16 = 1, Q4_0 = 2, IQ4_NL = 20, BF16 = 30;
+    // a tiny Qwen3.8-27B (qwen35, a dense FFN), converted without its MTP block (no nextn_predict_layers)
+    const std::vector<Kv> q35 = {str("general.architecture", "qwen35"), u32("qwen35.block_count", 4),
+                                 u32("qwen35.embedding_length", 64), u32("qwen35.attention.head_count", 2),
+                                 u32("qwen35.attention.head_count_kv", 1), u32("qwen35.attention.key_length", 16),
+                                 u32("qwen35.attention.value_length", 16), u32("qwen35.ssm.conv_kernel", 4),
+                                 u32("qwen35.ssm.state_size", 8), u32("qwen35.ssm.group_count", 2),
+                                 u32("qwen35.ssm.time_step_rank", 4), u32("qwen35.ssm.inner_size", 32),
+                                 u32("qwen35.full_attention_interval", 4), u32("qwen35.feed_forward_length", 32)};
+    CHECK(role("model.gguf", q35, {{"blk.0.ffn_up.weight", {64, 32}, F32, 1}, {"blk.3.attn_q.weight", {64, 64}, F32, 2}})
+              .kind.empty());
+
+    // LoRA adapters (llama.cpp's convert_lora_to_gguf.py: lora_a [inputs, rank], lora_b [rank, outputs])
+    const std::vector<Kv> lora = {str("general.architecture", "qwen35"), str("general.type", "adapter"),
+                                  str("adapter.type", "lora"), f32("adapter.lora.alpha", 64)};
+    const std::vector<Tensor> up = {{"blk.0.ffn_up.weight.lora_a", {64, 8}, F16, 1}, {"blk.0.ffn_up.weight.lora_b", {8, 32}, F16, 2}};
+    lamina::GgufRole r = role("lora.gguf", lora, up);
+    CHECK(r.kind == "LoRA" && r.problem.empty() && r.what == "a LoRA adapter of qwen35, alpha 64" &&
+          r.use.find("--lora") != std::string::npos);
+    r = role("lora-pair.gguf", lora, {{"blk.0.ffn_up.weight.lora_a", {64, 8}, F16, 1}, {"blk.0.ffn_up.weight.lora_b", {32, 32}, F16, 2}});
+    CHECK(r.kind == "LoRA" && r.problem.find("do not pair") != std::string::npos);
+    r = role("lora-q4.gguf", lora, {{"blk.0.ffn_up.weight.lora_a", {64, 32}, Q4_0, 1}, {"blk.0.ffn_up.weight.lora_b", {32, 32}, F16, 2}});
+    CHECK(r.problem.find("F32, F16, BF16 or Q8_0 pairs only") != std::string::npos);
+    r = role("lora-a.gguf", lora, {{"blk.0.ffn_up.weight.lora_a", {64, 8}, F16, 1}});
+    CHECK(r.problem.find("lacks its lora_b") != std::string::npos);
+    std::vector<Kv> flash = lora;
+    flash[0] = str("general.architecture", "qwen4exp");
+    r = role("lora-flash.gguf", flash, up);
+    CHECK(r.kind == "LoRA" && r.problem.find("an adapter of qwen4exp") != std::string::npos && r.use.empty());
+    std::vector<Kv> alora = lora;
+    alora.push_back(u32s("adapter.alora.invocation_tokens", {1, 2}));
+    CHECK(role("alora.gguf", alora, up).problem.find("aLoRA") != std::string::npos);
+    std::vector<Kv> prompt = lora;
+    prompt[2] = str("adapter.type", "prompt");
+    r = role("adapter.gguf", prompt, {{"x.weight", {32}, F32, 1}});
+    CHECK(r.kind == "adapter" && !r.problem.empty());
+    // against the model: each pair's product and its widths (the qwen35 path's load)
+    {
+        const lamina::GgufModel m = lamina::GgufModel::open((dir / "model.gguf").string());
+        CHECK(lamina::core::lora_file_problem(lamina::GgufFile((dir / "lora.gguf").string()), &m).empty());
+        write(dir / "lora-wide.gguf", lora, {{"blk.0.ffn_up.weight.lora_a", {64, 8}, F16, 1}, {"blk.0.ffn_up.weight.lora_b", {8, 48}, F16, 2}});
+        CHECK(lamina::core::lora_file_problem(lamina::GgufFile((dir / "lora-wide.gguf").string()), &m)
+                  .find("is 64 x 32 in the model, its pair 64 x 48") != std::string::npos);
+        write(dir / "lora-none.gguf", lora, {{"blk.9.ffn_up.weight.lora_a", {64, 8}, F16, 1}, {"blk.9.ffn_up.weight.lora_b", {8, 32}, F16, 2}});
+        CHECK(lamina::core::lora_file_problem(lamina::GgufFile((dir / "lora-none.gguf").string()), &m) ==
+              "blk.9.ffn_up.weight: the model has no such tensor");
+        CHECK(lamina::core::lora_file_problem(lamina::GgufFile((dir / "lora-flash.gguf").string()), &m) ==
+              "an adapter of qwen4exp, the model is qwen35");
+    }
+
+    // control vectors (llama.cpp's cvector-generator: direction.<layer> from layer 1, the model's width in F32)
+    const uint64_t w = (uint64_t) lamina::core::ModelGeometry{}.n_embd;
+    const std::vector<Kv> cv = {str("general.architecture", "controlvector"), str("controlvector.model_hint", "qwen4exp"),
+                                u32("controlvector.layer_count", 2)};
+    r = role("cvec.gguf", cv, {{"direction.1", {w}, F32, 1}, {"direction.2", {w}, F32, 2}});
+    CHECK(r.kind == "control vector" && r.problem.empty() && r.what == "a control vector for qwen4exp, 2 layers" &&
+          r.use.find("--control-vector") != std::string::npos);
+    r = role("cvec-narrow.gguf", cv, {{"direction.1", {64}, F32, 1}});
+    CHECK(r.kind == "control vector" && r.problem.find("must be " + std::to_string(w) + " F32 values") != std::string::npos);
+    CHECK(role("cvec-zero.gguf", cv, {{"direction.0", {w}, F32, 1}}).problem.find("a layer from 1 on") != std::string::npos);
+    CHECK(role("cvec-empty.gguf", cv, {}).problem.find("no direction") != std::string::npos);
+    {
+        const lamina::GgufFile f((dir / "cvec.gguf").string());
+        CHECK(lamina::core::control_vector_problem(f, (int64_t) w).empty() && !lamina::core::control_vector_problem(f, 64).empty());
+    }
+    // Engram tables: Qwen3.8-Flash-Next's PLE (rows of 160 values), another model's (DeepSeek V4.1's, of 256)
+    r = role("ple.gguf", {}, {{"per_layer_token_embd.weight", {160, 6}, BF16, 1}});
+    CHECK(r.kind == "engram" && r.problem.empty() && r.what == "an Engram table of BF16 rows of 160 values" &&
+          r.use.find("--ple-gguf") != std::string::npos);
+    r = role("engram.gguf", split_keys(5, 6, 1), {{"per_layer_token_embd.weight", {256, 4}, IQ4_NL, 1}});
+    CHECK(r.kind == "engram" && r.what == "an Engram table of IQ4_NL rows of 256 values, shard 6 of 6 of a split model" &&
+          r.problem == "per_layer_token_embd.weight has rows of 256 values, and the PLE's are rows of 160 values");
+    // the rest: an importance matrix, a later shard, a GGUF of no architecture
+    CHECK(role("imatrix.gguf", {str("general.type", "imatrix")}, {{"x.in_sum2", {32}, F32, 1}}).kind == "imatrix");
+    r = role("m-00002-of-00002.gguf", split_keys(1, 2, 1), {{"x.weight", {32}, F32, 1}});
+    CHECK(r.kind == "shard" && r.what == "shard 2 of 2 of a split model");
+    CHECK(role("bare.gguf", {}, {{"x.weight", {32}, F32, 1}}).kind == "other");
+    // role_refusal: what a load of one as a model says
+    CHECK(lamina::role_refusal(role("cvec.gguf", cv, {{"direction.1", {w}, F32, 1}})) ==
+          "a control vector, not a model: a control vector for qwen4exp, 1 layers; Lamina reads it --control-vector, on "
+          "Qwen3.8-Flash-Next");
 }
 
 lamina::RemoteListing listing_of(std::vector<std::string> paths, std::string focus = "") {
@@ -440,6 +574,69 @@ void test_hub(const fs::path& dir) {
     }
 }
 
+void set_env(const char* k, const std::string& v) {
+#ifdef _WIN32
+    _putenv_s(k, v.c_str());
+#else
+    if (v.empty()) unsetenv(k);
+    else setenv(k, v.c_str(), 1);
+#endif
+}
+
+/// read_remote_models: what each GGUF of a repository is, and a split model's last shard the repository holds under
+/// another name (one table shard for several quants, as DeepSeek V4.1's Engram): found by its split keys and read
+/// under the shard's own name; a model whose shard is nowhere stays incomplete
+void test_found(const fs::path& dir) {
+    using namespace fixture;
+    Hub hub;
+    set_env("HF_ENDPOINT", hub.url());
+    set_env("HF_TOKEN", hub.token);
+    std::vector<Kv> k1 = {str("general.architecture", "qwen4exp")}, k3 = k1;
+    for (const Kv& k : split_keys(0, 2, 2)) k1.push_back(k);
+    for (const Kv& k : split_keys(0, 3, 3)) k3.push_back(k);
+    const std::string s1 = model_bytes(dir, "f1.gguf", k1, {{"token_embd.weight", {32, 4}, 0, 1}});
+    const std::string table = model_bytes(dir, "f2.gguf", split_keys(1, 2, 2), {{"per_layer_token_embd.weight", {256, 4}, 20, 2}});
+    const std::string lonely = model_bytes(dir, "f3.gguf", k3, {{"token_embd.weight", {32, 4}, 0, 1}});
+    const std::string cvec = model_bytes(dir, "f4.gguf", {str("general.architecture", "controlvector")},
+                                         {{"direction.1", {(uint64_t) lamina::core::ModelGeometry{}.n_embd}, 0, 3}});
+    hub.files = {{"A/m-00001-of-00002.gguf", s1}, {"B/m-00001-of-00002.gguf", s1}, {"engram.gguf", table},
+                 {"C/n-00001-of-00003.gguf", lonely}, {"direction.gguf", cvec}};
+    hub.sha = {{"A/m-00001-of-00002.gguf", "a1"}, {"B/m-00001-of-00002.gguf", "a1"}, {"engram.gguf", "e1"},
+               {"C/n-00001-of-00003.gguf", "c1"}, {"direction.gguf", "d1"}};
+    const lamina::RemoteModels r = lamina::read_remote_models(hub.url() + "/o/r");
+    set_env("HF_ENDPOINT", "");
+    set_env("HF_TOKEN", "");
+    CHECK(r.found.size() == 5 && r.models().size() == 3);
+    std::map<std::string, const lamina::RemoteFound*> by;
+    for (const lamina::RemoteFound& f : r.found) by[f.model.path] = &f;
+    for (const std::string m : {"A/m-00001-of-00002.gguf", "B/m-00001-of-00002.gguf"}) {
+        const lamina::RemoteFound* f = by[m];
+        CHECK(f != nullptr && f->kind == "model" && f->error.empty() && f->model.missing.empty() &&
+              f->model.bytes == s1.size() + table.size());
+        if (f == nullptr) continue;
+        CHECK(f->notes.size() == 1 && f->notes[0].find("its shard 2 of 2 is engram.gguf") != std::string::npos);
+        // the copy under the shard's own name: the reader reads the model's two shards from it
+        const std::string second = m.substr(0, 2) + "m-00002-of-00002.gguf";
+        CHECK(!r.copies->local(second).empty() && fs::file_size(r.copies->local(second)) == table.size());
+        size_t tensors = 0;
+        try {
+            const lamina::GgufModel g = lamina::GgufModel::open(r.copies->local(m));
+            tensors = g.find("per_layer_token_embd.weight") != nullptr && g.find("token_embd.weight") != nullptr ? 2 : 1;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "  %s: %s\n", m.c_str(), e.what());
+        }
+        CHECK(tensors == 2);
+    }
+    const lamina::RemoteFound* e = by["engram.gguf"];
+    CHECK(e != nullptr && e->kind == "engram" && !e->read && e->notes.size() == 2 &&
+          e->notes[0] == "shard 2 of 2 of A/m-00001-of-00002.gguf");
+    const lamina::RemoteFound* c = by["C/n-00001-of-00003.gguf"];
+    CHECK(c != nullptr && c->kind == "model" && c->error.find("missing model shard C/n-00002-of-00003.gguf") != std::string::npos);
+    const lamina::RemoteFound* v = by["direction.gguf"];
+    CHECK(v != nullptr && v->kind == "control vector" && v->read && v->what.find("a model it does not name") != std::string::npos);
+    CHECK(hub.cdn_with_token == 0 && hub.hub_without_token == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -452,11 +649,22 @@ int main() {
     test_header_length(dir);
     std::fprintf(stderr, "models and the files beside them\n");
     test_models_and_beside();
+    std::fprintf(stderr, "drafters\n");
+    test_drafters(dir);
+    std::fprintf(stderr, "LoRA adapters, control vectors, Engram tables ...\n");
+    test_roles(dir);
     std::fprintf(stderr, "a Hub\n");
     try {
         test_hub(dir);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: the Hub's part threw: %s\n", e.what());
+        ++fails;
+    }
+    std::fprintf(stderr, "a repository's files, read\n");
+    try {
+        test_found(dir);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FAIL: the repository's part threw: %s\n", e.what());
         ++fails;
     }
     std::error_code ec;

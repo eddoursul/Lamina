@@ -22,7 +22,16 @@
 #include <string>
 #include <vector>
 
+namespace lamina {
+class GgufFile;
+}
+
 namespace lamina::core {
+
+/// Why the engine refuses the control vector whose GGUF is `f` for a model `n_embd` wide, from its header alone: its tensors
+/// direction.<layer> from layer 1 on, each `n_embd` F32 values inside the file (its values are read as it loads:
+/// control_vector_tables); "" where it takes it
+std::string control_vector_problem(const GgufFile& f, int64_t n_embd);
 
 struct ControlVectorSpec {
     struct File {
