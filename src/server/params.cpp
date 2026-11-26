@@ -471,8 +471,8 @@ std::string params_help() {
                    "that section), and the other way round; the engine's options, after the server's, are the config's "
                    "\"args\" (\"max-context\": 65536, a switch true or false). A value of the command line takes the "
                    "place of the config file's, and the file's that of the preset -m builds from (--check shows the "
-                   "engine's command line). A switch takes --no-<name> for off. docs/PARAMETERS.md describes every "
-                   "option.",
+                   "engine options a start gives the model). A switch takes --no-<name> for off. docs/PARAMETERS.md "
+                   "describes every option.",
                    0, kWidth, 0);
     out += "\nCommands\n";
     for (const auto& [left, help] : {
@@ -512,7 +512,7 @@ std::string params_help() {
     }
     out += "\n\nENGINE OPTIONS: the config's \"args\"\n" +
            wrapped("Their defaults are the engine's own; -m's preset sets some of them (lamina-server -m MODEL.gguf "
-                   "--check shows the engine's command line).",
+                   "--check shows those a start gives the model).",
                    0, kWidth, 0);
     out += program::options_help(program::kListServed, true, kWidth, kCol);
     return out;

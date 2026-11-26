@@ -758,9 +758,19 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus, const st
                 if (args[i] == "--max-context") ctx = args[i + 1] + " tokens";
             say("  port " + (jget(c, "port").is_null() ? std::string("8095") : str_of(c["port"])) + ", context " + ctx +
                 (jget(c, "log").is_null() ? "" : ", the engine's log " + str_of(c["log"])));
-            std::string line = "lamina --serve";
-            for (const std::string& a : args) line += " " + (a.find(' ') == std::string::npos ? a : "\"" + a + "\"");
-            say("  engine: " + line);
+            // the options the engine would start with: the config's "args" and what its keys add (the cards' --gpu, the
+            // learned profile, "parallel"), each one lamina-server's command line takes too; the model (--native), the
+            // pictures (--vision) and --serve are the server's own to give it
+            std::string opts;
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (args[i] == "--native" && i + 1 < args.size()) {
+                    ++i;
+                    continue;
+                }
+                if (args[i] == "--vision" || args[i] == "--serve") continue;
+                opts += (opts.empty() ? "" : " ") + (args[i].find(' ') == std::string::npos ? args[i] : "\"" + args[i] + "\"");
+            }
+            say("  engine options: " + (opts.empty() ? std::string("none, the engine's defaults") : opts));
         }
     }
     return out;

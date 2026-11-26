@@ -11,7 +11,7 @@ same in short.
   `"args": {"max-context": 65536}`, a switch `true` or `false` (`"kv-grow": false` is `--no-kv-grow`), a list for
   several values (`"control-vector-layer-range": [4, 44]`).
 - **Precedence**: the command line over the config file over the preset `-m` builds for the model file (one of
-  [examples/](../examples/README.md)). `--check` shows the engine's command line a start would run, `--write-config`
+  [examples/](../examples/README.md)). `--check` shows the engine options a start gives the model, `--write-config`
   writes the whole config.
 - **Values**: a switch takes `--no-<name>` for off. A list takes commas (`--aliases a,b`) or JSON. Sizes are binary
   (`8G`, `700M`), times have their unit (`55us`, `1.5ms`, `1s`). A path on the command line starts from the folder the

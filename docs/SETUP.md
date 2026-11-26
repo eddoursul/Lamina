@@ -173,7 +173,7 @@ learned profile then go beside FILE. An earlier FILE is kept as `FILE.bak`, and 
 `api_key`, an `images` section) carry over.
 
 `--check` says what this PC has (the CPU, the RAM, the GPUs) and, with `-m` or `--config`, the model's file, the preset,
-the GPUs it runs on, the RAM its experts take, the draft layer, the pictures, the port and the engine's command line,
+the GPUs it runs on, the RAM its experts take, the draft layer, the pictures, the port and the engine's options,
 then whether it would start; it loads nothing and exits with 1 when the model would not start (no usable GPU, too
 little RAM, a file the engine does not read, a missing encoder or projector). Whether the engine reads the file is
 decided as its load decides it, from the files' headers: the architecture and the shapes its kernels are built for,
