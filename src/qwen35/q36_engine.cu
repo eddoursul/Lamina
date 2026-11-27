@@ -5028,7 +5028,8 @@ struct Serve {
     /// this one are saved as the read passes them: before the prompt's last <|im_start|> (the next turn's prompt
     /// re-renders what follows: the answer without its reasoning, or without the empty block a request with thinking
     /// off ends its prompt with), where this prompt leaves the one before (agents send one long start again with
-    /// another tail), a few cells before the end of a last message that grows between requests, behind the prompt's
+    /// another tail), a few cells before the end of a last message that grows between requests (the request before held
+    /// 256 tokens or more of it), behind the prompt's
     /// last picture or video (its <|vision_end|>: another question about it starts there).  A long prompt's
     /// checkpoints every --prompt-cache-every cells are the read's own, at its chunks' ends, and the prompt's end is
     /// one with the engine's output (request): the same prompt again reads nothing.  (LAMINA_Q36_CKPT_CUT: none of the
@@ -5058,7 +5059,7 @@ struct Serve {
                 if (ids[(size_t) i] == kImEnd) {
                     int64_t start = i;   // the message's <|im_start|>; then its role and a newline
                     while (start > 0 && ids[(size_t) start] != kImStart) --start;
-                    if (d > start + 3 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                    if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                     break;
                 }
         }

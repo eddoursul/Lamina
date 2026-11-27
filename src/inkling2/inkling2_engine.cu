@@ -8019,8 +8019,8 @@ struct Serve {
     /// chain: a prompt ends where a turn does, so a request that edits the next message continues from there),
     /// ascending, each in (reuse, n) with two cells or more to its neighbours and the ends: where this prompt leaves
     /// the one before (agents send one long start again with another tail: the next such request continues from
-    /// there), a few cells before the end of a last message that grows between requests, and the end of the block of
-    /// the prompt's last picture.
+    /// there), a few cells before the end of a last message that grows between requests (the request before held 256
+    /// tokens or more of it), and the end of the block of the prompt's last picture.
     std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse) {
         const int64_t n = (int64_t) ids.size();
         int64_t fork = 0, msg_end = 0;
@@ -8032,7 +8032,7 @@ struct Serve {
             if (E.m->end_message >= 0 && ids[(size_t) i] == E.m->end_message) {   // (a picture's cells are negative)
                 int64_t start = i;                                                // the message's first token
                 while (start > 0 && !E.m->message_start(ids[(size_t) start])) --start;
-                if (d > start + 3 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                 break;
             }
         prev_prompt = ids;

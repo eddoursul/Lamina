@@ -5035,11 +5035,11 @@ int lamina::program::run(int argc, char** argv) {
             // critic's question after the same context; a transcript that grows inside one user message): none of
             // the cuts above falls where those prompts part.  Two more checkpoints for them: where this prompt leaves
             // the previous one (the next request sharing that prefix resumes there), and, when the last message grows
-            // (the previous prompt held its start already), a few cells before its <|im_end|> (the next request parts
-            // there; the margin covers a seam that tokenizes differently once text follows it).  An agent's turn
-            // adds a message instead, and takes neither.  And one behind the last picture or video the request reads
-            // (`media_end`, one past its <|vision_end|>): another question about it, in a new conversation too, starts
-            // there.
+            // (the previous prompt held 256 tokens or more of it: a transcript, not two messages that open alike), a
+            // few cells before its <|im_end|> (the next request parts there; the margin covers a seam that tokenizes
+            // differently once text follows it).  An agent's turn adds a message instead, and takes neither.  And one
+            // behind the last picture or video the request reads (`media_end`, one past its <|vision_end|>): another
+            // question about it, in a new conversation too, starts there.
             int64_t media_end = 0;
             if (!req_imgs.empty()) {
                 media_end = req_imgs.back().start;
@@ -5057,7 +5057,7 @@ int lamina::program::run(int argc, char** argv) {
                     if (ids[(size_t) i] == kImEnd) {
                         int64_t start = i;   // the message's <|im_start|>; then its role and a newline
                         while (start > 0 && ids[(size_t) start] != kImStart) --start;
-                        if (d > start + 3 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                        if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                         break;
                     }
                 if (media_end > reuse && media_end < n - 1) pic = media_end;
