@@ -117,10 +117,19 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, cons
     if (std::string ve = read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
     const int64_t n = (int64_t) ids.size();
     r.cell_row.assign((size_t) n, -1);
+    r.mrope.assign((size_t) n * 3, 0);
+    const auto put = [&](int64_t c, int64_t t, int64_t h, int64_t w) {
+        r.mrope[(size_t) c * 3] = (int32_t) t;
+        r.mrope[(size_t) c * 3 + 1] = (int32_t) h;
+        r.mrope[(size_t) c * 3 + 2] = (int32_t) w;
+    };
+    int64_t p = 0;   // the next text position
     size_t k = 0;
     for (int64_t i = 0; i < n;) {
         const int32_t pad = ids[(size_t) i];
         if (pad < 0 || std::find(pads.begin(), pads.end(), pad) == pads.end()) {
+            put(i, p, p, p);
+            ++p;
             ++i;
             continue;
         }
@@ -137,9 +146,12 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, cons
             h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
             ids[(size_t) (i + j)] = -1 - (int32_t) ((h ^ (h >> 31)) & 0x3fffffff);
             r.cell_row[(size_t) (i + j)] = (int32_t) (im.off / (size_t) n_embd + (size_t) j);
+            put(i + j, p, p + j / im.nx, p + j % im.nx);
         }
         i += im.n;
+        p += std::max(im.nx, im.ny);
     }
+    r.next = p;
     if (k != imgs.size()) return "the embeddings file has more images than the prompt";
     if (n > 0 && r.cell_row.back() >= 0) return "the prompt cannot end in an image";
     return "";

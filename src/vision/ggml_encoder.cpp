@@ -764,6 +764,9 @@ private:
         if (m_.kind == Kind::qwen3vl) {
             out.nx = merged_x;
             out.ny = merged_y;
+        } else if (m_.kind == Kind::hy4) {   // a row of cells and its newline, by the rows (the cells' M-RoPE grid)
+            out.nx = merged_x + 1;
+            out.ny = merged_y;
         } else {   // read at text positions: one row of n
             out.nx = n;
             out.ny = 1;

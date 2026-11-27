@@ -10,7 +10,8 @@
 //                   through two linear layers.  A picture's rows form a grid: row i is the cell (i % nx, i / nx).
 //   hy_v4_flash     Hy4-flash: the position table resampled on the host (HunyuanVL's sampling), no rotary positions,
 //                   an RMS norm, a 2x2 convolution of stride 2, GELU (erf), a 1x1 convolution, and a learned newline
-//                   row after each row of cells.  The text model reads the rows at text positions: one row of n.
+//                   row after each row of cells.  A picture's rows form a grid of nx = cells + 1 (the newline the
+//                   last column) by ny rows, which the text model reads at their M-RoPE positions.
 //   inkling2v       Inkling 2 Mini: 20x20 patches, heads of 64 values; a class token before the patches (dropped at
 //                   the end), the learned position table resized bilinearly, a norm before the blocks, rotary
 //                   positions in two dimensions (a head's first half by the column, its second by the row), each

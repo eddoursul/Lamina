@@ -72,6 +72,10 @@ uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const floa
 struct ImageCells {
     std::vector<float> rows;
     std::vector<int32_t> cell_row;
+    /// each prompt cell's M-RoPE position [cell][3] (t, h, w): text counts up by one; a record's cell (p, p + row, p +
+    /// column) of its grid, the text after it from p + max(nx, ny); `next`: the first cell after the prompt's
+    std::vector<int32_t> mrope;
+    int64_t next = 0;
     int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
 };
 /// Reads the image encoder's file (read_vision_records) and lays the pictures over the prompt's runs of a pad (`pads`:

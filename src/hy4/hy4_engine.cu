@@ -1325,6 +1325,12 @@ struct Engine {
             img_slot_d = dalloc<int32_t>(T);
             h_img = halloc<float>(T * N);
             h_slot = halloc<int32_t>(T);
+            mrope_d = dalloc<int32_t>((size_t) ctx * 3);
+            mr.s1 = (int) g.mrope[1];
+            mr.s2 = (int) g.mrope[2];
+            mrope_identity = false;
+            mrope_set(nullptr);
+            mr.tab = mrope_d;
         }
         for (size_t li = 0; li < m->layers.size(); ++li)
             if (!m->layers[li].dense) moe_layers.push_back((int) li);
@@ -2424,6 +2430,28 @@ struct Engine {
     const ImgReq* img = nullptr;
     float *img_rows_d = nullptr, *h_img = nullptr;
     int32_t *img_slot_d = nullptr, *h_slot = nullptr;
+    // the cells' M-RoPE positions (--vision: every rope reads them; a CUDA graph keeps the table's address, its
+    // contents change): a request's with pictures, else each cell's index (mrope_identity)
+    hy4k::MRope mr;
+    int32_t* mrope_d = nullptr;
+    std::vector<int32_t> mrope_h;
+    bool mrope_identity = false;
+
+    /// The table for a request (`ir`: its pictures' cells and positions, the cells after its prompt counting on from
+    /// ir->next; null: the identity, written only where a request with pictures left another).
+    void mrope_set(const ImgReq* ir) {
+        if (mrope_d == nullptr || (ir == nullptr && mrope_identity)) return;
+        mrope_h.resize((size_t) ctx * 3);
+        const int64_t n = ir != nullptr ? (int64_t) ir->mrope.size() / 3 : 0;
+        if (ir != nullptr) std::copy(ir->mrope.begin(), ir->mrope.end(), mrope_h.begin());
+        for (int64_t c = n; c < ctx; ++c) {
+            const int32_t p = (int32_t) (ir != nullptr ? ir->next + (c - n) : c);
+            mrope_h[(size_t) c * 3] = mrope_h[(size_t) c * 3 + 1] = mrope_h[(size_t) c * 3 + 2] = p;
+        }
+        CK(cudaMemcpyAsync(mrope_d, mrope_h.data(), mrope_h.size() * 4, cudaMemcpyHostToDevice, st));
+        CK(cudaStreamSynchronize(st));
+        mrope_identity = ir == nullptr;
+    }
 
     /// T rows (tokens toks, at positions pos() ..) through the model; logits of every row into `logits`.
     void forward(const int32_t* toks, int T) {
@@ -2593,7 +2621,7 @@ struct Engine {
         if (br) fork(sb1, sb2);
         mmvq(l.kv_a, xq, kva, T, s1);
         (l.kv_q8 ? hy4k::k_kv_store<true> : hy4k::k_kv_store<false>) <<<T, hy4k::kThreads, 0, s1>>>(
-            kva, l.kv_a_norm, l.kv, pos_d, l.swa ? (int) ring : 0, 0, l.theta, g.eps);
+            kva, l.kv_a_norm, l.kv, pos_d, l.swa ? (int) ring : 0, 0, l.theta, g.eps, mr);
         mmvq(l.gate, xq, gt, T, s2);
         mmvq(l.q_a, xq, qa, T);
         if (fz && g.q_lora % 256 == 0) {
@@ -2632,11 +2660,11 @@ struct Engine {
         if (fz && g.nope() % 32 == 0 && g.n_rot <= 64) {
             hy4k::k_qsplit_rope_q<<<dim3(H, T), 256, 0, st>>>(q, reinterpret_cast<hy4k::Q81*>(qnq), qabs, H,
                                                               (int) g.k_head, (int) g.nope(), (int) g.n_rot, pos_d,
-                                                              l.theta);
+                                                              l.theta, mr);
         } else {
             hy4k::k_q_split<<<dim3(H, T), 256, 0, st>>>(q, qnope, qabs, H, (int) g.k_head, (int) g.nope());
             hy4k::k_rope_norm<<<dim3(H, T), 32, 0, st>>>(qabs, H, hy4k::kKvRow, hy4k::kLatent, (int) g.n_rot, pos_d, 0,
-                                                         l.theta);
+                                                         l.theta, mr);
             quant(qnope, (int64_t) T * H, g.nope(), qnq);
         }
         hy4k::k_head_q8_0_w2<<<(unsigned) ((H * hy4k::kLatent + 15) / 16), 256, 0, st>>>(
@@ -2684,7 +2712,7 @@ struct Engine {
         const int N = (int) g.n_embd, ih = (int) g.idx_heads, idd = (int) g.idx_dim, pool_n = (int) g.idx_pool;
         mmvq(l.iq_b, qrq, iq, T, is);
         hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, is>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, pos_d, 0,
-                                                      l.theta);
+                                                      l.theta, mr);
         mmvq(l.ik, xq, ik, T, is);
         hy4k::k_rms<<<T, 128, 0, is>>>(ik, idd, l.ik_norm, ik, idd, idd, g.eps);
         quant(ik, T, idd, ikq, is);
@@ -2692,7 +2720,7 @@ struct Engine {
         mmvq(l.icg, ikq, ivg + (size_t) kMaxT * idd, T, is);
         hy4k::k_tail_store<<<T, 128, 0, is>>>(ivg, ivg + (size_t) kMaxT * idd, l.tail, pos_d, kTail, idd);
         hy4k::k_pool_rows<<<T, 128, 0, is>>>(l.tail, kTail, idd, pool_n, l.ape, l.ipool_norm, g.eps, l.theta,
-                                             (int) g.n_rot, pos_d, l.pooled);
+                                             (int) g.n_rot, pos_d, l.pooled, mr);
         const int reach = (int) (g.idx_top_k / pool_n - (g.idx_tail ? 1 : 0));
         hy4k::k_gemv_f32<<<dim3((unsigned) ((ih + 7) / 8), T), 256, 0, is>>>(l.iproj, xn, iw, N, ih,
                                                                              1.0f / sqrtf((float) (idd * ih)));
@@ -4840,7 +4868,8 @@ struct Prompt {
             lin0 = (int) std::max<int64_t>(0, p0 - n_swa + 1);
             __half* rh = reinterpret_cast<__half*>(l.kv);   // a ring's rows are halves
             if (p0 > lin0) hy4p::k_copy_cells<<<(unsigned) (p0 - lin0), 64, 0, st>>>(rh, ring, lin, 0, lin0, lin0);
-            hy4k::k_kv_store<false><<<T, hy4k::kThreads, 0, st>>>(kva, l.kv_a_norm, lin, posc, 0, lin0, l.theta, g.eps);
+            hy4k::k_kv_store<false>
+                <<<T, hy4k::kThreads, 0, st>>>(kva, l.kv_a_norm, lin, posc, 0, lin0, l.theta, g.eps, E.mr);
             for (size_t si = 0; si < E.chunk_snaps.size() && !l.mtp; ++si) {   // the ring as of each snapshot's S
                 const int64_t S = E.chunk_snaps[si];
                 if (S <= pass_p0 || S < p0 || S >= p_end) continue;
@@ -4855,7 +4884,7 @@ struct Prompt {
             hy4p::k_copy_cells<<<(unsigned) (p_end - pa), 64, 0, st>>>(lin, 0, rh, ring, (int) pa, lin0);
         } else {
             (l.kv_q8 ? hy4k::k_kv_store<true> : hy4k::k_kv_store<false>) <<<T, hy4k::kThreads, 0, st>>>(
-                kva, l.kv_a_norm, l.kv, posc, 0, 0, l.theta, g.eps);
+                kva, l.kv_a_norm, l.kv, posc, 0, 0, l.theta, g.eps, E.mr);
             indexer(l, T, p0);
             if (const int sl = m->dfly.on ? E.dfly_slot(l.il) : -1; sl >= 0) {   // DFly reads it: the last row's picks
                 CK(cudaMemcpyAsync(E.snap_cells + (size_t) sl * kMaxT * g.idx_top_k,
@@ -4870,7 +4899,7 @@ struct Prompt {
         for (int h0 = 0; h0 < H; h0 += kG) {
             dense(l.q_b, qrq, T, qg, kG * g.k_head, (size_t) h0 * g.k_head);
             hy4k::k_rope_norm<<<dim3(kG, T), 32, 0, st>>>(qg, kG, (int) g.k_head, (int) g.nope(), (int) g.n_rot, posc,
-                                                          0, l.theta);
+                                                          0, l.theta, E.mr);
             q8(qg, (int64_t) kG * T, g.nope(), hdq, 8, hids, g.k_head);
             MMQ::Product kb;
             kb.w = l.k_b.d + (size_t) h0 * kb_bytes;
@@ -4922,8 +4951,8 @@ struct Prompt {
         const auto& g = m->g;
         const int N = (int) g.n_embd, ih = (int) g.idx_heads, idd = (int) g.idx_dim, pool_n = (int) g.idx_pool;
         dense(l.iq_b, qrq, T, iq);
-        hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, st>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, posc, 0,
-                                                      l.theta);
+        hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, st>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, posc, 0, l.theta,
+                                                      E.mr);
         dense(l.ik, xq, T, ik);
         hy4k::k_rms<<<T, 128, 0, st>>>(ik, idd, l.ik_norm, ik, idd, idd, g.eps);
         q8(ik, T, idd, ikq);
@@ -4934,7 +4963,7 @@ struct Prompt {
         if (g_b > g_a)
             hy4p::k_pool_chunk<<<(unsigned) (g_b - g_a), idd, 0, st>>>(iv, ig, l.tail, kTail, (int) p0, (int) g_a, idd,
                                                                        pool_n, l.ape, l.ipool_norm, g.eps, l.theta,
-                                                                       (int) g.n_rot, l.pooled);
+                                                                       (int) g.n_rot, l.pooled, E.mr);
         const int keep = std::min(T, kTail);
         hy4k::k_tail_store<<<keep, 128, 0, st>>>(iv + (size_t) (T - keep) * idd, ig + (size_t) (T - keep) * idd, l.tail,
                                                  posc + (T - keep), kTail, idd);
@@ -5463,6 +5492,7 @@ struct Serve {
                 return;
             }
         }
+        E.mrope_set(geni ? &ir : nullptr);
         if ((int64_t) ids.size() + max_new > E.ctx - kMaxT) {
             serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%lld)\n", ids.size(), max_new,
                         (long long) (E.ctx - kMaxT));
@@ -5926,6 +5956,7 @@ int run_engine(int argc, char** argv, bool check_only) {
             return 2;
         }
         E.img = &ir;
+        E.mrope_set(&ir);
     }
     FILE* ff = dump_full.empty() ? nullptr : std::fopen(dump_full.c_str(), "wb");
     const auto t0 = Clock::now();

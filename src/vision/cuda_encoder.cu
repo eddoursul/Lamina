@@ -1292,8 +1292,8 @@ private:
             // the cells' rows, and the newline row after each row of cells
             n_rows = (ow + 1) * oh;
             out.n = n_rows;
-            out.nx = n_rows;   // read at text positions: one row of n
-            out.ny = 1;
+            out.nx = ow + 1;   // a row of cells and its newline, by the rows (the cells' M-RoPE grid)
+            out.ny = oh;
             out.n_embd = proj;
             out.data.resize((size_t) n_rows * proj);
             for (int y = 0; y < oh; ++y) {

@@ -245,15 +245,30 @@ __global__ void k_rms_inplace(float* y, const float* w, int n, float eps) {
     for (int i = threadIdx.x; i < n; i += blockDim.x) yr[i] = yr[i] * r * w[i];
 }
 
+/// M-RoPE, the checkpoint's mrope_section: a rope pair's position from the cell's (t, h, w) in `tab` ([cell][3]: a
+/// picture's or a video frame's cell (p, p + row, p + column), a text cell's (p, p, p)), the pairs interleaved (h at
+/// i % 3 == 1 below 3 s1, w at i % 3 == 2 below 3 s2, t the rest), as transformers' and vLLM's HY4 rotate them.  `tab`
+/// null: the cell's index, a request without pictures.
+struct MRope {
+    const int32_t* tab = nullptr;
+    int s1 = 0, s2 = 0;
+};
+__device__ __forceinline__ float rope_pos(const MRope& m, int cell, int i) {
+    if (m.tab == nullptr) return (float) cell;
+    const int sec = (i % 3 == 1 && i < 3 * m.s1) ? 1 : (i % 3 == 2 && i < 3 * m.s2) ? 2 : 0;
+    return (float) m.tab[3 * (size_t) cell + sec];
+}
+
 /// RoPE in consecutive pairs (ggml's ROPE_TYPE_NORM, rope.cu's rope_norm without YaRN): `n_rot` values from `off` in
-/// each of `heads` heads (`ld` floats apart) of row t, at position pos[t] (or pos0 + t when pos is null).
+/// each of `heads` heads (`ld` floats apart) of row t, at cell pos[t] (or pos0 + t when pos is null), its pairs at
+/// their M-RoPE positions.
 __global__ void k_rope_norm(float* x, int heads, int ld, int off, int n_rot, const int32_t* pos, int pos0,
-                            float theta_scale) {
+                            float theta_scale, MRope mr) {
     const int t = blockIdx.y;
     const int h = blockIdx.x;
     const int i = threadIdx.x;   // a pair
     if (h >= heads || 2 * i >= n_rot) return;
-    const float p = (float) (pos ? pos[t] : pos0 + t);
+    const float p = rope_pos(mr, pos ? pos[t] : pos0 + t, i);
     const float theta = p * powf(theta_scale, (float) i);
     const float c = cosf(theta), s = sinf(theta);
     float* v = x + (size_t) t * heads * ld + (size_t) h * ld + off + 2 * i;
@@ -362,7 +377,7 @@ __global__ void __launch_bounds__(256) k_head_q8_0_w2(const uint8_t* __restrict_
 /// row (kKvQ8Row).  Rope as k_rope_norm (one head of n_rot at 512).  A block of kThreads a row.
 template <bool Q8>
 __global__ void k_kv_store(const float* kva, const float* norm, void* cache, const int32_t* pos, int ring, int base,
-                           float theta_scale, float eps) {
+                           float theta_scale, float eps, MRope mr) {
     __shared__ float sh[32];
     __shared__ float vals[Q8 ? kKvRow : 1];   // Q8: the row's values before they are quantized
     const int t = blockIdx.x;
@@ -380,7 +395,7 @@ __global__ void k_kv_store(const float* kva, const float* norm, void* cache, con
     }
     const int i = threadIdx.x;
     if (i < (kKvRow - kLatent) / 2) {
-        const float p = (float) pos[t];
+        const float p = rope_pos(mr, pos[t], i);
         const float theta = p * powf(theta_scale, (float) i);
         const float c = cosf(theta), sn = sinf(theta);
         const float x0 = r[kLatent + 2 * i], x1 = r[kLatent + 2 * i + 1];
@@ -571,7 +586,8 @@ __global__ void __launch_bounds__(256) k_rms_q(const float* x, int ldx, const fl
 /// k_q_split, k_rope_norm of the rope part and the q8_1 rows of the nope part in one: block (h, t) of 256; the nope
 /// part's 32-value blocks a warp each, the rope's pairs by the last warp
 __global__ void __launch_bounds__(256) k_qsplit_rope_q(const float* q, Q81* qnq, float* qabs, int H, int k_head,
-                                                       int nope, int n_rot, const int32_t* pos, float theta_scale) {
+                                                       int nope, int n_rot, const int32_t* pos, float theta_scale,
+                                                       MRope mr) {
     const int t = blockIdx.y, h = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const float* src = q + ((size_t) t * H + h) * k_head;
     const int nb = nope / 32;
@@ -579,9 +595,8 @@ __global__ void __launch_bounds__(256) k_qsplit_rope_q(const float* q, Q81* qnq,
         q81_warp(src[b * 32 + lane], qnq + ((size_t) t * H + h) * nb + b, lane);
     if (warp == (int) (blockDim.x >> 5) - 1) {
         float* dq = qabs + ((size_t) t * H + h) * kKvRow + kLatent;
-        const float p = (float) pos[t];
         for (int i = lane; 2 * i < n_rot; i += 32) {
-            const float theta = p * powf(theta_scale, (float) i);
+            const float theta = rope_pos(mr, pos[t], i) * powf(theta_scale, (float) i);
             const float c = cosf(theta), s = sinf(theta);
             const float x0 = src[nope + 2 * i], x1 = src[nope + 2 * i + 1];
             dq[2 * i] = x0 * c - x1 * s;
@@ -1124,10 +1139,12 @@ __global__ void k_tail_store(const float* v, const float* gt, float* tail, const
     }
 }
 
-/// Row t's group pooled when the row completes it ((pos + 1) % pool == 0): k_pool's arithmetic on the tail's cells of
+/// Row t's group pooled when the row completes it ((pos + 1) % pool == 0): its cells' value and gate rows (p_m =
+/// softmax over the members of (gate_m + ape[m]) per channel, k = sum_m p_m value_m, RMS-normed * norm, its last n_rot
+/// values roped at its first cell's position) from the tail's cells of
 /// the group, into pooled + group * dim.  A block of dim threads per row.
 __global__ void k_pool_rows(const float* tail, int n_tail, int dim, int pool, const float* ape, const float* norm,
-                            float eps, float theta_scale, int n_rot, const int32_t* pos, float* pooled) {
+                            float eps, float theta_scale, int n_rot, const int32_t* pos, float* pooled, MRope mr) {
     __shared__ float sh[32];
     __shared__ float kk[256];
     const int p = pos[blockIdx.x], c = threadIdx.x;
@@ -1155,7 +1172,7 @@ __global__ void k_pool_rows(const float* tail, int n_tail, int dim, int pool, co
         float v = kk[c];
         if (c >= nope) {
             const int i = (c - nope) / 2;
-            const float theta = (float) (grp * pool) * powf(theta_scale, (float) i);
+            const float theta = rope_pos(mr, grp * pool, i) * powf(theta_scale, (float) i);
             const float cs = cosf(theta), sn = sinf(theta);
             const float x0 = kk[nope + 2 * i], x1 = kk[nope + 2 * i + 1];
             v = ((c - nope) & 1) == 0 ? x0 * cs - x1 * sn : x0 * sn + x1 * cs;
@@ -1298,78 +1315,6 @@ __global__ void __launch_bounds__(1024) k_select_cells(const float* scores, int 
     const int tail0 = vis * pool;
     for (int i = tid; i <= p - tail0; i += nt) row[reach * pool + i] = tail0 + i;
     if (tid == 0) n[t] = reach * pool + (p - tail0 + 1);
-}
-
-/// Group g's pooled key from its `pool` cells' value and gate rows (vg + gsrc[g] * pool * 2 * dim: [pool][2][dim],
-/// value then gate, the members in order): p_m = softmax over the members of (gate_m + ape[m]) per channel, k = sum_m
-/// p_m value_m, RMS-normed * norm, its last n_rot values roped at position gpos[g] (rope_norm) -> out + gdst[g] * dim.
-/// A block of dim threads per group.
-__global__ void k_pool(const float* vg, int dim, int pool, const float* ape, const float* norm, float eps,
-                       float theta_scale, int n_rot, const int32_t* gpos, const int32_t* gsrc, const int32_t* gdst,
-                       float* out) {
-    __shared__ float sh[32];
-    __shared__ float kk[256];
-    const int g = blockIdx.x, c = threadIdx.x;
-    const float* src = vg + (size_t) gsrc[g] * pool * 2 * dim;
-    if (c < dim) {
-        float mx = -INFINITY;
-        for (int m = 0; m < pool; ++m) mx = fmaxf(mx, src[((size_t) m * 2 + 1) * dim + c] + ape[(size_t) m * dim + c]);
-        float den = 0.f, num = 0.f;
-        for (int m = 0; m < pool; ++m) {
-            const float e = expf(src[((size_t) m * 2 + 1) * dim + c] + ape[(size_t) m * dim + c] - mx);
-            den += e;
-            num += e * src[((size_t) m * 2) * dim + c];
-        }
-        kk[c] = num / den;
-    }
-    float s = c < dim ? kk[c] * kk[c] : 0.f;
-    s = block_sum(s, sh);
-    const float inv = rsqrtf(s / (float) dim + eps);
-    if (c < dim) kk[c] = kk[c] * inv * norm[c];
-    __syncthreads();
-    const int nope = dim - n_rot;
-    if (c < dim) {
-        float v = kk[c];
-        if (c >= nope) {
-            const int i = (c - nope) / 2;
-            const float p = (float) gpos[g];
-            const float theta = p * powf(theta_scale, (float) i);
-            const float cs = cosf(theta), sn = sinf(theta);
-            const float x0 = kk[nope + 2 * i], x1 = kk[nope + 2 * i + 1];
-            v = ((c - nope) & 1) == 0 ? x0 * cs - x1 * sn : x0 * sn + x1 * cs;
-        }
-        out[(size_t) gdst[g] * dim + c] = v;
-    }
-}
-
-/// The indexer's scores of row t over its visible groups 0 .. ng[t]: s_g = sum_h w[t][h] relu(q[t][h] . k_g), the keys
-/// pooled [g][dim] f32.  A warp per group, 8 a block; q in shared memory.
-__global__ void __launch_bounds__(256) k_index_scores(const float* q, const float* w, const float* pooled,
-                                                      const int32_t* ng, int heads, int dim, float* scores,
-                                                      int ld_scores) {
-    extern __shared__ float qs[];   // [heads][dim], then w [heads]
-    const int t = blockIdx.y;
-    const int n = ng[t];
-    for (int i = threadIdx.x; i < heads * dim; i += blockDim.x) qs[i] = q[(size_t) t * heads * dim + i];
-    for (int i = threadIdx.x; i < heads; i += blockDim.x) qs[heads * dim + i] = w[(size_t) t * heads + i];
-    __syncthreads();
-    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const int gidx = blockIdx.x * 8 + warp;
-    if (gidx >= n) return;
-    const float* kr = pooled + (size_t) gidx * dim;
-    float kv[4];
-#pragma unroll
-    for (int j = 0; j < 4; ++j) kv[j] = lane + 32 * j < dim ? kr[lane + 32 * j] : 0.f;
-    float sc = 0.f;
-    for (int h = 0; h < heads; ++h) {
-        float d = 0.f;
-#pragma unroll
-        for (int j = 0; j < 4; ++j)
-            if (lane + 32 * j < dim) d += qs[h * dim + lane + 32 * j] * kv[j];
-        d = warp_sum(d);
-        sc += qs[heads * dim + h] * fmaxf(d, 0.f);
-    }
-    if (lane == 0) scores[(size_t) t * ld_scores + gidx] = sc;
 }
 
 // ------------------------------------------------------------------------------------------------ the MTP block

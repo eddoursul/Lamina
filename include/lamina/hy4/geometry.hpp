@@ -38,6 +38,9 @@ struct Geometry {
     int64_t n_swa = 0;             ///< attention.sliding_window (512): a window layer's cells, its own included
     double rope_base = 0;          ///< rope.freq_base (1e7): the sparse layers'
     double rope_base_swa = 0;      ///< rope.freq_base_swa (1e4): the window layers'
+    /// rope.dimension_sections: the M-RoPE sections of a picture's and a video frame's cells (t, h, w), the pairs
+    /// interleaved; where the file names none (AngelSlim's), the checkpoint's mrope_section, as vLLM defaults it
+    int64_t mrope[3] = {12, 10, 10};
 
     // the sparse layers' indexer
     int64_t idx_heads = 0;      ///< attention.indexer.head_count (16)
@@ -166,6 +169,13 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     ints("ple.head_vocab_sizes", g.eng_prime);
     ints("engram.token_map", map);
     if (!f.numbers(p + "swiglu_clamp_exp", nullptr, &limits) && err.empty()) err = p + "swiglu_clamp_exp: not an array";
+    if (std::vector<uint64_t> sec; f.get(p + "rope.dimension_sections") != nullptr) {
+        if (!f.numbers(p + "rope.dimension_sections", &sec) || sec.size() < 3) {
+            if (err.empty()) err = p + "rope.dimension_sections: not three numbers or more";
+        } else {
+            for (int k = 0; k < 3; ++k) g.mrope[k] = (int64_t) sec[(size_t) k];
+        }
+    }
     if (!err.empty()) return err;
     if (const MetaValue* v = f.get("tokenizer.ggml.tokens"); v && v->type == MetaType::ARRAY)
         g.n_vocab = (int64_t) v->count;

@@ -520,7 +520,7 @@ __global__ void __launch_bounds__(256) k_index_scores_mma(const float* __restric
 /// block of dim threads (pool <= 8).
 __global__ void k_pool_chunk(const float* val, const float* gate, const float* tail, int n_tail, int p0, int g0,
                              int dim, int pool, const float* ape, const float* norm, float eps, float theta_scale,
-                             int n_rot, float* pooled) {
+                             int n_rot, float* pooled, hy4k::MRope mr) {
     __shared__ float sh[32];
     __shared__ float kk[256];
     const int grp = g0 + blockIdx.x, c = threadIdx.x;
@@ -553,7 +553,7 @@ __global__ void k_pool_chunk(const float* val, const float* gate, const float* t
         float v = kk[c];
         if (c >= nope) {
             const int i = (c - nope) / 2;
-            const float theta = (float) (grp * pool) * powf(theta_scale, (float) i);
+            const float theta = hy4k::rope_pos(mr, grp * pool, i) * powf(theta_scale, (float) i);
             const float cs = cosf(theta), sn = sinf(theta);
             const float x0 = kk[nope + 2 * i], x1 = kk[nope + 2 * i + 1];
             v = ((c - nope) & 1) == 0 ? x0 * cs - x1 * sn : x0 * sn + x1 * cs;
