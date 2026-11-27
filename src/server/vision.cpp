@@ -265,54 +265,16 @@ std::string work_dir(lamina::platform::SpillDir& own) {
 
 }   // namespace
 
-std::string combined_embeddings_path(const std::string& vision_dir, uintmax_t nbytes) {
-    const std::string name = "req-" + random_hex(12) + ".sve";
-#ifndef _WIN32
-    std::error_code ec;
-    const fs::path shm = "/dev/shm";
-    if (fs::is_directory(shm, ec) && ::access("/dev/shm", W_OK) == 0) {
-        const fs::space_info sp = fs::space(shm, ec);
-        if (!ec && sp.available > 2 * nbytes + (16u << 20))
-            return "/dev/shm/lamina-vision-" + std::to_string(::getpid()) + "-" + name;
-    }
-#else
-    (void) nbytes;
-#endif
-    return u8_str(u8_path(vision_dir) / name);
+std::string media_list_path(const std::string& vision_dir) {
+    return u8_str(u8_path(vision_dir) / ("req-" + random_hex(12) + ".svl"));
 }
 
-void write_temporary(const std::string& path, const std::vector<std::string>& parts) {
-#ifdef _WIN32
-    const std::wstring w = u8_path(path).wstring();
-    const HANDLE h = CreateFileW(w.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS,
-                                 FILE_ATTRIBUTE_TEMPORARY, nullptr);
-    if (h == INVALID_HANDLE_VALUE) throw std::runtime_error("the image embeddings could not be written: " + path);
-    struct Close {
-        HANDLE h;
-        ~Close() { CloseHandle(h); }
-    } close{h};
-    for (const auto& part : parts) {
-        const std::string data = read_file(u8_path(part));
-        DWORD n = 0;
-        if (!WriteFile(h, data.data(), (DWORD) data.size(), &n, nullptr) || n != data.size())
-            throw std::runtime_error("the image embeddings could not be written: " + path);
-    }
-#else
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) throw std::runtime_error("the image embeddings could not be written: " + path);
-    for (const auto& part : parts) {
-        const std::string data = read_file(part);
-        for (size_t at = 0; at < data.size();) {
-            const ssize_t n = ::write(fd, data.data() + at, data.size() - at);
-            if (n <= 0) {
-                ::close(fd);
-                throw std::runtime_error("the image embeddings could not be written: " + path);
-            }
-            at += (size_t) n;
-        }
-    }
-    ::close(fd);
-#endif
+void write_media_list(const std::string& path, const std::vector<std::string>& parts) {
+    std::string text = "SVL1\n";
+    for (const std::string& p : parts) text += p + "\n";
+    std::ofstream f(u8_path(path), std::ios::binary | std::ios::trunc);
+    if (f) f.write(text.data(), (std::streamsize) text.size());
+    if (!f) throw std::runtime_error("the image embeddings could not be written: " + path);
 }
 
 std::optional<double> timeout_env(const char* name, double dflt) {
@@ -1057,7 +1019,8 @@ EncodedMedium Vision::encode_video(VideoJob& job, const std::vector<std::string>
     for (const auto& [k, x] : video_cache_) total += x.bytes;
     for (auto it = video_cache_.begin();
          it != video_cache_.end() && (total > kVideoCacheBytes || video_cache_.size() > kVideoCacheItems);) {
-        if (it->first != job.key && std::find(keep.begin(), keep.end(), it->second.enc.file) == keep.end()) {
+        if (it->first != job.key && std::find(keep.begin(), keep.end(), it->second.enc.file) == keep.end() &&
+            !in_use(it->second.enc.file)) {
             total -= it->second.bytes;
             fs::remove(u8_path(it->second.enc.file), ec);
             it = video_cache_.erase(it);
@@ -1071,6 +1034,22 @@ EncodedMedium Vision::encode_video(VideoJob& job, const std::vector<std::string>
     (void) keep;
     throw std::invalid_argument(std::string("the video could not be read: ") + vision_not_built());
 #endif
+}
+
+void Vision::hold(const std::vector<std::string>& files) {
+    const std::lock_guard<std::mutex> lk(use_mu_);
+    for (const std::string& f : files) ++in_use_[f];
+}
+
+void Vision::release(const std::vector<std::string>& files) {
+    const std::lock_guard<std::mutex> lk(use_mu_);
+    for (const std::string& f : files)
+        if (const auto it = in_use_.find(f); it != in_use_.end() && --it->second == 0) in_use_.erase(it);
+}
+
+bool Vision::in_use(const std::string& file) {
+    const std::lock_guard<std::mutex> lk(use_mu_);
+    return in_use_.count(file) > 0;
 }
 
 std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool is_bytes,
@@ -1118,7 +1097,7 @@ std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool i
     std::vector<std::string> held = keep;
     held.push_back(u8_str(out));
     for (auto it = cache_.begin(); it != cache_.end() && cache_.size() > 64;) {   // oldest first, never one in use
-        if (std::find(held.begin(), held.end(), it->second.first) == held.end()) {
+        if (std::find(held.begin(), held.end(), it->second.first) == held.end() && !in_use(it->second.first)) {
             std::error_code ec;
             fs::remove(u8_path(it->second.first), ec);
             it = cache_.erase(it);

@@ -209,8 +209,9 @@ public:
 
     /// the current request's image embeddings (GENI): set by prepare, taken by run (per thread)
     struct Embeddings {
-        std::string path;
+        std::string path;   ///< the list of its media's files (vision.hpp, write_media_list)
         std::vector<std::string> keys;
+        std::vector<std::string> parts;   ///< the files it names, held in the encoder's caches (Vision::hold)
     };
     static thread_local Embeddings embeddings;
     /// the request monitor's record of the request on this thread

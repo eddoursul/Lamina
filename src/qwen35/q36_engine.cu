@@ -4796,10 +4796,10 @@ struct ImgReq {
 };
 
 /// Reads a lamina-vision file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, in prompt
-/// order) and lays the pictures over the prompt's <|image_pad|> runs (a video's groups over its <|video_pad|> runs, a
-/// record each).  Positions as mtmd's: text counts up by one; a
-/// picture's cells take (t, h, w) = (p, p + row, p + column) and the text after it continues at p + max(nx, ny).  "" or
-/// the error.  `keys`: the server's key for each picture (img_keys=), else the embeddings' hash.
+/// order; or a list of such files: read_vision_records) and lays the pictures over the prompt's <|image_pad|> runs (a
+/// video's groups over its <|video_pad|> runs, a record each).  Positions as mtmd's: text counts up by one; a picture's
+/// cells take (t, h, w) = (p, p + row, p + column) and the text after it continues at p + max(nx, ny).  "" or the
+/// error.  `keys`: the server's key for each picture (img_keys=), else the embeddings' hash.
 std::string build_images(const std::string& path, const std::vector<int32_t>& ids, int64_t n_embd,
                          const std::vector<uint64_t>& keys, ImgReq& r) {
     std::vector<lamina::program::VisionImage> imgs;

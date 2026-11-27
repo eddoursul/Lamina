@@ -4654,9 +4654,9 @@ int lamina::program::run(int argc, char** argv) {
         std::vector<lamina::core::ImgKey> prev_imgs;
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more of the image encoder's records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt
-        // order; each image's rows go to its run of <|image_pad|> tokens (a video's group: of <|video_pad|> tokens),
-        // whose M-RoPE positions are mtmd's: t = p, h = p + y, w = p + x, and the text after the image continues at
-        // p + max(nx, ny).
+        // order, or a list of such files (read_vision_records); each image's rows go to its run of <|image_pad|> tokens
+        // (a video's group: of <|video_pad|> tokens), whose M-RoPE positions are mtmd's: t = p, h = p + y, w = p + x,
+        // and the text after the image continues at p + max(nx, ny).
         constexpr int64_t kImagePad = 248056;   // qwen4exp.ple.image_token_id: the PLE hash reads it for image cells
         constexpr int64_t kVideoPad = 248057;   // <|video_pad|>: a video's cells (the PLE hash reads it there)
         const auto media_pad = [](int64_t t) { return t == kImagePad || t == kVideoPad; };

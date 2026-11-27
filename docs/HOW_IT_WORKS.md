@@ -185,9 +185,8 @@ streamed through (it runs so where the experts do not all fit the GPU; the buffe
 else VRAM it leaves free, which its layer split keeps on the encoder's card. With batch slots, where requests run at
 once, that engine lends beside the requests that are generating, which leave those buffers alone, and holds a prompt
 that arrives meanwhile until the loan is back. The server
-encodes each picture once and passes its
-embeddings to the engine, which places them in the prompt with their positions in the picture's grid (Hy4-flash's file:
-at consecutive positions, as text, which is how llama.cpp's support for it reads them).
+encodes each picture once, keeps its rows in a file and names a request's files to the engine, which reads them in
+place and puts the rows in the prompt at their positions in the picture's grid.
 
 ## The server
 

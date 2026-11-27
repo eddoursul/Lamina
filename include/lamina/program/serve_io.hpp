@@ -61,7 +61,9 @@ struct VisionImage {
     size_t off;
 };
 /// Reads the image encoder's file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, a
-/// picture each, in prompt order), appending the rows to `rows` and the pictures to `imgs`: "" or the error.
+/// picture each, in prompt order), or a list of such files ("SVL1", then a path a line, in prompt order: the server's
+/// for a request, its encoder's files in place), appending the rows to `rows` and the pictures to `imgs`: "" or the
+/// error.
 std::string read_vision_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
                                 std::vector<VisionImage>& imgs);
 /// What the conversation cache compares: a picture is its grid and the server's key for it (`key`), or else its

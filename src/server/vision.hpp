@@ -113,6 +113,9 @@ public:
     /// `keep`: files the caller still needs
     std::pair<std::string, int64_t> encode(const std::string& source, bool is_bytes = false,
                                            const std::vector<std::string>& keep = {});
+    /// files of the caches (encode_all's) a request's list names: none of them leaves a cache until release()
+    void hold(const std::vector<std::string>& files);
+    void release(const std::vector<std::string>& files);
     std::string dir;   ///< the pictures' files: a path without a space (#480: the GENI line splits at spaces)
 
 private:
@@ -146,6 +149,9 @@ private:
         uintmax_t bytes = 0;
     };
     std::vector<std::pair<std::string, VideoEntry>> video_cache_;   ///< key -> its rows, oldest first
+    std::mutex use_mu_;                     ///< in_use_ (beside mu_: a request's end waits for no encoding)
+    std::map<std::string, int> in_use_;     ///< hold()'s files: the requests that name each
+    bool in_use(const std::string& file);   ///< (a cache's eviction)
     FfmpegTools ff_;
 };
 
@@ -170,12 +176,11 @@ bool share_path(const std::string& path);
 /// \\host\share\x); a network share's is read on Windows, as \\host\share\x. std::invalid_argument for a device's path,
 /// or a share's off Windows (`what`: "an image", "a video", for the message)
 std::string media_file_path(const std::string& source, const char* what);
-/// #874: where one request's combined image-embeddings file goes: on Linux /dev/shm when it has room (the engine
-/// reads it back at once), else the encoder's own directory
-std::string combined_embeddings_path(const std::string& vision_dir, uintmax_t nbytes);
-/// #874: `parts` (files) one after the other into `path`; on Windows as a short-lived file (FILE_ATTRIBUTE_TEMPORARY),
-/// which normally never reaches the drive before it is deleted
-void write_temporary(const std::string& path, const std::vector<std::string>& parts);
+/// where one request's list of its pictures' and videos' files goes: the encoder's own directory
+std::string media_list_path(const std::string& vision_dir);
+/// `parts` (the encoder's files, in prompt order) as the list the engine reads in place of one file of rows
+/// (program/serve_io.hpp, read_vision_records: "SVL1", then a path a line)
+void write_media_list(const std::string& path, const std::vector<std::string>& parts);
 /// a timeout from the environment (LAMINA_ENGINE_STALL_S ...): seconds, nullopt for no limit (0 or less)
 std::optional<double> timeout_env(const char* name, double dflt);
 

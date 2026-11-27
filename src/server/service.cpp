@@ -1396,10 +1396,10 @@ std::vector<int32_t> Service::encode_prompt(const json& messages, const json& to
 void Service::forget_prompt(const std::vector<int32_t>& ids) { prompts->forget(ids); }
 
 void Service::drop_embeddings() {
-    // the combined image file prepare() wrote when no run() took it over
+    // the list of image files prepare() wrote when no run() took it over, and its files' hold
     if (!embeddings.path.empty()) std::remove(embeddings.path.c_str());
-    embeddings.path.clear();
-    embeddings.keys.clear();
+    if (!embeddings.parts.empty() && vision) vision->release(embeddings.parts);
+    embeddings = Embeddings{};
 }
 
 void Service::note(int64_t n, const std::vector<Event>& evs, json& st, std::deque<std::pair<double, int64_t>>& rt) {

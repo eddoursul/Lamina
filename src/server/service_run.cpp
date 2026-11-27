@@ -172,7 +172,7 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
                                                   true);
         ids.insert(ids.end(), f.begin(), f.end());
     }
-    embeddings = Embeddings{};
+    drop_embeddings();   // (a list an earlier prepare() left untaken, and its files' hold)
     const std::vector<MediaRef> media = media_of(messages);
     std::vector<EncodedMedium> encoded;
     if (!media.empty()) {
@@ -290,18 +290,19 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         max_new = std::max<int64_t>(1, room);   // a shorter completion beats a 400 (the default)
     }
     if (!encoded.empty()) {
-        // the request's pictures and videos in one file for GENI, written once nothing above refuses the request
-        uintmax_t nbytes = 0;
+        // the request's pictures and videos for GENI: a list of the encoder's files, written once nothing above
+        // refuses the request, the files held in its caches until the request ends (a video's rows are read in place,
+        // not copied: 578 MB took 2.7 s)
         std::vector<std::string> parts;
         for (const EncodedMedium& e : encoded) {
-            std::error_code ec;
-            nbytes += std::filesystem::file_size(e.file, ec);
             parts.push_back(e.file);
             // #2228: a record's key: a picture's normalized bytes' hash (the encoder's file name), a video group's
             embeddings.keys.insert(embeddings.keys.end(), e.keys.begin(), e.keys.end());
         }
-        embeddings.path = combined_embeddings_path(vision->dir, nbytes);
-        write_temporary(embeddings.path, parts);
+        embeddings.path = media_list_path(vision->dir);
+        write_media_list(embeddings.path, parts);
+        vision->hold(parts);
+        embeddings.parts = std::move(parts);
     }
     if (req != nullptr && !jget(*req, "lamina_prefix").is_null())
         (*req)["lamina_prefix"] =
@@ -582,6 +583,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     std::vector<int32_t> raw_ids;
     const std::string emb = embeddings.path;
     const std::vector<std::string> img_keys = embeddings.keys;
+    std::vector<std::string> emb_parts = std::move(embeddings.parts);
     embeddings = Embeddings{};
     if (!emb.empty() && !img_keys.empty()) {
         if (!sampling.is_object()) sampling = json::object();
@@ -629,6 +631,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         terminal_requests.erase(request_id);
         active_cancels.erase(&cancel);
         if (!emb.empty()) std::remove(emb.c_str());
+        if (!emb_parts.empty()) vision->release(emb_parts);
+        emb_parts.clear();
     };
     std::unique_lock<std::timed_mutex> turn(fifo_, std::defer_lock);
     try {

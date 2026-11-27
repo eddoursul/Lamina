@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <vector>
@@ -72,8 +74,11 @@ void serve_warn(bool serving, const std::string& text) {
     if (serving) serve_print("WARN %s\n", text.c_str());
 }
 
-std::string read_vision_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
-                                std::vector<VisionImage>& imgs) {
+namespace {
+
+/// One file's records (read_vision_records)
+std::string read_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
+                         std::vector<VisionImage>& imgs) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return "cannot open " + path;
     std::string ve;
@@ -97,6 +102,40 @@ std::string read_vision_records(const std::string& path, int64_t n_embd, std::ve
     }
     std::fclose(f);
     return ve;
+}
+
+}   // namespace
+
+std::string read_vision_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
+                                std::vector<VisionImage>& imgs) {
+    std::vector<std::string> files{path};
+    {
+        std::FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return "cannot open " + path;
+        char head[5] = {};
+        if (std::fread(head, 1, sizeof head, f) == sizeof head && std::memcmp(head, "SVL1\n", sizeof head) == 0) {
+            std::string text;   // a list: its files' records in its order (a file in it is records, no list)
+            char buf[4096];
+            for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, got);
+            files.clear();
+            for (size_t at = 0; at < text.size();) {
+                const size_t e = std::min(text.find('\n', at), text.size());
+                if (e > at) files.push_back(text.substr(at, e - at));
+                at = e + 1;
+            }
+        }
+        std::fclose(f);
+    }
+    uintmax_t bytes = 0;   // the rows reserved at once: a video's thousand records reallocate nothing
+    for (const std::string& p : files) {
+        std::error_code ec;
+        const uintmax_t n = std::filesystem::file_size(p, ec);
+        if (!ec) bytes += n;
+    }
+    rows.reserve(rows.size() + (size_t) (bytes / sizeof(float)));
+    for (const std::string& p : files)
+        if (std::string ve = read_records(p, n_embd, rows, imgs); !ve.empty()) return ve;
+    return "";
 }
 
 uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const float* rows, int64_t n_embd) {
