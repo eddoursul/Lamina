@@ -7,6 +7,7 @@
 //      recently used first; no slot limit with 0; a lending conversation is never evicted; nothing is evicted for a
 //      conversation that would not fit anyway; short conversations and a budget of 0 park nothing;
 //   3. reusable(): the live sequence whole, a parked one from its best checkpoint, a changed image clamping the match;
+//      shared_start(), where two prompts part with their pictures compared;
 //   4. the RAM: a conversation parks only into the RAM the system can spare above the reserve, evicting the least
 //      recently used to make that room, and shed() gives back what the park holds once the system runs below it
 //      (a 16 GiB park beside a 101 GiB pinned arena on a 125 GiB PC swapped the system to a halt); ram_bound(),
@@ -34,6 +35,7 @@ using lamina::core::ConversationCache;
 using lamina::core::ImgKey;
 using lamina::core::reusable;
 using lamina::core::Seq;
+using lamina::core::shared_start;
 using lamina::core::superseded;
 
 namespace {
@@ -130,6 +132,21 @@ int main() {
         pics.imgs = {{2000, 11}};
         check(reusable(pics, prompt(6000), {{2000, 12}}, false) == 1000, "a changed image clamps the match before it");
         check(reusable(pics, prompt(6000), {{2000, 11}}, false) == 4000, "the same image does not");
+        // shared_start: where two prompts part (a request's checkpoint where it leaves the one before), their pictures
+        // compared besides the ids (of two token types, as the qwen35 path's)
+        const std::vector<int32_t> before((size_t) 6000, 7);
+        check(shared_start(before, {{2000, 11}}, prompt(6000), {{2000, 11}}, 5999) == 5999,
+              "the same picture: the prompts part where their ids do");
+        check(shared_start(before, {{2000, 11}}, prompt(6000), {{2000, 12}}, 5999) == 2000,
+              "another picture in its place parts them before its first pad");
+        check(shared_start(before, {}, prompt(6000), {{2000, 11}}, 5999) == 2000 &&
+                  shared_start(before, {{2000, 11}}, prompt(6000), {}, 5999) == 2000,
+              "so does a picture added or removed");
+        check(shared_start(before, {{2000, 11}, {3000, 13}}, prompt(6000), {{2000, 11}, {3100, 13}}, 5999) == 3000,
+              "a picture moved: before the earlier of its places");
+        check(shared_start(before, {}, edited, {}, 5999) == 2500 &&
+                  shared_start(before, {}, prompt(4000), {}, 5999) == 4000,
+              "without pictures: the first id that differs, or the shorter prompt's end");
         // a prompt's end: its checkpoint serves the same prompt whole where the engine keeps its output there
         Seq ended = conv(5200, {4000, 5000, 5200});
         ended.ckpts[1].end = true;

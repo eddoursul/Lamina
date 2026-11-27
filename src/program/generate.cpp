@@ -4648,8 +4648,10 @@ int lamina::program::run(int argc, char** argv) {
         lamina::spec::SuffixDrafter lookup(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
         std::vector<int32_t> ids32, ldrafts((size_t) W, 0);
         constexpr int64_t kImStart = 248045;   // <|im_start|>: a new turn begins here
-        // The previous request's prompt: where a new one leaves it, it gets a checkpoint (see `fork` below).
+        // The previous request's prompt and its pictures: where a new one leaves it, it gets a checkpoint (see `fork`
+        // below).
         std::vector<int64_t> prev_prompt;
+        std::vector<lamina::core::ImgKey> prev_imgs;
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more of the image encoder's records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt
         // order; each image's rows go to its run of <|image_pad|> tokens (a video's group: of <|video_pad|> tokens),
@@ -5034,12 +5036,13 @@ int lamina::program::run(int argc, char** argv) {
             // An agent sends one long prefix again and again with a different tail (a classifier's, a coder's, a
             // critic's question after the same context; a transcript that grows inside one user message): none of
             // the cuts above falls where those prompts part.  Two more checkpoints for them: where this prompt leaves
-            // the previous one (the next request sharing that prefix resumes there), and, when the last message grows
-            // (the previous prompt held 256 tokens or more of it: a transcript, not two messages that open alike), a
-            // few cells before its <|im_end|> (the next request parts there; the margin covers a seam that tokenizes
-            // differently once text follows it).  An agent's turn adds a message instead, and takes neither.  And one
-            // behind the last picture or video the request reads (`media_end`, one past its <|vision_end|>): another
-            // question about it, in a new conversation too, starts there.
+            // the previous one, its pictures compared too (the next request sharing that prefix resumes there), and,
+            // when the last message grows (the previous prompt held 256 tokens or more of it: a transcript, not two
+            // messages that open alike), a few cells before its <|im_end|> (the next request parts there; the margin
+            // covers a seam that tokenizes differently once text follows it).  An agent's turn adds a message instead,
+            // and takes neither.  And one behind the last picture or video the request reads (`media_end`, one past its
+            // <|vision_end|>): another question about it, in a new conversation too, starts there.  None inside a
+            // picture.
             int64_t media_end = 0;
             if (!req_imgs.empty()) {
                 media_end = req_imgs.back().start;
@@ -5049,9 +5052,7 @@ int lamina::program::run(int argc, char** argv) {
             constexpr int64_t kImEnd = 248046;
             int64_t fork = 0, msg_end = 0, pic = 0;
             if (track) {
-                const int64_t lim = std::min<int64_t>((int64_t) prev_prompt.size(), n - 1);
-                int64_t d = 0;
-                while (d < lim && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
+                const int64_t d = lamina::core::shared_start(prev_prompt, prev_imgs, ids, req_imgs, n - 1);
                 if (d > reuse + 256 && d < n - 1 && d != q) fork = d;
                 for (int64_t i = (q > 0 ? q : n - 1) - 1; i > reuse; --i)
                     if (ids[(size_t) i] == kImEnd) {
@@ -5060,9 +5061,12 @@ int lamina::program::run(int argc, char** argv) {
                         if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                         break;
                     }
+                for (int64_t* c : {&fork, &msg_end})
+                    if (*c > 0 && media_pad(ids[(size_t) *c]) && media_pad(ids[(size_t) *c - 1])) *c = 0;
                 if (media_end > reuse && media_end < n - 1) pic = media_end;
             }
-            if (!geni) prev_prompt.assign(ids.begin(), ids.end());
+            prev_prompt.assign(ids.begin(), ids.end());
+            prev_imgs = req_imgs;
             const int64_t cut1 = std::min(fork > 0 ? fork : INT64_MAX, msg_end > 0 ? msg_end : INT64_MAX);
             const int64_t cut2 = std::max(fork, msg_end) > cut1 ? std::max(fork, msg_end) : 0;
             const int64_t cuts[2] = {cut1 == INT64_MAX ? 0 : cut1, cut2};   // ascending, 0 = none

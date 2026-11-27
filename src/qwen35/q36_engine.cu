@@ -4902,9 +4902,10 @@ struct Serve {
     // the conversation cache (null: off)
     CacheOpts copt;
     std::unique_ptr<Cache> cache;
-    std::vector<int32_t> prev_prompt;             // the last text request's prompt: where the next one leaves it
-    std::vector<std::vector<float>> scale_sets;   // the adapters' scales requests came with: a conversation's tag
-    bool poisoned = false;                        // non-finite logits: whatever the cache holds may be bad
+    std::vector<int32_t> prev_prompt;              // the last request's prompt: where the next one leaves it
+    std::vector<lamina::core::ImgKey> prev_keys;   // and its pictures (cache_keys)
+    std::vector<std::vector<float>> scale_sets;    // the adapters' scales requests came with: a conversation's tag
+    bool poisoned = false;                         // non-finite logits: whatever the cache holds may be bad
     // LAMINA_Q36_CKPT_CUT=1 (A/B): every checkpoint at a chunk's end, as where the cache has no buffer to give - a
     // turn's read is then two chunks - and none of a prompt's end: the same request again reads its last tokens
     const bool ckpt_cut =
@@ -5016,10 +5017,15 @@ struct Serve {
         size_t tag = 0;
         while (tag < scale_sets.size() && scale_sets[tag] != lora) ++tag;
         if (tag == scale_sets.size()) scale_sets.push_back(lora);
+        return cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), cache_keys(imgs), (uint64_t) tag, busy,
+                            &session);
+    }
+
+    /// The pictures as the conversation cache compares them: a picture is its rows' hash and their count.
+    static std::vector<lamina::core::ImgKey> cache_keys(const std::vector<ImgKey>& imgs) {
         std::vector<lamina::core::ImgKey> keys;
-        for (const ImgKey& k : imgs)   // (a picture is its rows' hash and their count)
-            keys.push_back({k.cell, k.hash ^ (0x9e3779b97f4a7c15ull * (uint64_t) (k.n + 1))});
-        return cache->begin(std::vector<int64_t>(ids.begin(), ids.end()), keys, (uint64_t) tag, busy, &session);
+        for (const ImgKey& k : imgs) keys.push_back({k.cell, k.hash ^ (0x9e3779b97f4a7c15ull * (uint64_t) (k.n + 1))});
+        return keys;
     }
 
     /// Where a prompt's read takes a checkpoint besides its chunks' ends, ascending, each in (reuse, n) with two cells
@@ -5028,14 +5034,14 @@ struct Serve {
     /// this one are saved as the read passes them: before the prompt's last <|im_start|> (the next turn's prompt
     /// re-renders what follows: the answer without its reasoning, or without the empty block a request with thinking
     /// off ends its prompt with), where this prompt leaves the one before (agents send one long start again with
-    /// another tail), a few cells before the end of a last message that grows between requests (the request before held
-    /// 256 tokens or more of it), behind the prompt's
+    /// another tail; their pictures compared too), a few cells before the end of a last message that grows between
+    /// requests (the request before held 256 tokens or more of it), behind the prompt's
     /// last picture or video (its <|vision_end|>: another question about it starts there).  A long prompt's
     /// checkpoints every --prompt-cache-every cells are the read's own, at its chunks' ends, and the prompt's end is
     /// one with the engine's output (request): the same prompt again reads nothing.  (LAMINA_Q36_CKPT_CUT: none of the
     /// end, and one two cells before it where the turn's is not near.)
     std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse,
-                                          const std::vector<ImgKey>& imgs, bool geni) {
+                                          const std::vector<ImgKey>& imgs) {
         const int64_t n = (int64_t) ids.size();
         int64_t q = 0;
         for (int64_t i = n - 2; i > reuse; --i)
@@ -5050,10 +5056,9 @@ struct Serve {
                     break;
                 }
         int64_t fork = 0, msg_end = 0;
+        const std::vector<lamina::core::ImgKey> keys = cache_keys(imgs);
         {
-            const int64_t lim = std::min<int64_t>((int64_t) prev_prompt.size(), n - 1);
-            int64_t d = 0;
-            while (d < lim && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
+            const int64_t d = lamina::core::shared_start(prev_prompt, prev_keys, ids, keys, n - 1);
             if (d > reuse + 256 && d < n - 1 && d != q) fork = d;
             for (int64_t i = (q > 0 ? q : n - 1) - 1; i > reuse; --i)
                 if (ids[(size_t) i] == kImEnd) {
@@ -5063,7 +5068,8 @@ struct Serve {
                     break;
                 }
         }
-        if (!geni) prev_prompt = ids;
+        prev_prompt = ids;
+        prev_keys = keys;
         int64_t pic = 0;
         for (const ImgKey& k : imgs) pic = std::max(pic, k.cell + k.n + 1);
         std::vector<int64_t> want{q, fork, msg_end, pic};
@@ -5680,7 +5686,7 @@ struct Serve {
         // the cache's on a stream of its own, so nothing waits for the copy (Engine::snap_send); where the cache has no
         // buffer to give, the chunk ends at the mark and the state is copied then, the stages' queues empty first.
         std::vector<int64_t> marks;
-        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse, ir.imgs, geni);
+        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse, ir.imgs);
         const int64_t every = std::max<int64_t>(1, copt.every / E.tmax) * E.tmax;
         int64_t noted = (int64_t) reuse, saved = (int64_t) reuse;   // the cache has the tokens up to `noted`
         auto note = [&](int64_t upto) {

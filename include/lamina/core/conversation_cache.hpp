@@ -116,30 +116,36 @@ inline size_t chain_victim(const int64_t* pos, size_t n) {
     return v;
 }
 
-/// Cells of `seq` a prompt can continue from: the whole sequence when it is a prefix of the prompt (live only: the
-/// state is there), else its best checkpoint within the common prefix (its position; -1: none).  Image identity is
-/// required besides the tokens: a changed image clamps the match to before that image's first pad token.  One token
-/// at least is left to process - but with `ends` a checkpoint of a prompt's end (Ckpt::end) serves the whole prompt.
-inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, bool live,
-                        bool ends = false) {
-    const int64_t most = (int64_t) ids.size() - 1;
-    const int64_t m = std::min<int64_t>((int64_t) seq.tokens.size(), most + (ends ? 1 : 0));
+/// The start two prompts share, at most `most` cells: `a` (its pictures `a_imgs`) and `b` (`b_imgs`) alike token for
+/// token, and every picture inside it the same one (its embedding's or the server's key and its grid) at the same
+/// place.  Token ids alone only say where a picture's pads run: a picture changed, removed, added or moved parts the
+/// two before its first pad.
+template <class T, class U>
+inline int64_t shared_start(const std::vector<T>& a, const std::vector<ImgKey>& a_imgs, const std::vector<U>& b,
+                            const std::vector<ImgKey>& b_imgs, int64_t most) {
+    const int64_t m = std::min<int64_t>({(int64_t) a.size(), (int64_t) b.size(), most});
     int64_t lcp = 0;
-    while (lcp < m && seq.tokens[(size_t) lcp] == ids[(size_t) lcp]) ++lcp;
-
-    // The token prefix is necessary but not sufficient for multimodal input: every image that falls inside the
-    // reusable prefix must have the same embedding/grid identity at the same position.  If an image was changed,
-    // removed, added, or reordered, fail closed before its first pad token.
+    while (lcp < m && (int64_t) a[(size_t) lcp] == (int64_t) b[(size_t) lcp]) ++lcp;
     auto matching_image = [](const std::vector<ImgKey>& all, const ImgKey& wanted) {
         for (const ImgKey& image : all)
             if (image.start == wanted.start) return image == wanted;
         return false;
     };
-    for (const ImgKey& image : seq.imgs)
-        if (image.start < lcp && !matching_image(imgs, image)) lcp = image.start;
-    for (const ImgKey& image : imgs)
-        if (image.start < lcp && !matching_image(seq.imgs, image)) lcp = image.start;
+    for (const ImgKey& image : a_imgs)
+        if (image.start < lcp && !matching_image(b_imgs, image)) lcp = image.start;
+    for (const ImgKey& image : b_imgs)
+        if (image.start < lcp && !matching_image(a_imgs, image)) lcp = image.start;
+    return lcp;
+}
 
+/// Cells of `seq` a prompt can continue from: the whole sequence when it is a prefix of the prompt (live only: the
+/// state is there), else its best checkpoint within the start they share (shared_start: its pictures the same ones;
+/// its position; -1: none).  One token at least is left to process - but with `ends` a checkpoint of a prompt's end
+/// (Ckpt::end) serves the whole prompt.
+inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, bool live,
+                        bool ends = false) {
+    const int64_t most = (int64_t) ids.size() - 1;
+    const int64_t lcp = shared_start(seq.tokens, seq.imgs, ids, imgs, most + (ends ? 1 : 0));
     if (live && lcp > 0 && lcp == (int64_t) seq.tokens.size() && lcp <= most) return lcp;
     int64_t best = -1;
     for (const Ckpt& c : seq.ckpts)
