@@ -5035,7 +5035,7 @@ int lamina::program::run(int argc, char** argv) {
                     }
             // An agent sends one long prefix again and again with a different tail (a classifier's, a coder's, a
             // critic's question after the same context; a transcript that grows inside one user message): none of
-            // the cuts above falls where those prompts part.  Two more checkpoints for them: where this prompt leaves
+            // the checkpoints above falls where those prompts part.  Two more for them: where this prompt leaves
             // the previous one, its pictures compared too (the next request sharing that prefix resumes there), and,
             // when the last message grows (the previous prompt held 256 tokens or more of it: a transcript, not two
             // messages that open alike), a few cells before its <|im_end|> (the next request parts there; the margin
@@ -5067,13 +5067,15 @@ int lamina::program::run(int argc, char** argv) {
             }
             prev_prompt.assign(ids.begin(), ids.end());
             prev_imgs = req_imgs;
-            const int64_t cut1 = std::min(fork > 0 ? fork : INT64_MAX, msg_end > 0 ? msg_end : INT64_MAX);
-            const int64_t cut2 = std::max(fork, msg_end) > cut1 ? std::max(fork, msg_end) : 0;
-            const int64_t cuts[2] = {cut1 == INT64_MAX ? 0 : cut1, cut2};   // ascending, 0 = none
+            std::vector<int64_t> wanted;   // those three, ascending
+            for (int64_t c : {fork, msg_end, pic})
+                if (c > 0) wanted.push_back(c);
+            std::sort(wanted.begin(), wanted.end());
+            wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
             // [reuse, batched_end) through the batched prompt path, which the pictures' and videos' rows reach alone.
             // A read of them takes the text after them in the same run, to the last <|im_start|> where a short
-            // opening follows it (its run takes the checkpoint behind them inside it: no run ends there, so no
-            // expert streams twice); without them, short parts go through verify windows.
+            // opening follows it; without them, short parts go through verify windows.  The `wanted` checkpoints
+            // inside it are taken inside its runs: no run ends there, so no expert streams twice.
             int64_t batched_end = reuse;
             if (media_end > reuse) batched_end = (q >= media_end && n - 1 - q <= o.feed_max) ? q : n - 1;
             else if (n - 1 - reuse > o.feed_max) batched_end = (q > reuse && n - 1 - q <= o.feed_max) ? q : n - 1;
@@ -5083,11 +5085,6 @@ int lamina::program::run(int argc, char** argv) {
             if (batched_end > reuse) {
                 const int64_t last = reuse + (batched_end - 1 - reuse) / o.prefill_chunk * o.prefill_chunk;
                 if (last > reuse && last >= media_end && batched_end - last <= o.feed_max) batched_end = last;
-                for (int64_t c : cuts)   // a short piece after a cut goes through verify windows, as a short last chunk
-                    if (c > reuse && c >= media_end && c < batched_end && batched_end - c <= o.feed_max) {
-                        batched_end = c;
-                        break;
-                    }
             }
             if (batched_end > reuse) {
                 tr("prompt tiers", batched_end - reuse);
@@ -5176,26 +5173,37 @@ int lamina::program::run(int argc, char** argv) {
                 pp_t0 = r0;
                 for (int64_t a0 = reuse; a0 < batched_end;) {
                     int64_t b0 = track ? std::min(batched_end, a0 + step) : batched_end;
-                    for (int64_t c : cuts)
-                        if (c > a0 && c < b0) {
-                            b0 = c;
-                            break;
-                        }
-                    pp_at = a0;
-                    pp_chunks = 0;
-                    lead_seg = b0 - a0;
-                    // the run fills the checkpoint at its end as it goes (Prefill::set_checkpoint), and the one behind
-                    // the last picture or video inside it (Prefill::set_marks; a split prompt's stages theirs)
+                    // the run fills the checkpoint at its end as it goes (Prefill::set_checkpoint), and the `wanted`
+                    // ones inside it (Prefill::set_marks; a split prompt's stages theirs), each into a pinned buffer of
+                    // its own: the run ends at one that gets none, or at the first if the marks' device buffers are
+                    // not there (its checkpoint then the run's end)
                     void* const ck = track ? pcache.prepare() : nullptr;
                     std::vector<std::pair<int64_t, void*>> marks;
-                    if (void* h = track && pic > a0 && pic < b0 ? pcache.prepare_more() : nullptr; h != nullptr)
-                        marks.emplace_back(pic, h);
-                    prefill.set_checkpoint(b0, ck);
+                    bool cut = false;
+                    for (int64_t c : wanted) {
+                        if (c <= a0 || c >= b0) continue;
+                        void* const h = pcache.prepare_more();
+                        if (h == nullptr) {
+                            b0 = c;
+                            cut = true;
+                            break;
+                        }
+                        marks.emplace_back(c, h);
+                    }
                     if ((split_on && !psplit.set_marks(marks)) || !prefill.set_marks(marks)) {
+                        b0 = marks.front().first;   // (set_marks fails with marks alone)
+                        cut = true;
                         marks.clear();   // (their buffers go back at the next prepare())
                         prefill.set_marks({});
                         if (split_on) psplit.set_marks({});
                     }
+                    // a short piece after such a cut goes through verify windows, as a short last chunk
+                    if (cut && b0 >= media_end && batched_end - b0 <= o.feed_max) batched_end = b0;
+                    prefill.set_checkpoint(b0, ck);
+                    tr("prompt run begins", a0, b0);   // (its checkpoints' buffers ready)
+                    pp_at = a0;
+                    pp_chunks = 0;
+                    lead_seg = b0 - a0;
                     if (!prefill.run(ids.data() + a0, b0 - a0, a0, err)) {
                         prefill.checkpoint_wait();   // (its copies land before the buffers go back)
                         // an error while a STOP is set is still an error: the states may have gone past the chunks
@@ -5340,8 +5348,8 @@ int lamina::program::run(int argc, char** argv) {
                     pp_total = n - 1 - reuse;
                     pp_t0 = r0;
                 }
-                auto feed_to = [&](int64_t from, int64_t to) -> bool {   // with the `cuts` checkpoints on the way
-                    for (int64_t c : cuts)
+                auto feed_to = [&](int64_t from, int64_t to) -> bool {   // with the `wanted` checkpoints on the way
+                    for (int64_t c : wanted)
                         if (track && c > from && c < to) {
                             if (!feed(from, c)) return false;
                             if (poison_at >= 0) return true;
@@ -5356,8 +5364,8 @@ int lamina::program::run(int argc, char** argv) {
                 // (a window fewer: the first token 16-20 ms sooner on IQ3_S's follow-up turns); a scored request keeps
                 // the last token alone (its row is the first window's first), as does one that emits nothing
                 if (n - 1 > split && max_new > 0 && req_score.empty() && !ddump.on()) {
-                    int64_t s = split;   // the last piece feed_to runs: from the last cut before the end
-                    for (int64_t c : cuts)
+                    int64_t s = split;   // the last piece feed_to runs: from the last checkpoint before the end
+                    for (int64_t c : wanted)
                         if (track && c > s && c < n - 1) s = c;
                     const int64_t k = s + (n - 2 - s) / W * W;
                     if (n - 1 - k < W) merge_from = k;
