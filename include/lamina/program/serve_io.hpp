@@ -1,6 +1,6 @@
 // include/lamina/program/serve_io.hpp - the --serve loop's line protocol, wherever it travels.
 //
-// The engine binary (`lamina-engine --serve`) reads requests on stdin and writes its replies on stdout. lamina-server
+// The engine binary (`lamina-engine --serve`) reads requests on stdin and writes its replies on stdout. lamina
 // runs the same loop on a thread of its own process, with in-process channels set here before lamina::program::run.
 #pragma once
 
@@ -37,7 +37,7 @@ void serve_print(const char* fmt, ...)
     ;
 void serve_vprint(const char* fmt, va_list ap);
 /// A warning for whoever runs the engine, one line: on stderr, and with --serve (`serving`) also a WARN line, which
-/// lamina-server shows in its window
+/// lamina shows in its window
 void serve_warn(bool serving, const std::string& text);
 
 /// The serve loop's input reader at the loop's end: in-process the reader holds the loop's state, so its input ends

@@ -4,7 +4,7 @@ rem https://huggingface.co/eddoursul/Lamina-Qwen3.8-Flash-Next-MTP at a pinned r
 rem
 rem   download-draft-layer.bat FOLDER
 rem
-rem lamina-server takes the file from beside the model or beside the program; elsewhere name it in the config's
+rem lamina takes the file from beside the model or beside the program; elsewhere name it in the config's
 rem "args": "--drafter", "FOLDER\Lamina-Qwen3.8-Flash-Next-MTP.gguf". A download that broke off goes on from where it
 rem stopped. HF_ENDPOINT names a mirror. It needs curl.exe and certutil.exe, which Windows 10 (1803) and newer have.
 setlocal
@@ -49,14 +49,14 @@ echo %NAME%: downloaded, checked
 :done
 echo.
 echo The draft layer is "%FILE%"
-echo lamina-server takes it from beside the model or the program; elsewhere name it in the config's "args":
+echo lamina takes it from beside the model or the program; elsewhere name it in the config's "args":
 echo   "--drafter", "%FILE:\=/%"
 exit /b 0
 
 :usage
 echo usage: %~nx0 FOLDER
 echo Downloads Lamina's draft layer for Qwen3.8-Flash-Next (%NAME%, 0.8 GB) into FOLDER: the model's
-echo folder, where lamina-server finds it
+echo folder, where lamina finds it
 exit /b 2
 
 :nocurl

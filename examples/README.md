@@ -1,7 +1,7 @@
 # Example configs
 
 The configs Lamina is developed with, on a PC with two RTX 3090s, an RTX 5070 Ti and 160 GB of RAM
-(their speeds: [COMPARISON.md](../docs/COMPARISON.md)). They are built into `lamina-server` as the presets of `-m`,
+(their speeds: [COMPARISON.md](../docs/COMPARISON.md)). They are built into `lamina` as the presets of `-m`,
 which takes the model file, the GPU, the draft layer, the projector and the files a run writes from the PC instead
 ([SETUP.md](../docs/SETUP.md#a-model-file)); their paths are placeholders:
 
@@ -27,7 +27,7 @@ which takes the model file, the GPU, the draft layer, the projector and the file
   in `"args"` names another; `"drafts-per-step": 0`: without it). Pictures
   through the repository's `mmproj-F32.gguf` (a picture is up to 4,096 tokens, a token a 40 x 40 px patch).
 
-`lamina-server -m MODEL.gguf --write-config FILE` writes one with the PC's own files and GPUs. `run-<model>.bat.example`
+`lamina -m MODEL.gguf --write-config FILE` writes one with the PC's own files and GPUs. `run-<model>.bat.example`
 is a launcher for each: copied to `run-<model>.bat`, it starts the example from the clone's folder, the model's files
 where its paths say (`../Lamina-data`). Each names its model (`"model"`), its GPUs (`"gpu"`: the main one, then
 `auto`) and in `"args"` the engine's options that differ from its defaults. Their `"vision"` section has the image

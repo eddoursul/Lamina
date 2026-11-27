@@ -3,7 +3,7 @@
 //
 // A short list of documented keys can be read and changed from Lamina's own page (GET / POST /config): the values
 // this session runs with (the command line's over the config file's over the preset's), changed for the session
-// (Apply: at once; a start-up setting, which lamina-server reads when it starts, waits for its next start), and
+// (Apply: at once; a start-up setting, which lamina reads when it starts, waits for its next start), and
 // written to the config file on request (Save configuration; a session started without a config file keeps its
 // changes until it stops). Save writes the keys whose session value is not the one the file gives; for a config
 // that names a model and has no "args", a value equal to its preset's takes the key out of the file. Everything else
@@ -40,7 +40,7 @@ struct Editable {
     std::string_view rule;
     std::vector<std::string_view> choices;   ///< "enum"
     std::string_view help;
-    /// a change applies at once (Service::apply_setting); false: a start-up setting, read when lamina-server starts
+    /// a change applies at once (Service::apply_setting); false: a start-up setting, read when lamina starts
     bool live = true;
     /// "arg": the main GPU card's setting in the flag's place when "gpu" names the cards (a size, its value in MiB)
     std::string_view card = {};
@@ -65,7 +65,7 @@ const Editable* editable(std::string_view key);
 /// Save configuration can keep `e` in `file` (null: the session has none): an engine option needs an "args" list
 bool savable(const Editable& e, const FileSettings* file);
 /// GET /config: the editable keys with their values in this session (`live`), each marked "engine_option" (kept in
-/// "args"), "live" (a change applies at once; else at lamina-server's next start), "savable", "command_line" (the
+/// "args"), "live" (a change applies at once; else at lamina's next start), "savable", "command_line" (the
 /// command line set it: its value takes the place of the file's at every start), "pending" (a start-up setting
 /// changed this session: against `started`) and "unsaved" (a savable key whose value is not the one the file gives);
 /// "file" the file's name, null for a session without one (`file` null)

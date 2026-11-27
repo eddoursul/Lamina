@@ -1,7 +1,7 @@
 # Troubleshooting
 
 The engine's log is the config's `log` (`<model>.log` beside the config file, beside the server with `-m` alone); the
-server writes to its window. `lamina-server -m MODEL.gguf --check` (or `--config FILE --check`) says what the PC has
+server writes to its window. `lamina -m MODEL.gguf --check` (or `--config FILE --check`) says what the PC has
 and what a model needs.
 
 ## Building
@@ -73,14 +73,14 @@ one beside the model. `--check` says why a projector beside the model is not tak
 `--check -m URL` which of a repository's projectors the encoder reads.
 
 **"unknown argument: ..." and "the engine of this model does not take an option of the command line (above)".** An
-option on `lamina-server`'s command line that is not the server's goes to the engine, whose parser refused it: a typo,
+option on `lamina`'s command line that is not the server's goes to the engine, whose parser refused it: a typo,
 a value it does not take, or an option of Qwen3.8-Flash-Next's engine given for Qwen3.6-35B-A3B or Qwen3.8-27B (or the
-other way). `lamina-server --help` lists every option with the models that take it,
+other way). `lamina --help` lists every option with the models that take it,
 [PARAMETERS.md](PARAMETERS.md) with their defaults.
 
-**"the config's "..." is no key lamina-server reads (lamina-server --help lists them): ignored".** A key of the config
+**"the config's "..." is no key lamina reads (lamina --help lists them): ignored".** A key of the config
 file that no option names: a typo, or a key of another program or an earlier version. The server starts without it;
-`lamina-server --help` lists every key beside its option.
+`lamina --help` lists every key beside its option.
 
 **"the vision section (--vision-*) names no image projector".** Pictures were asked for (a `--vision-...` option, or a
 `vision` section in the config) and no projector names the model's: give one with `--mmproj FILE`, or turn pictures
@@ -89,8 +89,8 @@ off with `--no-mmproj`.
 **"port N is already in use - is Lamina (or another server) already running?".** Another server listens on the
 config's port: close it, or start this one with `--port`.
 
-**"config "vision": this lamina-server was built without the image encoder (LAMINA_BUILD_VISION=OFF)".** The
-image encoder is a part of `lamina-server`, and this one was built without it. Build it with the encoder (the
+**"config "vision": this lamina was built without the image encoder (LAMINA_BUILD_VISION=OFF)".** The
+image encoder is a part of `lamina`, and this one was built without it. Build it with the encoder (the
 default: `build.bat`, `./build.sh`) or take a release's, or take the `vision` section and `"--vision"` out of the
 config to run without pictures. The `exe` a config of an earlier version's setup holds is not read
 ([SETUP.md](SETUP.md#updating)).
@@ -164,7 +164,7 @@ no display as the main one) and check `nvidia-smi` for other processes on it.
 **It is slower than [COMPARISON.md](COMPARISON.md).** Those are the development PC's numbers: three GPUs holding most
 experts, a 3090's VRAM bandwidth, 8 cores and DDR5-5600 for the rest. Fewer or smaller GPUs leave more experts to the
 CPU, and the RAM's bandwidth sets its speed: run the RAM at its rated speed (EXPO or XMP), in both channels.
-`lamina-server -m MODEL.gguf --bench` measures an install the way it is used, through the API, and writes a report
+`lamina -m MODEL.gguf --bench` measures an install the way it is used, through the API, and writes a report
 without personal details, to compare after a change or to attach to an issue
 ([SETUP.md](SETUP.md#a-model-file)).
 

@@ -1,6 +1,6 @@
 ﻿# Lamina Engine - top-level build.
 #
-# The engine (`lamina-engine`), the server (`lamina-server`, the image encoder in it) and
+# The engine (`lamina-engine`), the server (`lamina`, the image encoder in it) and
 # the GPU tools need LAMINA_ENABLE_CUDA and NVIDIA GPUs of compute capability 8.0 or newer; without CUDA only the
 # CPU-side libraries, their tools and tests build. CMakePresets.json has the two builds: `native` (this PC's GPUs and
 # CPU, in build/) and `portable` (the releases': RTX 30, 40 and 50, any AVX2 CPU, in build-portable/); build.bat and
@@ -141,7 +141,7 @@ if(LAMINA_ENABLE_CUDA)
                         "newer (CUDACXX or -DCMAKE_CUDA_COMPILER, in a fresh build folder), or build for older GPUs only.")
   endif()
   # nvcc packs a fatbin's PTX alone and stores its machine code (SASS), nearly all of a program, unpacked; size packs
-  # every entry with zstd: lamina-server 170 -> 44 MB built for 86-real;120-real, the same code unpacked. The driver
+  # every entry with zstd: lamina 170 -> 44 MB built for 86-real;120-real, the same code unpacked. The driver
   # unpacks an entry when it loads its module, once per process: ~65 ms more per GPU had it loaded every module.
   add_compile_options($<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CUDA_COMPILER_ID:NVIDIA>>:-compress-mode=size>)
   # `enable_language(CUDA)` gives the .cu compile rules but NOT the imported targets, so `CUDA::cudart_static` has to
@@ -322,7 +322,7 @@ if(LAMINA_ENABLE_CUDA)
   target_include_directories(lamina_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(lamina_prefill PUBLIC lamina_engine CUDA::cudart_static)
 
-  # the engine as a library: the lamina-engine binary's main (src/program/main.cpp) and lamina-server's engine thread,
+  # the engine as a library: the lamina-engine binary's main (src/program/main.cpp) and lamina's engine thread,
   # which speaks the --serve protocol through in-process channels (serve_io.hpp)
   add_library(lamina_serve_io STATIC src/program/serve_io.cpp)
   target_include_directories(lamina_serve_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -587,14 +587,14 @@ if(LAMINA_NATIVE_EXPERTS)
   # llama.cpp's install rules are its libraries' and headers', none of Lamina's
   set(CMAKE_SKIP_INSTALL_RULES ON)
   add_subdirectory(${_lamina_llama_root}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
-  # lamina-server's parts from the same checkout (its root skips the ggml added above): the vendored cpp-httplib (a
+  # lamina's parts from the same checkout (its root skips the ggml added above): the vendored cpp-httplib (a
   # target there with LLAMA_BUILD_COMMON alone), nlohmann/json and stb_image.  Nothing links libllama, llama-common
   # or vendor-hash, so none of them is built (EXCLUDE_FROM_ALL): the tokenizer is lamina_text's own (the
   # vocabulary from the GGUF's header through ggml's gguf, src/server/gguf_header.h; the pre-tokenizer
   # src/server/pretokenize.cpp, which pretokenize_parity checks against llama.cpp's src/unicode.cpp), and the Jinja
   # chat templates are a copy in src/server/vendor
   set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
-  # lamina-server's outgoing HTTPS: WinHTTP on Windows (no OpenSSL DLLs beside it), OpenSSL through cpp-httplib elsewhere
+  # lamina's outgoing HTTPS: WinHTTP on Windows (no OpenSSL DLLs beside it), OpenSSL through cpp-httplib elsewhere
   if(WIN32)
     set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
   endif()
@@ -752,12 +752,12 @@ if(LAMINA_NATIVE_EXPERTS)
     target_link_libraries(lamina_prefill PUBLIC lamina_mmq)
     target_link_libraries(lamina_engine PUBLIC lamina_mmq)   # the verify window's projections at 7-8 tokens
 
-    # ---- lamina_vision: the image encoder (include/lamina/vision), a part of lamina-server ----
+    # ---- lamina_vision: the image encoder (include/lamina/vision), a part of lamina ----
     # A picture's rows from a model's projector file: on a GPU the engine's own kernels (cuda_encoder.cu: tensor-core
     # products, MMQ for a Q8_0 projector, a tensor-core attention kernel), on the CPU a ggml graph on ggml's CPU
     # backend (ggml_encoder.cpp).  stb_image from the llama.cpp checkout's vendor folder.  LAMINA_BUILD_VISION=OFF
     # leaves it out: such a server reads no pictures, and refuses a config that has a "vision" section.
-    option(LAMINA_BUILD_VISION "build the image encoder into lamina-server" ON)
+    option(LAMINA_BUILD_VISION "build the image encoder into lamina" ON)
     if(LAMINA_BUILD_VISION)
       add_library(lamina_vision STATIC src/vision/image.cpp src/vision/projector.cpp src/vision/ggml_encoder.cpp
                                        src/vision/encoder.cpp src/vision/cuda_encoder.cu)
@@ -895,7 +895,7 @@ if(LAMINA_BUILD_TESTS)
   enable_testing()
 endif()
 
-# ---- lamina-server ----------------------------------------------------------
+# ---- lamina: the server --------------------------------------------------
 # The HTTP server: the OpenAI, Anthropic and Responses APIs and the web app, with the engine on a thread of its own
 # (lamina_program through in-process channels). lamina_text is its text layer (no GPU): the tokenizer, the chat
 # template (Jinja, vendored from llama.cpp's common/jinja), the request conversions and the output parser;
@@ -947,7 +947,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   target_link_libraries(sha256_base64_test PRIVATE lamina_text)
   add_test(NAME sha256_base64_test COMMAND sha256_base64_test)
   if(TARGET lamina_program)
-    # the web app and the presets (examples/*.json: lamina-server -m) inside the binary
+    # the web app and the presets (examples/*.json: lamina -m) inside the binary
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/server/web * web_asset
                  "Embedding the web app")
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/examples *.json preset_file
@@ -975,8 +975,8 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
       find_package(Threads REQUIRED)
       target_link_libraries(lamina_server_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
     endif()
-    add_executable(lamina-server src/server/main.cpp src/platform/cpu_floor.cpp)
-    target_link_libraries(lamina-server PRIVATE lamina_server_core)
+    add_executable(lamina src/server/main.cpp src/platform/cpu_floor.cpp)
+    target_link_libraries(lamina PRIVATE lamina_server_core)
     # -m's config pieces: the presets, the main GPU, the command line's engine options, projectors (CPU only)
     add_executable(model_config_test tests/server/model_config_test.cpp)
     target_link_libraries(model_config_test PRIVATE lamina_server_core)
@@ -994,7 +994,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_test(NAME remote_model_test COMMAND remote_model_test)
     # the releases' programs: the server, with the engine in its process (the engine alone, `lamina-engine`, is for
     # tests and measurements and stays in the build folder)
-    install(TARGETS lamina-server RUNTIME DESTINATION . COMPONENT lamina)
+    install(TARGETS lamina RUNTIME DESTINATION . COMPONENT lamina)
     if(WIN32)
       install(PROGRAMS download-draft-layer.bat DESTINATION . COMPONENT lamina)
     else()
@@ -1031,12 +1031,12 @@ if(LAMINA_BUILD_TESTS)
   endforeach()
 endif()
 
-# Without LAMINA_BUILD_TESTS the default target builds the two programs (lamina-engine, lamina-server): the tests,
+# Without LAMINA_BUILD_TESTS the default target builds the two programs (lamina-engine, lamina): the tests,
 # parity checks, benches and tools build by name (cmake --build <build> --target <name>)
 get_property(_lamina_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_t IN LISTS _lamina_targets)
   get_target_property(_type ${_t} TYPE)
-  if(NOT _type STREQUAL "EXECUTABLE" OR _t MATCHES "^lamina-(engine|server)$")
+  if(NOT _type STREQUAL "EXECUTABLE" OR _t MATCHES "^lamina(-engine)?$")
     continue()
   elseif(NOT LAMINA_BUILD_TESTS)
     set_target_properties(${_t} PROPERTIES EXCLUDE_FROM_ALL ON)

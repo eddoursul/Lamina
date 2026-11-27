@@ -1,4 +1,4 @@
-// lamina-server --check -m URL's pieces (src/server/remote_model.hpp), no model and no GPU: Hugging Face URLs as the
+// lamina --check -m URL's pieces (src/server/remote_model.hpp), no model and no GPU: Hugging Face URLs as the
 // server reads them, a GGUF header's length from its first bytes, a listing's models and the files read beside a model,
 // the GGUF files that are no model by their headers (drafters, LoRA adapters, control vectors, Engram tables ...) and
 // the checks a load makes of them, and against a Hub played here (cpp-httplib: its API's revision and paged tree,

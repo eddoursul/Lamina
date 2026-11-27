@@ -1,4 +1,4 @@
-// src/platform/cpu_floor.cpp - lamina-engine's and lamina-server's CPU check, before anything else of theirs runs: the
+// src/platform/cpu_floor.cpp - lamina-engine's and lamina's CPU check, before anything else of theirs runs: the
 // engine's CPU kernels and ggml-cpu are built for AVX2 (with FMA and F16C), and on a CPU without it a program would
 // stop at an illegal instruction somewhere in its start. Its initializer runs ahead of the libraries' (MSVC's lib
 // segment, GCC's constructor priority 101), in a file compiled for the x86-64 baseline. A source of each program

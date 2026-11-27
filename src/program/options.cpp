@@ -17,7 +17,7 @@ const std::vector<OptionHelp>& engine_options() {
         {"--native", "MODEL.gguf", C,
          "the model's GGUF, its first shard (the others are found by name; --model on the other paths too). Its "
          "architecture picks the engine's path: Qwen3.8-Flash-Next, Qwen3.6-35B-A3B and Qwen3.8-27B, Hy4-flash or "
-         "Inkling 2 Mini (lamina-server: -m)"},
+         "Inkling 2 Mini (lamina: -m)"},
         {"--ple-gguf", "PATH", S,
          "Flash-Next: the per-layer embedding table from another GGUF, such as one of unsloth's engram tables "
          "(default: the model's shard that holds it)"},
@@ -150,12 +150,12 @@ const std::vector<OptionHelp>& engine_options() {
         {"--drafter", "FILE", C | S,
          "the model's drafter, a file of its own (--mtp, --dspark and --dfly, its earlier names, the same option on "
          "every path; another model's drafter is refused, named). Flash-Next: its draft layer, "
-         "Lamina-Qwen3.8-Flash-Next-MTP.gguf (the download-draft-layer script fetches it; lamina-server finds it "
+         "Lamina-Qwen3.8-Flash-Next-MTP.gguf (the download-draft-layer script fetches it; lamina finds it "
          "beside the model or the program), or a folder of its earlier layout; without it, a token a verify window, "
          "or prompt lookup's drafts. Inkling 2: its block drafter, a dspark-*.gguf or the checkpoint's "
-         "mtp.safetensors (lamina-server takes the smallest dspark-*.gguf beside the model, else in its dspark/ "
+         "mtp.safetensors (lamina takes the smallest dspark-*.gguf beside the model, else in its dspark/ "
          "folder, else mtp.safetensors beside it): ~1.2 GiB of VRAM with its cells and buffers. Hy4-flash: Tencent's "
-         "DFly2 drafter (the tencent/Hy4-flash checkpoint's last shard, its config.json beside it; lamina-server takes "
+         "DFly2 drafter (the tencent/Hy4-flash checkpoint's last shard, its config.json beside it; lamina takes "
          "one beside the model, else in a folder inside the model's, where --drafts-per-step asks for drafts) in place "
          "of the file's MTP block: ~0.8 GiB of the main GPU, the block's 3.6 GiB of RAM saved. Qwen3.6 and Qwen3.8-27B: "
          "none (they draft with the file's own MTP block; a file named is ignored)"},
@@ -274,7 +274,7 @@ const std::vector<OptionHelp>& engine_options() {
          "hold the model, filled in order); Inkling 2: DEV:A-B, the layers A to B on the card of CUDA number DEV (a "
          "card's layers= gives it), or 0: no split of its own (where the first card lacks room, experts stay in RAM)"},
         {"--batch-mtp", "", S,
-         "Qwen3.6 and Qwen3.8-27B with batch slots (lamina-server's --parallel) and --drafts-per-step: each "
+         "Qwen3.6 and Qwen3.8-27B with batch slots (lamina's --parallel) and --drafts-per-step: each "
          "session's step verifies its drafts too"},
 
         {"", "", 0, "Hy4-flash"},
@@ -317,17 +317,17 @@ const std::vector<OptionHelp>& engine_options() {
         {"--expert-cache", "auto|SIZE", 0, "Inkling 2: the first card's cache="},
         {"--vram-reserve-mib", "N", 0, "Inkling 2: the first card's reserve= in MiB"},
 
-        {"", "", 0, "Serve mode (lamina-server sets these)"},
-        {"--serve", "", C, "stay resident and take requests on stdin, as lamina-server sends them"},
+        {"", "", 0, "Serve mode (lamina sets these)"},
+        {"--serve", "", C, "stay resident and take requests on stdin, as lamina sends them"},
         {"--vision", "", C, "--serve takes pictures too, the image encoder's rows beside a request's tokens"},
         {"--batch", "N", 0,
-         "Qwen3.6 and Qwen3.8-27B: N sessions decoding together on one GPU (--slots; lamina-server's parallel)"},
+         "Qwen3.6 and Qwen3.8-27B: N sessions decoding together on one GPU (--slots; lamina's parallel)"},
         {"--tail-role-token", "ID", 0,
          "Flash-Next, Qwen3.6 and Qwen3.8-27B: a turn of this role right before the last one stays out of its "
-         "checkpoint (lamina-server's effort_position end; default -1: off)"},
+         "checkpoint (lamina's effort_position end; default -1: off)"},
         {"--expert-profile-save", "P", 0,
          "Flash-Next, Hy4-flash and Inkling 2: what the run's routing learned, blended with the profile it started "
-         "from, written to P at the end and between requests (lamina-server's expert_profile_save)"},
+         "from, written to P at the end and between requests (lamina's expert_profile_save)"},
         {"--expert-profile-save-every", "MIN", 0,
          "minutes between those saves (Flash-Next 10, the others 1; 0: at the end only)"},
 
@@ -473,7 +473,7 @@ std::string options_help(unsigned lists, bool deprecated, size_t width, size_t c
     out += "\n" + wrapped("Deprecated spellings, still taken: a card's own setting wins over them, a per-tier list's "
                           "values go to the tiers in order (its last to those past it), and of --gpu, --main-gpu and "
                           "--second-gpu the later takes the earlier's place (--second-gpu -1 after the cards: no "
-                          "tiers); lamina-server names the ones a start uses",
+                          "tiers); lamina names the ones a start uses",
                           0, width, 0);
     for (const DeprecatedOption& d : deprecated_options())
         out += help_line(std::string(d.flag) + (*d.value ? " " : "") + d.value, d.instead, width, col);

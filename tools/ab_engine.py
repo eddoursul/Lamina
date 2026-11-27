@@ -2,7 +2,7 @@
 
     python tools/ab_engine.py lamina-iq3_s.json A:exe=/path/a B:exe=/path/b,LAMINA_HC_Q8=2 [--rounds 3]
 
-An arm is NAME:key=value,...; `exe` is the server to run (lamina-server, the engine in it; default build/'s), `xargs`
+An arm is NAME:key=value,...; `exe` is the server to run (lamina, the engine in it; default build/'s), `xargs`
 appends ';'-separated engine arguments, every other key is set in the server's environment (the engine reads it).
 Each round starts the server once per arm (the arms' order alternates), warms it up with one short
 answer, then sends the same requests: greedy, fixed prompts, a short chat set and one long prompt.  Prints the
@@ -89,7 +89,7 @@ def main() -> int:
         for name, env in order:
             cfg = dict(base)
             e = dict(env)
-            server = e.pop("exe", None) or str(ROOT / "build" / ("lamina-server.exe" if os.name == "nt" else "lamina-server"))
+            server = e.pop("exe", None) or str(ROOT / "build" / ("lamina.exe" if os.name == "nt" else "lamina"))
             if "xargs" in e:                       # extra engine arguments, ';'-separated
                 cfg["args"] = list(base["args"]) + e.pop("xargs").split(";")
             cfg["port"] = a.port

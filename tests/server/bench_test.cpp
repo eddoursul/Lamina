@@ -1,4 +1,4 @@
-// lamina-server --bench (src/server/bench.hpp) against a scripted server of its own: the suite's shapes and medians,
+// lamina --bench (src/server/bench.hpp) against a scripted server of its own: the suite's shapes and medians,
 // the agent session's reuse, the tests a small context skips, failures reported, a stop, the report written and
 // redacted, the comparison, the cards a report names, the expert profile kept from the benchmark's saves, and the word
 // lists as Python's random.Random(7) picks them (suite 1's prompts).  (CPU only: no GPU, no engine.)
@@ -258,7 +258,7 @@ void the_report(FakeLamina& srv) {
     o.runs = 2;
     o.clients = 2;
     o.out = lamina::u8_str(d);
-    o.command = "lamina-server --bench-url " + srv.base() + " --bench-clients 2 --bench-runs 2";
+    o.command = "lamina --bench-url " + srv.base() + " --bench-clients 2 --bench-runs 2";
     CHECK(B::run(srv.target(), nullptr, o, "", 0, nullptr) == 0);
     std::vector<fs::path> dirs = dirs_in(d);
     CHECK(dirs.size() == 1);
@@ -269,11 +269,11 @@ void the_report(FakeLamina& srv) {
     for (const char* part : {"# Community benchmark on NVIDIA GeForce RTX 9999", "## Hardware and software",
                              "## Model and configuration", "## Method", "## Results", "## Correctness and limitations",
                              "### Agent session", "### Concurrency: 2 clients",
-                             "| Configuration | Actual prompt tokens | Reused tokens |", "`lamina-server --bench-url "})
+                             "| Configuration | Actual prompt tokens | Reused tokens |", "`lamina --bench-url "})
         CHECK(readme.find(part) != std::string::npos);
     const std::string raw = read_file(dirs[0] / "results.json");
     const json res = json::parse(raw);
-    CHECK(res["schema"] == B::kSchema && res["tool"] == "lamina-server --bench");
+    CHECK(res["schema"] == B::kSchema && res["tool"] == "lamina --bench");
     CHECK(res["machine"]["engine_version"] == "9.9.9" && res["machine"]["gpu"] == json::array({"NVIDIA GeForce RTX 9999"}));
     CHECK(med(res["results"]["chat"]["decode_tps"]) == 60.0);
     CHECK(res["params"]["started_server"] == false && res["params"]["clients"] == 2);

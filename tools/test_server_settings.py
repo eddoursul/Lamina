@@ -1,4 +1,4 @@
-"""lamina-server's settings table (src/server/params.cpp) against the config keys its sources read: every key the server
+"""lamina's settings table (src/server/params.cpp) against the config keys its sources read: every key the server
 reads is an option of the table (or the config's "args" and "mcpServers"), and every key of the table is read
 somewhere, so the config file and the command line stay one set of settings.
 

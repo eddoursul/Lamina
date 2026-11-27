@@ -1,4 +1,4 @@
-// src/server/params.hpp - lamina-server's settings in one table: every key of the run config and the command-line
+// src/server/params.hpp - lamina's settings in one table: every key of the run config and the command-line
 // option that sets it.  A value of the command line takes the place of the config file's, and the file's that of the
 // preset -m builds from (model_config.hpp).  An option the table does not have is the engine's (the config's "args").
 #pragma once
@@ -39,7 +39,7 @@ extern const std::vector<Param> kParams;
 /// the Param a flag names (an alias, or --no-<flag> of a switch), and whether it was that --no- form; nullptr when none
 const Param* find_param(std::string_view flag, bool* negated = nullptr);
 
-/// lamina-server's command line
+/// lamina's command line
 struct CommandLine {
     json settings = json::object();      ///< the options' values by key, a section's nested ({"sampling": {"top_k": 20}})
     std::vector<EngineOption> engine;    ///< the options the table does not have: the engine's

@@ -43,7 +43,7 @@ REDIST_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
 COMPONENTS = ("cuda_nvcc", "cuda_crt", "libnvvm", "cuda_cudart", "cccl")
 # What each archive holds (cmake --install's components): checked before it is written.  The server alone: the
 # engine runs in its process (the engine alone, lamina-engine, is for tests and measurements)
-EXECUTABLES = [f"lamina-server{EXE}"]
+EXECUTABLES = [f"lamina{EXE}"]
 PROGRAMS = [*EXECUTABLES, "download-draft-layer.bat" if WIN else "download-draft-layer.sh", "LICENSE",
             "LICENSE-llama.cpp", "LICENSE-cpp-httplib", "LICENSE-jsonhpp", "LICENSE-Outfit", "LICENSE-cuda"]
 # What the Linux programs may take from the system (docs/SETUP.md, Release binaries): glibc 2.34 at most (Ubuntu

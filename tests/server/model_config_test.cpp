@@ -1,4 +1,4 @@
-// lamina-server -m's config pieces that need no model and no GPU (src/server/model_config.hpp): the preset by the
+// lamina -m's config pieces that need no model and no GPU (src/server/model_config.hpp): the preset by the
 // header's architecture and quantizer, the main GPU and the image encoder's, a GPU's name in a config, the cards a
 // config's --main-gpu and --second-gpu name (none for a --main-gpu the engine would not find), the command
 // line's engine options in place of the config's, image projectors told apart by their width, a config written

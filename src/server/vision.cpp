@@ -388,7 +388,7 @@ bool vision_built() {
 }
 
 const char* vision_not_built() {
-    return "this lamina-server was built without the image encoder (LAMINA_BUILD_VISION=OFF)";
+    return "this lamina was built without the image encoder (LAMINA_BUILD_VISION=OFF)";
 }
 
 #if LAMINA_VISION

@@ -1,4 +1,4 @@
-// lamina-server's settings table (src/server/params.hpp): every option names one key and the other way round, the
+// lamina's settings table (src/server/params.hpp): every option names one key and the other way round, the
 // command line's values by their kinds (switches and their --no- forms, numbers, lists given again, NAME=VALUE pairs,
 // JSON), the engine's options apart, the errors, a section merged key by key, the config's keys the table lacks, and
 // --help naming every option, the engine's a server takes too.  (CPU only.)
@@ -27,7 +27,7 @@ static int fails = 0;
 namespace {
 
 lamina::CommandLine parse(std::vector<std::string> words) {
-    words.insert(words.begin(), "lamina-server");
+    words.insert(words.begin(), "lamina");
     std::vector<char*> argv;
     for (auto& w : words) argv.push_back(w.data());
     return lamina::parse_command_line((int) argv.size(), argv.data());
@@ -84,7 +84,7 @@ int main() {
     CHECK((s["env"] == json{{"A", "1"}, {"B", "x=y"}}));
     CHECK((s["gpu"] == json{0, 2}));
     {   // --gpu again for each card, a card's settings after its name: one item each, in order
-        const char* argv2[] = {"lamina-server", "--gpu", "GPU-75af3083", "--gpu", "RTX 5070 Ti",
+        const char* argv2[] = {"lamina", "--gpu", "GPU-75af3083", "--gpu", "RTX 5070 Ti",
                                "--gpu", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"};
         const lamina::CommandLine c2 = lamina::parse_command_line(7, (char**) argv2);
         CHECK((c2.settings["gpu"] == json{"GPU-75af3083", "RTX 5070 Ti", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"}));

@@ -1,4 +1,4 @@
-// src/server/model_config.hpp - lamina-server -m: the run config built from a model's GGUF: the preset its header
+// src/server/model_config.hpp - lamina -m: the run config built from a model's GGUF: the preset its header
 // picks (examples/*.json, built in), with this PC's GPUs and the files beside the model.  --write-config writes it; --check says what a model needs against what this PC has.
 #pragma once
 
@@ -74,7 +74,7 @@ std::string projector_problem(const std::string& path, const ModelFacts& m);
 /// than an F16 one, and that one sooner than F32
 std::vector<std::string> projectors_beside(const ModelFacts& m);
 
-/// What lamina-server's command line says about -m's config
+/// What lamina's command line says about -m's config
 struct ModelOptions {
     std::string model;               ///< -m: any shard of the model
     std::string mmproj;              ///< --mmproj ("": the projector beside the model, if any)

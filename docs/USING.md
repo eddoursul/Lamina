@@ -1,7 +1,7 @@
 # Using Lamina
 
-The server, `lamina-server`, runs the engine in its own process and serves the OpenAI, Anthropic and Responses APIs and
-a web app. It starts with a model file, `lamina-server -m MODEL.gguf`, or a config, `lamina-server --config FILE`
+The server, `lamina`, runs the engine in its own process and serves the OpenAI, Anthropic and Responses APIs and
+a web app. It starts with a model file, `lamina -m MODEL.gguf`, or a config, `lamina --config FILE`
 ([SETUP.md](SETUP.md#a-model-file)), and listens on this PC only, on the config's port (the presets': 8081 for
 ISTA-DASLab's Flash-Next files, 8082 for the family's others, 8083 for Qwen3.6-35B-A3B, 8084 for Qwen3.8-27B, 8086 for
 Hy4-flash, 8087 for Inkling 2 Mini). Ctrl+C in its window stops it; the engine saves what it learned about the experts
@@ -261,7 +261,7 @@ elsewhere.
 
 **Behind [llama-swap](https://github.com/mostlygeek/llama-swap)**, which starts the server a request names and stops
 the others: run the server itself with llama-swap's port, so that stopping it stops the engine too
-(`cmd: sh -c 'cd /path/to/Lamina && exec build/lamina-server --config iq3_s.json --port ${PORT}'`),
+(`cmd: sh -c 'cd /path/to/Lamina && exec build/lamina --config iq3_s.json --port ${PORT}'`),
 with `checkEndpoint: /health` (the server listens once the model has loaded) and a `healthCheckTimeout` of a few
 minutes. llama-swap passes the client's `Host` through: without an API key, add the name clients reach it by to
 `allowed_hosts` ([below](#from-other-devices)), or those requests get 403.
@@ -271,7 +271,7 @@ minutes. llama-swap passes the client's `Host` through: without an API key, add 
 The server listens on this PC only (`127.0.0.1`). `"host": "0.0.0.0"` in the config (or `--host`) opens it to the
 network, with an API key: `"api_key": "a-long-secret"` (or the `LAMINA_API_KEY` variable; several keys
 comma-separated or as a list), which clients then send as their API key. The server window prints this PC's addresses;
-on Windows the firewall blocks them until lamina-server is allowed on private networks. Through a tunnel or a proxy, set
+on Windows the firewall blocks them until lamina is allowed on private networks. Through a tunnel or a proxy, set
 the key first, and add the address the page is reached at to `"trusted_origins"` for the web app's settings and MCP
 tools. A request without the right key is refused before its body is read. The server has no deadline for a request's
 headers, though: a client that sends them a byte at a time holds one of its threads, so on a network you do not trust,
@@ -288,7 +288,7 @@ put a reverse proxy in front of it.
 The server reads a config file at its start (`--config FILE`), or with `-m` builds one from the model file
 ([SETUP.md](SETUP.md#a-model-file); `--write-config` writes it; its keys: [SETUP.md](SETUP.md#the-config)). Every key
 is an option of the command line too and the other way round, the engine's options in the config's `"args"`, and the
-command line's values take the place of the file's, the file's those of the preset: `lamina-server --config my.json
+command line's values take the place of the file's, the file's those of the preset: `lamina --config my.json
 --port 8090 --temperature 0.6` ([PARAMETERS.md](PARAMETERS.md#how-options-are-given)). A key the server does not read (a
 typo) is named in its window and ignored. Only the commands are the command line's alone: `--config`,
 `--write-config`, `--check`, `--bench`, `--help` and `--version`.

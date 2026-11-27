@@ -1,4 +1,4 @@
-// src/server/http_server.hpp - the HTTP side of lamina-server (serve/server.py's Handler): the OpenAI, Anthropic and
+// src/server/http_server.hpp - the HTTP side of lamina (serve/server.py's Handler): the OpenAI, Anthropic and
 // Responses APIs, the web app and its endpoints, the Monitor's, and who may use them (the Host check, API keys, web
 // pages' origins, CORS).
 #pragma once

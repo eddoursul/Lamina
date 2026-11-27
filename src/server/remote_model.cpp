@@ -329,7 +329,7 @@ void write_sparse(const fs::path& path, const std::string& head, uint64_t size) 
     CloseHandle(h);
     if (!sparse)
         throw RemoteError(u8_str(path.parent_path()) + ": its drive keeps no sparse files (an NTFS drive does): TEMP "
-                          "names the folder lamina-server writes the files' headers in");
+                          "names the folder lamina writes the files' headers in");
     if (!ok) throw RemoteError(u8_str(path) + " cannot be written");
 #else
     const int fd = ::open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
@@ -383,7 +383,7 @@ bool parse_hf_url(const std::string& url, HfTarget& t, const std::string& endpoi
     for (const std::string& s : split(u.path, "/"))
         if (!s.empty()) seg.push_back(s);
     auto bad = [&](const std::string& why) {
-        throw RemoteError(url + ": " + why + ". lamina-server reads a repository's URL, a folder's in it "
+        throw RemoteError(url + ": " + why + ". lamina reads a repository's URL, a folder's in it "
                           "(.../tree/REVISION/FOLDER) or a file's (.../blob/REVISION/FILE, .../resolve/REVISION/FILE)");
     };
     size_t i = 0;

@@ -52,16 +52,16 @@ For Flash-Next, `--mtp` does not accept other MTP formats.
 ## Run
 
 ```
-lamina-server --help
-lamina-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf
-lamina-server -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --mtp Lamina-Qwen3.8-Flash-Next-MTP.gguf
+lamina --help
+lamina -m Qwen3.8-27B-UD-Q6_K_XL.gguf
+lamina -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --mtp Lamina-Qwen3.8-Flash-Next-MTP.gguf
 ```
 
 Generate a configuration file:
 ```
-lamina-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf <other parameters> --write-config qwen27b.json
+lamina -m Qwen3.8-27B-UD-Q6_K_XL.gguf <other parameters> --write-config qwen27b.json
 ; Run with the created config file
-lamina-server --config qwen27b.json
+lamina --config qwen27b.json
 ```
 
 How to connect clients, images, image generation, MCP tools and serving on a network:
@@ -101,7 +101,7 @@ To enable, add this key to the model's config or use `--chat-template-file` on t
 Lamina is under the MIT license ([LICENSE](LICENSE)), as Strata is. Some parts carry their own: `third_party/ggml`
 (MIT, llama.cpp's), the web app's font, [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL Open Font License 1.1,
 `src/server/web/fonts/OFL.txt`), froggeric's chat template (Apache-2.0, unmodified,
-`data/chat-template-froggeric-v22.5.LICENSE`), and what lamina-server takes from llama.cpp's checkout (its Jinja engine,
+`data/chat-template-froggeric-v22.5.LICENSE`), and what lamina takes from llama.cpp's checkout (its Jinja engine,
 cpp-httplib, nlohmann/json, stb_image: MIT). It builds on:
 
 - [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors: the engine Lamina grew from, with ideas

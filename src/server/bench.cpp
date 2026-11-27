@@ -1,4 +1,4 @@
-// src/server/bench.cpp - lamina-server --bench (bench.hpp): the suite, the machine, the report and the comparison, in
+// src/server/bench.cpp - lamina --bench (bench.hpp): the suite, the machine, the report and the comparison, in
 // the server so that a release's programs run it as they are.
 #include <httplib.h>
 
@@ -1285,7 +1285,7 @@ std::string render_readme(const json& res) {
     const bool think = jget(p, "think") == true;
     std::vector<std::string> L = {
         "# Community benchmark on " + gpu, "",
-        "Measured on " + jstr(res, "date") + " with `lamina-server --bench` (suite " + std::to_string(kSchema) + ", " +
+        "Measured on " + jstr(res, "date") + " with `lamina --bench` (suite " + std::to_string(kSchema) + ", " +
             std::to_string(runs) + " runs per test, medians with ranges). Speeds are the engine's own timings; first-token "
             "times are measured by the client over HTTP. Speed only: no correctness check was run.",
         "",
@@ -1500,7 +1500,7 @@ int run(const Target& t, const json& cfg, const Options& o, const std::string& l
     json machine = collect_machine(t, cfg, local);   // again: VRAM and the cache after the work
     if (!truthy(jget(machine, "gpu"))) machine["gpu"] = pre["gpu"];
     const json res = {{"schema", kSchema},
-                      {"tool", "lamina-server --bench"},
+                      {"tool", "lamina --bench"},
                       {"date", today()},
                       {"params", {{"runs", opts.runs}, {"think", opts.think}, {"clients", opts.clients},
                                   {"long", opts.long_prompt}, {"started_server", started}, {"command", opts.command}}},

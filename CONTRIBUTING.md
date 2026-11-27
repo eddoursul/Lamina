@@ -8,7 +8,7 @@ every line of it, and show what you ran.
 Search the [issues](https://github.com/eddoursul/Lamina/issues) first, closed ones too. A report says:
 
 - what you did (the request, the command), what you expected and what happened, with the exact error;
-- the commit (`git rev-parse --short HEAD`), the output of `--check` (`lamina-server -m MODEL.gguf --check`), and the config's `args` if you changed them;
+- the commit (`git rev-parse --short HEAD`), the output of `--check` (`lamina -m MODEL.gguf --check`), and the config's `args` if you changed them;
 - the engine's log (the config's `log`) and the server's output, with keys and private text removed;
 - whether you saw it happen or found it by reading the code (then say so: "not reproduced").
 

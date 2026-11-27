@@ -1,8 +1,8 @@
-"""lamina-server's HTTP behavior on the scripted (mock) engine, against the recorded answers in http_golden.json.
+"""lamina's HTTP behavior on the scripted (mock) engine, against the recorded answers in http_golden.json.
 
 The requests cover the OpenAI, Anthropic and Responses APIs (streamed and not, tools, structured output, thinking
 budgets, stop strings, the guards), the errors, the security checks (Host, Origin, API keys) and the endpoints the web
-app and the Monitor read. Ids, timestamps and timings are normalized. The answers were recorded from lamina-server once
+app and the Monitor read. Ids, timestamps and timings are normalized. The answers were recorded from lamina once
 it answered as the Python server it was ported from did, request by request.
 
     set LAMINA_TEST_GGUF=<a Qwen3.8-Flash-Next GGUF (its first shard)>   the tokenizer and chat template
@@ -30,7 +30,7 @@ def server_exe() -> Path:
     exe = os.environ.get("LAMINA_SERVER")
     if exe:
         return Path(exe)
-    return ROOT / "build" / ("lamina-server.exe" if os.name == "nt" else "lamina-server")
+    return ROOT / "build" / ("lamina.exe" if os.name == "nt" else "lamina")
 
 
 SCRIPTS = [
@@ -299,7 +299,7 @@ def answers(gguf, exe=None, log_dir=None):
             proc = subprocess.Popen([str(exe or server_exe()), *server_args(gguf, port, extra)], cwd=ROOT, stdout=f,
                                     stderr=subprocess.STDOUT)
         try:
-            wait_ready(port, proc, "lamina-server", log)
+            wait_ready(port, proc, "lamina", log)
             got = {}
             for name, method, path, body, headers in cases():
                 status, ctype, raw = call(port, method, path, body, headers)
@@ -338,14 +338,14 @@ class TemplateFile(unittest.TestCase):
         tpl = Path(os.environ.get("TEMP", "/tmp")) / "lamina_http_test_template.jinja"
         tpl.write_text("X{{ messages[-1].content }}", encoding="utf-8")
         port, proc, log = mock_server(self, "--config", config_file(chat_template_file=str(tpl)))
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         status, ctype, raw = call(port, "POST", "/apply-template", chat(), {})
         self.assertEqual((status, parse_body(ctype, raw)["prompt"]), (200, "XHi"))
 
     def test_the_shipped_template(self):
         port, proc, log = mock_server(self, "--script", "Plain answer.", "--config",
                                       config_file(chat_template_file="data/chat-template-froggeric-v22.5.jinja"))
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
 
         def prompt(**body):
             status, ctype, raw = call(port, "POST", "/apply-template", {"model": "m", **body}, {})
@@ -382,7 +382,7 @@ class ShortOpening(unittest.TestCase):
 
     def prompts(self, *extra):
         port, proc, log = mock_server(self, *extra)
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
 
         def prompt(**body):
             status, ctype, raw = call(port, "POST", "/apply-template", {"model": "m", **body}, {})
@@ -417,7 +417,7 @@ class MarkerNames(unittest.TestCase):
 
     def serve(self, *extra):
         port, proc, log = mock_server(self, *sum((["--script", s] for s in self.SCRIPTS), []), *extra)
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
 
         def ask():
             status, ctype, raw = call(port, "POST", "/v1/chat/completions", chat(), {})
@@ -449,7 +449,7 @@ class MalformedCall(unittest.TestCase):
     def serve(self, *extra):
         answer = "A thought.</think>\n\n" + self.CALL
         port, proc, log = mock_server(self, "--script", answer, "--script", answer, "--script", "</think>\n\nNext.", *extra)
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         return port
 
     def next_is_answered(self, port):
@@ -482,7 +482,7 @@ class TemplateRefusal(unittest.TestCase):
 
     def test_a_400_that_frees_its_admission(self):
         port, proc, log = mock_server(self, "--max-queue", "0", "--script", "</think>\n\nFine.")
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         for _ in range(2):
             status, ctype, raw = call(port, "POST", "/v1/chat/completions", {"model": "m", "messages": []}, {})
             self.assertEqual((status, parse_body(ctype, raw)["error"]["message"]), (400, "No messages provided."), raw)
@@ -496,7 +496,7 @@ class HugeLimits(unittest.TestCase):
 
     def test_max_tokens(self):
         port, proc, log = mock_server(self, "--script", "</think>\n\nFine.")
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         for value in ('"99999999999999999999"', '"-99999999999999999999"', "1e300", "18446744073709551615"):
             body = '{"model": "m", "max_tokens": %s, "messages": [{"role": "user", "content": "Hi"}]}' % value
             status, ctype, raw = call(port, "POST", "/v1/chat/completions", body, {})
@@ -509,7 +509,7 @@ class RepetitionPenalty(unittest.TestCase):
 
     def test_range(self):
         port, proc, log = mock_server(self, "--script", "</think>\n\nFine.")
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         for key, value, status in (("repetition_penalty", 0, 400), ("repeat_penalty", -1, 400),
                                    ("repetition_penalty", "0", 400), ("repetition_penalty", 1.1, 200)):
             with self.subTest(key=key, value=value):
@@ -538,7 +538,7 @@ class SchemaBudget(unittest.TestCase):
 
     def test_refused(self):
         port, proc, log = mock_server(self, "--script", "</think>\n\n{}")
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         status, message = self.ask(port, {"$ref": "#/$defs/d0", "$defs": self.chain("anyOf", 40, {"type": "object"})})
         self.assertEqual(status, 400, message)
         self.assertIn("too complex", message)
@@ -549,7 +549,7 @@ class SchemaBudget(unittest.TestCase):
     def test_unique_lists(self):
         # draft-04's metaschema checks an enum's items for uniqueness: 40,000 lists sorted, not compared pairwise
         port, proc, log = mock_server(self, "--script", '</think>\n\n{"a": [5]}')
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
 
         def schema(values):
             return {"$schema": "http://json-schema.org/draft-04/schema#", "type": "object",
@@ -568,7 +568,7 @@ class SchemaBudget(unittest.TestCase):
     def test_pattern_memory(self):
         # a repeat of empty steps: each step one more choice and undo entry, gigabytes before the step budget
         port, proc, log = mock_server(self, "--script", '</think>\n\n{"a": "abc"}')
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         status, message = self.ask(port, {"type": "object", "properties": {"a": {"type": "string",
                                                                                  "pattern": "(?:x??){99999999}"}}})
         self.assertEqual(status, 502, message)
@@ -583,7 +583,7 @@ class MissingCallEnd(unittest.TestCase):
     def test_custom_tool_input(self):
         text = "<tool_call>\n<function=apply_patch>\n<parameter=input>\n*** Begin Patch\n*** End Patch\n</parameter>\n</function>"
         port, proc, log = mock_server(self, "--script", "</think>\n\n" + text)
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         body = {"model": "m", "input": "Patch it.", "tools": [{"type": "custom", "name": "apply_patch",
                                                                "description": "Apply a patch to the files."}]}
         status, ctype, raw = call(port, "POST", "/v1/responses", body, {})
@@ -600,7 +600,7 @@ class StreamedToolName(unittest.TestCase):
     def test_name(self):
         text = "<tool_call>\n<function=get_weather >\n<parameter=city>\n123\n</parameter>\n</function>\n</tool_call>"
         port, proc, log = mock_server(self, "--script", "</think>\n\n" + text)
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         status, ctype, raw = call(port, "POST", "/v1/chat/completions", chat(tools=TOOLS, stream=True), {})
         pieces = [tc for e in parse_body(ctype, raw) if isinstance(e.get("data"), dict)
                   for tc in (e["data"]["choices"][0]["delta"].get("tool_calls") or [])]
@@ -627,7 +627,7 @@ class KeyBeforeBody(unittest.TestCase):
 
     def test_refused_before_the_body(self):
         port, proc, log = mock_server(self, "--api-key", "k1")
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         self.assertEqual(self.headers_only(port, "nope"), "HTTP/1.1 401 Unauthorized")
         self.assertEqual(self.headers_only(port, "k1"), "no answer")   # the right key: the body is awaited
 
@@ -655,7 +655,7 @@ class PythonIteration(unittest.TestCase):
         for schema, answer, error in cases:
             with self.subTest(schema=schema):
                 port, proc, log = mock_server(self, "--script", "</think>\n\n" + answer)
-                wait_ready(port, proc, "lamina-server", log)
+                wait_ready(port, proc, "lamina", log)
                 body = {"model": "m", "messages": msgs(), "response_format": {"type": "json_schema", "json_schema": {
                     "name": "x", "schema": schema}}}
                 status, ctype, raw = call(port, "POST", "/v1/chat/completions", body, {})
@@ -680,7 +680,7 @@ class NetlocChecks(unittest.TestCase):
         for sub_id, error in cases:
             with self.subTest(id=sub_id):
                 port, proc, log = mock_server(self, "--script", '</think>\n\n{"a": 1}')
-                wait_ready(port, proc, "lamina-server", log)
+                wait_ready(port, proc, "lamina", log)
                 schema = {"$id": "http://example.com/root", "type": "object",
                           "properties": {"a": {"$id": sub_id, "type": "integer"}}}
                 body = {"model": "m", "messages": msgs(), "response_format": {"type": "json_schema", "json_schema": {
@@ -700,7 +700,7 @@ class GroupNames(unittest.TestCase):
 
     def test_names(self):
         port, proc, log = mock_server(self, "--script", '</think>\n\n{"a": "x"}')
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         for name, status in (("a²", 400), ("Ⅰ", 200)):
             with self.subTest(name=name):
                 schema = {"type": "object", "properties": {"a": {"type": "string", "pattern": "(?P<%s>x)" % name}}}
@@ -725,7 +725,7 @@ class BigIntSchema(unittest.TestCase):
                                                                           "json_schema": {"name": "x", "schema": schema}}}
             status, ctype, raw = call(port, "POST", "/v1/chat/completions", body, {})
             return status, raw.decode()
-        wait_ready(port, proc, "lamina-server", log)
+        wait_ready(port, proc, "lamina", log)
         status, raw = ask({"const": self.BIG})
         self.assertEqual(status, 200, raw)
         status, raw = ask({"multipleOf": self.BIG})   # the answer one less

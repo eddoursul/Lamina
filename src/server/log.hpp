@@ -15,7 +15,7 @@ void say_err(std::string_view text);
 void set_err_stream(std::FILE* f);
 
 /// While one lives, say() and say_err() on its thread hand their text to `sink` in place of the console (`err`: say_err's)
-/// - lamina-server --check on a model at a URL: its lines with the download's paths in place of the copies' it reads,
+/// - lamina --check on a model at a URL: its lines with the download's paths in place of the copies' it reads,
 /// or a model's lines left out of a table.  They nest: the latest one takes the lines.
 class SayRedirect {
 public:

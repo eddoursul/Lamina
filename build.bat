@@ -1,6 +1,6 @@
 @echo off
 rem Builds Lamina from this clone with a preset of CMakePresets.json: native (the default: this PC's GPUs and CPU,
-rem into build\) or portable (the releases' build for other PCs, into build-portable\). lamina-server.exe and
+rem into build\) or portable (the releases' build for other PCs, into build-portable\). lamina.exe and
 rem lamina-engine.exe run from there (the CUDA runtime is linked in).
 rem   build.bat [native or portable] [CMake options, e.g. -DLAMINA_BUILD_TESTS=ON; quote one that holds a ;]
 rem It takes the MSVC the shell has set up (a developer prompt, or a portable MSVC's setup_x64.bat: cl.exe on the PATH,
@@ -49,7 +49,7 @@ rem CUDA's ptxas now and then fails to read a file it has just written (upstream
 echo (the build stopped: trying it once more)
 cmake --build --preset %PRESET% || exit /b 1
 :done
-echo Done: the programs are in %OUT%\ (%OUT%\lamina-server.exe -m MODEL.gguf runs a model)
+echo Done: the programs are in %OUT%\ (%OUT%\lamina.exe -m MODEL.gguf runs a model)
 exit /b 0
 
 :no_vs

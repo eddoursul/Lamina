@@ -25,7 +25,7 @@
 // for the largest picture the projector's limit gives (made again for a picture past it), q, k and v, and a
 // product's input and output for kChunk rows.  The adapters leave the rows in one of the two buffers.  All of it is
 // the encoder's own allocation or, lent, one block of its caller's (EncoderParams::gpu_arena: the weights at its
-// start, the buffers after them): lamina-server's encoder borrows the engine's expert-cache slots that way for a
+// start, the buffers after them): lamina's encoder borrows the engine's expert-cache slots that way for a
 // picture and loads its weights each time, the file's matrices read into one pinned buffer (0.17-0.31 s).
 // LAMINA_VISION_MEM=1 prints the device's free memory and the time after each step of the start.
 #include "backends.hpp"

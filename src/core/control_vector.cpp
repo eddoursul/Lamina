@@ -81,7 +81,7 @@ bool control_vector_tables(const ControlVectorSpec& spec, int64_t n_layers, int6
             if (const lamina::MetaValue* hint = gguf.get("controlvector.model_hint"))
                 if (hint->type == lamina::MetaType::STRING && hint->s != "qwen4exp")
                     out.warnings.push_back(f.path + " was made for '" + hint->s + "', not qwen4exp");
-            // its header (lamina-server --check says the same of it), then its values
+            // its header (lamina --check says the same of it), then its values
             if (std::string e = control_vector_problem(gguf, n_embd); !e.empty()) {
                 err = f.path + ": " + e;
                 return false;

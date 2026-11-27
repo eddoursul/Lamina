@@ -1,4 +1,4 @@
-// src/server/remote_model.hpp - lamina-server --check -m URL: the models a URL names, judged from their files' headers.
+// src/server/remote_model.hpp - lamina --check -m URL: the models a URL names, judged from their files' headers.
 //
 // A Hugging Face URL (a repository, a folder in it, a file) is listed through the Hub's API at one commit; any other
 // URL is a GGUF file itself, its split model's other shards beside it by name.  Each file's header is read (one

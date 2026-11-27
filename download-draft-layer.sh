@@ -4,7 +4,7 @@
 #
 #   ./download-draft-layer.sh FOLDER
 #
-# lamina-server takes the file from beside the model or beside the program; elsewhere name it in the config's "args":
+# lamina takes the file from beside the model or beside the program; elsewhere name it in the config's "args":
 # "--drafter", "FOLDER/Lamina-Qwen3.8-Flash-Next-MTP.gguf".  A download that broke off goes on from where it stopped.
 # HF_ENDPOINT names a mirror.  It needs curl or wget, and sha256sum.
 set -eu
@@ -12,7 +12,7 @@ name=Lamina-Qwen3.8-Flash-Next-MTP.gguf
 if [ $# -ne 1 ]; then
   echo "usage: $0 FOLDER" >&2
   echo "Downloads Lamina's draft layer for Qwen3.8-Flash-Next ($name, 0.8 GB) into FOLDER: the model's" >&2
-  echo "folder, where lamina-server finds it" >&2
+  echo "folder, where lamina finds it" >&2
   exit 2
 fi
 rev=e0d95e4236a43f3e02153c290211b74ba17a6f90
@@ -55,5 +55,5 @@ else
 fi
 echo
 echo "The draft layer is $file"
-echo "lamina-server takes it from beside the model or the program; elsewhere name it in the config's \"args\":"
+echo "lamina takes it from beside the model or the program; elsewhere name it in the config's \"args\":"
 echo "  \"--drafter\", \"$file\""

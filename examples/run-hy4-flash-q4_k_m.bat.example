@@ -3,5 +3,5 @@ title Lamina Hy4-flash Q4_K_M
 rem Hy4-flash, AngelSlim's Q4_K_M (both shards), on http://127.0.0.1:8086/v1 with hy4-flash-q4_k_m.json (README.md).
 rem The engine's hy4 path: the dense weights on the config's main GPU, the routed experts on the CPU.
 cd /d "%~dp0.."
-build\lamina-server.exe --config examples\hy4-flash-q4_k_m.json
+build\lamina.exe --config examples\hy4-flash-q4_k_m.json
 pause

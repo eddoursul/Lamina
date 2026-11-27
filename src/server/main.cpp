@@ -1,10 +1,10 @@
-// src/server/main.cpp - lamina-server: the OpenAI, Anthropic and Responses APIs and the web app in front of the engine,
+// src/server/main.cpp - lamina: the OpenAI, Anthropic and Responses APIs and the web app in front of the engine,
 // which runs on a thread of this process (serve/server.py's main).
 //
-//   lamina-server -m MODEL.gguf                      a model file, its config built from the preset for it
-//   lamina-server --config FILE                      the model a run config names
-//   lamina-server --engine mock --tokenizer <gguf>   a scripted engine (the tests')
-//   lamina-server -m MODEL.gguf --bench              the model measured through this server's API (bench.hpp)
+//   lamina -m MODEL.gguf                      a model file, its config built from the preset for it
+//   lamina --config FILE                      the model a run config names
+//   lamina --engine mock --tokenizer <gguf>   a scripted engine (the tests')
+//   lamina -m MODEL.gguf --bench              the model measured through this server's API (bench.hpp)
 #include "bench.hpp"
 #include "config.hpp"
 #include "engine.hpp"
@@ -105,8 +105,8 @@ void install_stop_handlers() {
 }
 
 [[noreturn]] void usage_error(const std::string& msg) {
-    say_err("usage: lamina-server -m MODEL.gguf | --config FILE [options] [engine options] (--help lists them)");
-    say_err("lamina-server: error: " + msg);
+    say_err("usage: lamina -m MODEL.gguf | --config FILE [options] [engine options] (--help lists them)");
+    say_err("lamina: error: " + msg);
     std::exit(2);
 }
 
@@ -542,7 +542,7 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
         for (const std::string& s : pc_stops) say("  - " + s);
     } else {
         say(std::to_string(can) + " of the " + std::to_string(models_n) + " models can start once downloaded." + more +
-            " lamina-server --check -m <a model's URL> says more of one.");
+            " lamina --check -m <a model's URL> says more of one.");
     }
     return can > 0 ? 0 : 1;
 }
@@ -560,7 +560,7 @@ int run(int argc, char** argv) {
         return 0;
     }
     if (cl.version) {
-        std::fputs("lamina-server " LAMINA_VERSION "\n", stdout);
+        std::fputs("lamina " LAMINA_VERSION "\n", stdout);
         return 0;
     }
     if (!cl.write_config.empty() && cl.check) usage_error("--write-config or --check: not both");
@@ -582,7 +582,7 @@ int run(int argc, char** argv) {
     bench_opts.think = cl.bench_think;
     bench_opts.out = cl.bench_out;
     bench_opts.compare = cl.bench_compare.empty() ? "" : cl.bench_compare[0];
-    bench_opts.command = attached ? "lamina-server --bench-url " + cl.bench_url : "lamina-server --bench";
+    bench_opts.command = attached ? "lamina --bench-url " + cl.bench_url : "lamina --bench";
     if (cl.bench_clients > 0) bench_opts.command += " --bench-clients " + std::to_string(cl.bench_clients);
     if (cl.bench_long) bench_opts.command += " --bench-long";
     if (cl.bench_think) bench_opts.command += " --bench-think";
@@ -622,7 +622,7 @@ int run(int argc, char** argv) {
         return 1;
     }
     for (const std::string& k : unknown_keys(file_cfg))
-        say("[lamina] the config's \"" + k + "\" is no key lamina-server reads (lamina-server --help lists them): ignored");
+        say("[lamina] the config's \"" + k + "\" is no key lamina reads (lamina --help lists them): ignored");
     // the settings: the preset's (with -m, or a config's "model" when it has no "args"), the file's over them, the
     // command line's over both
     json given = file_cfg;
@@ -754,7 +754,7 @@ int run(int argc, char** argv) {
                 say(w);
             if (const std::string w = resolve_drafter(probe, model_arch); !w.empty()) say(w);
             say("[lamina] wrote " + cl.write_config + (kept.empty() ? "" : " (kept from the earlier file, now " +
-                cl.write_config + ".bak: " + join(kept, ", ") + ")") + "; start it with  lamina-server --config " +
+                cl.write_config + ".bak: " + join(kept, ", ") + ")") + "; start it with  lamina --config " +
                 cl.write_config);
         } catch (const std::exception& e) {
             say_err(std::string("[lamina] ") + e.what());
@@ -775,7 +775,7 @@ int run(int argc, char** argv) {
         const int64_t listed = jget(cfg, "port").is_number_integer() ? cfg["port"].get<int64_t>() : 8095;
         if (listed > 0 && bench::lamina_answers("http://127.0.0.1:" + std::to_string(listed))) {
             say_err("[lamina] a Lamina server answers on port " + std::to_string(listed) + ": the benchmark needs the GPUs "
-                    "to itself. Stop that server, or measure it as it runs:  lamina-server --bench-url http://127.0.0.1:" +
+                    "to itself. Stop that server, or measure it as it runs:  lamina --bench-url http://127.0.0.1:" +
                     std::to_string(listed));
             return 2;
         }
@@ -1186,7 +1186,7 @@ int run(int argc, char** argv) {
             say("       WARNING: no API key - anyone on your network can use this model. Add \"api_key\": \"...\" to the config "
                 "(clients send it as their API key; the web page asks for it)");
 #ifdef _WIN32
-        say("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for lamina-server, or run in an "
+        say("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for lamina, or run in an "
             "admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Lamina " + std::to_string(bound) + "\" -Direction "
             "Inbound -Protocol TCP -LocalPort " + std::to_string(bound) + " -Action Allow -Profile Private\n       (and set "
             "this network to Private in Windows' network settings)");

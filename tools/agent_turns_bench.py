@@ -9,7 +9,7 @@ return them.  Every point right after a tool result is one turn the model contin
 tokens with the repository as of 0.1.41, consecutive turns sharing their prefix as in a real session.  Nothing
 personal and nothing downloaded: anyone with this checkout gets the same requests.
 
-Arms are given as ab_engine.py takes them (NAME:key=value,...; `exe` replaces the server, lamina-server with its
+Arms are given as ab_engine.py takes them (NAME:key=value,...; `exe` replaces the server, lamina with its
 engine, `xargs` appends ';'-separated engine arguments, any other key goes to the engine's environment).  The rounds
 mirror the arm order (A B, B A, ...), each arm on a fresh server.  Sampling is the agent's (temperature 1, top-p 0.95,
 top-k 20, a fixed seed), 256 new tokens per turn.  The result is the server's own decode tok/s per turn and, per arm, the median of the
@@ -162,7 +162,7 @@ def main() -> int:
         for name, env in (arms if rnd % 2 == 0 else arms[::-1]):
             cfg = dict(base)
             e = dict(env)
-            server = e.pop("exe", None) or str(ROOT / "build" / ("lamina-server.exe" if os.name == "nt" else "lamina-server"))
+            server = e.pop("exe", None) or str(ROOT / "build" / ("lamina.exe" if os.name == "nt" else "lamina"))
             if "xargs" in e:
                 cfg["args"] = list(base["args"]) + e.pop("xargs").split(";")
             cfg["port"] = a.port

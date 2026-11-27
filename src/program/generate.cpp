@@ -1,7 +1,7 @@
 // src/program/generate.cpp - the engine (`lamina-engine`): a model's prompt through the batched prompt path and its
 // decoding in verify windows of the last token and the draft layer's drafts, the experts in the GPUs' VRAM tiers and
 // the CPU pool.  Generate mode reads pretokenized ids (--tokens) and prints the tokens it decodes; --serve keeps
-// the model loaded and takes requests on stdin, or on lamina-server's in-process channels (serve_io.hpp).
+// the model loaded and takes requests on stdin, or on lamina's in-process channels (serve_io.hpp).
 
 #include "lamina/artifact/draft_layer.hpp"
 #include "lamina/artifact/drafter.hpp"
@@ -432,7 +432,7 @@ bool number_list(const char* s, std::vector<double>& out) {
 
 /// --help: the options most runs set; --help-all: every one, then the deprecated spellings the engine still takes.
 void usage(bool all = false) {
-    std::fputs("lamina-engine --native MODEL.gguf [options]   (lamina-server runs it; generate mode also takes --tokens)\n"
+    std::fputs("lamina-engine --native MODEL.gguf [options]   (lamina runs it; generate mode also takes --tokens)\n"
                "\n"
                "A switch also takes --no-<name>.\n",
                stderr);
@@ -1164,7 +1164,7 @@ struct PromptBuffers {
 };
 
 /// The command line into `o` (argv[0] the program's name): 0, else the exit code with the reason printed (and the
-/// usage after it with `usage_on_error`); --help prints the usage and sets `help`.  No CUDA call: lamina-server checks
+/// usage after it with `usage_on_error`); --help prints the usage and sets `help`.  No CUDA call: lamina checks
 /// the options it is given with it (check_args) before anything loads.
 int parse_options(int argc, char** argv, Options& o, bool& help, bool usage_on_error = true) {
     struct MissingValue {
@@ -1940,7 +1940,7 @@ int lamina::program::run(int argc, char** argv) {
 #if defined(LAMINA_HAVE_QWEN35)
     if (const int rc = qwen35_switch(argc, argv); rc != kNotQwen35) return rc;
 #endif
-    // The engine may run in the server's process (lamina-server), which starts it again after an unload: what it holds
+    // The engine may run in the server's process (lamina), which starts it again after an unload: what it holds
     // outside the objects below (device buffers, the main stream, the image position tables) goes back at every
     // return, after those objects.
     struct AtExit {
@@ -2097,7 +2097,7 @@ int lamina::program::run(int argc, char** argv) {
         return 2;
     }
 
-    {   // what the file must hold for this path, before anything is allocated or read (lamina-server --check says the
+    {   // what the file must hold for this path, before anything is allocated or read (lamina --check says the
         // same of it): its pack, its experts' and dense matrices' formats, its tables and the tensors the windows read
         lamina::core::FileCheckOptions fo;
         fo.ple_gguf = o.ple_gguf;

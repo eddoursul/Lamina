@@ -169,7 +169,7 @@ The API reports how many prompt tokens were reused (`cached_tokens`, `cache_read
 
 ## Pictures
 
-The image encoder is the engine's own code, a part of `lamina-server` (`src/vision`: the picture sized and resampled
+The image encoder is the engine's own code, a part of `lamina` (`src/vision`: the picture sized and resampled
 as the model's reference processor does it, one vision transformer for every model's projector, each model's adapter;
 its arithmetic is that of llama.cpp's multimodal library). On the CPU it is a graph on ggml, llama.cpp's tensor
 library, that library's operation for operation; on a GPU the engine's own kernels: its matrix products, llama.cpp's
@@ -189,7 +189,7 @@ at consecutive positions, as text, which is how llama.cpp's support for it reads
 
 ## The server
 
-`lamina-server` serves the OpenAI, Anthropic and Responses APIs and the web app, which is built into it. It renders
+`lamina` serves the OpenAI, Anthropic and Responses APIs and the web app, which is built into it. It renders
 the model's chat template (from its GGUF, or the config's `chat_template_file`, with llama.cpp's Jinja engine) and tokenizes with the model's tokenizer (from
 the GGUF too), and runs the engine on a thread of its own process: the engine takes prompts as token ids and writes
 tokens as each pass accepts them, through in-process channels that carry the line protocol `lamina-engine --serve`

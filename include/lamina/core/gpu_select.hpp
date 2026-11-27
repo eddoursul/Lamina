@@ -21,7 +21,7 @@ struct GpuInfo {
     int sms = 0;
     int cc = 0;           ///< compute capability x 10 (86: 8.6)
 };
-/// The engine's devices are CUDA's first `n`: lamina-server narrows its process to the engine's cards
+/// The engine's devices are CUDA's first `n`: lamina narrows its process to the engine's cards
 /// (CUDA_VISIBLE_DEVICES) and adds after them a card its image encoder runs on that is none of theirs.  n < 0 (as at
 /// the start): every visible device.
 void engine_gpu_count(int n);
@@ -45,11 +45,11 @@ bool gpu_in_desktop_use(const std::string& bus_id, bool& known);
 /// bus id ("10:00.0", "0000:10:00.0", nvidia-smi's "00000000:10:00.0"), or a name or a part of one that only one card
 /// has ("RTX 3090", case-insensitive; a whole name wins over a part of another; a number no ordinal is, as a word of
 /// one: "3090", not "7").  -1
-/// with `why` when none or several match (then each one's ordinal, name and UUID).  lamina-server's find_gpu
+/// with `why` when none or several match (then each one's ordinal, name and UUID).  lamina's find_gpu
 /// (src/server/config.cpp) reads names the same way.
 int find_gpu(const std::vector<GpuInfo>& gpus, const std::string& spec, std::string& why);
 
-/// A GPU another part of this process keeps memory on (lamina-server's image encoder runs in the server's process,
+/// A GPU another part of this process keeps memory on (lamina's image encoder runs in the server's process,
 /// on a card of its own choice): counted, a keep for each one that holds it.  The engine's own use of a card needs
 /// none.
 void gpu_keep(int device, bool keep);
@@ -57,7 +57,7 @@ void gpu_keep(int device, bool keep);
 /// (cudaDeviceReset), unless the card is kept (gpu_keep): then nothing is done.  `device` is current after it.
 void gpu_reset_unused(int device);
 
-/// What another part of this process will borrow of `device` between requests (lamina-server's image encoder, where
+/// What another part of this process will borrow of `device` between requests (lamina's image encoder, where
 /// its section says "lend": the serve protocol's LEND), in bytes; 0 takes the word back.  Said before the engine
 /// loads: an engine that sizes itself by the card's free VRAM and has no cache to lend from (the qwen35 path) then
 /// has that much to lend - its prompt path's staging buffers made that large, or the VRAM left free past its reserve.

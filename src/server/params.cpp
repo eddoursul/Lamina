@@ -1,4 +1,4 @@
-// src/server/params.cpp - lamina-server's settings table and command line (params.hpp).
+// src/server/params.cpp - lamina's settings table and command line (params.hpp).
 #include "params.hpp"
 
 #include "config.hpp"
@@ -466,10 +466,10 @@ std::string params_help() {
     using program::wrapped;
     constexpr size_t kWidth = 118, kCol = 36;
     std::string out =
-        "lamina-server: the OpenAI, Anthropic and Responses APIs and the web app in front of the Lamina engine.\n"
+        "lamina: the OpenAI, Anthropic and Responses APIs and the web app in front of the Lamina engine.\n"
         "\n"
-        "  lamina-server -m MODEL.gguf [options] [engine options]\n"
-        "  lamina-server --config FILE [options] [engine options]\n"
+        "  lamina -m MODEL.gguf [options] [engine options]\n"
+        "  lamina --config FILE [options] [engine options]\n"
         "\n";
     out += wrapped("Each of the server's options is a key of the run config too, named in [brackets] (a dot: a key of "
                    "that section), and the other way round; the engine's options, after the server's, are the config's "
@@ -517,7 +517,7 @@ std::string params_help() {
         out += help_line(l, "[" + std::string(p.key) + "] " + std::string(p.help), kWidth, kCol);
     }
     out += "\n\nENGINE OPTIONS: the config's \"args\"\n" +
-           wrapped("Their defaults are the engine's own; -m's preset sets some of them (lamina-server -m MODEL.gguf "
+           wrapped("Their defaults are the engine's own; -m's preset sets some of them (lamina -m MODEL.gguf "
                    "--check shows those a start gives the model).",
                    0, kWidth, 0);
     out += program::options_help(program::kListServed, true, kWidth, kCol);

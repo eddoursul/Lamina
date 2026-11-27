@@ -1,5 +1,5 @@
 // include/lamina/program/options.hpp - the engine's options as the help lists them: `lamina-engine --help` the
-// common ones, `--help-all` every one, lamina-server's --help those its engine takes.  The paths' parsers read them.
+// common ones, `--help-all` every one, lamina's --help those its engine takes.  The paths' parsers read them.
 #pragma once
 
 #include <cstddef>
@@ -12,7 +12,7 @@ namespace lamina::program {
 /// Where an option is listed besides `lamina-engine --help-all`, which lists every one.
 enum OptionList : unsigned {
     kListCommon = 1,   ///< `lamina-engine --help`: the options most runs set
-    kListServed = 2,   ///< lamina-server's --help: an option for the engine a server runs
+    kListServed = 2,   ///< lamina's --help: an option for the engine a server runs
 };
 
 /// An option of the engine, a --gpu card's setting, or (an empty `flag`) the title of the section after it.
@@ -36,7 +36,7 @@ struct DeprecatedOption {
 /// The deprecated spellings, as --help-all lists them.
 const std::vector<DeprecatedOption>& deprecated_options();
 
-/// The deprecated spelling `flag` is; nullptr for any other option.  lamina-server names the ones a start uses.
+/// The deprecated spelling `flag` is; nullptr for any other option.  lamina names the ones a start uses.
 const DeprecatedOption* deprecated_option(const char* flag);
 
 /// The options listed in `lists` (0: every one), each section's title before its first one; then, with `deprecated`,

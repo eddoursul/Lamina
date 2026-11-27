@@ -103,7 +103,7 @@ std::vector<std::string> engine_args(const json& cfg);
 /// spellings (program::deprecated_option) in its command line `line` (engine_args), and --native in place of "model".  `file`: the config as its file has it (the server writes its "model" into the merged
 /// config's args as --native)
 std::vector<std::string> deprecated_options(const json& file, const std::vector<std::string>& line);
-/// An engine option on lamina-server's command line: the flag ("--max-context") and the values that follow it.
+/// An engine option on lamina's command line: the flag ("--max-context") and the values that follow it.
 using EngineOption = std::vector<std::string>;
 /// `opts` into the config's args, each in place of the args' own instances of its flag (with their values: the words
 /// after a flag that do not start with "--") and of its other form ("--kv-grow" for "--no-kv-grow" and back; a drafter

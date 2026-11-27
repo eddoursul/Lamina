@@ -1,4 +1,4 @@
-// src/server/bench.hpp - lamina-server --bench: a model measured the way it is used, through the server's own HTTP API,
+// src/server/bench.hpp - lamina --bench: a model measured the way it is used, through the server's own HTTP API,
 // and a report to share without personal details.
 //
 // The suite, each test three runs (medians and ranges): three short questions (decode tok/s, time to first token),

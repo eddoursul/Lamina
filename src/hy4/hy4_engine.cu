@@ -88,7 +88,7 @@ using Clock = std::chrono::steady_clock;
         }                                                                                                              \
     } while (0)
 
-/// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina-server's
+/// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina's
 /// process, which an exit would end).
 struct Fatal {
     int code;
@@ -411,7 +411,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
           const std::vector<std::string>& profiles, std::string& err) {
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
-    {   // what the file must hold for this path, before anything is read (lamina-server --check says the same of it)
+    {   // what the file must hold for this path, before anything is read (lamina --check says the same of it)
         lamina::core::FileCheckOptions fo;
         fo.mtp = want_mtp;
         if (std::string e = lamina::core::hy4_file_problem(gm, fo); !e.empty()) { err = e; return false; }
@@ -5150,7 +5150,7 @@ struct Prompt {
 };
 
 // ------------------------------------------------------------------------------------------------ serve
-/// lamina-server's engine protocol, one request at a time: GEN <max_new> [key=value ...] <ids>, or with --vision GENI
+/// lamina's engine protocol, one request at a time: GEN <max_new> [key=value ...] <ids>, or with --vision GENI
 /// <max_new> [keys] <file> <ids> (the file lamina-vision's rows of the prompt's pictures) -> RESUME (the tokens the state
 /// already held), PP lines while the prompt is read, a T line a token, DONE; STOP ends a request at its next step, QUIT
 /// the loop.

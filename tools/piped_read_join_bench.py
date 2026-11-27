@@ -1,6 +1,6 @@
 """Decoding streams while long cold prompts join: how smooth the streams stay, and what the joining prompt pays.
 
-Runs against a running lamina-server (OpenAI API). N streams decode long greedy answers (thinking off); after a
+Runs against a running lamina (OpenAI API). N streams decode long greedy answers (thinking off); after a
 delay one or two long cold prompts join. Every streamed token's arrival is timed on the client. Reported per scenario:
 
   joiner_ttft_s            the joining prompt's time to first token

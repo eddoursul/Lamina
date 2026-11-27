@@ -11,7 +11,7 @@
 //     the loop's messages and gates, attention with the distance bias and the sink over a window visit's ring of cells
 //     or a full visit's every cell (FP16 or q8_0), the experts, the causal convolutions after each;
 //   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (parity runs against llama.cpp);
-//     --serve: lamina-server's line protocol.
+//     --serve: lamina's line protocol.
 #include "inkling2_draft.cuh"
 #include "inkling2_kernels.cuh"
 
@@ -104,7 +104,7 @@ inline bool soft(cudaError_t e) {
     return false;
 }
 
-/// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina-server's
+/// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina's
 /// process, which an exit would end).
 struct Fatal {
     int code;
@@ -483,7 +483,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     const size_t reserve = o.reserve;
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
-    // what the file must hold for this path (lamina-server --check says the same of it)
+    // what the file must hold for this path (lamina --check says the same of it)
     if (std::string e = lamina::core::inkling2_file_problem(gm); !e.empty()) { err = e; return false; }
     if (std::string e = lamina::inkling2::read_geometry(gm.meta(), m.g); !e.empty()) { err = e; return false; }
     const Geometry& g = m.g;
@@ -7556,7 +7556,7 @@ protected:
     }
 };
 
-/// lamina-server's engine protocol, one request at a time: GEN <max_new> [key=value ...] <ids> -> RESUME (the tokens the
+/// lamina's engine protocol, one request at a time: GEN <max_new> [key=value ...] <ids> -> RESUME (the tokens the
 /// state already held), PP lines while the prompt is read, a T line a token, CACHE (the cache's state), DONE; STOP ends
 /// a request at its next step, QUIT the loop.
 struct Serve {

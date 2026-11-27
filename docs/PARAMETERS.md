@@ -1,6 +1,6 @@
 # Parameters
 
-Every option of `lamina-server`: the server's own, then the engine's it passes on. `lamina-server --help` lists the
+Every option of `lamina`: the server's own, then the engine's it passes on. `lamina --help` lists the
 same in short.
 
 ## How options are given
@@ -22,7 +22,7 @@ same in short.
 - **Defaults** are the engine's own; [the presets](#the-presets-engine-options) change some.
 - **Trade-offs**: the figures were measured on the development PC (an RTX 3090 running the model, an RTX 5070 Ti and a
   second RTX 3090 as tiers, an 8-core Ryzen 7 9700X, DDR5-5600) and move with the GPUs, their links and the RAM.
-  Measure an option on your PC before keeping it: `lamina-server -m MODEL.gguf --bench` before and after.
+  Measure an option on your PC before keeping it: `lamina -m MODEL.gguf --bench` before and after.
 
 ## Commands
 
@@ -389,7 +389,7 @@ harness-hub's pi adapter); pi on the Qwen3.8-27B made prompts 6% and generation 
 
 ### Set from the cards
 
-The engine's own spellings of what the `--gpu` cards give, as CUDA numbers. lamina-server sets them from the cards;
+The engine's own spellings of what the `--gpu` cards give, as CUDA numbers. lamina sets them from the cards;
 they also take the place of the cards' values when given.
 
 | Option | Models | What it is |
@@ -430,19 +430,19 @@ after the cards: no tiers).
 ### The engine alone
 
 `lamina-engine --native MODEL.gguf` runs the engine without the server, for tests and measurements: a build makes
-it beside lamina-server, the releases have the server alone. `--serve` and `--vision` are the line protocol and the
-pictures lamina-server speaks to the engine in its process; with `--tokens` it generates from token ids.
+it beside lamina, the releases have the server alone. `--serve` and `--vision` are the line protocol and the
+pictures lamina speaks to the engine in its process; with `--tokens` it generates from token ids.
 `lamina-engine --help` lists the common options, `lamina-engine --help-all` every one.
 
 | Option | Models | What it does |
 | --- | --- | --- |
 | `-h`, `--help`, `--help-all` | every model | The common options; every one, then the deprecated spellings. |
-| `--native MODEL.gguf` | every model (`--model` too, but on Flash-Next) | The model's GGUF, its first shard (lamina-server: `-m`). Its architecture picks the engine's path. |
-| `--serve` | every model | Stay resident and take requests on stdin, as lamina-server sends them. |
+| `--native MODEL.gguf` | every model (`--model` too, but on Flash-Next) | The model's GGUF, its first shard (lamina: `-m`). Its architecture picks the engine's path. |
+| `--serve` | every model | Stay resident and take requests on stdin, as lamina sends them. |
 | `--vision` | every model | `--serve` takes pictures too: the image encoder's rows beside a request's tokens. |
-| `--batch N` (`--slots`) | Qwen3.6, Qwen3.8-27B | N sessions decoding together on one GPU (lamina-server: `--parallel`). |
-| `--tail-role-token ID` | Flash-Next, Qwen3.6, Qwen3.8-27B | A turn of this role right before the last one stays out of its checkpoint (lamina-server sets it with `--effort-position end`; -1: off). |
-| `--expert-profile-save P`, `--expert-profile-save-every MIN` | Flash-Next, Hy4-flash, Inkling 2 | lamina-server's `expert_profile_save` and `expert_profile_save_every`. |
+| `--batch N` (`--slots`) | Qwen3.6, Qwen3.8-27B | N sessions decoding together on one GPU (lamina: `--parallel`). |
+| `--tail-role-token ID` | Flash-Next, Qwen3.6, Qwen3.8-27B | A turn of this role right before the last one stays out of its checkpoint (lamina sets it with `--effort-position end`; -1: off). |
+| `--expert-profile-save P`, `--expert-profile-save-every MIN` | Flash-Next, Hy4-flash, Inkling 2 | lamina's `expert_profile_save` and `expert_profile_save_every`. |
 | `--tokens LIST`, `--tokens-file PATH` | every model | Generate mode's prompt as token ids, comma-separated or from a file. |
 | `--max-new N` (`--n`) | every model (`--n` on Hy4-flash and Inkling 2) | Tokens to generate (Flash-Next 16, the others 64). |
 | `--stop-eos`, `--eos-ids LIST` | Flash-Next | Stop at an end-of-turn token (`--serve` always does), or at these. |

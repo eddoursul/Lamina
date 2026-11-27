@@ -1,4 +1,4 @@
-// src/server/model_config.cpp - lamina-server -m's config, --write-config and --check (model_config.hpp).
+// src/server/model_config.cpp - lamina -m's config, --write-config and --check (model_config.hpp).
 #include "model_config.hpp"
 
 #include "lamina/artifact/drafter.hpp"
@@ -482,7 +482,7 @@ std::vector<std::string> check_pc(const std::vector<GpuInfo>& gpus, bool show) {
     auto say = [show](const std::string& line) {
         if (show) lamina::say(line);
     };
-    say("Lamina " LAMINA_VERSION ", lamina-server in " + self_dir());
+    say("Lamina " LAMINA_VERSION " in " + self_dir());
 #if defined(__aarch64__) || defined(_M_ARM64)
     say("CPU: arm64, " + std::to_string(cores) + " logical cores");
 #else

@@ -1,5 +1,5 @@
 // tools/vision/vision_rows.cpp - the image encoder (include/lamina/vision/encoder.hpp) as a program over picture
-// files, for comparing its rows: two encoders, two builds, a GPU's against the CPU's.  lamina-server runs the same
+// files, for comparing its rows: two encoders, two builds, a GPU's against the CPU's.  lamina runs the same
 // encoder in its own process (src/server/vision.cpp); this is no part of a release.
 //
 //   vision_rows --mmproj <mmproj.gguf> [--gpu [--device N]] [--threads N] [--max-tokens N] [--min-tokens N]

@@ -16,7 +16,7 @@
 //   * the prompt read in chunks of --chunk tokens through the same driver (batched matmuls, ncols <= 8 per launch);
 //   * decode one token at a time from a captured graph (positions on the device), or with --no-graph eagerly.
 //
-// Modes: --serve (lamina-server's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS or --tokens-file F
+// Modes: --serve (lamina's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS or --tokens-file F
 // [--n N] [--force IDS] [--dump-full-logits F] (tools/qwen35/kl.py's reference interface), --bench-pp N / --bench-tg N.
 #include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
@@ -89,7 +89,7 @@ namespace MMQ = lamina::prefill::mmq;
     } while (0)
 
 /// The run's end on an error (CK's, a missing tensor's ...): its message is printed, run() returns `code`.  The engine may
-/// run in the server's process (lamina-server), which an exit would end.
+/// run in the server's process (lamina), which an exit would end.
 struct Fatal {
     int code;
 };
@@ -1619,7 +1619,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     const auto t0 = Clock::now();
     m.file = std::make_shared<lamina::GgufModel>(lamina::GgufModel::open(path));
     const lamina::GgufModel& gm = *m.file;
-    // what the file must hold for this path, before anything is placed (lamina-server --check says the same of it)
+    // what the file must hold for this path, before anything is placed (lamina --check says the same of it)
     if (err = lamina::core::qwen35_file_problem(gm); !err.empty()) return false;
     if (!lamina::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
     if (m.g.family != lamina::ModelFamily::Qwen35Moe && m.g.family != lamina::ModelFamily::Qwen35) {
@@ -1640,7 +1640,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     if (const lamina::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
-    // each adapter against the model, from their headers, before anything is placed (lamina-server --check says the same)
+    // each adapter against the model, from their headers, before anything is placed (lamina --check says the same)
     for (const LoraSpec& sp : lora_specs) {
         try {
             const lamina::GgufFile adapter(sp.path);
@@ -4684,7 +4684,7 @@ struct Slot {
     long long offered = 0, accepted = 0;
 };
 
-/// The engine protocol (lamina-server's).  One request at a time on the control lines: GEN / GENI (alone: speculative
+/// The engine protocol (lamina's).  One request at a time on the control lines: GEN / GENI (alone: speculative
 /// steps with the MTP block), or with --batch N BGEN / BGENI <slot> (the request's prompt is read into a session -
 /// the decode windows of the other slots go on between its chunks - then its tokens come as BT lines, one window for
 /// every slot decoding, until BDONE).  BSTOP <slot> ends a slot at its next window; STOP the request on the control
