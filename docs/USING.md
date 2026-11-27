@@ -222,8 +222,8 @@ video's (`<3005.0 seconds>`). ffmpeg seeks to it rather than decoding from the s
 A 3:42 film at 720p comes to ~13,300 prompt tokens with the Qwen models and ~57,000 with Hy4-flash. Its frames are read in
 1.6 s and encoded in 2-8 s on the development PC, and the prompt is read at the model's usual rate. A video is encoded
 once and kept (up to 32 videos or 4 GiB of encoded rows), also when a chat app sends it again every turn, and the next
-turn of the conversation reads only what follows it (with the Qwen models another question about it in a new
-conversation too). The web app attaches videos of up to 150 MB.
+turn of the conversation reads only what follows it, and so does another question about it in a new conversation.
+The web app attaches videos of up to 150 MB.
 
 ## Image generation
 
