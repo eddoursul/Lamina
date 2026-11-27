@@ -335,7 +335,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         int32_t *dstart, *dn, *ddst, *dtok;
         cudaMalloc(&dblob, blob.size());
         cudaMalloc(&dx, x.size() * 4);
-        cudaMalloc(&dxq, (size_t) NT * (std::max) (H / 32 * 36, H / 256 * 292));
+        cudaMalloc(&dxq, (size_t) NT * std::max(H / 32 * 36, H / 256 * 292));
         cudaMalloc(&dscr, lamina::kernels::native_expert_scratch_bytes(NT, FF, f.had_d));
         cudaMalloc((void**) &dout, (size_t) NT * H * 4);
         cudaMalloc((void**) &dptr, 8);
@@ -397,9 +397,9 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             size_t ddiff = 0, drows = 0;
             float* drow = nullptr;
             void* dact = nullptr;
-            cudaMalloc((void**) &drow, (size_t) (std::max) (FF, H) * 4);
+            cudaMalloc((void**) &drow, (size_t) std::max(FF, H) * 4);
             cudaMalloc(&dact, cpu::kNativeActBytes);
-            std::vector<float> gd((size_t) (std::max) (FF, H));
+            std::vector<float> gd((size_t) std::max(FF, H));
             for (int k = 0; k < NT; ++k) {
                 std::vector<uint8_t> act(cpu::kNativeActBytes);
                 cpu::native_quant_act(f, x.data() + k * H, act.data());
@@ -450,7 +450,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             lamina::kernels::iq_dequant_f32(m.type, m.src, FF * H, dq, s);
             cudaStreamSynchronize(s);
             cudaMemcpy(got_dq.data(), dq, got_dq.size() * 4, cudaMemcpyDeviceToHost);
-            dq_err = (std::max) (dq_err, rel(got_dq, *m.want));
+            dq_err = std::max(dq_err, rel(got_dq, *m.want));
         }
         std::printf("          GPU dequant vs ggml to_float: rel %.2e\n", dq_err);
         if (!(dq_err < 1e-6)) ++failures;

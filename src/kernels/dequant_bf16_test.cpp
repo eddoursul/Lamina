@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
                 const double e = std::fabs((double) gf[i] - ref[i]);
                 const double tol = 1e-6 * std::fabs((double) ref[i]) + 1e-30;
                 if (e > tol) ++bad_f;
-                worst = (std::max) (worst, e / (std::fabs((double) ref[i]) + 1e-30));
+                worst = std::max(worst, e / (std::fabs((double) ref[i]) + 1e-30));
                 const double eh = std::fabs((double) bf16_to_f32(gh[i]) - ref[i]);
                 if (eh > std::ldexp(std::fabs((double) ref[i]), -8) + 1e-30) ++bad_h;
             }

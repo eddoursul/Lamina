@@ -28,6 +28,9 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -373,7 +376,7 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
     int room = 0;   // the prefetch slots the tiers' budgets take
     for (int t = 0; t < d.n_tiers; ++t)
         if (!d.tiers[t].asleep)
-            room += (int) (std::min) ((uint64_t) d.tiers[t].gpu->prefetch_slots(), d.tiers[t].prefetch_bytes / bb);
+            room += (int) std::min((uint64_t) d.tiers[t].gpu->prefetch_slots(), d.tiers[t].prefetch_bytes / bb);
     if (room <= 0) return;
     // the predicted experts no GPU holds, ranked by their summed routing weight over the window's tokens
     int32_t cand[128];
@@ -398,8 +401,8 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
     int m[kMaxGpuTiers] = {}, total = 0;
     for (int t = 0; t < d.n_tiers; ++t) {
         if (d.tiers[t].asleep) continue;   // (and its experts are candidates for the tiers awake)
-        m[t] = (int) (std::min) ((uint64_t) (std::min) (nc - total, d.tiers[t].gpu->prefetch_slots()),
-                                 d.tiers[t].prefetch_bytes / bb);
+        m[t] = (int) std::min((uint64_t) std::min(nc - total, d.tiers[t].gpu->prefetch_slots()),
+                              d.tiers[t].prefetch_bytes / bb);
         total += m[t];
     }
     const uint8_t* src[128];

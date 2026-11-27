@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Lamina's CI (.github/workflows/build.yml), runnable on a PC the same way: the CUDA toolkit from NVIDIA's
-redistributable archives, the portable preset built by build.bat or build.sh with the tests, the tests that need no
-GPU, and the release archives from cmake --install.
+"""Lamina's CI (.github/workflows/build.yml), runnable on a PC the same way: the sources' formatting, the CUDA toolkit
+from NVIDIA's redistributable archives, the portable preset built by build.bat or build.sh with the tests, the tests
+that need no GPU, and the release archives from cmake --install.
 
+    python .github/ci.py format                 the C, C++ and CUDA sources as .clang-format lays them out
+                                                 (tools/format.py --check, the clang-format requirements.txt pins)
     python .github/ci.py toolkit --dest DIR     the toolkit for this OS and CPU into DIR (in GitHub Actions also
                                                  CUDA_PATH and PATH for the later steps; elsewhere CUDACXX names it)
     python .github/ci.py build                  build-portable/: every program and test, and the image encoder (the
@@ -181,6 +183,10 @@ def engine_version() -> str:
     return m.group(1) if m else "?"
 
 
+def format_check():
+    run([sys.executable, ROOT / "tools" / "format.py", "--check", "--diff"], cwd=ROOT, env=env())
+
+
 def build():
     tag = os.environ.get("GITHUB_REF_NAME", "") if os.environ.get("GITHUB_REF_TYPE") == "tag" else ""
     if tag and tag != f"v{engine_version()}":   # before an hour of building
@@ -308,6 +314,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  epilog=__doc__.split("\n\n", 1)[1], formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("format")
     t = sub.add_parser("toolkit")
     t.add_argument("--dest", required=True)
     t.add_argument("--version", default=CUDA_REDIST, help=f"NVIDIA's redistrib_<version>.json (default {CUDA_REDIST})")
@@ -316,7 +323,9 @@ def main() -> int:
     p = sub.add_parser("package")
     p.add_argument("--version", help="the archives' version (default: the tag, else the commit)")
     a = ap.parse_args()
-    if a.cmd == "toolkit":
+    if a.cmd == "format":
+        format_check()
+    elif a.cmd == "toolkit":
         toolkit(Path(a.dest).resolve(), a.version)
     elif a.cmd == "build":
         build()

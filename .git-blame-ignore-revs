@@ -1,0 +1,5 @@
+# Commits git blame looks past: changes of layout alone (git config blame.ignoreRevsFile .git-blame-ignore-revs;
+# GitHub's blame reads this file on its own).
+
+# clang-format: the C, C++ and CUDA sources laid out as .clang-format says
+dda648471450ddd6017befa1a3b3f5c66cee2c00

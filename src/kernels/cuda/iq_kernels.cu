@@ -1484,7 +1484,7 @@ size_t native_expert_scratch_bytes(int64_t cap, int64_t n_ff, bool rotated) {
     const size_t q81 = (size_t) (n_ff / 32) * sizeof(block_q8_1);
     const size_t q80 = (size_t) (n_ff / 32) * 34;
     const size_t q8k = (size_t) (n_ff / 256) * 292;
-    const size_t quant = ((size_t) cap * (std::max) (q81, (std::max) (q80, q8k)) + 255) & ~(size_t) 255;
+    const size_t quant = ((size_t) cap * std::max(q81, std::max(q80, q8k)) + 255) & ~(size_t) 255;
     return rotated ? quant + (size_t) cap * (size_t) n_ff * sizeof(float) : quant;   // the rotated layers' h
                                                                                      // in floats, after it
 }

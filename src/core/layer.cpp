@@ -229,22 +229,22 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
     if (!g_kv_elastic)   // the K/V pools (the elastic ones are in their own VMM range)
         for (const uint64_t b : kv_row_bytes(kv, (uint64_t) s.head_dim))
             n += align_up16((uint64_t) pages * s.n_head_kv * s.page_size * b);
-    n += (uint64_t) pages * 4;
     // page_table
-    n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;
+    n += (uint64_t) pages * 4;
     // tail
-    n += (uint64_t) s.idx_dim * 4;
+    n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;
     // dead
-    if (!g_kv_elastic) n += (uint64_t) ((max_cells / s.idx_block) + 2) * s.idx_dim * 4;
+    n += (uint64_t) s.idx_dim * 4;
     // pooled (the elastic keys are in the K/V's range)
-    n += 16;
+    if (!g_kv_elastic) n += (uint64_t) ((max_cells / s.idx_block) + 2) * s.idx_dim * 4;
     // block_pos
-    if (with_rope && !g_kv_elastic) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;
+    n += 16;
     // cos + sin tables (the elastic ones are in their own range)
-    n += lamina::kernels::qsa_step_bytes() + 16;   // counts and aligned attention status
-    // the per-token counts
-    n += (uint64_t) s.n_head * 4;
+    if (with_rope && !g_kv_elastic) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;
+    // the per-token counts (counts and aligned attention status)
+    n += lamina::kernels::qsa_step_bytes() + 16;
     // pos_dev
+    n += (uint64_t) s.n_head * 4;
     return align_up16(n) + 256;
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st, const QsaState* share_rope,
@@ -353,8 +353,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                       cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
         cudaHostAlloc((void**) &st.host_pos, (size_t) s.n_head * 4, cudaHostAllocMapped | cudaHostAllocPortable) !=
             cudaSuccess) {
-        return 0;
-        // the caller sees a zero byte count; a half-built state is worse than none
+        return 0;   // the caller sees a zero byte count; a half-built state is worse than none
     }
     st.host_step[lamina::kernels::kStepCount] = 0;
     // THE ROPE TABLE IS BUILT ON THE HOST IN FLOAT64 and uploaded once, because the reference computes its

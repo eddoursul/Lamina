@@ -18,6 +18,9 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <pthread.h>
@@ -482,7 +485,7 @@ void ExpertPool::run_split(ExpertJob* jobs, int n) {
     jobs_ = jobs;
     const int threads = n_ + (host_works_ ? 1 : 0);
     // about three tasks per thread in each phase, so the tail is short
-    parts_a_ = (std::max) (1, (3 * threads + n - 1) / n);
+    parts_a_ = std::max(1, (3 * threads + n - 1) / n);
     parts_b_ = parts_a_;
     run_phase(1, n * parts_a_);
     for (int e = 0; e < n; ++e) act_quant_q8_1(split_[(size_t) e].ff, FF, split_[(size_t) e].a2);
@@ -501,7 +504,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
     const auto t0 = std::chrono::steady_clock::now();
     // more distinct experts than buffers: run them in batches
     for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
-        const int nb = (std::min) (kMaxSplitMulti, n - b0);
+        const int nb = std::min(kMaxSplitMulti, n - b0);
         mjobs_ = jobs + b0;
         nfmt_ = &f;
         const int threads = n_ + (host_works_ ? 1 : 0);
@@ -584,7 +587,7 @@ void ExpertPool::run_fused_native(const NativeFmt& f, ExpertJobMulti* jobs, int 
     fn_ = n;
     const int threads = n_ + (host_works_ ? 1 : 0);
     // about three parts per thread over the layer's experts in each half, as the two-phase path cuts them
-    fa_ = (std::max) (1, (3 * threads + n - 1) / n);
+    fa_ = std::max(1, (3 * threads + n - 1) / n);
     fb_ = fa_;
     for (int e = 0; e < n; ++e) {   // every worker is parked (the previous phase closed): published by open_phase
         fstate_[(size_t) e].gu_done.store(0, std::memory_order_relaxed);

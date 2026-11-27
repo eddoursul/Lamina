@@ -1,6 +1,8 @@
-# The tools' Python packages (tools/*.py and their tests: gguf-py's numpy, PyYAML and tqdm, the tokenizer's regex),
-# pinned so a checkout installs the same ones on any day (#214). The programs and their build take no Python.
+# The tools' Python packages (tools/*.py and their tests: gguf-py's numpy, PyYAML and tqdm, the tokenizer's regex,
+# tools/format.py's clang-format), pinned so a checkout installs the same ones on any day (#214). The programs and
+# their build take no Python.
 # Python 3.10+ (numpy's newest releases need a newer Python: one line per range).
+clang-format==23.1.5
 numpy==2.5.3; python_version >= "3.12"
 numpy==2.4.6; python_version == "3.11"
 numpy==2.2.6; python_version < "3.11"

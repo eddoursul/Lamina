@@ -268,7 +268,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     return false;
                 }
                 jobs.push_back(Upload{data.get(), (const uint8_t*) gguf.tensor_data(tensor), bytes});
-                max_in = (std::max) (max_in, (int) ref.ne0);
+                max_in = std::max(max_in, (int) ref.ne0);
                 total += bytes;
                 pending.push_back(Pending{&ref, (int) tensor.type, bytes, std::move(data)});
             }

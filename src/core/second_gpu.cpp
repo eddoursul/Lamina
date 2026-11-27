@@ -65,7 +65,7 @@ bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, 
     DeviceScope scope(dev_, main_);
     // whole float4s: copy_from_mapped's unit (Q8_K's 730 words a token are not, for an odd max_t)
     const size_t xb =
-        ((size_t) max_t * (std::max) ((size_t) (n_embd / 32) * 36, (size_t) (n_embd / 256) * 292) + 15) & ~(size_t) 15;
+        ((size_t) max_t * std::max((size_t) (n_embd / 32) * 36, (size_t) (n_embd / 256) * 292) + 15) & ~(size_t) 15;
     const size_t ob = (size_t) cap_ * (size_t) n_embd * sizeof(float);
     const size_t pb = PlanLayout(cap_).bytes;
     const unsigned pm = cudaHostAllocPortable | cudaHostAllocMapped;
@@ -108,7 +108,7 @@ bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, 
 }
 
 bool SecondGpu::init_prefetch(int slots, uint64_t blob_bytes, std::string& err) {
-    slots = (std::min) (slots, kPrefetchMax);
+    slots = std::min(slots, kPrefetchMax);
     if (slots <= 0) return true;
     DeviceScope scope(dev_, main_);
     pre_cap_ = (blob_bytes + 255) / 256 * 256;

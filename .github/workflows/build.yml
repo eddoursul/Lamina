@@ -1,6 +1,7 @@
 # Lamina for Windows and Linux on x64 and arm64.  The runners have no GPU: the CUDA code compiles, and the tests that
 # need no GPU run.  A v* tag publishes a release with, for each of them, a download of the programs (the CUDA runtime
-# linked in).  The steps are .github/ci.py's, which runs the same way on a PC.
+# linked in).  The sources' formatting is checked beside them.  The steps are .github/ci.py's, which runs the same way
+# on a PC.
 name: Build
 
 on:
@@ -20,6 +21,20 @@ concurrency:
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: clang-format, the version requirements.txt pins
+        run: python -m pip install -r requirements.txt
+      - name: The C, C++ and CUDA sources' formatting
+        run: python .github/ci.py format
+
   build:
     name: ${{ matrix.os }}-${{ matrix.cpu }}
     runs-on: ${{ matrix.runner }}

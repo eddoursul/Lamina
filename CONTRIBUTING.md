@@ -8,7 +8,8 @@ every line of it, and show what you ran.
 Search the [issues](https://github.com/eddoursul/Lamina/issues) first, closed ones too. A report says:
 
 - what you did (the request, the command), what you expected and what happened, with the exact error;
-- the commit (`git rev-parse --short HEAD`), the output of `lamina check -m MODEL.gguf`, and the config's `args` if you changed them;
+- the commit (`git rev-parse --short HEAD`), the output of `lamina check -m MODEL.gguf`, and the config's `args` if you
+  changed them;
 - the engine's log (the config's `log`) and the server's output, with keys and private text removed;
 - whether you saw it happen or found it by reading the code (then say so: "not reproduced").
 
@@ -36,9 +37,16 @@ the issue when there is one. For a large change or a new default, open an issue 
   (`./build.sh native -DLAMINA_BUILD_TESTS=ON`) and runs with `ctest --test-dir build`. The server's and the tools'
   tests run from the clone's folder: `python -m unittest discover -s tests/server` (with `LAMINA_TEST_GGUF` naming a
   Flash-Next GGUF, its first shard: the server answers recorded requests on a mock engine) and `python -m unittest
-  discover -s tools -p "test_*.py"` (with `requirements.txt` installed). GitHub builds each pull request for Windows and Linux on
-  x64 and arm64 and runs the tests that need no GPU (`ctest -L cpu`) and the tools' tests there
+  discover -s tools -p "test_*.py"` (with `requirements.txt` installed). GitHub builds each pull request for Windows
+  and Linux on x64 and arm64 and runs the tests that need no GPU (`ctest -L cpu`) and the tools' tests there
   (`.github/workflows/build.yml`); the GPU tests are for you to run.
+- **Formatting.** The C, C++ and CUDA sources are laid out as [.clang-format](.clang-format) says, by the clang-format
+  version `requirements.txt` pins (another version lays some lines out differently): `python tools/format.py` formats
+  every tracked source in place, or the files it is given; `--check` changes nothing and names the files it would
+  change, as GitHub does for each pull request. Vendored code (`third_party/`, `src/server/vendor/`) keeps the layout
+  of where it comes from. A table or a macro that clang-format would lay out worse than the code has it stays between
+  `// clang-format off` and `// clang-format on`. `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes
+  `git blame` look past the commit that first formatted the code (GitHub's blame does on its own).
 - **Docs** describe what is, not what changed: update the ones your change makes wrong.
 
 Report what you ran as passed, failed or not run, with the commands and the hardware. Never submit measurements,
