@@ -11,6 +11,7 @@
 #include "lamina/artifact/gguf_reader.hpp"
 #if LAMINA_VISION
 #include "lamina/core/gpu_select.hpp"
+#include "lamina/platform/spill.hpp"
 #include "lamina/vision/encoder.hpp"
 #include "lamina/vision/projector.hpp"
 #include "lamina/vision/video.hpp"
@@ -234,22 +235,12 @@ std::optional<Pixels> wic_decode(const std::string& data, std::string& why) {
 }
 #endif
 
-/// #480: a directory for the pictures' rows whose path has no space (the engine's GENI line splits at spaces): the
-/// system temp directory while it has none, then the working directory, then the system drive's root; the temp
-/// directory as the last resort
-std::string work_dir() {
-    std::random_device rd;
-    auto make = [&](const fs::path& parent) -> std::optional<fs::path> {
-        for (int i = 0; i < 16; ++i) {
-            char name[32];
-            std::snprintf(name, sizeof name, "lamina-vision-%08x", (unsigned) rd());
-            std::error_code ec;
-            const fs::path d = parent / name;
-            if (fs::create_directory(d, ec)) return d;
-            if (ec) return std::nullopt;
-        }
-        return std::nullopt;
-    };
+/// #480: a directory for the pictures' rows whose path has no space (the engine's GENI line splits at spaces), this
+/// process's own under `lamina-vision` (lamina/platform/spill.hpp: it holds a lock there for its life, and a start
+/// removes the folders of the servers that ended without removing theirs, killed or crashed: each kept the rows of
+/// its pictures and videos, up to gigabytes): in the system temp directory while that path has none, then in the
+/// working directory, then at the system drive's root; in the temp directory as the last resort
+std::string work_dir(lamina::platform::SpillDir& own) {
     std::vector<fs::path> parents = {u8_path(temp_dir())};
     std::error_code ec;
     parents.push_back(fs::current_path(ec));
@@ -257,15 +248,19 @@ std::string work_dir() {
     const char* drive = std::getenv("SystemDrive");
     parents.push_back(u8_path(std::string(drive != nullptr ? drive : "C:") + "\\"));
 #endif
-    for (const auto& parent : parents) {
-        const auto d = make(parent);
-        if (!d) continue;
-        if (u8_str(*d).find(' ') == std::string::npos) return u8_str(*d);
-        fs::remove(*d, ec);
+    parents.push_back(u8_path(temp_dir()));
+    std::string err;
+    for (size_t i = 0; i < parents.size(); ++i) {
+        const std::string root = u8_str(parents[i] / "lamina-vision");
+        if (root.find(' ') != std::string::npos && i + 1 < parents.size()) continue;
+        int cleaned = 0;
+        if (!own.open(root, err, &cleaned)) continue;
+        if (cleaned > 0)
+            std::fprintf(stderr, "lamina: %s: the image encoder's folders of ended servers removed (%d)\n",
+                         root.c_str(), cleaned);
+        return own.path();
     }
-    const auto d = make(u8_path(temp_dir()));
-    if (!d) throw std::runtime_error("no directory for the image encoder's files could be made");
-    return u8_str(*d);
+    throw std::runtime_error("no directory for the image encoder's files could be made: " + err);
 }
 
 }   // namespace
@@ -421,7 +416,8 @@ struct Vision::Loaded {};
 struct Vision::Plan {};
 #endif
 
-Vision::Vision(const json& cfg, bool lazy) : dir(work_dir()), cfg_(cfg) {
+Vision::Vision(const json& cfg, bool lazy) : cfg_(cfg) {
+    dir = work_dir(own_dir_);
     if (!vision_built())
         throw std::runtime_error(std::string("the config has a \"vision\" section, and ") + vision_not_built());
     if (!lazy) start();
@@ -429,8 +425,7 @@ Vision::Vision(const json& cfg, bool lazy) : dir(work_dir()), cfg_(cfg) {
 
 Vision::~Vision() {
     close();
-    std::error_code ec;
-    fs::remove_all(u8_path(dir), ec);
+    own_dir_.close();   // (the folder, with what it holds)
 }
 
 void Vision::set_lender(Lend lend, std::function<void()> unlend) {

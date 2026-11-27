@@ -13,6 +13,8 @@
 #include "sync.hpp"
 #include "video.hpp"
 
+#include "lamina/platform/spill.hpp"
+
 #include <atomic>
 #include <functional>
 #include <map>
@@ -114,8 +116,9 @@ public:
     std::string dir;   ///< the pictures' files: a path without a space (#480: the GENI line splits at spaces)
 
 private:
-    struct Loaded;   ///< an encoder: its GPU kept from the engine's resets, or the loan it is in
-    struct Plan;     ///< what the section asks for, settled at the start
+    lamina::platform::SpillDir own_dir_;   ///< `dir`: this process's folder (work_dir)
+    struct Loaded;                         ///< an encoder: its GPU kept from the engine's resets, or the loan it is in
+    struct Plan;                           ///< what the section asks for, settled at the start
     void start();
     /// a video's groups through the encoder into its file (mu_ held by the caller's lock)
     EncodedMedium encode_video(VideoJob& job, const std::vector<std::string>& keep);
