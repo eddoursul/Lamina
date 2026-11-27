@@ -5039,19 +5039,24 @@ struct Serve {
     /// last picture or video (its <|vision_end|>: another question about it starts there).  A long prompt's
     /// checkpoints every --prompt-cache-every cells are the read's own, at its chunks' ends, and the prompt's end is
     /// one with the engine's output (request): the same prompt again reads nothing.  (LAMINA_Q36_CKPT_CUT: none of the
-    /// end, and one two cells before it where the turn's is not near.)
+    /// end, and one two cells before it where the turn's is not near.)  A message starts at an <|im_start|> right
+    /// after the one before ends (its <|im_end|> and a newline), or at the prompt's first token: that token inside a
+    /// message's text (code that quotes a chat template, which the server's tokenizer reads as the token) starts none.
     std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse,
                                           const std::vector<ImgKey>& imgs) {
         const int64_t n = (int64_t) ids.size();
+        const auto opens = [&](int64_t i) {
+            return ids[(size_t) i] == kImStart && (i == 0 || (i >= 2 && ids[(size_t) i - 2] == kImEnd));
+        };
         int64_t q = 0;
         for (int64_t i = n - 2; i > reuse; --i)
-            if (ids[(size_t) i] == kImStart) {
+            if (opens(i)) {
                 q = i;
                 break;
             }
         if (q > 0 && copt.tail_role >= 0)   // a trailing effort turn stays out of the checkpoint
             for (int64_t i = q - 1; i > reuse; --i)
-                if (ids[(size_t) i] == kImStart) {
+                if (opens(i)) {
                     if (ids[(size_t) i + 1] == copt.tail_role) q = i;
                     break;
                 }
@@ -5063,7 +5068,7 @@ struct Serve {
             for (int64_t i = (q > 0 ? q : n - 1) - 1; i > reuse; --i)
                 if (ids[(size_t) i] == kImEnd) {
                     int64_t start = i;   // the message's <|im_start|>; then its role and a newline
-                    while (start > 0 && ids[(size_t) start] != kImStart) --start;
+                    while (start > 0 && !opens(start)) --start;
                     if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                     break;
                 }

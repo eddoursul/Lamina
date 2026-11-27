@@ -8028,10 +8028,17 @@ struct Serve {
         int64_t d = 0;
         while (d < lim && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
         if (d > reuse + 256 && d < n - 1) fork = d;
+        // a message starts at its role's token right after the one before ends (its <|end_message|>, and after the
+        // model's a token that ends its sampling), or at the prompt's first token: that token inside a message's text
+        // (which the server's tokenizer reads as the token) starts none
+        const auto opens = [&](int64_t i) {
+            return E.m->message_start(ids[(size_t) i]) && (i == 0 || ids[(size_t) i - 1] == E.m->end_message ||
+                                                           (i >= 2 && ids[(size_t) i - 2] == E.m->end_message));
+        };
         for (int64_t i = n - 1; i > reuse; --i)
             if (E.m->end_message >= 0 && ids[(size_t) i] == E.m->end_message) {   // (a picture's cells are negative)
                 int64_t start = i;                                                // the message's first token
-                while (start > 0 && !E.m->message_start(ids[(size_t) start])) --start;
+                while (start > 0 && !opens(start)) --start;
                 if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                 break;
             }

@@ -4647,7 +4647,7 @@ int lamina::program::run(int argc, char** argv) {
         // prompt lookup: the text so far, kept across requests (a conversation's next request shares its prefix)
         lamina::spec::SuffixDrafter lookup(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
         std::vector<int32_t> ids32, ldrafts((size_t) W, 0);
-        constexpr int64_t kImStart = 248045;   // <|im_start|>: a new turn begins here
+        constexpr int64_t kImStart = 248045, kImEnd = 248046;   // <|im_start|>, <|im_end|>: a turn's first and last
         // The previous request's prompt and its pictures: where a new one leaves it, it gets a checkpoint (see `fork`
         // below).
         std::vector<int64_t> prev_prompt;
@@ -5019,17 +5019,23 @@ int lamina::program::run(int argc, char** argv) {
             // ---- the rest of the prompt, [reuse, n - 1).  A turn usually shares everything before its prompt's
             // last <|im_start|> with the next one (chat templates re-render the answer, e.g. without its
             // reasoning), so that position gets a checkpoint, and so do the prompt's end (a regenerated answer)
-            // and the end of every `step` cells of a long prompt.  Short parts go through verify windows.
+            // and the end of every `step` cells of a long prompt.  Short parts go through verify windows.  A
+            // message starts at an <|im_start|> right after the one before ends (its <|im_end|> and a newline), or
+            // at the prompt's first token: that token inside a message's text (code that quotes a chat template,
+            // which the server's tokenizer reads as the token) starts none.
+            const auto opens = [&](int64_t i) {
+                return ids[(size_t) i] == kImStart && (i == 0 || (i >= 2 && ids[(size_t) i - 2] == kImEnd));
+            };
             int64_t q = 0;
             if (track)
                 for (int64_t i = n - 2; i > reuse; --i)
-                    if (ids[(size_t) i] == kImStart) {
+                    if (opens(i)) {
                         q = i;
                         break;
                     }
             if (q > 0 && o.tail_role_token >= 0)   // a trailing effort turn stays out of the checkpoint
                 for (int64_t i = q - 1; i > reuse; --i)
-                    if (ids[(size_t) i] == kImStart) {
+                    if (opens(i)) {
                         if (ids[(size_t) i + 1] == o.tail_role_token) q = i;
                         break;
                     }
@@ -5049,7 +5055,6 @@ int lamina::program::run(int argc, char** argv) {
                 while (media_end < n && media_pad(ids[(size_t) media_end])) ++media_end;
                 media_end = std::min(media_end + 1, n - 1);
             }
-            constexpr int64_t kImEnd = 248046;
             int64_t fork = 0, msg_end = 0, pic = 0;
             if (track) {
                 const int64_t d = lamina::core::shared_start(prev_prompt, prev_imgs, ids, req_imgs, n - 1);
@@ -5057,7 +5062,7 @@ int lamina::program::run(int argc, char** argv) {
                 for (int64_t i = (q > 0 ? q : n - 1) - 1; i > reuse; --i)
                     if (ids[(size_t) i] == kImEnd) {
                         int64_t start = i;   // the message's <|im_start|>; then its role and a newline
-                        while (start > 0 && ids[(size_t) start] != kImStart) --start;
+                        while (start > 0 && !opens(start)) --start;
                         if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                         break;
                     }
