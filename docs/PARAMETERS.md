@@ -67,8 +67,9 @@ writes.
 | `--vision-cuda-device UUID` | `vision.cuda_device` | with `lend`, the engine's main GPU; else the card with the least VRAM that drives no display | The encoder's GPU (`nvidia-smi -L` lists the UUIDs). |
 | `--vision-q8 mmq\|fp16` | `vision.q8` | `mmq` | A Q8_0 projector's products on a GPU: as llama.cpp computes them (the inputs rounded to 8 bits), or in FP16, nearer the unquantized projector. The answers measured the same. |
 | `--vision-threads N` | `vision.threads` | with `-m`: the logical cores | The encoder's threads on the CPU. |
-| `--vision-max-tokens N` | `vision.max_tokens` | the projector's own, 4,096; Flash-Next's, Qwen3.6's and Qwen3.8-27B's presets 1,024 | A picture's tokens at most: a larger one is scaled down. More tokens show more detail and take longer to read. |
+| `--vision-max-tokens N` | `vision.max_tokens` | the projector's own, 4,096; Flash-Next's, Qwen3.6's and Qwen3.8-27B's presets 1,024 | A picture's tokens at most: a larger one is scaled down (a Qwen video's frame too, below its own 768). More tokens show more detail and take longer to read. |
 | `--vision-min-tokens N` | `vision.min_tokens` | the projector's own | A picture's tokens at least. |
+| `--vision-ffmpeg FILE` | `vision.ffmpeg` | the PATH's `ffmpeg` and `ffprobe` | Videos: the ffmpeg program (5.1 or newer) that reads their frames, ffprobe beside it ([USING.md](USING.md#videos)). |
 | `--vision-model GGUF` | `vision.model` | | Taken and not read (earlier versions read the encoder's vocabulary from it). |
 | `--model-name NAME` | `model_name` | with `-m`: the file's name | The model's name in `/v1/models`. Any name is served. |
 | `--aliases A,B` (`--alias`) | `aliases` | | More names the model is listed under. |

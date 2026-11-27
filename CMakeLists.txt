@@ -760,7 +760,7 @@ if(LAMINA_NATIVE_EXPERTS)
     # leaves it out: such a server reads no pictures, and refuses a config that has a "vision" section.
     option(LAMINA_BUILD_VISION "build the image encoder into lamina" ON)
     if(LAMINA_BUILD_VISION)
-      add_library(lamina_vision STATIC src/vision/image.cpp src/vision/projector.cpp src/vision/ggml_encoder.cpp
+      add_library(lamina_vision STATIC src/vision/image.cpp src/vision/projector.cpp src/vision/video.cpp src/vision/ggml_encoder.cpp
                                        src/vision/encoder.cpp src/vision/cuda_encoder.cu)
       target_include_directories(lamina_vision PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
       # vendored headers: their warnings are not the build's (stb_image's code compiles in these files)
@@ -962,7 +962,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
                 src/server/images.cpp src/server/keepawake.cpp src/server/mcp.cpp src/server/model_config.cpp
                 src/server/net.cpp src/server/params.cpp src/server/process.cpp src/server/prometheus.cpp src/server/remote_model.cpp
                 src/server/responses.cpp src/server/runconfig.cpp src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp
-                src/server/telemetry.cpp src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
+                src/server/telemetry.cpp src/server/video.cpp src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
                 ${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_BINARY_DIR}/bench_files.cpp)
     target_include_directories(lamina_server_core PUBLIC src/server)
     # vendored headers (stb_image, cpp-httplib): their warnings are not the build's (LAMINA_WERROR)

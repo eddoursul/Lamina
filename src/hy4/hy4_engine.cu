@@ -248,6 +248,7 @@ struct Model {
     double arena_gib = 0;
     size_t pinned = 0;        // the arena's bytes in pinned memory
     int32_t eos = -1;         // tokenizer.ggml.eos_token_id: the end of an answer
+    int32_t video_pad = -1;   // <｜hy_video▁pad｜>: a video frame's cells, as a picture's
     int32_t image_pad = -1;   // <｜hy_image▁pad｜>: a picture's cells in a
                               // prompt (the template writes one, the server n)
 };
@@ -431,6 +432,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     if (const lamina::MetaValue* v = gm.meta().get("tokenizer.ggml.eos_token_id"); v && v->is_num())
         m.eos = (int32_t) v->u;
     m.image_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_image\xE2\x96\x81pad");
+    m.video_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_video\xE2\x96\x81pad");
     const auto& g = m.g;
     Loader L{gm, {}, {}, {}};
     {   // the dense tensors: all but the routed experts, the Engram table and the MTP block when it is not loaded
@@ -5454,7 +5456,8 @@ struct Serve {
                 serve_print("ERR this engine was started without --vision\n");
                 return;
             }
-            if (const std::string ve = lamina::program::image_cells(emb, ids, E.m->image_pad, g.n_embd, img_keys, ir);
+            if (const std::string ve =
+                    lamina::program::image_cells(emb, ids, {E.m->image_pad, E.m->video_pad}, g.n_embd, img_keys, ir);
                 !ve.empty()) {
                 serve_print("ERR %s\n", ve.c_str());
                 return;
@@ -5916,7 +5919,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     ImgReq ir;
     if (!emb_file.empty()) {
-        if (const std::string ve = lamina::program::image_cells(emb_file, prompt, m.image_pad, m.g.n_embd, {}, ir);
+        if (const std::string ve =
+                lamina::program::image_cells(emb_file, prompt, {m.image_pad, m.video_pad}, m.g.n_embd, {}, ir);
             !ve.empty()) {
             std::fprintf(stderr, "lamina: --emb: %s\n", ve.c_str());
             return 2;

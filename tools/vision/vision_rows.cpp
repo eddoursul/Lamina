@@ -15,10 +15,17 @@
 //
 // It prints "READY <n_embd>", then per stdin line
 //   ENC <image path> <output path>   ->  "OK <n_tokens> <nx> <ny> <ms>"  or  "ERR <message>"
+//   FRAMES <output path>\t<frame>[\t<frame>]   ->  the same for a video's group of frames (picture files already
+//                                             at its plan's size: include/lamina/vision/video.hpp) through
+//                                             encode_frames
+//   PLAN <frames> <fps> <width> <height>   ->  "OK {json}": the video plan of a stream of that many frames, rate and
+//                                             displayed size (frames, width, height, per_group, group_tokens, times)
 //   QUIT
 // The output file is  int32 {0x31455653 'SVE1', n_tokens, nx, ny, n_embd}  then float32 [n_tokens][n_embd],
 // row i at grid position (x = i % nx, y = i / nx): the record the engine reads a picture from.
 #include "lamina/vision/encoder.hpp"
+#include "lamina/vision/projector.hpp"
+#include "lamina/vision/video.hpp"
 
 #include <cuda_runtime.h>
 
@@ -41,6 +48,20 @@ bool parse_enc(const std::string& line, std::string& img, std::string& out) {
     img = rest.substr(0, sp);
     out = rest.substr(sp + 1);
     return !img.empty() && !out.empty();
+}
+
+// "FRAMES <out>\t<first>[\t<second>]"
+bool parse_frames(const std::string& line, std::string& out, std::vector<std::string>& frames) {
+    if (line.rfind("FRAMES ", 0) != 0) return false;
+    std::vector<std::string> f;
+    size_t at = 7;
+    for (size_t tab; (tab = line.find('\t', at)) != std::string::npos; at = tab + 1)
+        f.push_back(line.substr(at, tab - at));
+    f.push_back(line.substr(at));
+    if (f.size() < 2 || f.size() > 3) return false;
+    out = f[0];
+    frames.assign(f.begin() + 1, f.end());
+    return !out.empty();
 }
 
 }   // namespace
@@ -121,22 +142,62 @@ int main(int argc, char** argv) {
     while (std::getline(std::cin, line)) {
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
         if (line == "QUIT") break;
-        std::string img, out;
-        if (!parse_enc(line, img, out)) {
-            std::printf("ERR expected: ENC <image> <output>\n");
+        if (line.rfind("PLAN ", 0) == 0) {
+            lamina::vision::VideoStream vs;
+            if (std::sscanf(line.c_str() + 5, "%lld %lf %d %d", (long long*) &vs.frames, &vs.fps, &vs.width,
+                            &vs.height) != 4) {
+                std::printf("ERR expected: PLAN <frames> <fps> <width> <height>\n");
+                std::fflush(stdout);
+                continue;
+            }
+            lamina::vision::Projector header;
+            lamina::vision::VideoPlan plan;
+            std::string why;
+            try {
+                header.open(params);
+            } catch (const std::exception& e) {
+                why = e.what();
+            }
+            if (why.empty() && lamina::vision::plan_video(header, vs, params.max_tokens, plan, why)) {
+                std::string out = "{\"frames\": [";
+                for (size_t i = 0; i < plan.frames.size(); ++i)
+                    out += (i ? "," : "") + std::to_string((long long) plan.frames[i]);
+                out += "], \"width\": " + std::to_string(plan.width) + ", \"height\": " + std::to_string(plan.height) +
+                       ", \"per_group\": " + std::to_string(plan.per_group) +
+                       ", \"group_tokens\": " + std::to_string(plan.group_tokens) + ", \"times\": [";
+                for (size_t i = 0; i < plan.times.size(); ++i)
+                    out += std::string(i ? ",\"" : "\"") + lamina::vision::video_time_text(plan.times[i]) + "\"";
+                std::printf("OK %s]}\n", out.c_str());
+            } else {
+                std::printf("ERR %s\n", why.c_str());
+            }
             std::fflush(stdout);
             continue;
         }
+        std::string img, out;
+        std::vector<std::string> frames;
+        const bool video = parse_frames(line, out, frames);
+        if (!video && !parse_enc(line, img, out)) {
+            std::printf("ERR expected: ENC <image> <output>, or FRAMES <output>\t<frame>[\t<frame>]\n");
+            std::fflush(stdout);
+            continue;
+        }
+        if (!video) frames = {img};
         const auto t0 = std::chrono::steady_clock::now();
-        lamina::vision::Rgb picture;
+        std::vector<lamina::vision::Rgb> pictures(frames.size());
         lamina::vision::Rows rows;
         err.clear();
-        if (!lamina::vision::decode_file(img, picture, err)) {
-            std::printf("ERR cannot read the image %s (%s)\n", img.c_str(), err.c_str());
-            std::fflush(stdout);
-            continue;
-        }
-        if (!enc->encode(picture, rows, err) && err.empty()) err = "the image encoder failed";
+        bool read = true;
+        for (size_t f = 0; f < frames.size() && read; ++f)
+            if (!lamina::vision::decode_file(frames[f], pictures[f], err)) {
+                std::printf("ERR cannot read the image %s (%s)\n", frames[f].c_str(), err.c_str());
+                std::fflush(stdout);
+                read = false;
+            }
+        if (!read) continue;
+        const bool ok = video ? enc->encode_frames(pictures[0], pictures.size() > 1 ? &pictures[1] : nullptr, rows, err)
+                              : enc->encode(pictures[0], rows, err);
+        if (!ok && err.empty()) err = "the image encoder failed";
         if (err.empty() && !lamina::vision::write_rows(out, rows)) err = "cannot write " + out;
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (err.empty()) std::printf("OK %d %d %d %.0f\n", rows.n, rows.nx, rows.ny, ms);

@@ -5,9 +5,10 @@
 // small kernels between them and one tensor-core kernel for the attention.  Activations are FP32 between the
 // products; the products' inputs are rounded to FP16 (to q8_1 for MMQ) and summed in FP32.
 //
-//   patches     host: each 16x16x3 patch a row of 768 (Qwen: in the order of the 2x2 groups); device: one FP32
-//               product with the patch kernel (Qwen: its two kernels summed), the bias, the position table added
-//               (resampled on the host: projector.hpp)
+//   patches     host: each 16x16x3 patch a row of 768 (Qwen: in the order of the 2x2 groups; a video's pair: the two
+//               frames' patches side by side, 1,536); device: one FP32 product with the patch kernel (Qwen: its two
+//               kernels summed, or side by side for a pair), the bias, the position table added (resampled on the
+//               host: projector.hpp)
 //   a block     LayerNorm, q k v (one matrix, or three), Qwen: the 2-D rotary positions on q and k, the attention,
 //               the output projection, the residual; LayerNorm, up, GELU, down, the residual
 //   Qwen        a last LayerNorm, each 2x2 group's four rows as one, two linear layers with GELU between
@@ -598,8 +599,26 @@ public:
     bool encode(const Rgb& picture, Rows& out, std::string& err) override {
         try {
             ck(cudaSetDevice(dev_), "cudaSetDevice");
-            encode_or_throw(picture, out);
+            if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
+                throw std::runtime_error("an empty picture");
+            int tw = 0, th = 0;
+            const std::vector<float> pixels = projector_planes(picture, proj_, tw, th);
+            run(pixels, nullptr, tw, th, out);
             mem("a picture");
+            return true;
+        } catch (const std::exception& e) {
+            err = e.what();
+            return false;
+        }
+    }
+
+    bool encode_frames(const Rgb& first, const Rgb* second, Rows& out, std::string& err) override {
+        try {
+            ck(cudaSetDevice(dev_), "cudaSetDevice");
+            const std::vector<float> pixels = frame_planes(proj_, first, second);
+            std::vector<float> more;
+            if (second != nullptr) more = planes(*second, proj_.mean, proj_.std);
+            run(pixels, second != nullptr ? &more : nullptr, first.w, first.h, out);
             return true;
         } catch (const std::exception& e) {
             err = e.what();
@@ -770,18 +789,30 @@ private:
             throw std::runtime_error("its heads are not of a width this encoder's attention kernel takes (72 values; "
                                      "Inkling 2's up to 80 in fours)");
         const int P = proj_.patch_size, in = 3 * P * P;
-        // the patch kernel as a matrix [E][3 P P] (a patch's values: channel, row, column); Qwen's two summed
-        {
+        // the patch kernel as a matrix [E][3 P P] (a patch's values: channel, row, column); Qwen's two summed, and
+        // side by side as [E][2 3 P P] for a video's pair (a row: the first frame's patch, then the second's)
+        if (measuring_) {
+            patch_ = mat_f32_place(E, in);
+            if (qwen) patch2_ = mat_f32_place(E, 2 * in);
+            patch_b_ = vec("v.patch_embd.bias", E, qwen);
+        } else {
             std::vector<float> w = proj_.floats("v.patch_embd.weight");
             if ((int64_t) w.size() != (int64_t) E * in)
                 throw std::runtime_error("its patch kernel has another shape than the tower's");
+            std::vector<float> pair;
             if (qwen) {
                 const std::vector<float> w1 = proj_.floats("v.patch_embd.weight.1");
                 if (w1.size() != w.size())
                     throw std::runtime_error("its second patch kernel has another shape than the first");
+                pair.resize((size_t) E * 2 * in);
+                for (int o = 0; o < E; ++o) {
+                    std::copy(&w[(size_t) o * in], &w[(size_t) o * in] + in, &pair[(size_t) o * 2 * in]);
+                    std::copy(&w1[(size_t) o * in], &w1[(size_t) o * in] + in, &pair[(size_t) o * 2 * in + in]);
+                }
                 for (size_t i = 0; i < w.size(); ++i) w[i] += w1[i];
             }
             patch_ = mat_f32(w, E, in);
+            if (qwen) patch2_ = mat_f32(pair, E, 2 * in);
             patch_b_ = vec("v.patch_embd.bias", E, qwen);
         }
         if (!measuring_) {   // the host's: resized for each picture
@@ -928,9 +959,10 @@ private:
         };
         // the two streams' buffers: a row of the tower's width a patch, or a quarter of an adapter's row where that
         // is wider (the 27B's rows of 5,120): the adapters leave their rows in them, a row a group of four patches
-        // (a patch's pixels where those are more: Inkling 2's 20 x 20 patches)
+        // (a patch's pixels where those are more: Inkling 2's 20 x 20 patches, Qwen's pair of a video's frames)
         const int64_t adapter = std::max<int64_t>(n_mid_, proj_.projection_dim);
-        const int64_t pixels = (int64_t) 3 * proj_.patch_size * proj_.patch_size;
+        const int64_t pixels =
+            (int64_t) (proj_.kind == ProjectorKind::qwen3vl ? 2 : 1) * 3 * proj_.patch_size * proj_.patch_size;
         const size_t stream = (size_t) n_max * (size_t) std::max<int64_t>({(int64_t) E, (adapter + 3) / 4, pixels}) * 4;
         void* const x = work(stream);
         void* const h = work(stream);
@@ -1053,16 +1085,14 @@ private:
     }
 
     // ---- a picture -------------------------------------------------------------------------------------------------
-    void encode_or_throw(const Rgb& picture, Rows& out) {
-        if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
-            throw std::runtime_error("an empty picture");
-        int tw = 0, th = 0;
-        const std::vector<float> pixels = projector_planes(picture, proj_, tw, th);
-
+    /// `pixels`: a picture's planes at tw x th; `second`: Qwen's second frame of a video's pair (its patches beside the
+    /// first's through the pair's matrix), else null
+    void run(const std::vector<float>& pixels, const std::vector<float>* second, int tw, int th, Rows& out) {
         const bool qwen = proj_.kind == ProjectorKind::qwen3vl, ink = proj_.kind == ProjectorKind::inkling2v;
         const int E = proj_.n_embd, H = proj_.n_head, D = proj_.d_head(), P = proj_.patch_size;
         // (Inkling 2: the class token's row before the patches')
         const int cls = ink ? 1 : 0, pw = tw / P, ph = th / P, n_patch = pw * ph, N = n_patch + cls, in = 3 * P * P;
+        const int frames = second != nullptr ? 2 : 1, row_in = frames * in;
         if (N > n_max_) alloc(N, false);
 
         // the patches as rows (channel, row, column), and the position table, in the tokens' order: Qwen's the 2x2
@@ -1077,23 +1107,26 @@ private:
                 px = p % pw;
             }
         };
-        host_.resize((size_t) N * std::max(in, E));
+        host_.resize((size_t) N * std::max(row_in, E));
         const size_t plane = (size_t) tw * th;
         for (int p = 0; p < n_patch; ++p) {
             int py, px;
             patch_of(p, py, px);
-            float* row = &host_[(size_t) p * in];
-            for (int c = 0; c < 3; ++c)
-                for (int y = 0; y < P; ++y) {
-                    const float* src = &pixels[c * plane + (size_t) (py * P + y) * tw + (size_t) px * P];
-                    std::copy(src, src + P, row + (c * P + y) * P);
-                }
+            for (int f = 0; f < frames; ++f) {
+                const std::vector<float>& src_planes = f == 0 ? pixels : *second;
+                float* row = &host_[(size_t) p * row_in + (size_t) f * in];
+                for (int c = 0; c < 3; ++c)
+                    for (int y = 0; y < P; ++y) {
+                        const float* src = &src_planes[c * plane + (size_t) (py * P + y) * tw + (size_t) px * P];
+                        std::copy(src, src + P, row + (c * P + y) * P);
+                    }
+            }
         }
-        to_device(h_, host_.data(), (size_t) n_patch * in * 4);
+        to_device(h_, host_.data(), (size_t) n_patch * row_in * 4);
         if (ink) ck(cudaMemsetAsync(x_, 0, (size_t) E * 4, st_), "the class token's row");
         for (int64_t t0 = 0; t0 < n_patch; t0 += chunk_) {
             const int64_t T = std::min<int64_t>(chunk_, n_patch - t0);
-            mul(patch_, h_ + t0 * in, T, x_ + (t0 + cls) * E, E);
+            mul(frames == 2 ? patch2_ : patch_, h_ + t0 * row_in, T, x_ + (t0 + cls) * E, E);
         }
         {
             const std::vector<float> table = qwen  ? qwen_position_table(pos_host_, E, n_side_, pw, ph)
@@ -1319,7 +1352,7 @@ private:
     bool any_mmq_ = false;   // a Q8_0 matrix goes through MMQ
     int64_t q8_elems_ = 0;   // the largest Q8_0 matrix multiplied as FP16 values: its values (0: none)
     // the weights
-    Mat patch_, mm0_, mm1_;
+    Mat patch_, patch2_, mm0_, mm1_;   // (patch2_: Qwen's two kernels side by side, a video's pair)
     float* patch_b_ = nullptr;
     float* post_w_ = nullptr;
     float* post_b_ = nullptr;

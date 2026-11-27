@@ -58,12 +58,23 @@ private:
 // ---- requests
 extern const std::vector<std::string_view> kTextParts;    ///< "text", "input_text" (and a part without a type)
 extern const std::vector<std::string_view> kImageParts;   ///< "image_url", "input_image", "image"
+/// "video_url" (vLLM's), "input_video" (llama.cpp's: {"data" or "url": ...}), "video" (an image block's shape)
+extern const std::vector<std::string_view> kVideoParts;
 std::string text_of(const json& content);
-bool has_image(const json& content);
+/// a content list with a picture or a video part
+bool has_media(const json& content);
 std::string image_source(const json& part);
+std::string video_source(const json& part);
+/// a request's content as the template reads it: text alone as a string, else its text, {"type": "image", "source"}
+/// and {"type": "video", "source"} items in order
 json parts_of(const json& content);
-/// the image sources of the rendered conversation, in prompt order
-std::vector<std::string> images_of(const json& messages);
+/// a picture or a video of the rendered conversation
+struct MediaRef {
+    bool video = false;
+    std::string source;
+};
+/// the pictures and videos of the rendered conversation, in prompt order
+std::vector<MediaRef> media_of(const json& messages);
 /// a reasoning effort as a client gives it -> the template's kwargs (RequestError for an unknown one)
 json effort_kwargs(const json& value);
 json budget_effort(const json& tokens);

@@ -112,6 +112,10 @@ case("chat-stop-stream", "POST", "/v1/chat/completions", chat(stop="Two", stream
 case("chat-seed-temp", "POST", "/v1/chat/completions", chat(temperature=0.5, top_p=0.9, top_k=10, seed=7, presence_penalty=0.5))
 case("chat-image-no-vision", "POST", "/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [
     {"type": "text", "text": "What is this?"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}]}]})
+case("chat-video-no-vision", "POST", "/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "What happens?"}, {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}}]}]})
+case("responses-video-no-vision", "POST", "/v1/responses", {"model": "m", "input": [{"role": "user", "content": [
+    {"type": "input_text", "text": "What happens?"}, {"type": "input_video", "video_url": "data:video/mp4;base64,AAAA"}]}]})
 case("chat-lamina-prefix", "POST", "/v1/chat/completions", {**chat(), "lamina_prefix": {"messages": 1}})
 case("chat-lamina-prefix-bad", "POST", "/v1/chat/completions", {**chat(), "lamina_prefix": {"messages": 0}})
 case("responses-json", "POST", "/v1/responses", {"model": "m", "input": "Give JSON", "text": {"format": {"type": "json_object"}}})

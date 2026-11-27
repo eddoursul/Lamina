@@ -310,4 +310,18 @@ std::vector<float> projector_planes(const Rgb& picture, const ProjectorParams& p
     return planes(fit(picture, tw, th, p.filter, p.letterbox, p.pad), p.mean, p.std);
 }
 
+std::vector<float> frame_planes(const ProjectorParams& p, const Rgb& first, const Rgb* second) {
+    if (p.kind == ProjectorKind::inkling2v) throw std::runtime_error("this model's projector takes no video");
+    const int a = p.size.align;
+    if (first.w <= 0 || first.h <= 0 || first.w % a != 0 || first.h % a != 0 ||
+        first.px.size() != (size_t) first.w * (size_t) first.h * 3)
+        throw std::runtime_error("a video frame of " + std::to_string(first.w) + "x" + std::to_string(first.h) +
+                                 " is not of whole merged patches of " + std::to_string(a) + " pixels");
+    if (second != nullptr && p.kind != ProjectorKind::qwen3vl)
+        throw std::runtime_error("this projector takes a video's frames one at a time");
+    if (second != nullptr && (second->w != first.w || second->h != first.h || second->px.size() != first.px.size()))
+        throw std::runtime_error("a pair of video frames of two sizes");
+    return planes(first, p.mean, p.std);
+}
+
 }   // namespace lamina::vision

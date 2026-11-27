@@ -3,12 +3,15 @@
 // The engine's encoder (include/lamina/vision, on the model's mmproj file) in this process: on a GPU the engine's own
 // kernels, on a card the config names, its memory taken before the engine sizes its caches; on the CPU a ggml graph.
 // A picture's embeddings are written to a file the engine reads and cached by the picture's hash, so a conversation
-// that sends the same picture every turn (most clients do) encodes it once.  A build without the encoder
-// (LAMINA_BUILD_VISION=OFF) has the class and refuses to make one.
+// that sends the same picture every turn (most clients do) encodes it once.  A video (Qwen's and Hy4-flash's
+// projectors) is planned as its model's processor plans it (include/lamina/vision/video.hpp), its frames read through
+// ffmpeg (video.hpp) and encoded a group at a time into one file, a record a group, cached by the video's key.  A
+// build without the encoder (LAMINA_BUILD_VISION=OFF) has the class and refuses to make one.
 #pragma once
 
 #include "json.hpp"
 #include "sync.hpp"
+#include "video.hpp"
 
 #include <atomic>
 #include <functional>
@@ -27,6 +30,34 @@ inline constexpr size_t kImageBytesMax = 32u << 20;
 /// the pixels a picture the server decodes may have: Pillow's limit (twice Image.MAX_IMAGE_PIXELS), where it
 /// refuses a decompression bomb
 inline constexpr uint64_t kImagePixelsMax = 178956970;
+
+/// a request's video, before the turn: its plan, then its frames
+struct VideoJob {
+    std::string key;   ///< the video's (VideoFile::key): an encoded one is found by it
+    std::shared_ptr<VideoFile> file;
+    VideoInfo info;
+    std::vector<int64_t> frames;   ///< the plan's frames in order (an index can repeat)
+    int width = 0, height = 0, per_group = 1, group_tokens = 0;
+    std::vector<double> times;                  ///< each group's time in seconds
+    std::vector<std::vector<uint8_t>> pixels;   ///< the frames read and resized (read_video), as `frames`
+    bool cached = false;                        ///< the encoder had its rows when it was planned
+    int groups() const { return per_group > 0 ? (int) (frames.size() / (size_t) per_group) : 0; }
+};
+
+/// a request's picture or video, in prompt order
+struct Medium {
+    std::string source;   ///< a picture's: what load() reads, or its bytes (`is_bytes`)
+    bool is_bytes = false;
+    std::shared_ptr<VideoJob> video;   ///< a video's, planned (and read) before the turn
+};
+
+/// a medium's embeddings: its file (a record a picture, one each group of a video's), each record's rows and the key
+/// the engine matches it by (16 hex digits)
+struct EncodedMedium {
+    std::string file;
+    std::vector<int64_t> rows;
+    std::vector<std::string> keys;
+};
 
 class Vision {
 public:
@@ -62,10 +93,18 @@ public:
     /// the formats the encoder's decoder reads pass through; any other is converted, a JPEG stored turned (its EXIF
     /// Orientation) is turned upright (std::invalid_argument when it cannot be read, or has over kImagePixelsMax)
     static std::string normalize(const std::string& data);
-    /// encode() for every picture of one request: the files of its earlier pictures are never evicted for a later
-    /// one (#1072); a request whose client left encodes no more (#1999: ClientGone)
-    std::vector<std::pair<std::string, int64_t>> encode_all(const std::vector<std::pair<std::string, bool>>& sources,
-                                                            Cancel* cancel);
+    /// "" where the encoder takes videos (Qwen's and Hy4-flash's projectors, with ffmpeg), else why not
+    std::string video_refusal();
+    /// A video planned, outside the turn: its file opened (a URL's bytes downloaded), its stream probed, its frames,
+    /// their size and its groups settled as its model's processor settles them, or its rows found in the cache.
+    /// std::invalid_argument when it cannot be read.
+    std::shared_ptr<VideoJob> plan_video(const std::string& source, bool is_bytes);
+    /// its frames decoded and resized (bicubic, a thread each of half the CPU's), outside the turn; nothing for a
+    /// video the cache holds
+    void read_video(VideoJob& job, Cancel* cancel);
+    /// the pictures and videos of one request in prompt order (a picture: encode()): the files of its earlier ones
+    /// are never evicted for a later one (#1072); a request whose client left encodes no more (#1999: ClientGone)
+    std::vector<EncodedMedium> encode_all(const std::vector<Medium>& media, Cancel* cancel);
     /// (its embeddings file, its image tokens); `source`: what load() reads, or the picture's bytes (`is_bytes`);
     /// `keep`: files the caller still needs
     std::pair<std::string, int64_t> encode(const std::string& source, bool is_bytes = false,
@@ -76,6 +115,8 @@ private:
     struct Loaded;   ///< an encoder: its GPU kept from the engine's resets, or the loan it is in
     struct Plan;     ///< what the section asks for, settled at the start
     void start();
+    /// a video's groups through the encoder into its file (mu_ held by the caller's lock)
+    EncodedMedium encode_video(VideoJob& job, const std::vector<std::string>& keep);
     /// the encoder for a picture (mu_ held): the resident one, or a borrowing one's lease, made now
     void* encoder_now(std::string& err);
     void lease_end();
@@ -93,6 +134,14 @@ private:
                                                                                    ///< a picture at a time
     std::vector<std::pair<std::string, std::pair<std::string, int64_t>>> cache_;   ///< key -> (file,
                                                                                    ///< tokens), oldest first
+    /// a video's rows and plan
+    struct VideoEntry {
+        EncodedMedium enc;
+        VideoJob plan;   ///< (no file, no pixels)
+        uintmax_t bytes = 0;
+    };
+    std::vector<std::pair<std::string, VideoEntry>> video_cache_;   ///< key -> its rows, oldest first
+    FfmpegTools ff_;
 };
 
 /// whether this build has the image encoder (LAMINA_BUILD_VISION)
@@ -110,6 +159,9 @@ bool projector_type_read(const std::string& type);
 std::string projector_refusal(const std::string& mmproj);
 /// a path to another computer (\\host\share, //host/share, \\?\UNC\..., \??\UNC\...): Windows would sign in to it
 bool network_path(const std::string& path);
+/// a local file's path from a path or a file:// URL (as urllib's url2pathname reads one); std::invalid_argument for a
+/// network path or another host's URL (`what`: "an image", "a video", for the message)
+std::string media_file_path(const std::string& source, const char* what);
 /// #874: where one request's combined image-embeddings file goes: on Linux /dev/shm when it has room (the engine
 /// reads it back at once), else the encoder's own directory
 std::string combined_embeddings_path(const std::string& vision_dir, uintmax_t nbytes);

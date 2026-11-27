@@ -74,10 +74,10 @@ struct ImageCells {
     std::vector<int32_t> cell_row;
     int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
 };
-/// Reads the image encoder's file (read_vision_records) and lays the pictures over the prompt's runs of `pad`, a row a
-/// cell; each such cell's id becomes negative, from the picture's key (`keys`: the server's, img_keys=, else the rows'
-/// hash) and its row.  "" or the error.
-std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int32_t pad, int64_t n_embd,
-                        const std::vector<uint64_t>& keys, ImageCells& r);
+/// Reads the image encoder's file (read_vision_records) and lays the pictures over the prompt's runs of a pad (`pads`:
+/// a picture's, a video group's), a record a run, a row a cell; each such cell's id becomes negative, from the
+/// record's key (`keys`: the server's, img_keys=, else the rows' hash) and its row.  "" or the error.
+std::string image_cells(const std::string& path, std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
+                        int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r);
 
 }   // namespace lamina::program

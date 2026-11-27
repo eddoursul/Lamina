@@ -8110,7 +8110,7 @@ struct Serve {
                 serve_print("ERR this engine was started without --vision\n");
                 return;
             }
-            if (const std::string ve = lamina::program::image_cells(emb, ids, E.m->image_pad, g.n_embd, img_keys, ir);
+            if (const std::string ve = lamina::program::image_cells(emb, ids, {E.m->image_pad}, g.n_embd, img_keys, ir);
                 !ve.empty()) {
                 serve_print("ERR %s\n", ve.c_str());
                 return;
@@ -8735,7 +8735,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     if (!forced.empty()) n_gen = (int) forced.size() + 1;
     ImgReq ir;
     if (!emb_file.empty()) {
-        if (const std::string ve = lamina::program::image_cells(emb_file, prompt, m.image_pad, m.g.n_embd, {}, ir);
+        if (const std::string ve = lamina::program::image_cells(emb_file, prompt, {m.image_pad}, m.g.n_embd, {}, ir);
             !ve.empty()) {
             std::fprintf(stderr, "lamina: --emb: %s\n", ve.c_str());
             return 2;

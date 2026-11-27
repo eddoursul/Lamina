@@ -339,14 +339,17 @@ public:
         return true;
     }
 
-    /// a web page of another origin must not have a file on this computer read as an image
+    /// a web page of another origin must not have a file on this computer read as an image or a video
     void no_local_images(const json& messages) {
         if (!foreign_origin()) return;
-        for (const auto& src : images_of(messages))
-            if (!starts_with(src, "data:") && !starts_with(src, "http://") && !starts_with(src, "https://"))
-                throw RequestError(
-                    "a web page of another origin cannot have a file on this computer read as an image: send "
-                    "it as a data: URL (or add the page's origin to the config's trusted_origins)");
+        for (const MediaRef& m : media_of(messages))
+            if (!starts_with(m.source, "data:") && !starts_with(m.source, "http://") &&
+                !starts_with(m.source, "https://"))
+                throw RequestError(std::string("a web page of another origin cannot have a file on this computer read "
+                                               "as ") +
+                                   (m.video ? "a video" : "an image") +
+                                   ": send it as a data: URL (or add the page's origin to the config's "
+                                   "trusted_origins)");
     }
 
     bool control_body() {
@@ -634,14 +637,15 @@ void get_props(Exchange& x) {
 void get_models(Exchange& x) {
     Service& svc = x.svc;
     bool loaded = svc.loaded();
-    json model = {
-        {"id", svc.model},
-        {"object", "model"},
-        {"status", {{"value", "loaded"}}},
-        {"meta", {{"n_ctx", svc.reported_ctx()}}},
-        {"architecture",
-         {{"input_modalities", svc.vision != nullptr ? json::array({"text", "image"}) : json::array({"text"})},
-          {"output_modalities", json::array({"text"})}}}};
+    json model = {{"id", svc.model},
+                  {"object", "model"},
+                  {"status", {{"value", "loaded"}}},
+                  {"meta", {{"n_ctx", svc.reported_ctx()}}},
+                  {"architecture",
+                   {{"input_modalities", svc.vision == nullptr                 ? json::array({"text"})
+                                         : svc.vision->video_refusal().empty() ? json::array({"text", "image", "video"})
+                                                                               : json::array({"text", "image"})},
+                    {"output_modalities", json::array({"text"})}}}};
     if (!loaded && (svc.idle_unload_s || svc.engine->unloaded())) {
         model["status"] = {{"value", "unloaded"}};   // like llama-server's router: listed, loads on use
         loaded = true;
@@ -830,6 +834,7 @@ void do_get(Service& svc, HttpServer& server, const httplib::Request& req, httpl
                       {"max_context", svc.reported_ctx()},
                       {"model", svc.model},
                       {"images", svc.vision != nullptr},
+                      {"videos", svc.vision != nullptr && svc.vision->video_refusal().empty()},
                       {"api_key", truthy(svc.api_key)},
                       {"image_generation", svc.images != nullptr},
                       {"loaded", svc.loaded()},

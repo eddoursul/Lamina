@@ -14948,6 +14948,26 @@
     }
    }
   ],
+  "chat-video-no-vision": [
+   400,
+   {
+    "error": {
+     "type": "invalid_request_error",
+     "message": "this server was started without the vision encoder (an image projector beside the model, or the config's vision section), so it cannot read videos"
+    }
+   }
+  ],
+  "responses-video-no-vision": [
+   400,
+   {
+    "error": {
+     "message": "this server was started without the vision encoder (an image projector beside the model, or the config's vision section), so it cannot read videos",
+     "type": "invalid_request_error",
+     "param": "input",
+     "code": null
+    }
+   }
+  ],
   "chat-lamina-prefix": [
    200,
    {

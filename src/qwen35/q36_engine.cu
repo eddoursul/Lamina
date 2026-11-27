@@ -4783,6 +4783,8 @@ protected:
 
 // ------------------------------------------------------------------------------------------------ pictures
 constexpr int32_t kImagePad = 248056;   // <|image_pad|>
+constexpr int32_t kVideoPad = 248057;   // <|video_pad|>: a video's group of frames, as a picture
+inline bool media_pad(int32_t t) { return t == kImagePad || t == kVideoPad; }
 
 /// A request's pictures: the encoder's rows in prompt order, each picture's cell run, and the positions.
 struct ImgReq {
@@ -4794,7 +4796,8 @@ struct ImgReq {
 };
 
 /// Reads a lamina-vision file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, in prompt
-/// order) and lays the pictures over the prompt's <|image_pad|> runs.  Positions as mtmd's: text counts up by one; a
+/// order) and lays the pictures over the prompt's <|image_pad|> runs (a video's groups over its <|video_pad|> runs, a
+/// record each).  Positions as mtmd's: text counts up by one; a
 /// picture's cells take (t, h, w) = (p, p + row, p + column) and the text after it continues at p + max(nx, ny).  "" or
 /// the error.  `keys`: the server's key for each picture (img_keys=), else the embeddings' hash.
 std::string build_images(const std::string& path, const std::vector<int32_t>& ids, int64_t n_embd,
@@ -4812,7 +4815,7 @@ std::string build_images(const std::string& path, const std::vector<int32_t>& id
     int64_t p = 0, i = 0;
     size_t k = 0;
     while (i < n) {
-        if (ids[(size_t) i] != kImagePad) {
+        if (!media_pad(ids[(size_t) i])) {
             put(i, p, p, p);
             ++p;
             ++i;
@@ -4824,9 +4827,9 @@ std::string build_images(const std::string& path, const std::vector<int32_t>& id
                                                              r.rows.data(), n_embd);
         r.imgs.push_back({i, im.n, h});
         for (int64_t j = 0; j < im.n; ++j)
-            if (i + j >= n || ids[(size_t) (i + j)] != kImagePad)
+            if (i + j >= n || ids[(size_t) (i + j)] != ids[(size_t) i])
                 return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                       " rows but fewer <|image_pad|> tokens";
+                       " rows but fewer pad tokens";
         for (int64_t j = 0; j < im.n; ++j) {
             const int64_t y = j / im.nx, x = j % im.nx;
             put(i + j, p, p + y, p + x);
@@ -4836,7 +4839,7 @@ std::string build_images(const std::string& path, const std::vector<int32_t>& id
         p += std::max(im.nx, im.ny);
     }
     if (k != imgs.size()) return "the embeddings file has more images than the prompt";
-    if (n > 0 && ids[(size_t) (n - 1)] == kImagePad) return "the prompt cannot end in an image";
+    if (n > 0 && media_pad(ids[(size_t) (n - 1)])) return "the prompt cannot end in an image";
     r.delta = (int32_t) (p - n);
     return "";
 }

@@ -970,8 +970,9 @@ int run(int argc, char** argv) {
                 say(lazy ? "vision encoder unloaded; it starts with the model ..." : "loading the vision encoder ...");
                 // in this process, before the engine: what it takes of a GPU is taken when the engine sizes its caches
                 json vcfg = cfg["vision"];   // a relative path is the config's cwd's, as for the engine
-                if (const std::string f = jstr(vcfg, "mmproj"); !f.empty() && !u8_path(f).is_absolute())
-                    vcfg["mmproj"] = u8_str(cfg_dir / u8_path(f));
+                for (const char* key : {"mmproj", "ffmpeg"})
+                    if (const std::string f = jstr(vcfg, key); !f.empty() && !u8_path(f).is_absolute())
+                        vcfg[key] = u8_str(cfg_dir / u8_path(f));
                 // "lend": where the engine can lend VRAM on the encoder's card; else the encoder keeps its own (the
                 // CPU's borrows none: said where its card was settled)
                 if (truthy(jget(vcfg, "lend")) && !truthy(jget(vcfg, "gpu"))) vcfg["lend"] = false;

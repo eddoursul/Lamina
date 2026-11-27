@@ -56,6 +56,11 @@ bool is_image_part(const json& part) {
     return t.is_string() && in(t.get_ref<const std::string&>(), kImageParts);
 }
 
+bool is_video_part(const json& part) {
+    const json& t = jget(part, "type");
+    return t.is_string() && in(t.get_ref<const std::string&>(), kVideoParts);
+}
+
 /// dict.update
 void merge(json& dst, const json& src) {
     for (auto it = src.begin(); it != src.end(); ++it) dst[it.key()] = it.value();
@@ -111,7 +116,7 @@ std::string ChatTemplate::render(const json& messages, const json& tools, bool a
         const json& m = messages[i];
         const bool drop = i + 1 < messages.size() && !(keep != nullptr && std::string_view(keep) == "1") &&
                           m.is_object() && jstr(m, "role") == "assistant" &&
-                          strip(text_of(jget(m, "content"))).empty() && !has_image(jget(m, "content")) &&
+                          strip(text_of(jget(m, "content"))).empty() && !has_media(jget(m, "content")) &&
                           !truthy(jget(m, "tool_calls"));
         if (!drop) msgs.push_back(m);
     }
@@ -239,6 +244,7 @@ json ChatTemplate::detect_caps() const {
 // ---------------------------------------------------------------------------------------------- requests
 const std::vector<std::string_view> kTextParts = {"text", "input_text"};
 const std::vector<std::string_view> kImageParts = {"image_url", "input_image", "image"};
+const std::vector<std::string_view> kVideoParts = {"video_url", "input_video", "video"};
 
 std::string text_of(const json& content) {
     if (content.is_null()) return "";
@@ -250,10 +256,10 @@ std::string text_of(const json& content) {
     return out;
 }
 
-bool has_image(const json& content) {
+bool has_media(const json& content) {
     if (!content.is_array()) return false;
     for (const auto& p : content)
-        if (p.is_object() && is_image_part(p)) return true;
+        if (p.is_object() && (is_image_part(p) || is_video_part(p))) return true;
     return false;
 }
 
@@ -270,13 +276,30 @@ std::string image_source(const json& part) {
     return url.is_string() ? url.get<std::string>() : std::string();
 }
 
+std::string video_source(const json& part) {
+    const std::string kind = type_of(part);
+    if (kind == "video") {   // a block of an image block's shape
+        const json& src = jget(part, "source");
+        if (jstr(src, "type") == "base64")
+            return "data:" + jstr(src, "media_type", "video/mp4") + ";base64," + jstr(src, "data");
+        if (truthy(jget(src, "url"))) return jstr(src, "url");
+        return jstr(src, "path");
+    }
+    json v = jget(part, kind);
+    if (kind == "input_video" && !v.is_object() && !v.is_string()) v = jget(part, "video_url");   // (Responses')
+    if (v.is_object()) v = truthy(jget(v, "url")) ? jget(v, "url") : jget(v, "data");
+    return v.is_string() ? v.get<std::string>() : std::string();
+}
+
 json parts_of(const json& content) {
-    if (!has_image(content)) return text_of(content);
+    if (!has_media(content)) return text_of(content);
     json items = json::array();
     for (const auto& part : content) {
         if (!part.is_object()) continue;
         if (is_image_part(part)) {
             items.push_back({{"type", "image"}, {"source", image_source(part)}});
+        } else if (is_video_part(part)) {
+            items.push_back({{"type", "video"}, {"source", video_source(part)}});
         } else if (is_text_part(part) && part.contains("text")) {
             items.push_back({{"type", "text"}, {"text", jstr(part, "text")}});
         }
@@ -299,13 +322,15 @@ json check_parts(const json& content) {
 
 }   // namespace
 
-std::vector<std::string> images_of(const json& messages) {
-    std::vector<std::string> out;
+std::vector<MediaRef> media_of(const json& messages) {
+    std::vector<MediaRef> out;
     for (const auto& m : messages) {
         const json& c = jget(m, "content");
         if (!c.is_array()) continue;
-        for (const auto& item : c)
-            if (jstr(item, "type") == "image") out.push_back(jstr(item, "source"));
+        for (const auto& item : c) {
+            const std::string kind = jstr(item, "type");
+            if (kind == "image" || kind == "video") out.push_back({kind == "video", jstr(item, "source")});
+        }
     }
     return out;
 }
@@ -782,7 +807,7 @@ Converted anthropic_to_messages(json& req, bool think_unasked) {
         const bool any_result = content.is_array() && std::any_of(content.begin(), content.end(), [](const json& b) {
                                     return b.is_object() && jstr(b, "type") == "tool_result";
                                 });
-        if (jstr(m, "role") == "user" && has_image(content) && !any_result) {
+        if (jstr(m, "role") == "user" && has_media(content) && !any_result) {
             r.messages.push_back({{"role", "user"}, {"content", parts_of(content)}});
             continue;
         }
@@ -796,7 +821,7 @@ Converted anthropic_to_messages(json& req, bool think_unasked) {
                     text += jstr(block, "text");
                     any_text = true;
                     parts.push_back(block);
-                } else if (in(kind, kImageParts)) {
+                } else if (in(kind, kImageParts) || in(kind, kVideoParts)) {
                     parts.push_back(block);
                 } else if (kind == "thinking") {
                     reasoning += jstr(block, "thinking");
@@ -815,7 +840,7 @@ Converted anthropic_to_messages(json& req, bool think_unasked) {
                 }
             }
         if (any_text || !calls.empty() || any_reasoning || !parts.empty()) {
-            json out = {{"role", jget(m, "role")}, {"content", has_image(parts) ? parts_of(parts) : json(text)}};
+            json out = {{"role", jget(m, "role")}, {"content", has_media(parts) ? parts_of(parts) : json(text)}};
             if (any_reasoning) out["reasoning_content"] = reasoning;
             if (!calls.empty()) out["tool_calls"] = calls;
             r.messages.push_back(out);

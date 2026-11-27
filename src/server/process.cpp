@@ -338,7 +338,7 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
     }
     CloseHandle(pi.hThread);
     p.cr_lines = o.cr_lines;
-    if (p.out != nullptr) p.out_reader = std::thread([&p] { p.read_out(); });
+    if (p.out != nullptr && !o.raw_out) p.out_reader = std::thread([&p] { p.read_out(); });
     else p.lines->close();
     p.on_err_line = std::move(o.on_err_line);
     if (p.err != nullptr) p.err_reader = std::thread([&p] { p.read_err(); });
@@ -711,7 +711,7 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
     p.out = out_pipe[0];
     p.err = err_pipe[0];
     p.cr_lines = o.cr_lines;
-    if (p.out >= 0) p.out_reader = std::thread([&p] { p.read_out(); });
+    if (p.out >= 0 && !o.raw_out) p.out_reader = std::thread([&p] { p.read_out(); });
     else p.lines->close();
     p.on_err_line = std::move(o.on_err_line);
     if (p.err >= 0) p.err_reader = std::thread([&p] { p.read_err(); });
@@ -866,6 +866,28 @@ std::string Process::stderr_tail() {
 }
 
 int Process::read_line(std::string& line, double timeout_s) { return impl_->lines->pop(line, timeout_s); }
+
+size_t Process::read_raw(void* dst, size_t n) {
+    Impl& p = *impl_;
+    size_t got = 0;
+    auto* at = static_cast<char*>(dst);
+#ifdef _WIN32
+    while (got < n && p.out != nullptr) {
+        DWORD k = 0;
+        const DWORD want = (DWORD) std::min<size_t>(n - got, (size_t) 1 << 30);
+        if (!ReadFile(p.out, at + got, want, &k, nullptr) || k == 0) break;
+        got += k;
+    }
+#else
+    while (got < n && p.out >= 0) {
+        const ssize_t k = ::read(p.out, at + got, n - got);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) break;
+        got += (size_t) k;
+    }
+#endif
+    return got;
+}
 
 bool Process::stderr_done() const { return impl_->err_done.load(); }
 

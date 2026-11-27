@@ -4652,9 +4652,12 @@ int lamina::program::run(int argc, char** argv) {
         std::vector<int64_t> prev_prompt;
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more of the image encoder's records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt
-        // order; each image's rows go to its run of <|image_pad|> tokens, whose M-RoPE positions are mtmd's: t = p,
-        // h = p + y, w = p + x, and the text after the image continues at p + max(nx, ny).
+        // order; each image's rows go to its run of <|image_pad|> tokens (a video's group: of <|video_pad|> tokens),
+        // whose M-RoPE positions are mtmd's: t = p, h = p + y, w = p + x, and the text after the image continues at
+        // p + max(nx, ny).
         constexpr int64_t kImagePad = 248056;   // qwen4exp.ple.image_token_id: the PLE hash reads it for image cells
+        constexpr int64_t kVideoPad = 248057;   // <|video_pad|>: a video's cells (the PLE hash reads it there)
+        const auto media_pad = [](int64_t t) { return t == kImagePad || t == kVideoPad; };
         bool mrope_identity = true;
         std::vector<float> img_rows;
         std::vector<const float*> row_ptr;
@@ -4887,7 +4890,7 @@ int lamina::program::run(int argc, char** argv) {
                     int64_t p = 0, i = 0;
                     size_t k = 0;
                     while (ve.empty() && i < n) {
-                        if (ids[(size_t) i] != kImagePad) {
+                        if (!media_pad(ids[(size_t) i])) {
                             put(i, p, p, p);
                             ++p;
                             ++i;
@@ -4903,9 +4906,9 @@ int lamina::program::run(int argc, char** argv) {
                                     im, req_img_keys.size() == imgs.size() ? &req_img_keys[k - 1] : nullptr,
                                     img_rows.data(), g.n_embd)});
                         for (int64_t j = 0; j < im.n && ve.empty(); ++j)
-                            if (i + j >= n || ids[(size_t) (i + j)] != kImagePad)
+                            if (i + j >= n || ids[(size_t) (i + j)] != ids[(size_t) i])
                                 ve = "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                                     " rows but fewer <|image_pad|> tokens";
+                                     " rows but fewer pad tokens";
                         for (int64_t j = 0; j < im.n && ve.empty(); ++j) {
                             const int64_t y = j / im.nx, x = j % im.nx;
                             put(i + j, p, p + y, p + x);
@@ -4915,7 +4918,7 @@ int lamina::program::run(int argc, char** argv) {
                         p += std::max(im.nx, im.ny);
                     }
                     if (ve.empty() && k != imgs.size()) ve = "the embeddings file has more images than the prompt";
-                    if (ve.empty() && n > 0 && ids[(size_t) (n - 1)] == kImagePad)
+                    if (ve.empty() && n > 0 && media_pad(ids[(size_t) (n - 1)]))
                         ve = "the prompt cannot end in an image";
                     for (int64_t c = n; ve.empty() && c < cells; ++c) put(c, p + (c - n), p + (c - n), p + (c - n));
                 }
@@ -5063,7 +5066,7 @@ int lamina::program::run(int argc, char** argv) {
                                                                             // checkpoint
                 batched_end = n - 1;
                 if (q > reuse && n - 1 - q <= o.feed_max &&
-                    std::find(ids.begin() + q, ids.begin() + (n - 1), kImagePad) == ids.begin() + (n - 1))
+                    std::find_if(ids.begin() + q, ids.begin() + (n - 1), media_pad) == ids.begin() + (n - 1))
                     batched_end = q;
             } else if (n - 1 - reuse > o.feed_max) {
                 batched_end = (q > reuse && n - 1 - q <= o.feed_max) ? q : n - 1;

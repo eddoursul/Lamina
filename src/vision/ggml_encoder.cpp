@@ -106,8 +106,8 @@ struct Graph {
     const int n_embd, n_head, n_head_kv, d_head, n_layer;
     const float eps, kq_scale;
     const bool flash;
-    const int head_pad;      // the flash attention's heads widened by this many zeros (GgmlEncoder::open)
-    const int n_batch = 1;   // a still picture
+    const int head_pad;   // the flash attention's heads widened by this many zeros (GgmlEncoder::open)
+    const int n_batch;    // frames in the input: 1 (a picture), 2 (Qwen's pair of a video's frames)
     // the inputs the encoder fills
     ggml_tensor* inp_raw = nullptr;
     ggml_tensor* positions = nullptr;   // Qwen's rotary positions
@@ -125,12 +125,12 @@ struct Graph {
     bool tap_layer(int il) const { return il < 2 || il == n_layer - 1; }
     bool tap_attn = false;   // the next attention's output before its projection
 
-    Graph(const Model& model, ggml_context* ctx, int w, int h, bool flash_attention, int pad)
+    Graph(const Model& model, ggml_context* ctx, int w, int h, bool flash_attention, int pad, int frames)
         : m(model), ctx0(ctx), gf(ggml_new_graph_custom(ctx, kMaxNodes, false)), img_w(w), img_h(h),
           patch_size(model.patch_size), n_patches_x(w / model.patch_size), n_patches_y(h / model.patch_size),
           n_patches(n_patches_x * n_patches_y), n_embd(model.n_embd), n_head(model.n_head), n_head_kv(model.n_head_kv),
           d_head(model.d_head()), n_layer(model.n_layer), eps(model.eps), kq_scale(1.0f / sqrtf((float) d_head)),
-          flash(flash_attention), head_pad(pad) {}
+          flash(flash_attention), head_pad(pad), n_batch(frames) {}
 
     ggml_tensor* build_inp_raw() {
         inp_raw = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img_w, img_h, 3, n_batch);
@@ -207,11 +207,18 @@ struct Graph {
         const int num_position_ids = n_pos * 4;   // 4 values a position
         int mrope_sections[4] = {d_head / 4, d_head / 4, d_head / 4, d_head / 4};
 
-        // a still picture: the two patch kernels over the same frame, summed
+        // a still picture: the two patch kernels over the same frame, summed; a video's pair (mtmd's
+        // build_inp_temporal_merge): the first frame through the first kernel, the second through the other
         build_inp_raw();
-        ggml_tensor* inp =
-            ggml_add(ctx0, ggml_conv_2d(ctx0, m.patch_embd_0, inp_raw, patch_size, patch_size, 0, 0, 1, 1),
-                     ggml_conv_2d(ctx0, m.patch_embd_1, inp_raw, patch_size, patch_size, 0, 0, 1, 1));
+        ggml_tensor* inp0 = inp_raw;
+        ggml_tensor* inp1 = inp_raw;
+        if (n_batch == 2) {
+            const size_t nb1 = ggml_row_size(inp_raw->type, img_w), nb2 = ggml_row_size(inp_raw->type, img_w * img_h);
+            inp0 = ggml_view_3d(ctx0, inp_raw, img_w, img_h, 3, nb1, nb2, 0);
+            inp1 = ggml_view_3d(ctx0, inp_raw, img_w, img_h, 3, nb1, nb2, nb2 * 3);
+        }
+        ggml_tensor* inp = ggml_add(ctx0, ggml_conv_2d(ctx0, m.patch_embd_0, inp0, patch_size, patch_size, 0, 0, 1, 1),
+                                    ggml_conv_2d(ctx0, m.patch_embd_1, inp1, patch_size, patch_size, 0, 0, 1, 1));
 
         // the patches in 2x2 groups from here on (the merger concatenates each group's four at the end)
         {
@@ -546,7 +553,26 @@ public:
 
     bool encode(const Rgb& picture, Rows& out, std::string& err) override {
         try {
-            encode_or_throw(picture, out);
+            if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
+                throw std::runtime_error("an empty picture");
+            int tw = 0, th = 0;
+            const std::vector<float> pixels = projector_planes(picture, m_, tw, th);
+            run(pixels, tw, th, 1, out);
+            return true;
+        } catch (const std::exception& e) {
+            err = e.what();
+            return false;
+        }
+    }
+
+    bool encode_frames(const Rgb& first, const Rgb* second, Rows& out, std::string& err) override {
+        try {
+            std::vector<float> pixels = frame_planes(m_, first, second);
+            if (second != nullptr) {
+                const std::vector<float> more = planes(*second, m_.mean, m_.std);
+                pixels.insert(pixels.end(), more.begin(), more.end());
+            }
+            run(pixels, first.w, first.h, second != nullptr ? 2 : 1, out);
             return true;
         } catch (const std::exception& e) {
             err = e.what();
@@ -657,40 +683,36 @@ private:
     }
 
     // ---- a picture -------------------------------------------------------------------------------------------------
-    ggml_cgraph* build(ggml_context_ptr& ctx0, std::unique_ptr<Graph>& g, int w, int h, bool flash) {
+    ggml_cgraph* build(ggml_context_ptr& ctx0, std::unique_ptr<Graph>& g, int w, int h, bool flash, int frames) {
         ggml_init_params ip = {/*.mem_size =*/compute_meta_.size(), /*.mem_buffer =*/compute_meta_.data(),
                                /*.no_alloc =*/true};
         ctx0.reset(ggml_init(ip));
-        g = std::make_unique<Graph>(m_, ctx0.get(), w, h, flash, head_pad_);
+        g = std::make_unique<Graph>(m_, ctx0.get(), w, h, flash, head_pad_, frames);
         g->dump = std::getenv("LAMINA_VISION_DUMP") != nullptr;
         return g->build();
     }
 
     /// the buffers for a w x h picture's graph reserved
-    void reserve(int w, int h) {
+    void reserve(int w, int h, int frames) {
         ggml_context_ptr ctx0;
         std::unique_ptr<Graph> g;
-        ggml_cgraph* gf = build(ctx0, g, w, h, flash_);
+        ggml_cgraph* gf = build(ctx0, g, w, h, flash_, frames);
         if (!ggml_backend_sched_reserve(sched_.get(), gf))
             throw std::runtime_error("the encoder's buffers do not fit the RAM");
     }
 
-    void encode_or_throw(const Rgb& picture, Rows& out) {
-        if (picture.w <= 0 || picture.h <= 0 || picture.px.size() != (size_t) picture.w * (size_t) picture.h * 3)
-            throw std::runtime_error("an empty picture");
-        int tw = 0, th = 0;
-        const std::vector<float> pixels = projector_planes(picture, m_, tw, th);
-
+    /// `pixels`: the planes of `frames` frames of tw x th, one after the other
+    void run(const std::vector<float>& pixels, int tw, int th, int frames, Rows& out) {
         // the first picture reserves the buffers, as mtmd's warm-up does
         if (!allocated_) {
-            reserve(tw, th);
+            reserve(tw, th, frames);
             allocated_ = true;
         }
 
         ggml_backend_sched_reset(sched_.get());
         ggml_context_ptr ctx0;
         std::unique_ptr<Graph> g;
-        ggml_cgraph* gf = build(ctx0, g, tw, th, flash_);
+        ggml_cgraph* gf = build(ctx0, g, tw, th, flash_, frames);
         if (!ggml_backend_sched_alloc_graph(sched_.get(), gf))
             throw std::runtime_error("the picture's buffers do not fit the RAM");
 

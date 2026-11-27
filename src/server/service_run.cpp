@@ -87,12 +87,63 @@ json Service::note_unreadable_tool_images(json& messages, Cancel* cancel) {
     return fetched;
 }
 
+std::vector<std::shared_ptr<VideoJob>> Service::plan_videos(json& messages, Cancel* cancel) {
+    std::vector<std::shared_ptr<VideoJob>> out;
+    for (auto& m : messages) {
+        if (!jget(m, "content").is_array()) continue;
+        for (auto& item : m["content"]) {
+            if (!item.is_object() || jstr(item, "type") != "video") continue;
+            const std::string src = jstr(item, "source");
+            std::string why;
+            if (cancel != nullptr && cancel->is_set()) throw ClientGone();
+            if (vision == nullptr)
+                why = "this server was started without the vision encoder (an image projector beside the model, or "
+                      "the config's vision section), so it cannot read videos";
+            else if (tok.blocks) why = "this model's chat template has no place for a video";
+            else if (offline && is_url(src))
+                why = "offline mode cannot download a video URL; send a data: video or a local file instead";
+            if (why.empty()) {
+                try {
+                    out.push_back(vision->plan_video(src, false));   // (a URL downloaded outside the turn)
+                    continue;
+                } catch (const std::invalid_argument& e) {
+                    why = e.what();
+                }
+            }
+            if (jstr(m, "role") != "tool") throw RequestError(why);
+            say("[lamina] a video a tool returned was left out of the prompt: " + why);
+            item = {{"type", "text"}, {"text", "[video omitted: " + why + "]"}};
+        }
+    }
+    return out;
+}
+
+std::string Service::video_text(const VideoJob& v) const {
+    // Qwen3VLProcessor's: "<1.5 seconds><|vision_start|>" pads "<|vision_end|>" a pair of frames; the HunYuan
+    // team's HY4 processor's: "<1.5 seconds><｜hy_image▁start｜>" pads "<｜hy_image▁end｜>" a frame, inside the
+    // video's own tags
+    std::string out = tok.hy4 ? tok.hy4->video_start : std::string();
+    for (int g = 0; g < v.groups(); ++g) {
+        char t[64];
+        std::snprintf(t, sizeof t, "<%.1f seconds>", g < (int) v.times.size() ? v.times[(size_t) g] : 0.0);
+        out += t;
+        out += tok.hy4 ? tok.hy4->image_start + tok.hy4->video_pad + tok.hy4->image_end
+                       : std::string("<|vision_start|><|video_pad|><|vision_end|>");
+    }
+    if (tok.hy4) out += tok.hy4->video_end;
+    return out;
+}
+
 Prepared Service::prepare(json& messages, const json& tools, const json& kwargs, std::optional<int64_t> max_new0,
                           const std::optional<std::string>& force, json* req, Cancel* cancel) {
     // -> (ids, thinking, max_new); an unset or non-positive max_new means the rest of the context. `force`: without
     // thinking the reply starts with the forced call's opening, so it ends the prompt
     const json fetched = note_unreadable_tool_images(messages, cancel);
-    const std::vector<int32_t> encoded_ids = encode_prompt(messages, tools, kwargs);
+    // the videos, planned before the prompt is written: each one's groups and their times are text of it
+    const std::vector<std::shared_ptr<VideoJob>> videos = plan_videos(messages, cancel);
+    std::vector<std::string> vtext;
+    for (const auto& v : videos) vtext.push_back(video_text(*v));
+    const std::vector<int32_t> encoded_ids = encode_prompt(messages, tools, kwargs, true, &vtext);
     std::vector<int32_t> ids = encoded_ids;
     // the prompt's end says, where a template decides for itself (a <|think_off|> or <|think_low|> in a message)
     const std::string prompt_end = ids.size() >= 2 ? tok.decode(std::vector<int32_t>(ids.end() - 2, ids.end())) : "";
@@ -109,57 +160,84 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         ids.insert(ids.end(), f.begin(), f.end());
     }
     embeddings = Embeddings{};
-    const std::vector<std::string> pics = images_of(messages);
-    std::vector<std::pair<std::string, int64_t>> encoded;
-    if (!pics.empty()) {
-        if (offline && std::any_of(pics.begin(), pics.end(), is_url))
+    const std::vector<MediaRef> media = media_of(messages);
+    std::vector<EncodedMedium> encoded;
+    if (!media.empty()) {
+        const bool pictures = std::any_of(media.begin(), media.end(), [](const MediaRef& m) { return !m.video; });
+        if (offline &&
+            std::any_of(media.begin(), media.end(), [](const MediaRef& m) { return !m.video && is_url(m.source); }))
             throw RequestError("offline mode cannot download an image URL; send a data: image instead");
         if (vision == nullptr)
             throw RequestError(
                 "this server was started without the vision encoder (an image projector beside the model, or the "
                 "config's vision section), so it cannot read images");
         // a picture's tags: Qwen's, or Hy4's (its template writes the same three), or a block form's (the marker
-        // its template writes after the picture block's tag)
-        if (tok.blocks && tok.blocks->image_pad.empty())
+        // its template writes after the picture block's tag); a video group's: Qwen's <|vision_start|> and
+        // <|video_pad|>, Hy4's picture start and video pad (video_text)
+        if (pictures && tok.blocks && tok.blocks->image_pad.empty())
             throw RequestError("this model's chat template has no place for a picture");
         const std::string pad_tag = tok.blocks ? tok.blocks->image_pad
                                     : tok.hy4  ? tok.hy4->image_pad
                                                : "<|image_pad|>",
                           start_tag = tok.blocks ? tok.blocks->image
                                       : tok.hy4  ? tok.hy4->image_start
-                                                 : "<|vision_start|>";
-        const int32_t pad = tok.encode(pad_tag, true)[0], start = tok.encode(start_tag, true)[0];
-        // an image URL is downloaded first, outside the turn: under it, a slow server held every other request
-        std::vector<std::pair<std::string, bool>> sources;
-        for (const auto& src : pics) {
+                                                 : "<|vision_start|>",
+                          vpad_tag = tok.hy4 ? tok.hy4->video_pad : "<|video_pad|>";
+        const int32_t pad = pad_tag.empty() ? -1 : tok.encode(pad_tag, true)[0], start = tok.encode(start_tag, true)[0],
+                      vpad = tok.blocks ? -1 : tok.encode(vpad_tag, true)[0];
+        // an image URL is downloaded first, outside the turn: under it, a slow server held every other request; so
+        // are a video's frames read
+        std::vector<Medium> items;
+        size_t v = 0;
+        for (const MediaRef& m : media) {
             if (cancel != nullptr && cancel->is_set()) throw ClientGone();
-            if (fetched.contains(src)) sources.emplace_back(fetched[src].get<std::string>(), true);
-            else if (is_url(src)) sources.emplace_back(Vision::download(src), true);
-            else sources.emplace_back(src, false);
+            Medium it;
+            if (m.video) {
+                if (v == videos.size()) throw RequestError("the prompt and its videos do not match");
+                it.video = videos[v++];
+            } else if (fetched.contains(m.source)) {
+                it.source = fetched[m.source].get<std::string>();
+                it.is_bytes = true;
+            } else if (is_url(m.source)) {
+                it.source = Vision::download(m.source);
+                it.is_bytes = true;
+            } else {
+                it.source = m.source;
+            }
+            items.push_back(std::move(it));
         }
+        for (const Medium& it : items)
+            if (it.video != nullptr) vision->read_video(*it.video, cancel);
         {
             // the engine and the image encoder must not work at the same time: encoding takes its turn as requests do
             const auto held = turn(cancel);
-            encoded = vision->encode_all(sources, cancel);
+            encoded = vision->encode_all(items, cancel);
         }
-        // one <|image_pad|> per image -> one per image token; only the markers the template writes for an image (right
-        // after <|vision_start|>) are images, the same text inside a message stays text
-        const std::vector<int32_t> literal = tok.encode(pad_tag, false);
+        // the records in prompt order: a picture's one, a video's one a group
+        std::vector<int64_t> rows;
+        for (const EncodedMedium& e : encoded) rows.insert(rows.end(), e.rows.begin(), e.rows.end());
+        // one pad per picture or video group -> one per row; only the markers the template (and video_text) write
+        // (right after their start tag) are media, the same text inside a message stays text
+        const std::vector<int32_t> literal = pad_tag.empty() ? std::vector<int32_t>() : tok.encode(pad_tag, false),
+                                   vliteral = vpad < 0 ? std::vector<int32_t>() : tok.encode(vpad_tag, false);
         std::vector<int32_t> out;
         size_t k = 0;
         for (size_t j = 0; j < ids.size(); ++j) {
             const int32_t t = ids[j];
-            if (t == pad && j > 0 && ids[j - 1] == start) {
-                if (k == encoded.size()) throw RequestError("the prompt and its images do not match");
-                out.insert(out.end(), (size_t) encoded[k].second, pad);
+            const bool media_pad = t == pad || t == vpad;
+            if (media_pad && j > 0 && ids[j - 1] == start) {
+                if (k == rows.size()) throw RequestError("the prompt and its images do not match");
+                out.insert(out.end(), (size_t) rows[k], t);
                 ++k;
             } else if (t == pad) {
                 out.insert(out.end(), literal.begin(), literal.end());
+            } else if (t == vpad) {
+                out.insert(out.end(), vliteral.begin(), vliteral.end());
             } else {
                 out.push_back(t);
             }
         }
-        if (k != encoded.size()) throw RequestError("the prompt and its images do not match");
+        if (k != rows.size()) throw RequestError("the prompt and its images do not match");
         ids = std::move(out);
     }
     int64_t ctx = engine->max_context();
@@ -199,17 +277,17 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         max_new = std::max<int64_t>(1, room);   // a shorter completion beats a 400 (the default)
     }
     if (!encoded.empty()) {
-        // the request's pictures in one file for GENI, written once nothing above refuses the request
+        // the request's pictures and videos in one file for GENI, written once nothing above refuses the request
         uintmax_t nbytes = 0;
         std::vector<std::string> parts;
-        for (const auto& [p, n] : encoded) {
+        for (const EncodedMedium& e : encoded) {
             std::error_code ec;
-            nbytes += std::filesystem::file_size(p, ec);
-            parts.push_back(p);
+            nbytes += std::filesystem::file_size(e.file, ec);
+            parts.push_back(e.file);
+            // #2228: a record's key: a picture's normalized bytes' hash (the encoder's file name), a video group's
+            embeddings.keys.insert(embeddings.keys.end(), e.keys.begin(), e.keys.end());
         }
         embeddings.path = combined_embeddings_path(vision->dir, nbytes);
-        // #2228: each picture's key is its normalized bytes' hash (the encoder's file name)
-        for (const auto& p : parts) embeddings.keys.push_back(std::filesystem::path(p).stem().string().substr(0, 16));
         write_temporary(embeddings.path, parts);
     }
     if (req != nullptr && !jget(*req, "lamina_prefix").is_null())

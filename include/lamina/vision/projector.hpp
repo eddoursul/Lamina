@@ -45,6 +45,11 @@ struct ProjectorParams {
 /// th; std::runtime_error where the picture's size cannot be brought to its grid
 std::vector<float> projector_planes(const Rgb& picture, const ProjectorParams& p, int& tw, int& th);
 
+/// A video's first frame of a group as projector `p` takes it (Encoder::encode_frames): its planes (planes()), as it
+/// is.  std::runtime_error for a projector that takes no video, a frame that is not of whole merged patches, a second
+/// frame of another size, or a second frame where the projector takes one
+std::vector<float> frame_planes(const ProjectorParams& p, const Rgb& first, const Rgb* second);
+
 /// A tensor of the file: ggml's type id, its dimensions as ggml has them (ne[0] the fastest) and its bytes.
 struct TensorInfo {
     int type = 0;

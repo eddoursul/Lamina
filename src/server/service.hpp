@@ -29,6 +29,7 @@
 namespace lamina {
 
 class Vision;
+struct VideoJob;
 namespace images {
 class ImageGen;
 }
@@ -182,7 +183,9 @@ public:
     json v1_status();
     std::string render_prompt(const json& messages, const json& tools, const json& kwargs);
     bool short_opening(const json& messages) const;
-    std::vector<int32_t> encode_prompt(const json& messages, const json& tools, const json& kwargs, bool store = true);
+    /// the rendered prompt's ids; `videos`: the text each video's template marker becomes (video_text), in order
+    std::vector<int32_t> encode_prompt(const json& messages, const json& tools, const json& kwargs, bool store = true,
+                                       const std::vector<std::string>* videos = nullptr);
     void forget_prompt(const std::vector<int32_t>& ids);
     Prepared prepare(json& messages, const json& tools, const json& kwargs, std::optional<int64_t> max_new,
                      const std::optional<std::string>& force = std::nullopt, json* req = nullptr,
@@ -219,6 +222,13 @@ private:
     void note(int64_t n, const std::vector<Event>& evs, json& st, std::deque<std::pair<double, int64_t>>& rt);
     double progress_line(double last_print, json& st, double every = 1.0);
     json note_unreadable_tool_images(json& messages, Cancel* cancel);
+    /// the request's videos planned, in prompt order (a tool's video that cannot be read becomes a note, as its
+    /// picture does); RequestError for a user's
+    std::vector<std::shared_ptr<VideoJob>> plan_videos(json& messages, Cancel* cancel);
+    /// what a video's template marker becomes in the prompt's text: each group's time and one pad between the
+    /// group's tags (Qwen's <|vision_start|> <|vision_end|>; Hy4's picture tags inside its video tags), the pad then
+    /// a row a cell as a picture's
+    std::string video_text(const VideoJob& v) const;
     double rate_of(const json& s, const std::deque<std::pair<double, int64_t>>& rt);
 
     std::timed_mutex fifo_;

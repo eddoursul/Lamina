@@ -1,5 +1,6 @@
 #include "lamina/program/serve_io.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <mutex>
@@ -110,15 +111,16 @@ uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const floa
                           : fnv1a(rows + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
 }
 
-std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int32_t pad, int64_t n_embd,
-                        const std::vector<uint64_t>& keys, ImageCells& r) {
+std::string image_cells(const std::string& path, std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
+                        int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r) {
     std::vector<VisionImage> imgs;
     if (std::string ve = read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
     const int64_t n = (int64_t) ids.size();
     r.cell_row.assign((size_t) n, -1);
     size_t k = 0;
     for (int64_t i = 0; i < n;) {
-        if (ids[(size_t) i] != pad) {
+        const int32_t pad = ids[(size_t) i];
+        if (pad < 0 || std::find(pads.begin(), pads.end(), pad) == pads.end()) {
             ++i;
             continue;
         }
@@ -129,7 +131,7 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int3
         for (int64_t j = 0; j < im.n; ++j) {
             if (i + j >= n || ids[(size_t) (i + j)] != pad)
                 return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                       " rows but fewer image tokens";
+                       " rows but fewer pad tokens";
             uint64_t h = key + (uint64_t) j * 0x9E3779B97F4A7C15ull;   // splitmix64 of the key and the row
             h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
             h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;

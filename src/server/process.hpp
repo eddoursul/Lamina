@@ -41,13 +41,14 @@ struct SpawnOptions {
     std::optional<Environment> env;   ///< nullopt: this process's
     enum Stream { inherit, null, pipe, file };
     Stream in = inherit, out = inherit, err = inherit;
-    std::string err_file;                                  ///< err == file: appended to this file
-    bool contain = true;                                   ///< ends with the server; kill() ends what it started too
-    bool own_group = false;                                ///< out of the console's Ctrl+C
-                                                           ///< (Windows: a new process group)
-    bool no_window = false;                                ///< Windows: no console of its own (CREATE_NO_WINDOW)
-    bool cr_lines = false;                                 ///< out == pipe: a lone CR ends a line
-                                                           ///< too (a progress bar's updates)
+    std::string err_file;     ///< err == file: appended to this file
+    bool contain = true;      ///< ends with the server; kill() ends what it started too
+    bool own_group = false;   ///< out of the console's Ctrl+C
+                              ///< (Windows: a new process group)
+    bool no_window = false;   ///< Windows: no console of its own (CREATE_NO_WINDOW)
+    bool cr_lines = false;    ///< out == pipe: a lone CR ends a line
+                              ///< too (a progress bar's updates)
+    bool raw_out = false;     ///< out == pipe: its bytes as they are, through read_raw() (no lines)
     std::function<void(const std::string&)> on_err_line;   ///< err == pipe: each line of its stderr, as it comes
 };
 
@@ -66,6 +67,9 @@ public:
     /// a line of its stdout (out == pipe), without the line end: 1 a line, 0 none within timeout_s (< 0: no limit),
     /// -1 its output ended
     int read_line(std::string& line, double timeout_s);
+    /// up to n bytes of its stdout (out == pipe with raw_out) into `dst`, blocking until they are there or its output
+    /// ends: the bytes read (fewer than n only at the end)
+    size_t read_raw(void* dst, size_t n);
     /// the last lines of its stderr (err == pipe), newline-joined
     std::string stderr_tail();
     /// its stderr has been read to its end (err == pipe; true otherwise)

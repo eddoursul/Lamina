@@ -4,7 +4,8 @@
 // Three projector types, the ones the engine's models have, on one tower shape (a ViT of pre-norm blocks and GELU
 // FFNs; Qwen's and Hy4's with 16x16 patches and heads of 72 values):
 //   qwen3vl_merger  Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B: two patch kernels summed (a still picture is
-//                   both frames of a pair), the learned position table resized bilinearly, 2-D rotary positions in
+//                   both frames of a pair; a video's pair takes one frame each), the learned position table resized
+//                   bilinearly, 2-D rotary positions in
 //                   every block, the patches in 2x2 groups from the start, each group's four concatenated and passed
 //                   through two linear layers.  A picture's rows form a grid: row i is the cell (i % nx, i / nx).
 //   hy_v4_flash     Hy4-flash: the position table resampled on the host (HunyuanVL's sampling), no rotary positions,
@@ -17,7 +18,8 @@
 //                   matrices.  A picture is not resized (unless it passes the token limit) but padded right and below
 //                   to whole merged patches.  One row of n, read at text positions.
 // A picture is first sized as the projector's reference processor sizes it (image.hpp): for Qwen's that is
-// transformers' way, a direct resize, where mtmd at the pinned commit letterboxes (LAMINA_VISION_LETTERBOX=1).
+// transformers' way, a direct resize, where mtmd at the pinned commit letterboxes (LAMINA_VISION_LETTERBOX=1).  A
+// video's frames come sized by its plan (video.hpp) and are encoded a group at a time (encode_frames).
 //
 // Two implementations of one arithmetic, llama.cpp's mtmd's at the pinned commit (tools/mtmd, MIT; Hy4's projector as
 // its pull request 32517 has it, Inkling 2's as unsloth's fork):
@@ -82,6 +84,11 @@ public:
     /// The picture sized, normalized and encoded.  False with `err`.  One call at a time; a GPU's encoder makes its
     /// device the calling thread's current one.
     virtual bool encode(const Rgb& picture, Rows& out, std::string& err) = 0;
+    /// A video's group of frames (video.hpp's plan), each already at the plan's size (whole merged patches), normalized
+    /// and encoded as it is: Qwen's two frames, the first through the first patch kernel and `second` through the
+    /// other (null: the first again, a still picture's way); Hy4's one frame (`second` null), as a picture of that
+    /// size.  The rows as encode() gives them.  False with `err` (Inkling 2's projector takes no video).
+    virtual bool encode_frames(const Rgb& first, const Rgb* second, Rows& out, std::string& err) = 0;
 };
 
 /// The rows as the record the engine reads a picture from (program/serve_io.hpp): int32 {0x31455653 'SVE1', n, nx,

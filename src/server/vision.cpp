@@ -1,6 +1,7 @@
 // src/server/vision.cpp - the resident image encoder (vision.hpp).
 #include "vision.hpp"
 
+#include "base64.hpp"
 #include "http_client.hpp"
 #include "log.hpp"
 #include "process.hpp"
@@ -12,18 +13,22 @@
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/vision/encoder.hpp"
 #include "lamina/vision/projector.hpp"
+#include "lamina/vision/video.hpp"
 #endif
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <random>
 #include <stdexcept>
+#include <thread>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO
@@ -55,44 +60,6 @@ std::string read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open");
     return std::string(std::istreambuf_iterator<char>(f), {});
-}
-
-/// base64 as Python's b64decode reads it (characters outside the alphabet are skipped)
-std::string b64decode(std::string_view s) {
-    auto val = [](unsigned char c) -> int {
-        if (c >= 'A' && c <= 'Z') return c - 'A';
-        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-        if (c >= '0' && c <= '9') return c - '0' + 52;
-        if (c == '+') return 62;
-        if (c == '/') return 63;
-        return -1;
-    };
-    std::string out;
-    out.reserve(s.size() * 3 / 4);
-    uint32_t acc = 0;
-    int bits = 0;
-    size_t n = 0, pad = 0;
-    for (const unsigned char c : s) {
-        if (c == '=') {
-            ++pad;
-            continue;
-        }
-        const int v = val(c);
-        if (v < 0) continue;
-        if (pad) throw std::invalid_argument("Discontinuous padding not allowed");
-        acc = (acc << 6) | (uint32_t) v;
-        bits += 6;
-        ++n;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back((char) ((acc >> bits) & 0xff));
-        }
-    }
-    if (n % 4 == 1)
-        throw std::invalid_argument("Invalid base64-encoded string: number of data characters (" + std::to_string(n) +
-                                    ") cannot be 1 more than a multiple of 4");
-    if (n % 4 != 0 && (n % 4) + pad < 4) throw std::invalid_argument("Incorrect padding");
-    return out;
 }
 
 bool is_jpeg(const std::string& d) {
@@ -430,6 +397,7 @@ struct Vision::Loaded {
 };
 struct Vision::Plan {
     vision::EncoderParams params;
+    vision::ProjectorParams proj;       // the projector's header (a video's plan)
     std::string where = "on the CPU";   // "on GPU 1, NVIDIA GeForce RTX 3090"
     uint64_t need = 0;                  // borrowing: what the encoder takes of its GPU
     bool said_free = false, said_cpu = false;
@@ -475,6 +443,14 @@ void Vision::start() {
     p.max_tokens = number(jget(cfg, "max_tokens"));
     p.min_tokens = number(jget(cfg, "min_tokens"));   // #767
     p.q8_fp16 = lower(jstr(cfg, "q8")) == "fp16";
+    {   // the header, for a video's plan (and the file a projector the encoder reads: its load says so otherwise)
+        vision::Projector header;
+        try {
+            header.open(p);
+            plan->proj = header;
+        } catch (const std::exception&) {}
+    }
+    const FfmpegTools ff = find_ffmpeg(jstr(cfg, "ffmpeg"));
     const bool lend = p.gpu && truthy(jget(cfg, "lend"));
     auto loaded = std::make_unique<Loaded>();
     if (p.gpu) {
@@ -525,6 +501,7 @@ void Vision::start() {
         core::gpu_loan_ask(p.device, plan->need);
         const std::lock_guard<std::mutex> lk(mu_);
         plan_ = std::move(plan);
+        ff_ = ff;
         lend_ = true;
         alive_ = true;
         return;
@@ -557,6 +534,7 @@ void Vision::start() {
     }
     const std::lock_guard<std::mutex> lk(mu_);
     plan_ = std::move(plan);
+    ff_ = ff;
     lend_ = false;
     loaded_ = std::move(loaded);
     alive_ = true;
@@ -705,6 +683,22 @@ std::string Vision::load(const std::string& source) {
         }
     }
     if (starts_with(source, "http://") || starts_with(source, "https://")) return download(source);
+    const std::string path = media_file_path(source, "an image");
+    std::error_code ec;
+    if (!path.empty() && fs::is_regular_file(u8_path(path), ec)) {
+        if (const uintmax_t size = fs::file_size(u8_path(path), ec); !ec && size > kImageBytesMax)
+            throw std::invalid_argument("the image file " + path + " is over " + std::to_string(kImageBytesMax >> 20) +
+                                        " MiB");
+        try {
+            return read_file(u8_path(path));
+        } catch (const std::exception& e) {
+            throw std::invalid_argument("the image could not be read from " + path + " (" + e.what() + ")");
+        }
+    }
+    throw std::invalid_argument("an image must be a data: URL, an http(s) URL or a local file path");
+}
+
+std::string media_file_path(const std::string& source, const char* what) {
     const bool file_url = starts_with(source, "file://");
     std::string path = file_url ? source.substr(7) : source;
     // refused before anything looks at the path: file://host/share/x.png is \\host\share\x.png ("file://C:/x.png", a
@@ -723,20 +717,10 @@ std::string Vision::load(const std::string& source) {
     }
     // checked on the decoded path: file:///%2F%2Fhost/share/x.png is //host/share/x.png too
     if (network_path(path) || (!host.empty() && !drive && lower(host) != "localhost"))
-        throw std::invalid_argument("an image file must be on this computer: network paths (\\\\host\\share, "
-                                    "//host/share, file://host/...) are not read");
-    std::error_code ec;
-    if (!path.empty() && fs::is_regular_file(u8_path(path), ec)) {
-        if (const uintmax_t size = fs::file_size(u8_path(path), ec); !ec && size > kImageBytesMax)
-            throw std::invalid_argument("the image file " + path + " is over " + std::to_string(kImageBytesMax >> 20) +
-                                        " MiB");
-        try {
-            return read_file(u8_path(path));
-        } catch (const std::exception& e) {
-            throw std::invalid_argument("the image could not be read from " + path + " (" + e.what() + ")");
-        }
-    }
-    throw std::invalid_argument("an image must be a data: URL, an http(s) URL or a local file path");
+        throw std::invalid_argument(std::string(what) +
+                                    " file must be on this computer: network paths (\\\\host\\share, //host/share, "
+                                    "file://host/...) are not read");
+    return path;
 }
 
 std::string Vision::download(const std::string& url) {
@@ -786,9 +770,154 @@ std::string Vision::normalize(const std::string& data) {
     return bmp(*p);
 }
 
-std::vector<std::pair<std::string, int64_t>>
-Vision::encode_all(const std::vector<std::pair<std::string, bool>>& sources, Cancel* cancel) {
-    // a borrowing encoder's lease holds for all of the request's new pictures
+std::string Vision::video_refusal() {
+#if LAMINA_VISION
+    const std::lock_guard<std::mutex> lk(mu_);
+    if (plan_ == nullptr) return "the vision encoder is unloaded";
+    if (plan_->proj.kind == vision::ProjectorKind::inkling2v || plan_->proj.patch_size <= 0)
+        return "this model's projector takes no video";
+    return ff_.why;
+#else
+    return vision_not_built();
+#endif
+}
+
+std::shared_ptr<VideoJob> Vision::plan_video(const std::string& source, bool is_bytes) {
+#if LAMINA_VISION
+    if (const std::string no = video_refusal(); !no.empty())
+        throw std::invalid_argument("the video could not be read: " + no);
+    vision::ProjectorParams proj;
+    int max_tokens = 0;
+    {
+        const std::lock_guard<std::mutex> lk(mu_);
+        proj = plan_->proj;
+        max_tokens = plan_->params.max_tokens;
+    }
+    auto job = std::make_shared<VideoJob>();
+    job->file = open_video(source, is_bytes, dir);
+    job->key = job->file->key;
+    {
+        const std::lock_guard<std::mutex> lk(mu_);
+        for (const auto& [k, e] : video_cache_)
+            if (k == job->key) {
+                const std::shared_ptr<VideoFile> file = job->file;
+                *job = e.plan;
+                job->file = file;
+                job->cached = true;
+                return job;
+            }
+    }
+    job->info = probe_video(ff_, job->file->path);
+    const vision::VideoStream s{job->info.frames, job->info.fps, job->info.shown_w, job->info.shown_h};
+    vision::VideoPlan plan;
+    std::string err;
+    if (!vision::plan_video(proj, s, max_tokens, plan, err))
+        throw std::invalid_argument("the video could not be read (" + err + ")");
+    job->frames = plan.frames;
+    job->width = plan.width;
+    job->height = plan.height;
+    job->per_group = plan.per_group;
+    job->group_tokens = plan.group_tokens;
+    job->times = plan.times;
+    return job;
+#else
+    (void) source;
+    (void) is_bytes;
+    throw std::invalid_argument(std::string("the video could not be read: ") + vision_not_built());
+#endif
+}
+
+void Vision::read_video(VideoJob& job, Cancel* cancel) {
+#if LAMINA_VISION
+    if (job.cached || !job.pixels.empty() || job.frames.empty()) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<int64_t> distinct = job.frames;
+    std::sort(distinct.begin(), distinct.end());
+    distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+    // ffmpeg's frames at their stored size into a short queue, resized to the plan's by the workers as they come
+    std::vector<std::vector<uint8_t>> resized(distinct.size());
+    std::mutex qm;
+    std::condition_variable qcv;
+    std::deque<std::pair<size_t, std::vector<uint8_t>>> queue;
+    bool done = false;
+    std::string failed;
+    const unsigned n_workers = std::max(1u, std::min(8u, std::thread::hardware_concurrency() / 2));
+    const VideoInfo info = job.info;
+    const int w = job.width, h = job.height;
+    std::vector<std::thread> workers;
+    for (unsigned i = 0; i < n_workers; ++i)
+        workers.emplace_back([&] {
+            for (;;) {
+                std::pair<size_t, std::vector<uint8_t>> item;
+                {
+                    std::unique_lock<std::mutex> lk(qm);
+                    qcv.wait(lk, [&] { return done || !queue.empty(); });
+                    if (queue.empty()) return;
+                    item = std::move(queue.front());
+                    queue.pop_front();
+                }
+                qcv.notify_all();
+                try {
+                    vision::Rgb src;
+                    src.w = info.stored_w;
+                    src.h = info.stored_h;
+                    src.px = std::move(item.second);
+                    resized[item.first] = vision::resample(src, w, h, vision::Filter::bicubic).px;
+                } catch (const std::exception& e) {
+                    const std::lock_guard<std::mutex> lk(qm);
+                    if (failed.empty()) failed = e.what();
+                }
+            }
+        });
+    struct Join {   // the workers end however the reading ends
+        std::vector<std::thread>& ws;
+        std::mutex& m;
+        std::condition_variable& cv;
+        bool& done;
+        ~Join() {
+            {
+                const std::lock_guard<std::mutex> lk(m);
+                done = true;
+            }
+            cv.notify_all();
+            for (std::thread& t : ws) t.join();
+        }
+    } join{workers, qm, qcv, done};
+    const size_t got = read_video_frames(
+        ff_, job.file->path, info, distinct,
+        [&](size_t k, std::vector<uint8_t>&& px) {
+            std::unique_lock<std::mutex> lk(qm);
+            qcv.wait(lk, [&] { return queue.size() < 2 * (size_t) n_workers; });
+            queue.emplace_back(k, std::move(px));
+            lk.unlock();
+            qcv.notify_all();
+        },
+        cancel);
+    {
+        const std::lock_guard<std::mutex> lk(qm);
+        done = true;
+    }
+    qcv.notify_all();
+    for (std::thread& t : workers) t.join();
+    workers.clear();
+    if (!failed.empty()) throw std::invalid_argument("the video's frames could not be resized (" + failed + ")");
+    for (size_t k = got; k < distinct.size(); ++k) resized[k] = resized[got - 1];   // past the stream's end: its last
+    job.pixels.resize(job.frames.size());
+    for (size_t i = 0; i < job.frames.size(); ++i) {
+        const size_t k =
+            (size_t) (std::lower_bound(distinct.begin(), distinct.end(), job.frames[i]) - distinct.begin());
+        job.pixels[i] = resized[k];
+    }
+    std::fprintf(stderr, "lamina: a video's %zu frames (%zu read, %dx%d to %dx%d) in %.1f s\n", job.frames.size(), got,
+                 info.stored_w, info.stored_h, w, h, seconds_since(t0));
+#else
+    (void) job;
+    (void) cancel;
+#endif
+}
+
+std::vector<EncodedMedium> Vision::encode_all(const std::vector<Medium>& media, Cancel* cancel) {
+    // a borrowing encoder's lease holds for all of the request's new pictures and videos
     struct Hold {
         Vision& v;
         explicit Hold(Vision& vision) : v(vision) {
@@ -800,14 +929,126 @@ Vision::encode_all(const std::vector<std::pair<std::string, bool>>& sources, Can
             if (--v.holds_ == 0) v.lease_end();
         }
     } hold(*this);
-    std::vector<std::pair<std::string, int64_t>> out;
-    for (const auto& [src, is_bytes] : sources) {
+    std::vector<EncodedMedium> out;
+    for (const Medium& m : media) {
         if (cancel != nullptr && cancel->is_set()) throw ClientGone();
         std::vector<std::string> keep;
-        for (const auto& [p, n] : out) keep.push_back(p);
-        out.push_back(encode(src, is_bytes, keep));
+        for (const EncodedMedium& e : out) keep.push_back(e.file);
+        if (m.video != nullptr) {
+            out.push_back(encode_video(*m.video, keep));
+            continue;
+        }
+        const auto [file, n] = encode(m.source, m.is_bytes, keep);
+        out.push_back({file, {n}, {fs::path(u8_path(file)).stem().string().substr(0, 16)}});
     }
     return out;
+}
+
+EncodedMedium Vision::encode_video(VideoJob& job, const std::vector<std::string>& keep) {
+#if LAMINA_VISION
+    constexpr uintmax_t kVideoCacheBytes = (uintmax_t) 4 << 30;   // the videos' rows kept on the drive at most
+    constexpr size_t kVideoCacheItems = 32;
+    {
+        const std::lock_guard<std::mutex> lk(mu_);
+        for (auto it = video_cache_.begin(); it != video_cache_.end(); ++it)
+            if (it->first == job.key) {
+                auto hit = std::move(*it);   // most recently used last
+                video_cache_.erase(it);
+                video_cache_.push_back(std::move(hit));
+                return video_cache_.back().second.enc;
+            }
+    }
+    // planned from the cache and dropped from it since: read now
+    if (job.cached) {
+        job.cached = false;
+        read_video(job, nullptr);
+    }
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto t0 = std::chrono::steady_clock::now();
+    struct LeaseEnd {   // a video encoded outside encode_all: its lease ends with it
+        Vision& v;
+        ~LeaseEnd() {
+            if (v.holds_ == 0) v.lease_end();
+        }
+    } lease_end_{*this};
+    std::string err;
+    auto* encoder = (vision::Encoder*) encoder_now(err);
+    if (encoder == nullptr) throw std::invalid_argument("the video could not be read: " + err);
+    const fs::path out = u8_path(dir) / (job.key + "-video.sve");
+    std::FILE* f = vision::open_utf8(u8_str(out), true);
+    if (f == nullptr) throw std::invalid_argument("the video's embeddings could not be written to " + u8_str(out));
+    struct Close {
+        std::FILE*& f;
+        ~Close() {
+            if (f != nullptr) std::fclose(f);
+        }
+    } close{f};
+    EncodedMedium enc;
+    enc.file = u8_str(out);
+    const int groups = job.groups();
+    if (groups <= 0 || job.pixels.size() != job.frames.size())
+        throw std::invalid_argument("the video could not be read: its frames were not read");
+    for (int g = 0; g < groups; ++g) {
+        vision::Rgb a;
+        a.w = job.width;
+        a.h = job.height;
+        a.px = std::move(job.pixels[(size_t) g * (size_t) job.per_group]);
+        vision::Rgb b;
+        if (job.per_group == 2) {
+            b.w = job.width;
+            b.h = job.height;
+            b.px = std::move(job.pixels[(size_t) g * 2 + 1]);
+        }
+        vision::Rows rows;
+        if (!encoder->encode_frames(a, job.per_group == 2 ? &b : nullptr, rows, err))
+            throw std::invalid_argument("the video could not be read: " + err);
+        const int32_t header[5] = {0x31455653, rows.n, rows.nx, rows.ny, rows.n_embd};
+        const size_t floats = (size_t) rows.n * (size_t) rows.n_embd;
+        if (std::fwrite(header, sizeof header, 1, f) != 1 ||
+            std::fwrite(rows.data.data(), sizeof(float), floats, f) != floats)
+            throw std::invalid_argument("the video's embeddings could not be written to " + u8_str(out));
+        enc.rows.push_back(rows.n);
+        enc.keys.push_back(sha256_hex(job.key + "/" + std::to_string(g)).substr(0, 16));
+    }
+    if (std::fclose(f) != 0) {
+        f = nullptr;
+        throw std::invalid_argument("the video's embeddings could not be written to " + u8_str(out));
+    }
+    f = nullptr;
+    if (lend_ && loaded_ != nullptr) loaded_->pictures += groups;
+    job.pixels.clear();
+    job.pixels.shrink_to_fit();
+    int64_t tokens = 0;
+    for (const int64_t n : enc.rows) tokens += n;
+    std::fprintf(stderr, "lamina: a video's %d groups (%lld image tokens) encoded in %.1f s\n", groups,
+                 (long long) tokens, seconds_since(t0));
+    VideoEntry e;
+    e.enc = enc;
+    e.plan = job;
+    e.plan.file.reset();
+    e.plan.cached = false;
+    std::error_code ec;
+    e.bytes = fs::file_size(out, ec);
+    video_cache_.emplace_back(job.key, std::move(e));
+    // oldest first, never one this request uses
+    uintmax_t total = 0;
+    for (const auto& [k, x] : video_cache_) total += x.bytes;
+    for (auto it = video_cache_.begin();
+         it != video_cache_.end() && (total > kVideoCacheBytes || video_cache_.size() > kVideoCacheItems);) {
+        if (it->first != job.key && std::find(keep.begin(), keep.end(), it->second.enc.file) == keep.end()) {
+            total -= it->second.bytes;
+            fs::remove(u8_path(it->second.enc.file), ec);
+            it = video_cache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return enc;
+#else
+    (void) job;
+    (void) keep;
+    throw std::invalid_argument(std::string("the video could not be read: ") + vision_not_built());
+#endif
 }
 
 std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool is_bytes,

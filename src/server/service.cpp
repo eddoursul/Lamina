@@ -1354,7 +1354,8 @@ std::string Service::render_prompt(const json& messages, const json& tools, cons
     return history_text + tail + full.substr(mine.size());
 }
 
-std::vector<int32_t> Service::encode_prompt(const json& messages, const json& tools, const json& kwargs, bool store) {
+std::vector<int32_t> Service::encode_prompt(const json& messages, const json& tools, const json& kwargs, bool store,
+                                            const std::vector<std::string>* videos) {
     // #537: a literal tag (and a control token's text) inside a message is encoded as the text it is
     const Marked m = mark_think_literals(messages, tools, literals);
     std::string prompt = render_prompt(m.messages, m.tools, kwargs);
@@ -1363,6 +1364,30 @@ std::vector<int32_t> Service::encode_prompt(const json& messages, const json& to
         auto [p, spans] = unmark_think_literals(prompt, literals);
         prompt = std::move(p);
         for (const auto& [a, b] : spans) plain.push_back({a, b});
+    }
+    if (videos != nullptr && !videos->empty()) {
+        // each video's marker, as its template writes it (not a message's literal text), becomes its groups' text
+        const std::string marker = tok.hy4 ? tok.hy4->video_start + tok.hy4->video_pad + tok.hy4->video_end
+                                           : std::string("<|vision_start|><|video_pad|><|vision_end|>");
+        size_t k = 0, at = 0;
+        while ((at = prompt.find(marker, at)) != std::string::npos) {
+            const bool literal =
+                std::any_of(plain.begin(), plain.end(), [&](const Span& s) { return at >= s.a && at < s.b; });
+            if (literal) {
+                at += marker.size();
+                continue;
+            }
+            if (k == videos->size()) throw RequestError("the prompt and its videos do not match");
+            const std::string& text = (*videos)[k++];
+            prompt.replace(at, marker.size(), text);
+            for (Span& s : plain)
+                if (s.a >= at) {
+                    s.a = s.a + text.size() - marker.size();
+                    s.b = s.b + text.size() - marker.size();
+                }
+            at += text.size();
+        }
+        if (k != videos->size()) throw RequestError("the prompt and its videos do not match");
     }
     return prompts->encode(prompt, plain, store);   // #567: only what follows the last
                                                     // literal shared with a recent prompt

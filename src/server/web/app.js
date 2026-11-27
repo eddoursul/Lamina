@@ -99,11 +99,12 @@ function headers(json = false) {
 $("api-key").value = store.get("apikey", "");
 $("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); };
 
-let health = {model: "lamina", images: false, max_context: 0};
+let health = {model: "lamina", images: false, videos: false, max_context: 0};
 async function loadHealth() {
   try {
     health = await (await fetch("health")).json();
-    $("attach-btn").title = health.images ? "Attach a text file or a picture (or drop it here)"
+    $("attach-btn").title = health.videos ? "Attach a text file, a picture or a video (or drop it here)"
+                          : health.images ? "Attach a text file or a picture (or drop it here)"
                                           : "Attach a text file (or drop it here)";
     $("chat-empty-sub").textContent = `${health.model} runs on this PC. Nothing leaves it.`;
     $("tab-btn-images").hidden = !health.image_generation;
@@ -634,11 +635,11 @@ function samplingUntouched(s) {
 let settings = {...DEFAULTS, ...store.get("sampling", {})};
 if (samplingUntouched(settings)) settings.temperature = DEFAULTS.temperature;
 let messages = store.get("chat", []);
-let attachments = [];                 // {name, url}
+let attachments = [];                 // {kind: image | video | file, name, url or text}
 let busy = null;                      // {controller, msg}
 
 function saveChat() {
-  store.set("chat", messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name})),
+  store.set("chat", messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name, kind: i.kind})),
                                            files: (m.files || []).map((f) => ({name: f.name}))})));
 }
 function timeStr(t) { return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
@@ -664,8 +665,9 @@ function msgEl(m, i) {
       const wrap = document.createElement("div");
       wrap.className = "msg-images";
       for (const im of m.images) {
-        if (im.url) { const img = document.createElement("img"); img.src = im.url; img.alt = im.name || "image"; wrap.appendChild(img); }
-        else { const c = document.createElement("span"); c.className = "chip"; c.innerHTML = icon("image", "st-icon st-icon--sm"); c.append(im.name || "image"); wrap.appendChild(c); }
+        if (im.url && im.kind === "video") { const v = document.createElement("video"); v.src = im.url; v.controls = true; v.muted = true; v.title = im.name || "video"; wrap.appendChild(v); }
+        else if (im.url) { const img = document.createElement("img"); img.src = im.url; img.alt = im.name || "image"; wrap.appendChild(img); }
+        else { const c = document.createElement("span"); c.className = "chip"; c.innerHTML = icon("image", "st-icon st-icon--sm"); c.append(im.name || im.kind || "image"); wrap.appendChild(c); }
       }
       el.appendChild(wrap);
     }
@@ -802,7 +804,8 @@ function apiMessages() {
       const imgs = (m.images || []).filter((i) => i.url);
       const text = userText(m);
       out.push({role: "user", content: imgs.length ? [{type: "text", text},
-        ...imgs.map((i) => ({type: "image_url", image_url: {url: i.url}}))] : text});
+        ...imgs.map((i) => (i.kind === "video" ? {type: "video_url", video_url: {url: i.url}}
+                                               : {type: "image_url", image_url: {url: i.url}}))] : text});
     } else if (!(busy && busy.msg === m)) {            // the answer being asked for now is not history yet
       out.push(...assistantMessages(m));
     }
@@ -975,7 +978,7 @@ $("export-btn").onclick = () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 };
 
-// pictures and text files: the attach button, dropping them on the chat, or pasting a picture (issue #30)
+// pictures, videos and text files: the attach button, dropping them on the chat, or pasting a picture (issue #30)
 const TEXT_EXT = /\.(txt|md|markdown|rst|tex|py|pyi|ipynb|js|mjs|cjs|ts|tsx|jsx|vue|svelte|json|jsonl|csv|tsv|log|ya?ml|toml|ini|cfg|conf|env|xml|html?|css|scss|less|c|cc|cpp|cxx|h|hh|hpp|cu|cuh|rs|go|java|kt|kts|swift|rb|php|pl|lua|r|jl|scala|sql|sh|bash|zsh|fish|ps1|psm1|bat|cmd|diff|patch|gradle|cmake|mk|dockerfile|gitignore|proto|graphql)$/i;
 const MAX_TEXT_FILE = 512 * 1024;
 function isTextFile(f) {
@@ -984,6 +987,15 @@ function isTextFile(f) {
 }
 function addFiles(files) {
   for (const f of files) {
+    if (f.type.startsWith("video/")) {
+      if (!health.videos) { toast("warn", "Videos are off", "This model was set up without videos (or ffmpeg is missing)."); continue; }
+      // (a data: URL is 4/3 of the file: the server's request limit, 256 MiB, holds 150 MB)
+      if (f.size > 150e6) { toast("warn", "Video too large", `${f.name} is over 150 MB.`); continue; }
+      const r = new FileReader();
+      r.onload = () => { attachments.push({kind: "video", name: f.name || "video", url: r.result}); renderAttachments(); };
+      r.readAsDataURL(f);
+      continue;
+    }
     if (f.type.startsWith("image/")) {
       if (!health.images) { toast("warn", "Pictures are off", "This model was set up for text only."); continue; }
       if (f.size > 20e6) { toast("warn", "Picture too large", `${f.name} is over 20 MB.`); continue; }
@@ -992,7 +1004,7 @@ function addFiles(files) {
       r.readAsDataURL(f);
       continue;
     }
-    if (!isTextFile(f)) { toast("warn", "Not a text file", `${f.name}: attach text files (code, notes, logs, data)${health.images ? " or pictures" : ""}.`); continue; }
+    if (!isTextFile(f)) { toast("warn", "Not a text file", `${f.name}: attach text files (code, notes, logs, data)${health.videos ? ", pictures or videos" : health.images ? " or pictures" : ""}.`); continue; }
     if (f.size > MAX_TEXT_FILE) { toast("warn", "File too large", `${f.name} is over 512 KB.`); continue; }
     const r = new FileReader();
     r.onload = () => {

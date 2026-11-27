@@ -190,9 +190,19 @@ json content_of(const json& content, const std::string& param) {
                                      at, "unsupported_parameter");
             parts.push_back({{"type", "input_image"}, {"image_url", part["image_url"]}});
             image = true;
+        } else if (is_one_of(kind, {"input_video", "video_url"})) {
+            json url = jget(part, "video_url");
+            if (!truthy(url)) url = jget(part, "input_video");   // llama.cpp's {"data" or "url": ...}
+            if (url.is_object()) url = truthy(jget(url, "url")) ? jget(url, "url") : jget(url, "data");
+            if (!truthy(url))
+                throw ResponsesError("only videos given as video_url (a data: or http(s) URL) are supported; "
+                                     "this server keeps no files",
+                                     at, "unsupported_parameter");
+            parts.push_back({{"type", "input_video"}, {"video_url", url}});
+            image = true;
         } else {
             throw ResponsesError("content parts of type " + py_repr_value(kind) +
-                                     " are not supported (text and images are)",
+                                     " are not supported (text, images and videos are)",
                                  at + ".type", "unsupported_parameter");
         }
     }
@@ -210,6 +220,8 @@ json content_of(const json& content, const std::string& param) {
             json url = p["image_url"];
             if (url.is_object()) url = jget(url, "url");
             items.push_back({{"type", "image"}, {"source", truthy(url) ? url : json("")}});
+        } else if (is_str(p["type"], "input_video")) {
+            items.push_back({{"type", "video"}, {"source", p["video_url"]}});
         } else {
             items.push_back({{"type", "text"}, {"text", p["text"]}});
         }

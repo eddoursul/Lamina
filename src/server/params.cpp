@@ -45,6 +45,8 @@ const std::vector<Param> kParams = {
     {"--vision-threads", "", "vision.threads", K::Int, "N", "the encoder's CPU threads (with -m: the logical cores)"},
     {"--vision-max-tokens", "", "vision.max_tokens", K::Int, "N", "a picture's tokens at most"},
     {"--vision-min-tokens", "", "vision.min_tokens", K::Int, "N", "a picture's tokens at least"},
+    {"--vision-ffmpeg", "", "vision.ffmpeg", K::Path, "FILE",
+     "videos: the ffmpeg program (5.1 or newer; ffprobe beside it) that reads their frames (default: the PATH's)"},
     {"--model-name", "", "model_name", K::Str, "NAME", "the model's name in the API (with -m: the file's)"},
     {"--aliases", "--alias", "aliases", K::List, "A,B", "other names the model answers to"},
     {"--lora-models", "", "lora_models", K::Value, "JSON",

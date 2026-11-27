@@ -18,7 +18,9 @@ namespace lamina {
 struct Hy4Tags {
     std::string think_open, think_close, calls_open, calls_close, call_open, call_close, key_open, key_close, val_open,
         val_close;
-    std::string image_start, image_pad;   // a picture: <｜hy_image▁start｜><｜hy_image▁pad｜><｜hy_image▁end｜>
+    std::string image_start, image_pad, image_end;   // a picture:
+                                                     // <｜hy_image▁start｜><｜hy_image▁pad｜><｜hy_image▁end｜>
+    std::string video_start, video_pad, video_end;   // a video: <｜hy_video▁start｜>, its frames, <｜hy_video▁end｜>
     /// a Hy4-flash template's tags (from its HYTK), or nullopt for another template
     static std::optional<Hy4Tags> from_template(std::string_view source);
 };

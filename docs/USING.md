@@ -196,6 +196,27 @@ VRAM (`--no-vision-lend`, 0.7-1.2 GB) encodes such a picture in 0.2 s: for a car
 [PARAMETERS.md](PARAMETERS.md#the-model); what each model lends: [SETUP.md](SETUP.md#a-model-file). `--offline`
 refuses URLs.
 
+## Videos
+
+Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B and Hy4-flash read videos through the same projector and encoder
+(Inkling 2 Mini's takes none): an OpenAI-style `video_url` part (vLLM's form), llama.cpp's `input_video` part
+(`{"data": ...}` or `{"url": ...}`), a Responses API `input_video` part (its `video_url`) or a `video` block shaped as
+an Anthropic `image` block, each a data: URL, an http(s) URL (up to 1 GiB) or a local file path. ffmpeg and ffprobe, 5.1
+or newer, read the file (any format they read): on the PATH, or `--vision-ffmpeg` names ffmpeg (ffprobe beside it).
+
+A video is sampled and sized as its model's own processor does it: 2 frames a second, each group of frames after its
+time in the prompt (`<12.5 seconds>`), so the model can tell when something happens.
+
+- **Qwen:** up to 768 frames, a pair of frames a group, a frame at most 768 tokens. The whole video is held to about
+  12,300 tokens, plus ~10 a group for its time and tags.
+- **Hy4-flash:** up to 2,048 frames, one a group, held to about 60,000 tokens.
+
+A 3:42 film at 720p comes to ~13,300 prompt tokens with the Qwen models and ~57,000 with Hy4-flash. Its frames are read in
+1.6 s and encoded in 2-8 s on the development PC, and the prompt is read at the model's usual rate. A video is encoded
+once and kept (up to 32 videos or 4 GiB of encoded rows), also when a chat app sends it again every turn, and the next
+turn of the conversation reads only what follows it (with Qwen3.6-35B-A3B and Qwen3.8-27B another question about it in
+a new conversation too). The web app attaches videos of up to 150 MB.
+
 ## Image generation
 
 Optional: [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) in
