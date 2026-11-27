@@ -128,9 +128,13 @@ public:
     /// own up and moves to a pageable buffer (the conversations' chains hold them all in a session of many).
     /// checkpoint() takes it; one it does not goes back with prepare()'s.
     void* prepare_more();
-    /// Between requests: a pinned buffer made ready for the next checkpoint, where none is idle and the cache may
-    /// still pin one (pinning takes about 0.1 ms a MiB, which is then no request's time).
+    /// Between requests: pinned buffers made ready for the next request's run (kSpares idle: its end and one
+    /// checkpoint inside it), pinned anew while the cache may pin more (about 0.1 ms a MiB), else given up by a held
+    /// checkpoint, which moves to a pageable buffer (prepare_more's way: a parked conversation's, the least recently
+    /// used first, else the live one's first); none past the RAM reserve.  That is then no request's time, and the
+    /// run's copies go beside it (a pageable buffer waits for the run's end: checkpoint() copies then).
     void spare();
+    static constexpr int kSpares = 2;
     /// Checkpoints the state, which is at `pos` == the live length: from `filled`, prepare()'s buffer whose device
     /// state the run has copied in (null: copied now).  `end`: a prompt's end, with the engine's output there
     /// (whole_prompt); a conversation keeps its last one.

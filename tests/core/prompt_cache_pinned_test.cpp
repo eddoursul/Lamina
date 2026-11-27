@@ -5,7 +5,10 @@
 //      run still gets them, its checkpoints moving to pageable buffers with their bytes, and that conversation comes
 //      back from the park with both of its states as they were saved;
 //   2. a long conversation whose chain holds them: its checkpoints from before the request give theirs up, the ones
-//      the request took itself (a split prompt's stages may still be writing them) do not, and the states stay.
+//      the request took itself (a split prompt's stages may still be writing them) do not, and the states stay;
+//   3. between requests (SequenceCache::spare): two pinned buffers ready for the next run, pinned anew while the cache
+//      may pin more, then given up by a parked conversation's checkpoints, and prepare() takes a pinned one where the
+//      free list's last is pageable.
 // Needs a CUDA device for the pinned buffers (exit 77 without one).
 #include "lamina/core/prompt_cache.hpp"
 
@@ -164,6 +167,54 @@ int main() {
         r.insert(r.end(), other.begin(), other.end());
         check(c.begin(r, none) == 1000, "a request that leaves it at 1,000 continues from there");
         check(all(c.state, 0xC2), "... with the state saved there");
+    }
+    // 3. between requests (spare)
+    {
+        Fake c(2);   // (three pinned)
+        const std::vector<int64_t> a = tokens(1, 1200), b = tokens(100000, 1200);
+        check(c.begin(a, none) == 0, "conversation A starts empty");
+        c.spare();
+        void* h1 = c.prepare();
+        void* h2 = c.prepare_more();
+        check(pinned(h1) && pinned(h2) && h1 != h2, "spare: two pinned buffers for the next run");
+        c.fill(0xE1);
+        c.filled(h2);
+        c.set(0, a.data(), 500);
+        c.checkpoint(500, h2);
+        c.fill(0xE2);
+        c.filled(h1);
+        c.set(500, a.data() + 500, 500);
+        c.checkpoint(1000, h1);
+        check(c.begin(b, none) == 0, "conversation B starts empty (A parked)");
+        void* h3 = c.prepare();
+        check(pinned(h3), "B's run: the third pinned buffer");
+        c.fill(0xB1);
+        c.filled(h3);
+        c.set(0, b.data(), 400);
+        c.checkpoint(400, h3);
+        c.fill(0xB2);
+        c.set(400, b.data() + 400, 400);
+        c.checkpoint(800);   // (copied now, into a pageable buffer: no more may be pinned)
+        c.spare();
+        std::vector<int64_t> b2 = tokens(100000, 400);
+        const std::vector<int64_t> tail = tokens(800000, 300);
+        b2.insert(b2.end(), tail.begin(), tail.end());
+        check(c.begin(b2, none) == 400, "B rewound to 400 (its checkpoint at 800, a pageable buffer, given back)");
+        void* e = c.prepare();
+        void* m = c.prepare_more();
+        check(pinned(e) && pinned(m) && e != m,
+              "the run's buffers: the two A's checkpoints gave up between the requests (the free list's last is "
+              "pageable)");
+        check(all(c.state, 0xB1), "... B's state from its checkpoint");
+        std::vector<int64_t> a2 = tokens(1, 1000);
+        const std::vector<int64_t> more = tokens(500000, 300);
+        a2.insert(a2.end(), more.begin(), more.end());
+        check(c.begin(a2, none) == 1000, "A back from the park at 1,000");
+        check(all(c.state, 0xE2), "... with the state saved there");
+        std::vector<int64_t> a3 = tokens(1, 500);
+        a3.insert(a3.end(), more.begin(), more.end());
+        check(c.begin(a3, none) == 500, "A rewound to 500");
+        check(all(c.state, 0xE1), "... with the state saved there");
     }
     std::printf(g_fail ? "FAILED: %d\n" : "all ok\n", g_fail);
     return g_fail ? 1 : 0;

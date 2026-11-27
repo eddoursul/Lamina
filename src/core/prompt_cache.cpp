@@ -452,7 +452,7 @@ void* SequenceCache::prepare(bool* pageable, bool end) {
     drop_prepared();
     if (!enabled()) return nullptr;
     if (end) drop_end();
-    if (pageable != nullptr) pinned_first();   // an idle pinned buffer goes first
+    pinned_first();   // an idle pinned buffer goes first
     void* h = take_buffer();
     if (h == nullptr) return nullptr;
     const bool pin = pinned_buffer(h);
@@ -502,17 +502,31 @@ void* SequenceCache::pinned_from_held(void* pageable) {
 }
 
 void SequenceCache::spare() {
-    if (!enabled() || pinned_ > chain_cap_) return;
-    for (void* b : free_)
-        if (pinned_buffer(b)) return;
-    void* h = nullptr;
-    if (cudaMallocHost(&h, (size_t) ckpt_alloc_) != cudaSuccess) {
-        (void) cudaGetLastError();
-        return;
+    if (!enabled()) return;
+    int idle = 0;
+    for (void* b : free_) idle += pinned_buffer(b) ? 1 : 0;
+    for (; idle < kSpares; ++idle) {
+        // (a buffer more in RAM either way: a pinned one, or the pageable one a held checkpoint moves to)
+        if (ram_spare && ram_spare() < (int64_t) ckpt_alloc_) return;
+        void* h = nullptr;
+        if (pinned_ <= chain_cap_ && cudaMallocHost(&h, (size_t) ckpt_alloc_) == cudaSuccess) {
+            ++pinned_;
+            owned_.emplace_back(h, true);
+        } else {
+            (void) cudaGetLastError();
+            const auto pg = std::find_if(free_.begin(), free_.end(), [&](const void* b) { return !pinned_buffer(b); });
+            void* const pageable = pg != free_.end() ? *pg : lamina::platform::spill_alloc(ckpt_alloc_);
+            if (pageable == nullptr) return;
+            if (pg != free_.end()) free_.erase(pg);
+            else owned_.emplace_back(pageable, false);
+            h = pinned_from_held(pageable);
+            if (h == nullptr) {
+                free_.push_back(pageable);
+                return;
+            }
+        }
+        free_.push_back(h);
     }
-    ++pinned_;
-    owned_.emplace_back(h, true);
-    free_.push_back(h);
 }
 
 void SequenceCache::drop_end() {

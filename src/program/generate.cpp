@@ -5624,6 +5624,7 @@ int lamina::program::run(int argc, char** argv) {
                          (long long) n, (long long) reuse, prompt_ms, prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0,
                          (long long) produced_n, decode_ms, decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0);
             if (pcache.enabled()) std::fprintf(stderr, "lamina serve: prompt cache: %s\n", pcache.summary().c_str());
+            pcache.spare();   // (the next run's checkpoint buffers, pinned, after the answer)
             check_stack_limit(o.main_gpu, o.main_gpu);
             for (const int d : o.tier_gpus) check_stack_limit(d, o.main_gpu);
             if (replace) replan();
