@@ -1,0 +1,7 @@
+# ruff (tools/lint.py): Python's errors, not its style: pyflakes' checks (undefined, unused and redefined names,
+# imports, f-strings, comparisons), syntax errors and pylint's errors.  Vendored code is not checked.
+target-version = "py310"
+extend-exclude = ["third_party", "src/server/vendor", "tools/image/sdcpp_native"]
+
+[lint]
+select = ["F", "E9", "PLE"]

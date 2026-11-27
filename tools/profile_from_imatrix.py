@@ -14,7 +14,6 @@ Inkling 2 Mini's shipped profile is ggml-org/Inkling-2-Mini-GGUF's imatrix.gguf 
 import argparse
 import re
 import struct
-from pathlib import Path
 
 MAGIC, VERSION = b"STRP", 1
 SCALAR = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}

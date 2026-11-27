@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Lamina's CI (.github/workflows/build.yml), runnable on a PC the same way: the sources' formatting, the CUDA toolkit
-from NVIDIA's redistributable archives, the portable preset built by build.bat or build.sh with the tests, the tests
-that need no GPU, and the release archives from cmake --install.
+"""Lamina's CI (.github/workflows/build.yml and lint.yml), runnable on a PC the same way: the sources' checks, the
+CUDA toolkit from NVIDIA's redistributable archives, the portable preset built by build.bat or build.sh with the tests
+and the compilers' warnings as errors, the tests that need no GPU, and the release archives from cmake --install.
 
-    python .github/ci.py format                 the C, C++ and CUDA sources as .clang-format lays them out
-                                                 (tools/format.py --check, the clang-format requirements.txt pins)
+    python .github/ci.py lint                   the sources' checks (tools/lint.py: the C, C++ and CUDA layout,
+                                                 Python's errors, the shell scripts, the workflows, the Markdown
+                                                 links; the tools requirements-lint.txt pins)
     python .github/ci.py toolkit --dest DIR     the toolkit for this OS and CPU into DIR (in GitHub Actions also
                                                  CUDA_PATH and PATH for the later steps; elsewhere CUDACXX names it)
     python .github/ci.py build                  build-portable/: every program and test, and the image encoder (the
-                                                 portable preset: the release's GPUs, for other PCs)
+                                                 portable preset: the release's GPUs, for other PCs), a C++ warning
+                                                 an error (LAMINA_WERROR)
     python .github/ci.py test                   the tests that need no GPU: ctest -L cpu, the tools' unit tests
     python .github/ci.py package [--version V]  dist/lamina-V-bin-<os>-cuda-<x.y>-<cpu>.zip (.tar.gz on Linux), flat:
                                                  the server with the CUDA runtime linked in, the script that
@@ -183,8 +185,8 @@ def engine_version() -> str:
     return m.group(1) if m else "?"
 
 
-def format_check():
-    run([sys.executable, ROOT / "tools" / "format.py", "--check", "--diff"], cwd=ROOT, env=env())
+def lint():
+    run([sys.executable, ROOT / "tools" / "lint.py"], cwd=ROOT, env=env())
 
 
 def build():
@@ -201,7 +203,7 @@ def build():
     # LAMINA_JOBS, else on a runner, which does nothing else, every core (a PC's build leaves half to the desktop)
     jobs = os.environ.get("LAMINA_JOBS") or (str(os.cpu_count() or 4) if os.environ.get("GITHUB_ACTIONS") else "")
     jobs = [f"-DLAMINA_JOBS={jobs}"] if jobs else []
-    run([*script, "portable", "-DLAMINA_BUILD_TESTS=ON", *jobs], env=e, cwd=ROOT)
+    run([*script, "portable", "-DLAMINA_BUILD_TESTS=ON", "-DLAMINA_WERROR=ON", *jobs], env=e, cwd=ROOT)
     if ccache:
         subprocess.run([ccache, "--show-stats"])
 
@@ -311,10 +313,10 @@ def default_version() -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
-                                 epilog=__doc__.split("\n\n", 1)[1], formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__.split("\n\n", 1)[1],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("format")
+    sub.add_parser("lint")
     t = sub.add_parser("toolkit")
     t.add_argument("--dest", required=True)
     t.add_argument("--version", default=CUDA_REDIST, help=f"NVIDIA's redistrib_<version>.json (default {CUDA_REDIST})")
@@ -323,8 +325,8 @@ def main() -> int:
     p = sub.add_parser("package")
     p.add_argument("--version", help="the archives' version (default: the tag, else the commit)")
     a = ap.parse_args()
-    if a.cmd == "format":
-        format_check()
+    if a.cmd == "lint":
+        lint()
     elif a.cmd == "toolkit":
         toolkit(Path(a.dest).resolve(), a.version)
     elif a.cmd == "build":

@@ -762,8 +762,9 @@ if(LAMINA_NATIVE_EXPERTS)
     if(LAMINA_BUILD_VISION)
       add_library(lamina_vision STATIC src/vision/image.cpp src/vision/projector.cpp src/vision/ggml_encoder.cpp
                                        src/vision/encoder.cpp src/vision/cuda_encoder.cu)
-      target_include_directories(lamina_vision PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                 PRIVATE ${_lamina_llama_root}/vendor)
+      target_include_directories(lamina_vision PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+      # vendored headers: their warnings are not the build's (stb_image's code compiles in these files)
+      target_include_directories(lamina_vision SYSTEM PRIVATE ${_lamina_llama_root}/vendor)
       target_link_libraries(lamina_vision PUBLIC lamina_mmq lamina_kernels ggml CUDA::cudart_static lamina_warnings)
       # the encoder as a program over picture files (READY, ENC <picture> <rows file>), for comparing its rows
       add_executable(vision_rows tools/vision/vision_rows.cpp)
@@ -963,7 +964,9 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
                 src/server/responses.cpp src/server/runconfig.cpp src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp
                 src/server/telemetry.cpp src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
                 ${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_BINARY_DIR}/bench_files.cpp)
-    target_include_directories(lamina_server_core PUBLIC src/server ${_lamina_llama_root}/vendor
+    target_include_directories(lamina_server_core PUBLIC src/server)
+    # vendored headers (stb_image, cpp-httplib): their warnings are not the build's (LAMINA_WERROR)
+    target_include_directories(lamina_server_core SYSTEM PUBLIC ${_lamina_llama_root}/vendor
                                ${_lamina_llama_root}/vendor/cpp-httplib)
     target_link_libraries(lamina_server_core PUBLIC lamina_text cpp-httplib lamina_program lamina_warnings)
     if(TARGET lamina_vision)   # the image encoder, in the server's process (src/server/vision.cpp)

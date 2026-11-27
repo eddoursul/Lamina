@@ -1,0 +1,11 @@
+#!/bin/sh
+# The staged files' checks before a commit (tools/lint.py --staged: their layout, Python's errors, the shell scripts,
+# the workflows, the Markdown links), on once per clone: git config core.hooksPath .githooks
+root=$(git rev-parse --show-toplevel) || exit 1
+for py in "$root/.venv/Scripts/python.exe" "$root/.venv/bin/python" "$(command -v python3)" "$(command -v python)"; do
+    if [ -n "$py" ] && [ -x "$py" ]; then
+        exec "$py" -I "$root/tools/lint.py" --staged
+    fi
+done
+echo "pre-commit: no Python for tools/lint.py" >&2
+exit 1

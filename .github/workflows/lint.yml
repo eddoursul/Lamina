@@ -1,0 +1,33 @@
+# The sources' checks on every push to main and every pull request, docs included (build.yml skips those): the C, C++
+# and CUDA sources' layout, Python's errors, the shell scripts, the workflows and the Markdown files' links, each tool
+# at the version requirements-lint.txt pins (tools/lint.py, through .github/ci.py lint, which runs the same way on a
+# PC; the pre-commit hook in .githooks runs it on a commit's files).
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: The checks' tools, the versions requirements-lint.txt pins
+        run: python -m pip install -r requirements-lint.txt
+      - name: The sources' checks
+        run: python .github/ci.py lint

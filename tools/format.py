@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Formats the C, C++ and CUDA sources with clang-format as .clang-format describes, at the version requirements.txt
-pins (another version lays some lines out differently).
+"""Formats the C, C++ and CUDA sources with clang-format as .clang-format describes, at the version
+requirements-lint.txt pins (another version lays some lines out differently).
 
     python tools/format.py                    every tracked source, in place (a file is written only if it changes)
     python tools/format.py FILE ...           these files
     python tools/format.py --check [--diff]   nothing written: the files it would change, each with its changes with
-                                              --diff; exit 1 if there are any (CI)
+                                              --diff; exit 1 if there are any (tools/lint.py checks the same)
 
 clang-format: --clang-format PATH, else $CLANG_FORMAT, else the one pip installed beside this Python
-(pip install -r requirements.txt), else PATH's.  The folders whose own .clang-format turns formatting off (vendored
+(pip install -r requirements-lint.txt), else PATH's.  The folders whose own .clang-format turns formatting off (vendored
 code: third_party/, src/server/vendor/, tools/image/sdcpp_native/) stay as they are.
 """
 from __future__ import annotations
@@ -29,9 +29,9 @@ SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".cu", ".c
 
 
 def pinned_version() -> str:
-    m = re.search(r"^clang-format==([0-9.]+)", (ROOT / "requirements.txt").read_text(encoding="utf-8"), re.M)
+    m = re.search(r"^clang-format==([0-9.]+)", (ROOT / "requirements-lint.txt").read_text(encoding="utf-8"), re.M)
     if not m:
-        sys.exit("format: requirements.txt pins no clang-format")
+        sys.exit("format: requirements-lint.txt pins no clang-format")
     return m.group(1)
 
 
@@ -46,7 +46,7 @@ def find_clang_format(given: str | None) -> str:
             return str(d / exe)
     found = shutil.which("clang-format")
     if not found:
-        sys.exit("format: no clang-format (pip install -r requirements.txt, or --clang-format PATH)")
+        sys.exit("format: no clang-format (pip install -r requirements-lint.txt, or --clang-format PATH)")
     return found
 
 
@@ -69,8 +69,8 @@ def formatted(exe: str, path: Path) -> tuple[bytes, bytes]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
-                                 epilog=__doc__.split("\n\n", 1)[1], formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__.split("\n\n", 1)[1],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="*", help="these files (default: every tracked source)")
     ap.add_argument("--check", action="store_true", help="write nothing; exit 1 if a file would change")
     ap.add_argument("--diff", action="store_true", help="with --check, each file's changes")
@@ -85,8 +85,8 @@ def main() -> int:
     except (OSError, subprocess.CalledProcessError) as e:
         sys.exit(f"format: {exe} does not run: {e}")
     if f"version {want}" not in have and not a.any_version:
-        sys.exit(f"format: {exe} is {have!r}, requirements.txt pins {want} (pip install -r requirements.txt, or "
-                 "--any-version)")
+        sys.exit(f"format: {exe} is {have!r}, requirements-lint.txt pins {want} (pip install -r "
+                 "requirements-lint.txt, or --any-version)")
 
     paths = [Path(f).resolve() for f in a.files] if a.files else [ROOT / n for n in tracked_sources()]
     with cf.ThreadPoolExecutor(os.cpu_count() or 4) as pool:

@@ -33,19 +33,24 @@ the issue when there is one. For a large change or a new default, open an issue 
 - **Speed.** Before and after on the same PC and the same fixed text, several runs in both orders, with every changed
   setting named; the runs themselves, not only the best. Long prompts and long conversations come first: a gain on
   short texts alone does not decide a default.
-- **Tests.** The engine builds without warnings; the test suite builds with `build.bat native -DLAMINA_BUILD_TESTS=ON`
-  (`./build.sh native -DLAMINA_BUILD_TESTS=ON`) and runs with `ctest --test-dir build`. The server's and the tools'
-  tests run from the clone's folder: `python -m unittest discover -s tests/server` (with `LAMINA_TEST_GGUF` naming a
-  Flash-Next GGUF, its first shard: the server answers recorded requests on a mock engine) and `python -m unittest
-  discover -s tools -p "test_*.py"` (with `requirements.txt` installed). GitHub builds each pull request for Windows
-  and Linux on x64 and arm64 and runs the tests that need no GPU (`ctest -L cpu`) and the tools' tests there
+- **Tests.** The engine builds without warnings (GitHub's builds take `-DLAMINA_WERROR=ON`: a C++ warning is an
+  error); the test suite builds with `build.bat native -DLAMINA_BUILD_TESTS=ON` (`./build.sh native
+  -DLAMINA_BUILD_TESTS=ON`) and runs with `ctest --test-dir build`. The server's and the tools' tests run from the
+  clone's folder: `python -m unittest discover -s tests/server` (with `LAMINA_TEST_GGUF` naming a Flash-Next GGUF, its
+  first shard: the server answers recorded requests on a mock engine) and `python -m unittest discover -s tools -p
+  "test_*.py"` (with `requirements.txt` installed). GitHub builds each pull request for Windows and Linux on x64 and
+  arm64 and runs the tests that need no GPU (`ctest -L cpu`) and the tools' tests there
   (`.github/workflows/build.yml`); the GPU tests are for you to run.
-- **Formatting.** The C, C++ and CUDA sources are laid out as [.clang-format](.clang-format) says, by the clang-format
-  version `requirements.txt` pins (another version lays some lines out differently): `python tools/format.py` formats
-  every tracked source in place, or the files it is given; `--check` changes nothing and names the files it would
-  change, as GitHub does for each pull request. Vendored code (`third_party/`, `src/server/vendor/`) keeps the layout
-  of where it comes from. A table or a macro that clang-format would lay out worse than the code has it stays between
-  `// clang-format off` and `// clang-format on`. `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes
+- **Formatting and checks.** The C, C++ and CUDA sources are laid out as [.clang-format](.clang-format) says, by the
+  clang-format version `requirements-lint.txt` pins with the other checks' tools (`pip install -r
+  requirements-lint.txt`; another version lays some lines out or reports differently): `python tools/format.py` formats
+  every tracked source in place, or the files it is given. `python tools/lint.py` checks the layout, Python's errors
+  (ruff, as [ruff.toml](ruff.toml) selects: undefined and unused names, syntax errors; not the style), the shell
+  scripts (shellcheck), the workflows (actionlint) and the Markdown files' relative links, as GitHub does for each
+  push and pull request; `git config core.hooksPath .githooks` runs it on each commit's staged files (`--staged`).
+  Vendored code (`third_party/`, `src/server/vendor/`) keeps the layout of where it comes from. A table or a macro
+  that clang-format would lay out worse than the code has it stays between `// clang-format off` and
+  `// clang-format on`. `git config blame.ignoreRevsFile .git-blame-ignore-revs` makes
   `git blame` look past the commit that first formatted the code (GitHub's blame does on its own).
 - **Docs** describe what is, not what changed: update the ones your change makes wrong.
 

@@ -1,0 +1,7 @@
+# The checks' tools (tools/lint.py: CI's lint job and the pre-commit hook in .githooks; tools/format.py), pinned:
+# another version lays the code out or reports otherwise.  shellcheck-py and actionlint-py install the programs of
+# those versions (actionlint-py from its source package, which downloads actionlint's release).
+clang-format==23.1.5
+ruff==0.17.6
+shellcheck-py==0.11.0.1
+actionlint-py==1.7.12.25
