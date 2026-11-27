@@ -5573,7 +5573,8 @@ struct Serve {
         // a parked conversation the request continues from further on than from the live one: its own next request
         // (one that continues it whole, or superseded()) takes it back, any other borrows its start and leaves it
         // parked; the live one is parked in either case.  Else the live one is parked where the request leaves it (it
-        // drops kParkMin or more of its cells and more than it keeps) and is not its own next request.
+        // drops kParkMin or more of its cells and a kParkShare-th of it or more: a sibling's first message after one
+        // long system prompt too) and is not its own next request.
         size_t best = 0;
         int64_t best_r = Engine::reusable(E.seq, Engine::snaps_at(E.snaps), ids);
         for (size_t i = 0; i < E.park.size(); ++i)
@@ -5598,7 +5599,7 @@ struct Serve {
                 lender->pin = false;
             }
             common = common_of(E.seq);
-        } else if (drop >= Engine::kParkMin && drop > (int64_t) common &&
+        } else if (drop >= Engine::kParkMin && drop * lamina::core::kParkShare >= E.pos() &&
                    !lamina::core::superseded(E.seq, ids, (int64_t) common)) {
             E.park_live((int64_t) common);
         }

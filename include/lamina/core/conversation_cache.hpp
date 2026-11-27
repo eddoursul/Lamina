@@ -153,9 +153,14 @@ inline int64_t reusable(const Seq& seq, const std::vector<int64_t>& ids, const s
     return best;
 }
 
-/// A prompt that leaves the live conversation this many cells before its end, and more than it keeps, parks the rest;
-/// one that leaves a parked conversation fewer cells before its end takes it back, cut there.
+/// A prompt that leaves the live conversation this many cells before its end, and a kParkShare-th of it or more, parks
+/// it; one that leaves a parked conversation fewer cells before its end takes it back, cut there.
 inline constexpr int64_t kParkDropped = 1024;
+/// Parking copies all of a conversation's cells (Flash-Next's K and V: ~4 us a cell from the GPU), and reading the
+/// cells a prompt drops again, should the conversation come back, costs ~70 times that a cell: a sixteenth of it or
+/// more dropped pays for the copy where one in four such conversations comes back (sibling subagents after one
+/// system prompt do), not a long one that a request rewinds a few hundred cells.
+inline constexpr int64_t kParkShare = 16;
 
 /// Whether a prompt that parts from the conversation `seq` (a parked one, or one a session holds) at `at`, its end or
 /// a checkpoint of it, is that conversation's own next request - so that it continues live from `at`, the cells after
@@ -212,7 +217,7 @@ struct Start {
 ///     parked (SequenceCache::begin), which costs by its cells, as bringing it back does, and where the park cannot
 ///     take it, reading it again does - and starts there from what it shares with another: cells copied from that
 ///     one's session or from the park.  Where the session it takes is the lender's own, it continues in place, and
-///     the lender is parked first when more of it is dropped than kept.
+///     the lender is parked first when a kParkShare-th of it or more is dropped.
 inline Start choose_start(const std::vector<Seq>& lives, uint64_t busy, const std::vector<Seq>& parked,
                           const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag, bool ends) {
     const int n = (int) lives.size();
@@ -254,7 +259,7 @@ inline Start choose_start(const std::vector<Seq>& lives, uint64_t busy, const st
             st.session = at;
         } else if (st.session == at) {
             st.kind = Start::kContinue;
-            st.park_rest = dropped > best;
+            st.park_rest = dropped * kParkShare >= (int64_t) c.tokens.size();
         } else {
             st.kind = Start::kBorrowSession;
         }

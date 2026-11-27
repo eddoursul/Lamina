@@ -15,7 +15,7 @@
 //   5. superseded(): a parked conversation's own next request (few cells after the checkpoint, the same request
 //      again, its last answer sent back in another rendering) against another conversation with the same start;
 //   6. choose_start(): where a request starts and in which session it runs - on one session (its conversation
-//      continued, parked first only for another conversation that drops more of it than it keeps, a parked one
+//      continued, parked first only for another conversation that drops a sixteenth of it or more, a parked one
 //      taken back or lending) and on several (the session that holds the conversation; a new one in the session
 //      that holds nothing, else the one with the smallest conversation, of equal ones the one used longest ago; a
 //      sibling's start copied from a session, also one that decodes; never a session that decodes; the same request
@@ -276,13 +276,22 @@ int main() {
         check(st.kind == Start::kContinue && st.session == 0 && st.cells == 20000 && !st.park_rest,
               "one session: its conversation's next request continues it from its end");
         st = choose_start(one, 0, none, sibling, {}, 0, false);
-        check(st.kind == Start::kContinue && st.session == 0 && st.cells == 16000 && !st.park_rest,
-              "one session: a sibling continues in place, the 4,000 cells it drops fewer than it keeps");
+        check(
+            st.kind == Start::kContinue && st.session == 0 && st.cells == 16000 && st.park_rest,
+            "one session: a sibling continues in place, the conversation parked first (it drops 4,000 of its 20,000)");
         std::vector<int64_t> early = prompt(4000);   // ... one that shares 4,000 cells only
         for (int i = 0; i < 9000; ++i) early.push_back(60000 + i);
         st = choose_start(one, 0, none, early, {}, 0, false);
         check(st.kind == Start::kContinue && st.cells == 4000 && st.park_rest,
-              "one session: one that drops more than it keeps has the conversation parked first");
+              "one session: one that drops more than it keeps has the conversation parked first too");
+        Seq deep = conv(16000, {4000, 16000, 18800, 20000});   // a checkpoint 1,200 cells before its end
+        for (int i = 0; i < 4000; ++i) deep.tokens.push_back(1000 + i);
+        std::vector<int64_t> rewound(deep.tokens.begin(), deep.tokens.begin() + 18800);
+        for (int i = 0; i < 1500; ++i) rewound.push_back(60000 + i);
+        std::vector<Seq> long_one = seqs(std::move(deep));
+        st = choose_start(long_one, 0, none, rewound, {}, 0, false);
+        check(st.kind == Start::kContinue && st.cells == 18800 && !st.park_rest,
+              "one session: another request that drops less than a kParkShare-th (1,200 of 20,000) parks nothing");
         Seq written = conv(4000, {4000});   // 6,000 cells written after a start of 4,000: the last 5,000 an answer
         for (int i = 0; i < 6000; ++i) written.tokens.push_back(100 + i);
         std::vector<int64_t> rendered = prompt(4000);   // its next request: the answer without the 1,000 before it
@@ -326,8 +335,9 @@ int main() {
         check(st.kind == Start::kBorrowSession && st.from == 0 && st.session == 1 && st.cells == 16000,
               "a sibling takes a session of its own with the start copied: the lender stays");
         st = choose_start(two, 0, none, sibling, {}, 0, false);
-        check(st.kind == Start::kContinue && st.session == 0 && st.cells == 16000 && !st.park_rest,
-              "where the session it takes is the lender's (used longest ago), it continues in place");
+        check(
+            st.kind == Start::kContinue && st.session == 0 && st.cells == 16000 && st.park_rest,
+            "where the session it takes is the lender's (used longest ago), it continues in place, the lender parked");
         two[0].stamp = 3;   // A used last: B's session is the one to take
         st = choose_start(two, 0, none, sibling, {}, 0, false);
         check(st.kind == Start::kBorrowSession && st.from == 0 && st.session == 1,
