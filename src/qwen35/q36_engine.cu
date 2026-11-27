@@ -5035,15 +5035,20 @@ struct Serve {
     /// re-renders what follows: the answer without its reasoning, or without the empty block a request with thinking
     /// off ends its prompt with), where this prompt leaves the one before (agents send one long start again with
     /// another tail; their pictures compared too), a few cells before the end of a last message that grows between
-    /// requests (the request before held 256 tokens or more of it), behind the prompt's
-    /// last picture or video (its <|vision_end|>: another question about it starts there).  A long prompt's
+    /// requests (the request before held 256 tokens or more of it), behind the prompt's last picture or video (its
+    /// <|vision_end|>: another question about it starts there).  And `optional`, before its last message 256 cells or
+    /// more past the reuse (a client that sends that message again after each new turn leaves the prompt there, a
+    /// sibling with another first message after one system prompt too), where it ends no chunk: the read drops it from
+    /// a chunk that holds another one (a second checkpoint inside a chunk ends it, and an appending client's turn,
+    /// whose last message and the turn's checkpoint share a chunk, would pay 30-44 ms for that on Qwen3.6), or where
+    /// the cache has no buffer for it (0: none).  A long prompt's
     /// checkpoints every --prompt-cache-every cells are the read's own, at its chunks' ends, and the prompt's end is
     /// one with the engine's output (request): the same prompt again reads nothing.  (LAMINA_Q36_CKPT_CUT: none of the
     /// end, and one two cells before it where the turn's is not near.)  A message starts at an <|im_start|> right
     /// after the one before ends (its <|im_end|> and a newline), or at the prompt's first token: that token inside a
     /// message's text (code that quotes a chat template, which the server's tokenizer reads as the token) starts none.
     std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse,
-                                          const std::vector<ImgKey>& imgs) {
+                                          const std::vector<ImgKey>& imgs, int64_t& optional) {
         const int64_t n = (int64_t) ids.size();
         const auto opens = [&](int64_t i) {
             return ids[(size_t) i] == kImStart && (i == 0 || (i >= 2 && ids[(size_t) i - 2] == kImEnd));
@@ -5060,7 +5065,7 @@ struct Serve {
                     if (ids[(size_t) i + 1] == copt.tail_role) q = i;
                     break;
                 }
-        int64_t fork = 0, msg_end = 0;
+        int64_t fork = 0, msg_end = 0, last_msg = 0;
         const std::vector<lamina::core::ImgKey> keys = cache_keys(imgs);
         {
             const int64_t d = lamina::core::shared_start(prev_prompt, prev_keys, ids, keys, n - 1);
@@ -5070,6 +5075,7 @@ struct Serve {
                     int64_t start = i;   // the message's <|im_start|>; then its role and a newline
                     while (start > 0 && !opens(start)) --start;
                     if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                    if (q > 0 && start > reuse + 256) last_msg = start;
                     break;
                 }
         }
@@ -5080,12 +5086,20 @@ struct Serve {
         std::vector<int64_t> want{q, fork, msg_end, pic};
         if (ckpt_cut && n - 2 - std::max(q, reuse) > kEndNear) want.push_back(n - 2);
         std::sort(want.begin(), want.end());
+        auto fits = [&](int64_t p) {
+            if (p < reuse + 2 || p > n - 2) return false;
+            for (const ImgKey& k : imgs)
+                if (k.cell < p && p < k.cell + k.n) return false;
+            return true;
+        };
         std::vector<int64_t> marks;
-        for (const int64_t p : want) {
-            if (p < reuse + 2 || p > n - 2 || (!marks.empty() && p < marks.back() + 2)) continue;
-            bool inside = false;
-            for (const ImgKey& k : imgs) inside = inside || (k.cell < p && p < k.cell + k.n);
-            if (!inside) marks.push_back(p);
+        for (const int64_t p : want)
+            if (fits(p) && (marks.empty() || p >= marks.back() + 2)) marks.push_back(p);
+        optional = 0;
+        if (!ckpt_cut && last_msg > 0 && fits(last_msg) &&
+            std::none_of(marks.begin(), marks.end(), [&](int64_t p) { return std::abs(p - last_msg) < 2; })) {
+            marks.insert(std::upper_bound(marks.begin(), marks.end(), last_msg), last_msg);
+            optional = last_msg;
         }
         return marks;
     }
@@ -5689,9 +5703,15 @@ struct Serve {
         // engine's image as it passes (Engine::Chunk): the turn's read stays one chunk.  One a chunk: a second mark
         // ends it, and is the checkpoint of the state it leaves, as a long prompt's are.  The image goes to a buffer of
         // the cache's on a stream of its own, so nothing waits for the copy (Engine::snap_send); where the cache has no
-        // buffer to give, the chunk ends at the mark and the state is copied then, the stages' queues empty first.
+        // buffer to give, the chunk ends at the mark and the state is copied then, the stages' queues empty first.  The
+        // optional one (checkpoint_marks) is dropped where it would end a chunk.
         std::vector<int64_t> marks;
-        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse, ir.imgs);
+        int64_t optional = 0;
+        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse, ir.imgs, optional);
+        auto drop_optional = [&] {
+            marks.erase(std::find(marks.begin(), marks.end(), optional));
+            optional = 0;
+        };
         const int64_t every = std::max<int64_t>(1, copt.every / E.tmax) * E.tmax;
         int64_t noted = (int64_t) reuse, saved = (int64_t) reuse;   // the cache has the tokens up to `noted`
         auto note = [&](int64_t upto) {
@@ -5711,10 +5731,17 @@ struct Serve {
             const int64_t c0 = (int64_t) reuse + i;
             Engine::Chunk c;
             c.T = (int) std::min<int64_t>(E.tmax, (int64_t) ids.size() - c0);
+            const auto first = std::upper_bound(marks.begin(), marks.end(), c0);
+            if (optional > c0 && optional < c0 + c.T && first + 1 != marks.end() && *(first + 1) < c0 + c.T)
+                drop_optional();   // (another one inside the chunk)
             const auto mark = std::upper_bound(marks.begin(), marks.end(), c0);
             if (mark == marks.end() || *mark >= c0 + c.T) return c;   // none inside it (one at its end: the callback's)
             void* const h = ckpt_cut ? nullptr : checkpoint_buffer(c.pinned);
             if (h == nullptr) {
+                if (*mark == optional) {
+                    drop_optional();
+                    return c;
+                }
                 c.T = (int) (*mark - c0);
                 return c;
             }

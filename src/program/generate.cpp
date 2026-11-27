@@ -5046,16 +5046,19 @@ int lamina::program::run(int argc, char** argv) {
             // when the last message grows (the previous prompt held 256 tokens or more of it: a transcript, not two
             // messages that open alike), a few cells before its <|im_end|> (the next request parts there; the margin
             // covers a seam that tokenizes differently once text follows it).  An agent's turn adds a message instead,
-            // and takes neither.  And one behind the last picture or video the request reads (`media_end`, one past its
-            // <|vision_end|>): another question about it, in a new conversation too, starts there.  None inside a
-            // picture.
+            // and takes neither.  One before the prompt's last message (`last_msg`, its <|im_start|>, 256 cells or
+            // more past the reuse): a client that sends that message again after each new turn (a block of state or
+            // reminders at the end) leaves this prompt there, a sibling with another first message after one system
+            // prompt too, and an edit of that message.  And one behind the last picture or video the request reads
+            // (`media_end`, one past its <|vision_end|>): another question about it, in a new conversation too,
+            // starts there.  None inside a picture.
             int64_t media_end = 0;
             if (!req_imgs.empty()) {
                 media_end = req_imgs.back().start;
                 while (media_end < n && media_pad(ids[(size_t) media_end])) ++media_end;
                 media_end = std::min(media_end + 1, n - 1);
             }
-            int64_t fork = 0, msg_end = 0, pic = 0;
+            int64_t fork = 0, msg_end = 0, last_msg = 0, pic = 0;
             if (track) {
                 const int64_t d = lamina::core::shared_start(prev_prompt, prev_imgs, ids, req_imgs, n - 1);
                 if (d > reuse + 256 && d < n - 1 && d != q) fork = d;
@@ -5064,21 +5067,22 @@ int lamina::program::run(int argc, char** argv) {
                         int64_t start = i;   // the message's <|im_start|>; then its role and a newline
                         while (start > 0 && !opens(start)) --start;
                         if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                        if (q > 0 && start > reuse + 256) last_msg = start;
                         break;
                     }
                 // on the scan's grid from the read's start (Prefill::kMarkGrid): a checkpoint inside the run there
                 // leaves its arithmetic, and the answer, as they are without it; the next prompt reads up to 15 cells
                 // more.  (The one behind a picture stays where it is: another question about it starts there.)
-                for (int64_t* c : {&fork, &msg_end})
+                for (int64_t* c : {&fork, &msg_end, &last_msg})
                     if (*c > 0) *c -= (*c - reuse) % lamina::prefill::Prefill::kMarkGrid;
-                for (int64_t* c : {&fork, &msg_end})
+                for (int64_t* c : {&fork, &msg_end, &last_msg})
                     if (*c > 0 && media_pad(ids[(size_t) *c]) && media_pad(ids[(size_t) *c - 1])) *c = 0;
                 if (media_end > reuse && media_end < n - 1) pic = media_end;
             }
             prev_prompt.assign(ids.begin(), ids.end());
             prev_imgs = req_imgs;
-            std::vector<int64_t> wanted;   // those three, ascending
-            for (int64_t c : {fork, msg_end, pic})
+            std::vector<int64_t> wanted;   // those four, ascending
+            for (int64_t c : {fork, msg_end, last_msg, pic})
                 if (c > 0) wanted.push_back(c);
             std::sort(wanted.begin(), wanted.end());
             wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());

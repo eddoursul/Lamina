@@ -1784,8 +1784,8 @@ struct Engine {
     /// token (host_logits), -1 when stopped first.
     /// Why a snapshot is kept (keep_snap): a prompt's end (the last kSnaps), a multiple of kSnapEvery a read passed
     /// (all), behind a prompt's last picture or video (the last kMediaSnaps), where a later prompt may part from this
-    /// one (the last kPartSnaps)
-    enum class Kept : uint8_t { end, every, media, part };
+    /// one (the last kPartSnaps), before a prompt's last message (the last kLastSnaps)
+    enum class Kept : uint8_t { end, every, media, part, last };
     std::vector<int64_t> chunk_snaps;   // the snapshots inside the next chunk: the multiples of kSnapEvery, `wanted`'s
     // the next read's snapshots besides the multiples of kSnapEvery (request()), ascending, where the prompt path's
     // pieces pass them: inside a piece or at a piece's end
@@ -1876,9 +1876,11 @@ struct Engine {
     // both taken at or before the point (snapshot(): at each prompt's end), else the state starts over.  A read keeps
     // one at each multiple of kSnapEvery it passes, and at the places a later prompt may part from this one: behind
     // its last picture or video (another question about it in a new conversation continues there), where it leaves
-    // the request before (agents send one long start again with another tail) and a few cells before the end of a
-    // last message that grows between requests.  Each at the last multiple of the indexer's pool at or before its
-    // place, where a snapshot inside a chunk needs no tail (it keeps the tails as the chunk leaves them).
+    // the request before (agents send one long start again with another tail), a few cells before the end of a last
+    // message that grows between requests, and before its last message (a client that sends that message again after
+    // each new turn leaves the prompt there, a sibling with another first message after one system prompt too).  Each
+    // at the last multiple of the indexer's pool at or before its place, where a snapshot inside a chunk needs no tail
+    // (it keeps the tails as the chunk leaves them).
     struct Snap {
         int64_t pos = 0;
         std::vector<uint8_t> bytes;   // every window layer's ring, then every indexer layer's tail
@@ -1889,11 +1891,15 @@ struct Engine {
     static constexpr size_t kSnaps = 8;           // prompt ends kept
     static constexpr size_t kMediaSnaps = 4;      // snapshots behind pictures kept
     static constexpr size_t kPartSnaps = 4;       // snapshots where prompts part kept
+    static constexpr size_t kLastSnaps = 2;       // snapshots before a prompt's last message kept (the next request's)
     static constexpr int64_t kSnapEvery = 8192;   // a read keeps a snapshot at each multiple of this it passes
     /// s into snaps, the oldest of its kind out where it has its count already (all but the multiples')
     void keep_snap(Snap&& s) {
         if (s.kept != Kept::every) {
-            const size_t cap = s.kept == Kept::end ? kSnaps : s.kept == Kept::media ? kMediaSnaps : kPartSnaps;
+            const size_t cap = s.kept == Kept::end     ? kSnaps
+                               : s.kept == Kept::media ? kMediaSnaps
+                               : s.kept == Kept::last  ? kLastSnaps
+                                                       : kPartSnaps;
             const auto kind = [&](const Snap& x) { return x.kept == s.kept; };
             if ((size_t) std::count_if(snaps.begin(), snaps.end(), kind) >= cap)
                 snaps.erase(std::find_if(snaps.begin(), snaps.end(), kind));
@@ -5618,7 +5624,8 @@ struct Serve {
         // or before its place (and `past` cells or more past the start it resumes from): behind the prompt's last
         // picture or video; where it leaves the request before (its pictures compared: their cells' ids are their
         // keys') and a few cells before the end of a last message the request before held 256 tokens or more of, a
-        // message that grows between requests
+        // message that grows between requests; before the last message, its turn's first token (a client that sends
+        // that message again after each new turn leaves the prompt there)
         {
             const int64_t n = (int64_t) ids.size();
             E.wanted.clear();
@@ -5649,6 +5656,9 @@ struct Serve {
                     int64_t body = i;                   // its text's first cell
                     while (body > 0 && ids[(size_t) body - 1] != md.turn_middle) --body;
                     if (d - body >= 256) want(i - 4, Engine::Kept::part, 256);
+                    int64_t open = body;   // the turn's first token, before its role
+                    while (open > 0 && ids[(size_t) open] != md.turn_start) --open;
+                    if (q < n) want(open, Engine::Kept::last, 256);
                     break;
                 }
             std::sort(E.wanted.begin(), E.wanted.end());
