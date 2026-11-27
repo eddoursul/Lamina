@@ -1,7 +1,7 @@
 # Parameters
 
-Every option of `lamina`: the server's own, then the engine's it passes on. `lamina --help` lists the
-same in short.
+Every command and option of `lamina`: the commands, the server's options, then the engine's it passes on.
+`lamina help` lists the commands in short, `lamina <command> --help` a command's options.
 
 ## How options are given
 
@@ -11,8 +11,8 @@ same in short.
   `"args": {"max-context": 65536}`, a switch `true` or `false` (`"kv-grow": false` is `--no-kv-grow`), a list for
   several values (`"control-vector-layer-range": [4, 44]`).
 - **Precedence**: the command line over the config file over the preset `-m` builds for the model file (one of
-  [examples/](../examples/README.md)). `--check` shows the engine options a start gives the model, `--write-config`
-  writes the whole config.
+  [examples/](../examples/README.md)). `lamina check` shows the engine options a start gives the model,
+  `lamina write-config` writes the whole config.
 - **Values**: a switch takes `--no-<name>` for off. A list takes commas (`--aliases a,b`) or JSON. Sizes are binary
   (`8G`, `700M`), times have their unit (`55us`, `1.5ms`, `1s`). A path on the command line starts from the folder the
   server was started in, one in a config from its `cwd`.
@@ -22,26 +22,36 @@ same in short.
 - **Defaults** are the engine's own; [the presets](#the-presets-engine-options) change some.
 - **Trade-offs**: the figures were measured on the development PC (an RTX 3090 running the model, an RTX 5070 Ti and a
   second RTX 3090 as tiers, an 8-core Ryzen 7 9700X, DDR5-5600) and move with the GPUs, their links and the RAM.
-  Measure an option on your PC before keeping it: `lamina -m MODEL.gguf --bench` before and after.
+  Measure an option on your PC before keeping it: `lamina bench -m MODEL.gguf` before and after.
 
 ## Commands
 
+`lamina <command> [options] [engine options]`: the command first. Each of `serve`, `check`, `bench` and
+`write-config` takes the server's options and the engine's below, which make the config it runs, checks, measures or
+writes.
+
 | Command | What it does |
 | --- | --- |
-| `--config FILE` | Start from this config file. |
-| `--write-config FILE` | Write the config the command line runs (the preset's, the file's and the command line's settings in one) to FILE and stop. An earlier FILE is kept as `FILE.bak`, and its keys outside the preset stay. |
-| `--check` | Say what the PC has and, with `-m` or `--config`, what the model needs, where it would run and whether it starts (exit code 1: it would not). Nothing is loaded. With `-m URL`, a model not downloaded yet: a Hugging Face repository's URL, a folder's or a file's in it, or a GGUF file's at any address; its files' headers alone are read, and a URL of several models, or of a model beside files its report does not take up (a LoRA adapter, a control vector, an Engram table), gets a table of them ([SETUP.md](SETUP.md#a-model-at-a-url)). |
-| `--verbose` | With `--check` of a URL that gets a table: under each file's row, what it is and why it cannot start or is not read, or how Lamina reads it. |
-| `--bench` | Measure the model through the server's own API on a port of its own: short questions, prompts of ~4K and ~16K tokens and a coding agent's session, three runs each (3-10 minutes); write a report into `bench-results/` beside the program, with personal details removed, and stop. |
-| `--bench-url URL` | The same against a Lamina server that runs; nothing is loaded. |
-| `--bench-runs N` | Runs per test (default 3). |
-| `--bench-clients N` | Also N requests at once (batch slots run them together). |
-| `--bench-long` | Also a prompt of ~32K tokens. |
-| `--bench-think` | Thinking on (the suite turns it off, so that the answers stay short and comparable). |
-| `--bench-out DIR` | Where the report's folder goes. |
-| `--bench-compare OLD [NEW]` | An earlier report (its folder or `results.json`) beside this run's; with NEW and no `--bench`, two reports side by side. |
-| `-h`, `--help` | The options in short. |
-| `-v`, `--version` | The program's version. |
+| `serve` | Serve the model: the OpenAI, Anthropic and Responses APIs and the web app ([USING.md](USING.md)), until it is stopped. |
+| `check` | Say what the PC has and, with `-m` or `--config`, what the model needs, where it would run and whether it starts (exit code 1: it would not). Nothing is loaded. With `-m URL`, a model not downloaded yet: a Hugging Face repository's URL, a folder's or a file's in it, or a GGUF file's at any address; its files' headers alone are read, and a URL of several models, or of a model beside files its report does not take up (a LoRA adapter, a control vector, an Engram table), gets a table of them ([SETUP.md](SETUP.md#a-model-at-a-url)). |
+| `bench` | Measure the model through the server's own API on a port of its own: short questions, prompts of ~4K and ~16K tokens and a coding agent's session, three runs each (3-10 minutes); write a report into `bench-results/` beside the program, with personal details removed, and stop. |
+| `write-config FILE` | Write the config the command line runs (the preset's, the file's and the command line's settings in one) to FILE. An earlier FILE is kept as `FILE.bak`, and its keys outside the preset stay. |
+| `version` | The program's version; also `-v`, `--version`. |
+| `help [COMMAND]` | The commands, or a command's options; also `-h`, `--help` (after a command: its options). |
+
+### The commands' own options
+
+| Option | Command | What it does |
+| --- | --- | --- |
+| `--config FILE` | `serve`, `check`, `bench`, `write-config` | Start from this config file. |
+| `--verbose` | `check` | With a URL that gets a table: under each file's row, what it is and why it cannot start or is not read, or how Lamina reads it. |
+| `--url URL` | `bench` | The suite against a Lamina server that runs; nothing is loaded. |
+| `--runs N` | `bench` | Runs per test (default 3). |
+| `--clients N` | `bench` | Also N requests at once (batch slots run them together). |
+| `--long` | `bench` | Also a prompt of ~32K tokens. |
+| `--think` | `bench` | Thinking on (the suite turns it off, so that the answers stay short and comparable). |
+| `--out DIR` | `bench` | Where the report's folder goes. |
+| `--compare OLD [NEW]` | `bench` | An earlier report (its folder or `results.json`) beside this run's; with NEW, two reports side by side, nothing run. |
 
 ## The server's options
 
@@ -49,7 +59,7 @@ same in short.
 
 | Option | Key | Default | What it does |
 | --- | --- | --- | --- |
-| `-m`, `--model GGUF` | `model` | | The model's file, a split one by any shard. Without the config's `"args"`, the file's preset supplies the engine's options, and the server picks the GPUs and finds the files beside the model ([SETUP.md](SETUP.md#a-model-file)). With `--check`, also a URL. |
+| `-m`, `--model GGUF` | `model` | | The model's file, a split one by any shard. Without the config's `"args"`, the file's preset supplies the engine's options, and the server picks the GPUs and finds the files beside the model ([SETUP.md](SETUP.md#a-model-file)). With `lamina check`, also a URL. |
 | `--mmproj FILE` | `vision.mmproj` | with `-m`: the `mmproj*.gguf` made for the model beside it | The image projector: pictures on ([USING.md](USING.md#pictures)). |
 | `--no-mmproj` | `vision` (`false`) | | No pictures. |
 | `--vision-gpu` | `vision.gpu` | on with `-m` | The image encoder on a GPU; `--no-vision-gpu`: on the CPU, 8-10 s for a picture of ~1,000 tokens instead of 0.3-0.6 s. |
@@ -405,8 +415,8 @@ they also take the place of the cards' values when given.
 
 ### Deprecated spellings
 
-Still taken, each named in the server's window at a start with what takes its place; `--write-config` writes a config
-without them. A card's own setting wins over them, a per-tier list's values go to the tiers in order (its last to
+Still taken, each named in the server's window at a start with what takes its place; `lamina write-config` writes a
+config without them. A card's own setting wins over them, a per-tier list's values go to the tiers in order (its last to
 those past it), and of `--gpu`, `--main-gpu` and `--second-gpu` the later takes the earlier's place (`--second-gpu -1`
 after the cards: no tiers).
 

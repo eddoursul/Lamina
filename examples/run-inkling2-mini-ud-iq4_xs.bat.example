@@ -3,5 +3,5 @@ title Lamina Inkling 2 Mini UD-IQ4_XS
 rem Inkling 2 Mini, unsloth's UD-IQ4_XS, on http://127.0.0.1:8087/v1 with inkling2-mini-ud-iq4_xs.json (README.md).
 rem The engine's inkling2 path: the model on the config's GPU, the context what its VRAM holds cells for.
 cd /d "%~dp0.."
-build\lamina.exe --config examples\inkling2-mini-ud-iq4_xs.json
+build\lamina.exe serve --config examples\inkling2-mini-ud-iq4_xs.json
 pause

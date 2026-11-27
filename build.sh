@@ -14,4 +14,4 @@ cmake --preset "$preset" "$@" || exit 1
 # CUDA's ptxas now and then fails to read a file it has just written (upstream #45): the same command gets past it
 cmake --build --preset "$preset" ||
   { echo "(the build stopped: trying it once more)"; cmake --build --preset "$preset"; } || exit 1
-echo "Done: the programs are in $out/ ($out/lamina -m MODEL.gguf runs a model)"
+echo "Done: the programs are in $out/ ($out/lamina serve -m MODEL.gguf runs a model)"

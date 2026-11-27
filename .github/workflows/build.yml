@@ -82,7 +82,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           NOTES: |
-            Each platform has one download, `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server, with the CUDA runtime linked in (it needs the NVIDIA driver alone, one for CUDA 13 or newer). Extract it into a folder and run `lamina -m MODEL.gguf` ([docs/SETUP.md](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/docs/SETUP.md#a-model-file)). It is built for RTX 30, 40 and 50 GPUs.
+            Each platform has one download, `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`: the server, with the CUDA runtime linked in (it needs the NVIDIA driver alone, one for CUDA 13 or newer). Extract it into a folder and run `lamina serve -m MODEL.gguf` ([docs/SETUP.md](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/docs/SETUP.md#a-model-file)). It is built for RTX 30, 40 and 50 GPUs.
         run: |
           ls -l dist
           pre=; [[ "$TAG" == *-* ]] && pre=--prerelease

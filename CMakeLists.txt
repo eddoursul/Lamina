@@ -8,10 +8,11 @@
 # into a folder of their own as a release lays them out.
 # CMake 3.22 (Ubuntu 22.04's) or newer, with 3.24's policies where CMake has them
 cmake_minimum_required(VERSION 3.22...3.24)
-project(lamina VERSION 0.4 LANGUAGES CXX)
+project(lamina VERSION 0.5 LANGUAGES CXX)
 # on the files that print it alone: a new version recompiles these, not every one (the CUDA kernels, ggml)
 set_property(SOURCE src/program/main.cpp src/program/generate.cpp src/server/main.cpp src/server/bench.cpp
-             src/server/model_config.cpp APPEND PROPERTY COMPILE_DEFINITIONS LAMINA_VERSION="${PROJECT_VERSION}")
+             src/server/model_config.cpp src/server/params.cpp
+             APPEND PROPERTY COMPILE_DEFINITIONS LAMINA_VERSION="${PROJECT_VERSION}")
 
 # cmake --install: flat, as a release's download extracts (component lamina): the programs, the draft layer's download
 # script and the licenses.  The CUDA runtime is linked in: a program loads the NVIDIA driver alone.
@@ -947,12 +948,12 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   target_link_libraries(sha256_base64_test PRIVATE lamina_text)
   add_test(NAME sha256_base64_test COMMAND sha256_base64_test)
   if(TARGET lamina_program)
-    # the web app and the presets (examples/*.json: lamina -m) inside the binary
+    # the web app and the presets (examples/*.json: -m) inside the binary
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/src/server/web * web_asset
                  "Embedding the web app")
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/presets.cpp ${CMAKE_CURRENT_SOURCE_DIR}/examples *.json preset_file
                  "Embedding the presets")
-    # --bench's agent session: the clone's README and docs as the Python benchmark read them, frozen
+    # bench's agent session: the clone's README and docs as the Python benchmark read them, frozen
     lamina_embed(${CMAKE_CURRENT_BINARY_DIR}/bench_files.cpp ${CMAKE_CURRENT_SOURCE_DIR}/data bench-agent-files.json
                  bench_file "Embedding the benchmark's texts")
     add_library(lamina_server_core STATIC src/server/api.cpp src/server/bench.cpp src/server/config.cpp
@@ -985,7 +986,7 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_executable(params_test tests/server/params_test.cpp)
     target_link_libraries(params_test PRIVATE lamina_server_core)
     add_test(NAME params_test COMMAND params_test)
-    # --bench against a scripted server of its own: the suite, the report, the redaction, the comparison (CPU only)
+    # lamina bench against a scripted server of its own: the suite, the report, the redaction, the comparison (CPU only)
     add_executable(bench_test tests/server/bench_test.cpp)
     target_link_libraries(bench_test PRIVATE lamina_server_core)
     add_test(NAME bench_test COMMAND bench_test)

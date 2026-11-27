@@ -1,4 +1,4 @@
-// src/server/bench.cpp - lamina --bench (bench.hpp): the suite, the machine, the report and the comparison, in
+// src/server/bench.cpp - lamina bench (bench.hpp): the suite, the machine, the report and the comparison, in
 // the server so that a release's programs run it as they are.
 #include <httplib.h>
 
@@ -1285,7 +1285,7 @@ std::string render_readme(const json& res) {
     const bool think = jget(p, "think") == true;
     std::vector<std::string> L = {
         "# Community benchmark on " + gpu, "",
-        "Measured on " + jstr(res, "date") + " with `lamina --bench` (suite " + std::to_string(kSchema) + ", " +
+        "Measured on " + jstr(res, "date") + " with `lamina bench` (suite " + std::to_string(kSchema) + ", " +
             std::to_string(runs) + " runs per test, medians with ranges). Speeds are the engine's own timings; first-token "
             "times are measured by the client over HTTP. Speed only: no correctness check was run.",
         "",
@@ -1500,7 +1500,7 @@ int run(const Target& t, const json& cfg, const Options& o, const std::string& l
     json machine = collect_machine(t, cfg, local);   // again: VRAM and the cache after the work
     if (!truthy(jget(machine, "gpu"))) machine["gpu"] = pre["gpu"];
     const json res = {{"schema", kSchema},
-                      {"tool", "lamina --bench"},
+                      {"tool", "lamina bench"},
                       {"date", today()},
                       {"params", {{"runs", opts.runs}, {"think", opts.think}, {"clients", opts.clients},
                                   {"long", opts.long_prompt}, {"started_server", started}, {"command", opts.command}}},
@@ -1532,7 +1532,7 @@ int run(const Target& t, const json& cfg, const Options& o, const std::string& l
             say("\nCompared with " + o.compare + ":");
             say(red(compare_table(older, res)));
         } catch (const std::exception& e) {
-            say_err(std::string("[lamina] --bench-compare: ") + e.what());
+            say_err(std::string("[lamina] --compare: ") + e.what());
         }
     }
     say("\nReport: " + u8_str(dir / "README.md") + "\nShare it: paste README.md into an issue at " + kShare +
@@ -1545,7 +1545,7 @@ int compare_only(const std::string& older, const std::string& newer) {
         say(compare_table(load_results(older), load_results(newer)));
         return 0;
     } catch (const std::exception& e) {
-        say_err(std::string("[lamina] --bench-compare: ") + e.what());
+        say_err(std::string("[lamina] --compare: ") + e.what());
         return 2;
     }
 }

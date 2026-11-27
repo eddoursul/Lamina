@@ -411,7 +411,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
           const std::vector<std::string>& profiles, std::string& err) {
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
-    {   // what the file must hold for this path, before anything is read (lamina --check says the same of it)
+    {   // what the file must hold for this path, before anything is read (lamina check says the same of it)
         lamina::core::FileCheckOptions fo;
         fo.mtp = want_mtp;
         if (std::string e = lamina::core::hy4_file_problem(gm, fo); !e.empty()) { err = e; return false; }

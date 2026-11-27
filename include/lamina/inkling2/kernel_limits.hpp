@@ -1,5 +1,5 @@
 // include/lamina/inkling2/kernel_limits.hpp - what Inkling 2's kernels take of a model's geometry (the sizes they are
-// built for: kernel_sizes.hpp): the engine's load and lamina --check refuse a model past them alike.
+// built for: kernel_sizes.hpp): the engine's load and lamina check refuse a model past them alike.
 #pragma once
 
 #include "lamina/inkling2/geometry.hpp"

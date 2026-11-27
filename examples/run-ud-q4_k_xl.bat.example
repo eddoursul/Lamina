@@ -4,5 +4,5 @@ rem Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL, on http://127.0.0.1:8082/v1 with u
 rem The config's --main-gpu runs the engine: another program on that card stalls its per-layer spin-waits.
 rem Its --second-gpu holds more experts and may drive the display.
 cd /d "%~dp0.."
-build\lamina.exe --config examples\ud-q4_k_xl.json
+build\lamina.exe serve --config examples\ud-q4_k_xl.json
 pause

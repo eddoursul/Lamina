@@ -66,7 +66,7 @@ json gpu_canonical(const json& gpu);
 /// the cards the engine works on, as --gpu takes them: "gpu"'s, else the args' --gpu, else their --main-gpu and
 /// --second-gpu (names alone); empty when none names one
 std::vector<std::string> engine_cards(const json& cfg);
-/// a config in the form --write-config writes: the older GPU flags as cards of "gpu" (--main-gpu and --second-gpu as
+/// a config in the form write-config writes: the older GPU flags as cards of "gpu" (--main-gpu and --second-gpu as
 /// their names, the main GPU's flags and the per-tier lists as their settings, a card's own setting winning), but
 /// beside a "gpu" of numbers and where a setting would go to an auto card; the other older names renamed
 /// (--clocks-hold, --tier-min ...); with `flash` (a Qwen3.8-Flash-Next config) the options at the engine's default

@@ -20,7 +20,7 @@ const EmbeddedFile* preset_file(std::string_view path);
 /// "inkling-2-mini.bin"; lamina/core/expert_cache.hpp), and every one of them
 const EmbeddedFile* profile_file(std::string_view path);
 std::span<const EmbeddedFile> profile_file_all();
-/// data/bench-agent-files.json, the texts of lamina --bench's agent session (src/server/bench.hpp)
+/// data/bench-agent-files.json, the texts of lamina bench's agent session (src/server/bench.hpp)
 const EmbeddedFile* bench_file(std::string_view path);
 
 }  // namespace lamina

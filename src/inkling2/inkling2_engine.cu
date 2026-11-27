@@ -483,7 +483,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     const size_t reserve = o.reserve;
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
-    // what the file must hold for this path (lamina --check says the same of it)
+    // what the file must hold for this path (lamina check says the same of it)
     if (std::string e = lamina::core::inkling2_file_problem(gm); !e.empty()) { err = e; return false; }
     if (std::string e = lamina::inkling2::read_geometry(gm.meta(), m.g); !e.empty()) { err = e; return false; }
     const Geometry& g = m.g;

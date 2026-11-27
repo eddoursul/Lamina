@@ -7,10 +7,10 @@
 // written to the config file on request (Save configuration; a session started without a config file keeps its
 // changes until it stops). Save writes the keys whose session value is not the one the file gives; for a config
 // that names a model and has no "args", a value equal to its preset's takes the key out of the file. Everything else
-// in the file - the keys --write-config writes, the network and security keys (host, api_key, cors_origins, trusted_origins,
-// allowed_hosts), the MCP servers and before_load (which run programs), sampling keys not listed here - is kept as
-// it is: a save touches only the keys it names (as --write-config over an earlier file keeps the user's keys, #629). The
-// earlier file is kept as <file>.bak.
+// in the file - the keys write-config writes, the network and security keys (host, api_key, cors_origins,
+// trusted_origins, allowed_hosts), the MCP servers and before_load (which run programs), sampling keys not listed
+// here - is kept as it is: a save touches only the keys it names (as write-config over an earlier file keeps the
+// user's keys, #629). The earlier file is kept as <file>.bak.
 //
 // A value or a file that is not what it must be throws RequestError (frontend.hpp, Python's ValueError: a 400); a
 // file that cannot be read or written throws ConfigFileError (Python's OSError).

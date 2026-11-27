@@ -1,10 +1,12 @@
 // src/server/main.cpp - lamina: the OpenAI, Anthropic and Responses APIs and the web app in front of the engine,
-// which runs on a thread of this process (serve/server.py's main).
+// which runs on a thread of this process (serve/server.py's main), and the commands that check and measure it.
 //
-//   lamina -m MODEL.gguf                      a model file, its config built from the preset for it
-//   lamina --config FILE                      the model a run config names
-//   lamina --engine mock --tokenizer <gguf>   a scripted engine (the tests')
-//   lamina -m MODEL.gguf --bench              the model measured through this server's API (bench.hpp)
+//   lamina serve -m MODEL.gguf                      a model file, its config built from the preset for it
+//   lamina serve --config FILE                      the model a run config names
+//   lamina serve --engine mock --tokenizer <gguf>   a scripted engine (the tests')
+//   lamina check -m MODEL.gguf                      this PC and the model, nothing loaded (model_check.hpp)
+//   lamina bench -m MODEL.gguf                      the model measured through this server's API (bench.hpp)
+//   lamina write-config FILE -m MODEL.gguf          the config the command line runs, written
 #include "bench.hpp"
 #include "config.hpp"
 #include "engine.hpp"
@@ -104,8 +106,11 @@ void install_stop_handlers() {
 #endif
 }
 
+std::string g_command;   // the command line's command ("": none yet)
+
 [[noreturn]] void usage_error(const std::string& msg) {
-    say_err("usage: lamina -m MODEL.gguf | --config FILE [options] [engine options] (--help lists them)");
+    say_err("usage: " + command_usage(g_command) + " (lamina " + (g_command.empty() ? "help" : g_command + " --help") +
+            " lists them)");
     say_err("lamina: error: " + msg);
     std::exit(2);
 }
@@ -136,7 +141,7 @@ long self_pid() {
 #endif
 }
 
-/// a file removed when it goes out of scope, however the run ends (--bench's copy of the expert profile, which the
+/// a file removed when it goes out of scope, however the run ends (bench's copy of the expert profile, which the
 /// engine saves into at its close: declared before the engine, so removed after it)
 struct RemovedAtEnd {
     std::string path;
@@ -251,7 +256,7 @@ std::string no_lending(const json& cfg, const std::string& arch, std::vector<Gpu
 /// card's UUID (the encoder finds its card among this process's CUDA devices, whose order is another).  With
 /// "lend", a section that names no card gets the engine's main GPU, where every engine lends; for one that names its
 /// card `lend_no` is why the engine cannot lend there (no_lending; "": it can), and the encoder then keeps its VRAM
-/// on that card.  `tell`: the card picked said (not where --check's pictures line names it).
+/// on that card.  `tell`: the card picked said (not where check's pictures line names it).
 void settle_vision_gpu(json& cfg, std::vector<GpuInfo>& gpus, const std::string& arch, std::string& lend_no,
                        bool tell = true) {
     lend_no.clear();
@@ -302,7 +307,7 @@ void print_line(std::FILE* f, std::string_view text) {
     std::fflush(f);
 }
 
-/// what --check -m URL read: the URL, the commit, the files and bytes, the time
+/// what check -m URL read: the URL, the commit, the files and bytes, the time
 std::string remote_read(const RemoteModels& r) {
     char secs[32];
     std::snprintf(secs, sizeof secs, "%.1f", r.seconds);
@@ -314,7 +319,7 @@ std::string remote_read(const RemoteModels& r) {
            secs + " s";
 }
 
-/// --check -m URL where the URL holds several models: this PC, then a row of each model - whether the engine reads its
+/// check -m URL where the URL holds several models: this PC, then a row of each model - whether the engine reads its
 /// files, whether it would start here once downloaded (its config built as -m builds one, with the file's and the
 /// command line's settings) - and why not.  0 when one can start.
 int check_table(const RemoteModels& r, const json& file_cfg, const json& given, const CommandLine& cl,
@@ -542,13 +547,32 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
         for (const std::string& s : pc_stops) say("  - " + s);
     } else {
         say(std::to_string(can) + " of the " + std::to_string(models_n) + " models can start once downloaded." + more +
-            " lamina --check -m <a model's URL> says more of one.");
+            " lamina check -m <a model's URL> says more of one.");
     }
     return can > 0 ? 0 : 1;
 }
 
 int run(int argc, char** argv) {
     no_throttle_self();   // #691: a minimized console window must not slow the engine down
+    // what is answered before a command line is read: the commands (none given too), a command's options, the version
+    const std::string first = argc > 1 ? argv[1] : "help";
+    if (first == "help" || first == "-h" || first == "--help") {
+        const std::string of = argc > 2 ? argv[2] : "";
+        if (of.empty()) {
+            std::fputs(commands_help().c_str(), stdout);
+            return 0;
+        }
+        if (of != "serve" && of != "check" && of != "bench" && of != "write-config")
+            usage_error("help " + of + ": '" + of + "' is no command with options");
+        std::fputs(command_help(of).c_str(), stdout);
+        return 0;
+    }
+    if (first == "version" || first == "-v" || first == "--version") {
+        std::fputs(LAMINA_VERSION "\n", stdout);
+        return 0;
+    }
+    for (const Command& c : kCommands)
+        if (c.name == first) g_command = first;   // (its usage line before an error of its command line)
     CommandLine cl;
     try {
         cl = parse_command_line(argc, argv);
@@ -556,25 +580,19 @@ int run(int argc, char** argv) {
         usage_error(e.what());
     }
     if (cl.help) {
-        std::fputs(params_help().c_str(), stdout);
+        std::fputs(command_help(cl.command).c_str(), stdout);
         return 0;
     }
     if (cl.version) {
-        std::fputs("lamina " LAMINA_VERSION "\n", stdout);
+        std::fputs(LAMINA_VERSION "\n", stdout);
         return 0;
     }
-    if (!cl.write_config.empty() && cl.check) usage_error("--write-config or --check: not both");
-    if (cl.verbose && !cl.check) usage_error("--verbose goes with --check");
-    const bool attached = !cl.bench_url.empty();   // --bench-url: a server that runs, measured from here
-    if (cl.bench_compare.size() == 2) {            // two reports side by side, nothing run
-        if (cl.bench || attached || cl.bench_options) usage_error("--bench-compare OLD NEW compares two reports: no --bench with it");
+    const bool attached = !cl.bench_url.empty();   // bench --url: a server that runs, measured from here
+    if (cl.bench_compare.size() == 2) {            // bench --compare OLD NEW: two reports side by side, nothing run
+        if (attached || cl.bench_options || !cl.config.empty() || !cl.settings.empty() || !cl.engine.empty())
+            usage_error("--compare OLD NEW compares two reports: nothing is run, and no other option goes with it");
         return bench::compare_only(cl.bench_compare[0], cl.bench_compare[1]);
     }
-    if (cl.bench && attached) usage_error("--bench or --bench-url: not both");
-    if ((cl.bench_options || !cl.bench_compare.empty()) && !cl.bench && !attached)
-        usage_error("the --bench-* options go with --bench (or --bench-url)");
-    if ((cl.bench || attached) && (cl.check || !cl.write_config.empty()))
-        usage_error("--bench with --check or --write-config: not together");
     bench::Options bench_opts;
     bench_opts.runs = cl.bench_runs;
     bench_opts.clients = cl.bench_clients;
@@ -582,11 +600,11 @@ int run(int argc, char** argv) {
     bench_opts.think = cl.bench_think;
     bench_opts.out = cl.bench_out;
     bench_opts.compare = cl.bench_compare.empty() ? "" : cl.bench_compare[0];
-    bench_opts.command = attached ? "lamina --bench-url " + cl.bench_url : "lamina --bench";
-    if (cl.bench_clients > 0) bench_opts.command += " --bench-clients " + std::to_string(cl.bench_clients);
-    if (cl.bench_long) bench_opts.command += " --bench-long";
-    if (cl.bench_think) bench_opts.command += " --bench-think";
-    if (cl.bench_runs != 3) bench_opts.command += " --bench-runs " + std::to_string(cl.bench_runs);
+    bench_opts.command = attached ? "lamina bench --url " + cl.bench_url : "lamina bench";
+    if (cl.bench_clients > 0) bench_opts.command += " --clients " + std::to_string(cl.bench_clients);
+    if (cl.bench_long) bench_opts.command += " --long";
+    if (cl.bench_think) bench_opts.command += " --think";
+    if (cl.bench_runs != 3) bench_opts.command += " --runs " + std::to_string(cl.bench_runs);
     for (const EngineOption& eo : cl.engine) {   // the ones the server sets itself
         if (eo[0] == "--replicas" || starts_with(eo[0], "--replica-") || eo[0] == "--no-replica-cpus")
             usage_error(eo[0] + ": " + kOneEngine + "; for engines on other cards start a server for each, with its own "
@@ -600,7 +618,7 @@ int run(int argc, char** argv) {
     install_stop_handlers();
     if (attached) {   // nothing is loaded here: the client alone
         if (!cl.config.empty() || cl.settings.contains("model") || !cl.engine.empty())
-            usage_error("--bench-url measures a server that runs: no -m, --config or engine options with it");
+            usage_error("--url measures a server that runs: no -m, --config or engine options with it");
         std::string url(rstrip_chars(cl.bench_url, "/"));
         const json given = cl.settings.contains("api_key") ? cl.settings["api_key"] : json(nullptr);
         const char* env_key = std::getenv("LAMINA_API_KEY");
@@ -622,7 +640,7 @@ int run(int argc, char** argv) {
         return 1;
     }
     for (const std::string& k : unknown_keys(file_cfg))
-        say("[lamina] the config's \"" + k + "\" is no key lamina reads (lamina --help lists them): ignored");
+        say("[lamina] the config's \"" + k + "\" is no key lamina reads (lamina serve --help lists them): ignored");
     // the settings: the preset's (with -m, or a config's "model" when it has no "args"), the file's over them, the
     // command line's over both
     json given = file_cfg;
@@ -631,15 +649,15 @@ int run(int argc, char** argv) {
     if (engine_kind != "lamina" && engine_kind != "mock")
         usage_error("engine (--engine): lamina or mock, not '" + engine_kind + "'");
     const bool mock = engine_kind == "mock";
-    std::vector<GpuInfo> gpus;   // nvidia-smi's: the preset's main GPU, --check's list
-    // -m URL, --check alone: the model's files' headers read into copies laid out as a download keeps them (the Hub's
+    std::vector<GpuInfo> gpus;   // nvidia-smi's: the preset's main GPU, check's list
+    // -m URL, check's alone: the model's files' headers read into copies laid out as a download keeps them (the Hub's
     // listing at one commit, or the file the URL names); one model is then checked as a file on disk is, its lines with
     // the download's paths, several in a table
     std::unique_ptr<RemoteModels> remote;
     std::optional<SayRedirect> remote_lines;
     if (const std::string url = jstr(given, "model"); !mock && is_url(url)) {
         if (!cl.check)
-            usage_error("-m " + url + ": a model at a URL is checked (--check -m URL) but not run here: download its "
+            usage_error("-m " + url + ": a model at a URL is checked (lamina check -m URL), not run here: download its "
                         "files, then name the first one's path");
         gpus = nvidia_gpus();
         say_err("[lamina] reading the GGUF files' headers at " + url);
@@ -669,7 +687,7 @@ int run(int argc, char** argv) {
     const std::string model = jstr(given, "model");
     if (mock) {
         if (cl.check || !cl.write_config.empty() || !cl.engine.empty())
-            usage_error("the mock engine takes no --check, --write-config or engine options");
+            usage_error("the mock engine runs with serve or bench alone, and takes no engine options");
         if (jstr(given, "tokenizer").empty())
             usage_error("the mock engine needs --tokenizer <a model's .gguf> (its tokenizer and chat template)");
     } else if (model.empty() && !jget(file_cfg, "args").is_array() && !cl.check) {
@@ -678,7 +696,7 @@ int run(int argc, char** argv) {
     const bool from_preset = !mock && !model.empty() && !jget(file_cfg, "args").is_array();
     json cfg = json::object();
     std::string model_arch;      // the preset's model's general.architecture
-    std::vector<std::string> preset_keys;   // its keys, which --write-config renews
+    std::vector<std::string> preset_keys;   // its keys, which write-config renews
     std::vector<std::string> notes;   // the preset's lines for the window: the model, the pictures, the log
     json preset_base = json::object();   // the preset's settings, under the file's (the Settings view compares)
     if ((from_preset || cl.check) && gpus.empty()) gpus = nvidia_gpus();
@@ -735,12 +753,12 @@ int run(int argc, char** argv) {
             } catch (const std::exception&) {   // (the start says what is wrong with the file)
             }
         }
-        settle_vision_gpu(cfg, gpus, arch, lend_no, !cl.check);   // (--check: its pictures line names the card)
+        settle_vision_gpu(cfg, gpus, arch, lend_no, !cl.check);   // (check: its pictures line names the card)
     }
     if (!cl.write_config.empty()) {
         json out;
+        std::string arch = model_arch;   // (a config's own args: its model file's)
         try {   // the form a config is written in now: its cards, its options past the engine's defaults, an object
-            std::string arch = model_arch;
             if (arch.empty()) arch = read_model(model_file(cfg)).arch;
             out = modern_config(cfg, arch == "qwen4exp");
         } catch (const std::exception& e) {
@@ -750,11 +768,10 @@ int run(int argc, char** argv) {
         try {
             const std::vector<std::string> kept = write_config(cl.write_config, out, preset_keys);
             json probe = cfg;   // the draft layer, or the drafter, as a start would find it
-            if (const std::string w = resolve_draft_layer(probe, model_arch.empty() ? "qwen4exp" : model_arch); !w.empty())
-                say(w);
-            if (const std::string w = resolve_drafter(probe, model_arch); !w.empty()) say(w);
+            if (const std::string w = resolve_draft_layer(probe, arch); !w.empty()) say(w);
+            if (const std::string w = resolve_drafter(probe, arch); !w.empty()) say(w);
             say("[lamina] wrote " + cl.write_config + (kept.empty() ? "" : " (kept from the earlier file, now " +
-                cl.write_config + ".bak: " + join(kept, ", ") + ")") + "; start it with  lamina --config " +
+                cl.write_config + ".bak: " + join(kept, ", ") + ")") + "; start it with  lamina serve --config " +
                 cl.write_config);
         } catch (const std::exception& e) {
             say_err(std::string("[lamina] ") + e.what());
@@ -765,7 +782,7 @@ int run(int argc, char** argv) {
     if (cl.check)
         return check_report(cl.config.empty() && model.empty() ? nullptr : &cfg, gpus, "",
                             remote ? "Once downloaded, it can start." : "It can start.") ? 0 : 1;
-    // --bench: the config as the report shows it, then this run's own server: this PC only, on a port of its own (not
+    // bench: the config as the report shows it, then this run's own server: this PC only, on a port of its own (not
     // the one the user's clients use), loaded at once and kept loaded, the expert profile saved into a copy
     json bench_cfg;
     RemovedAtEnd bench_scratch;
@@ -775,7 +792,7 @@ int run(int argc, char** argv) {
         const int64_t listed = jget(cfg, "port").is_number_integer() ? cfg["port"].get<int64_t>() : 8095;
         if (listed > 0 && bench::lamina_answers("http://127.0.0.1:" + std::to_string(listed))) {
             say_err("[lamina] a Lamina server answers on port " + std::to_string(listed) + ": the benchmark needs the GPUs "
-                    "to itself. Stop that server, or measure it as it runs:  lamina --bench-url http://127.0.0.1:" +
+                    "to itself. Stop that server, or measure it as it runs:  lamina bench --url http://127.0.0.1:" +
                     std::to_string(listed));
             return 2;
         }
@@ -914,8 +931,8 @@ int run(int argc, char** argv) {
             if (!sampling_defaults.empty()) say("[lamina] sampling defaults from the config: " + items(sampling_defaults));
             std::vector<std::string> args = engine_args(cfg);
             if (const std::vector<std::string> old = deprecated_options(file_cfg, args); !old.empty()) {
-                say("[lamina] deprecated options, still taken (--write-config FILE writes a config with what takes "
-                    "their place; a --gpu card is an item of its \"gpu\"):");
+                say("[lamina] deprecated options, still taken (lamina write-config FILE writes a config with what "
+                    "takes their place; a --gpu card is an item of its \"gpu\"):");
                 for (const std::string& o : old) say("         " + o);
             }
             lazy = jget(cfg, "lazy_load") == true;

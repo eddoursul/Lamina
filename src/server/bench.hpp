@@ -1,4 +1,4 @@
-// src/server/bench.hpp - lamina --bench: a model measured the way it is used, through the server's own HTTP API,
+// src/server/bench.hpp - lamina bench: a model measured the way it is used, through the server's own HTTP API,
 // and a report to share without personal details.
 //
 // The suite, each test three runs (medians and ranges): three short questions (decode tok/s, time to first token),
@@ -100,11 +100,11 @@ json run_suite(const Target& t, int64_t ctx, const Options& o, const std::functi
 
 /// The whole benchmark: the machine before and after, the suite, the report in a folder of its own below o.out (or
 /// bench-results beside the program), its summary printed.  `cfg`: the config of the server this run started (null:
-/// --bench-url's server); `log_file` and `log_from`: the engine's log and where this run's part begins, for the
+/// bench --url's server); `log_file` and `log_from`: the engine's log and where this run's part begins, for the
 /// report's excerpt.  The exit code: 0; 1 when no request came back; 2 no Lamina server at t.base; 130 stopped.
 int run(const Target& t, const json& cfg, const Options& o, const std::string& log_file, uint64_t log_from,
         const std::function<bool()>& stopped);
-/// --bench-compare OLD NEW: the two reports' table; 2 when one cannot be read
+/// --compare OLD NEW: the two reports' table; 2 when one cannot be read
 int compare_only(const std::string& older, const std::string& newer);
 
 }  // namespace lamina::bench

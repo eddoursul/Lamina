@@ -1033,7 +1033,7 @@ void post_config(Exchange& x) {
                 if (!runconfig::savable(*e, &fs))
                     throw RequestError(it.key() + " is an engine option, read when the server starts, and a config "
                                        "without \"args\" holds none: the command line sets it (or a config "
-                                       "lamina --write-config writes)");
+                                       "lamina write-config writes)");
             }
             json updated;
             std::tie(updated, changed) = runconfig::apply(svc.live_config, set);

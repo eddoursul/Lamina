@@ -15,7 +15,7 @@ int check_args(int argc, char** argv);
 
 /// Qwen3.8-Flash-Next's default for an option under --serve, as its value reads ("4", "0.5", "auto", "kernel"; a
 /// switch's "on" or "off"); empty for an option it does not know or one without a default worth writing.  A config that
-/// lamina --write-config writes leaves out the options at their default.
+/// lamina write-config writes leaves out the options at their default.
 const char* option_default(const char* flag);
 
 }  // namespace lamina::program

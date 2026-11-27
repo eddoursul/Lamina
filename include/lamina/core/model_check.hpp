@@ -2,7 +2,7 @@
 //
 // What each path's load refuses of a file by its header - its architecture and keys, every tensor's name, shape, type
 // and place, the shards' sizes - is checked here before anything is allocated or read: each path's load calls its
-// part first, and lamina --check calls the whole, so the server says of a file (on disk, or the copies of a
+// part first, and lamina check calls the whole, so the server says of a file (on disk, or the copies of a
 // remote file's headers) what a start would say.  Not here: what a file's values hold (a non-finite weight is refused
 // as the pack converts it), what the options or this PC's memory and GPUs decide.
 #pragma once

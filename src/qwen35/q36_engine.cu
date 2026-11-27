@@ -1619,7 +1619,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     const auto t0 = Clock::now();
     m.file = std::make_shared<lamina::GgufModel>(lamina::GgufModel::open(path));
     const lamina::GgufModel& gm = *m.file;
-    // what the file must hold for this path, before anything is placed (lamina --check says the same of it)
+    // what the file must hold for this path, before anything is placed (lamina check says the same of it)
     if (err = lamina::core::qwen35_file_problem(gm); !err.empty()) return false;
     if (!lamina::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
     if (m.g.family != lamina::ModelFamily::Qwen35Moe && m.g.family != lamina::ModelFamily::Qwen35) {
@@ -1640,7 +1640,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     if (const lamina::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
-    // each adapter against the model, from their headers, before anything is placed (lamina --check says the same)
+    // each adapter against the model, from their headers, before anything is placed (lamina check says the same)
     for (const LoraSpec& sp : lora_specs) {
         try {
             const lamina::GgufFile adapter(sp.path);

@@ -1,5 +1,6 @@
-// src/server/model_config.hpp - lamina -m: the run config built from a model's GGUF: the preset its header
-// picks (examples/*.json, built in), with this PC's GPUs and the files beside the model.  --write-config writes it; --check says what a model needs against what this PC has.
+// src/server/model_config.hpp - the run config -m builds from a model's GGUF: the preset its header picks
+// (examples/*.json, built in), with this PC's GPUs and the files beside the model.  lamina write-config writes it;
+// lamina check says what a model needs against what this PC has.
 #pragma once
 
 #include "config.hpp"
@@ -79,7 +80,7 @@ struct ModelOptions {
     std::string model;               ///< -m: any shard of the model
     std::string mmproj;              ///< --mmproj ("": the projector beside the model, if any)
     bool no_mmproj = false;          ///< --no-mmproj
-    std::string written;             ///< the config file that describes the run (--write-config's, else --config's):
+    std::string written;             ///< the config file that describes the run (write-config's, else --config's):
                                      ///< the log and the learned profile go beside it, else beside the program
     std::vector<int> allowed_gpus;   ///< --gpu: the cards the engine sees
 };
@@ -104,7 +105,7 @@ ModelConfig config_from_model(const ModelOptions& opts, const std::vector<GpuInf
 /// when it cannot be written.
 std::vector<std::string> write_config(const std::string& path, json cfg, const std::vector<std::string>& renewed = {});
 
-/// --check, said in the window: given a config (built from -m or read), its model's summary - the file, where it runs,
+/// lamina check, said in the window: given a config (built from -m or read), its model's summary - the file, where it runs,
 /// what it takes, its drafter and pictures - and the verdict, why not where it would not start (this PC's own reasons
 /// among them); without one, this PC (its CPU, RAM and GPUs). `model_error`: why -m's model gave no config; `ready` the
 /// last line where it would start.  False when the model would not start.
@@ -113,12 +114,12 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
 
 /// Why no model would start on this PC; `show`: its lines said too (its CPU, RAM and GPUs)
 std::vector<std::string> check_pc(const std::vector<GpuInfo>& gpus, bool show = true);
-/// What --check finds of a config's model
+/// What lamina check finds of a config's model
 struct ModelCheck {
     std::string refused;              ///< why the engine refuses the model's file ("" where it reads it)
     std::vector<std::string> stops;   ///< why it would not start here as the config runs it (`refused` among them)
 };
-/// --check's summary of a config's model (said): the file and whether the engine's load reads it
+/// lamina check's summary of a config's model (said): the file and whether the engine's load reads it
 /// (core::model_file_problem, with the config's engine options), where it runs, what it takes of this PC, its drafter
 /// and its pictures
 ModelCheck check_model(const json& cfg, const std::vector<GpuInfo>& gpus);

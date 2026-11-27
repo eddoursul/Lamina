@@ -1,4 +1,4 @@
-// src/server/model_config.cpp - lamina -m's config, --write-config and --check (model_config.hpp).
+// src/server/model_config.cpp - the config -m builds, write-config and check (model_config.hpp).
 #include "model_config.hpp"
 
 #include "lamina/artifact/drafter.hpp"

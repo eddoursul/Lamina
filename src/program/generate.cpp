@@ -2097,7 +2097,7 @@ int lamina::program::run(int argc, char** argv) {
         return 2;
     }
 
-    {   // what the file must hold for this path, before anything is allocated or read (lamina --check says the
+    {   // what the file must hold for this path, before anything is allocated or read (lamina check says the
         // same of it): its pack, its experts' and dense matrices' formats, its tables and the tensors the windows read
         lamina::core::FileCheckOptions fo;
         fo.ple_gguf = o.ple_gguf;

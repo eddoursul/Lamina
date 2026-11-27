@@ -1,4 +1,4 @@
-// src/server/params.cpp - lamina's settings table and command line (params.hpp).
+// src/server/params.cpp - lamina's commands, settings table and command line (params.hpp).
 #include "params.hpp"
 
 #include "config.hpp"
@@ -23,8 +23,8 @@ const std::vector<Param> kParams = {
     {"--model", "-m", "model", K::Path, "GGUF",
      "the model's file (a split one by any shard). Without the config's \"args\" the preset for it (examples/*.json, "
      "picked by the file's header) gives them, with this PC's GPUs and the files beside the model; with them, it takes "
-     "the place of their --native. With --check also a URL: a Hugging Face repository's, a folder's or a file's in it, "
-     "or a GGUF file's (its files' headers alone are read; several models: a table)"},
+     "the place of their --native. With lamina check also a URL: a Hugging Face repository's, a folder's or a "
+     "file's in it, or a GGUF file's (its files' headers alone are read; several models: a table)"},
     {"--mmproj", "", "vision.mmproj", K::Path, "FILE",
      "pictures: the image projector (with -m by default the mmproj*.gguf made for the model beside it)"},
     {"--no-mmproj", "", "vision", K::Off, "", "no pictures"},
@@ -269,7 +269,7 @@ json parse_value(const Param& p, const std::string& flag, const std::string& v) 
             if (py_loads(v, j) && !j.is_string()) return j;
             return v;
         }
-        case K::Path: return is_url(v) ? v : u8_str(std::filesystem::absolute(u8_path(v)).lexically_normal());   // (-m URL: --check reads it)
+        case K::Path: return is_url(v) ? v : u8_str(std::filesystem::absolute(u8_path(v)).lexically_normal());   // (-m URL: check reads it)
         case K::Str:
         case K::Off: break;
     }
@@ -317,9 +317,28 @@ json* setting_at(json& cfg, std::string_view key) {
 
 }  // namespace
 
+const std::vector<Command> kCommands = {
+    {"serve", "the OpenAI, Anthropic and Responses APIs and the web app in front of a model"},
+    {"check", "what this PC has and, for a model (its file, a config or a URL), what it needs, how it would run and "
+              "whether it starts; nothing is loaded"},
+    {"bench", "a model measured the way it is used, through the server's own API, and a report to share"},
+    {"write-config", "the run config a command line runs, written to a file"},
+    {"version", "the program's version (also -v, --version)"},
+    {"help", "these commands; help COMMAND: its options (also -h, --help)"},
+};
+
 CommandLine parse_command_line(int argc, char** argv) {
     CommandLine cl;
-    for (int i = 1; i < argc; ++i) {
+    const std::string first = argc > 1 ? argv[1] : "";
+    if (first != "serve" && first != "check" && first != "bench" && first != "write-config")
+        throw std::invalid_argument(first.empty() || starts_with(first, "-") ? "a command comes first"
+                                                                             : "'" + first + "' is no command");
+    cl.command = first;
+    cl.check = first == "check";
+    const bool bench = first == "bench";
+    int i = 2;
+    if (first == "write-config" && argc > 2 && !starts_with(argv[2], "-")) cl.write_config = argv[i++];
+    for (; i < argc; ++i) {
         std::string o = argv[i], v;
         const size_t eq = o.find('=');
         const bool inline_value = starts_with(o, "--") && eq != std::string::npos;
@@ -344,21 +363,14 @@ CommandLine parse_command_line(int argc, char** argv) {
             cl.config = value();
             continue;
         }
-        if (o == "--write-config") {
-            cl.write_config = value();
-            continue;
-        }
-        if (o == "--check") {
-            cl.check = true;
-            continue;
-        }
-        if (o == "--verbose") {
+        if (o == "--verbose" && cl.check) {
+            if (inline_value) bad(o, "takes no value");
             cl.verbose = true;
             continue;
         }
-        static const char* const bench_flags[] = {"--bench",       "--bench-url",   "--bench-runs", "--bench-clients",
-                                                  "--bench-long",  "--bench-think", "--bench-out",  "--bench-compare"};
-        if (std::find(std::begin(bench_flags), std::end(bench_flags), o) != std::end(bench_flags)) {
+        static const char* const bench_flags[] = {"--url",  "--runs", "--clients", "--long",
+                                                  "--think", "--out",  "--compare"};
+        if (bench && std::find(std::begin(bench_flags), std::end(bench_flags), o) != std::end(bench_flags)) {
             // the benchmark's (src/server/bench.hpp): command-line options, no config keys
             auto whole = [&](int lo, int hi) {
                 const std::string v = value();
@@ -371,27 +383,27 @@ CommandLine parse_command_line(int argc, char** argv) {
                 bad(o, "expected a whole number in " + std::to_string(lo) + ".." + std::to_string(hi) + ", not '" + v + "'");
             };
             auto absolute = [](const std::string& p) { return u8_str(std::filesystem::absolute(u8_path(p)).lexically_normal()); };
-            if (o == "--bench" || o == "--bench-long" || o == "--bench-think") {
+            if (o == "--long" || o == "--think") {
                 if (inline_value) bad(o, "takes no value");
-                (o == "--bench" ? cl.bench : o == "--bench-long" ? cl.bench_long : cl.bench_think) = true;
-                cl.bench_options = cl.bench_options || o != "--bench";
-                continue;
-            }
-            if (o == "--bench-url") {
-                cl.bench_url = value();
-                continue;
-            }
-            if (o == "--bench-runs" || o == "--bench-clients") {
-                (o == "--bench-runs" ? cl.bench_runs : cl.bench_clients) = o == "--bench-runs" ? whole(1, 100) : whole(0, 256);
+                (o == "--long" ? cl.bench_long : cl.bench_think) = true;
                 cl.bench_options = true;
                 continue;
             }
-            if (o == "--bench-out") {
+            if (o == "--url") {
+                cl.bench_url = value();
+                continue;
+            }
+            if (o == "--runs" || o == "--clients") {
+                (o == "--runs" ? cl.bench_runs : cl.bench_clients) = o == "--runs" ? whole(1, 100) : whole(0, 256);
+                cl.bench_options = true;
+                continue;
+            }
+            if (o == "--out") {
                 cl.bench_out = absolute(value());
                 cl.bench_options = true;
                 continue;
             }
-            if (o == "--bench-compare") {   // OLD, and NEW when the next word is no option
+            if (o == "--compare") {   // OLD, and NEW when the next word is no option
                 cl.bench_compare.push_back(absolute(value()));
                 if (!inline_value && i + 1 < argc && !starts_with(argv[i + 1], "--")) cl.bench_compare.push_back(absolute(argv[++i]));
                 if (cl.bench_compare.size() > 2) bad(o, "takes one report (OLD) or two (OLD NEW)");
@@ -429,6 +441,9 @@ CommandLine parse_command_line(int argc, char** argv) {
         }
         throw std::invalid_argument("unrecognized arguments: " + std::string(argv[i]));
     }
+    if (first == "write-config" && cl.write_config.empty() && !cl.help && !cl.version)
+        throw std::invalid_argument("the file to write comes first: lamina write-config FILE [options]");
+    cl.bench = bench && cl.bench_url.empty() && cl.bench_compare.size() != 2;
     if (json* g = setting_at(cl.settings, "gpu")) *g = gpu_canonical(*g);   // --gpu 0,2: [0, 2]; cards: one item each
     return cl;
 }
@@ -461,47 +476,109 @@ std::vector<std::string> unknown_keys(const json& cfg) {
     return out;
 }
 
-std::string params_help() {
+namespace {
+
+constexpr size_t kWidth = 118, kCol = 36;
+
+using Lines = std::initializer_list<std::pair<const char*, const char*>>;
+
+std::string help_lines(Lines lines) {
+    std::string out;
+    for (const auto& [left, help] : lines) out += program::help_line(left, help, kWidth, kCol);
+    return out;
+}
+
+/// a command's help but serve's: what it does, its forms, its own options, then the options of serve's it takes
+std::string other_help(std::string_view what, std::initializer_list<const char*> forms, Lines options) {
+    std::string out = program::wrapped(what, 0, kWidth, 0) + "\n";
+    for (const char* form : forms) out += std::string("  ") + form + "\n";
+    out += "\nOptions\n" + help_lines(options) + program::help_line("-h, --help", "this text", kWidth, kCol);
+    return out + "\n" +
+           program::wrapped("-m, --config and the other options of lamina serve (lamina serve --help lists them, the "
+                            "engine's too) make the config, as a start would run it.",
+                            0, kWidth, 0);
+}
+
+}  // namespace
+
+std::string command_usage(std::string_view command) {
+    if (command == "serve") return "lamina serve -m MODEL.gguf | --config FILE [options] [engine options]";
+    if (command == "check") return "lamina check [-m MODEL.gguf | -m URL | --config FILE] [options] [engine options]";
+    if (command == "bench")
+        return "lamina bench -m MODEL.gguf | --config FILE [options] [engine options] | --url URL | --compare OLD NEW";
+    if (command == "write-config")
+        return "lamina write-config FILE -m MODEL.gguf | --config FILE [options] [engine options]";
+    return "lamina <command> [options]";
+}
+
+std::string commands_help() {
+    std::string out =
+        "Lamina v" LAMINA_VERSION ", an inference engine\n"
+        "\n"
+        "  lamina <command> [options]\n"
+        "\n"
+        "Commands\n";
+    for (const Command& c : kCommands) out += program::help_line(c.name, c.what, kWidth, 16);
+    return out + "\n" +
+           program::wrapped("lamina <command> --help lists a command's options; docs/PARAMETERS.md describes every one.",
+                            0, kWidth, 0);
+}
+
+std::string command_help(std::string_view command) {
     using program::help_line;
     using program::wrapped;
-    constexpr size_t kWidth = 118, kCol = 36;
+    if (command == "check")
+        return other_help("lamina check: what this PC has and, for a model, what it needs, how it would run and whether "
+                          "it would start (exit code 1: it would not). Nothing is loaded. Without a model, this PC "
+                          "alone; with -m URL, a model before it is downloaded: a Hugging Face repository's URL, a "
+                          "folder's or a file's in it, or a GGUF file's (its files' headers alone are read; several "
+                          "models: a table).",
+                          {"lamina check", "lamina check -m MODEL.gguf [options] [engine options]",
+                           "lamina check --config FILE [options] [engine options]", "lamina check -m URL [options]"},
+                          {{"--verbose", "with a URL that holds several files: what each one is and why it cannot "
+                                         "start or is not read, under its row"}});
+    if (command == "bench")
+        return other_help(
+            "lamina bench: a model measured the way it is used: loaded, a fixed suite sent through the server's own "
+            "API on a port of its own (short questions, 4K and 16K prompts, a coding agent's session; 3-10 minutes), a "
+            "report to share written into bench-results beside the program. With --url, a Lamina server that runs, "
+            "nothing loaded here; with --compare OLD NEW, two reports side by side, nothing run.",
+            {"lamina bench -m MODEL.gguf [options] [engine options]",
+             "lamina bench --config FILE [options] [engine options]", "lamina bench --url URL [options]",
+             "lamina bench --compare OLD NEW"},
+            {{"--url URL", "the suite against a Lamina server that runs (http://127.0.0.1:8081)"},
+             {"--runs N", "runs per test (default 3)"},
+             {"--clients N", "also N requests at once (the server's --parallel slots run them together)"},
+             {"--long", "also a prompt of ~32K tokens"},
+             {"--think", "thinking on (the suite turns it off, so the answers are short and comparable)"},
+             {"--out DIR", "where the report's folder goes (default: bench-results beside the program)"},
+             {"--compare OLD [NEW]", "an earlier report (its folder or results.json) beside this run's; with NEW, "
+                                     "two reports side by side, nothing run"}});
+    if (command == "write-config")
+        return other_help(
+            "lamina write-config: the run config a command line runs (the preset's, the config file's and the command "
+            "line's settings in one) written to FILE, with its cards and the engine's options past their defaults; an "
+            "earlier FILE is kept as FILE.bak, and its keys outside the preset stay. lamina serve --config FILE runs "
+            "it.",
+            {"lamina write-config FILE -m MODEL.gguf [options] [engine options]",
+             "lamina write-config FILE --config OLD.json [options] [engine options]"},
+            {});
     std::string out =
-        "lamina: the OpenAI, Anthropic and Responses APIs and the web app in front of the Lamina engine.\n"
+        "lamina serve: the OpenAI, Anthropic and Responses APIs and the web app in front of the Lamina engine.\n"
         "\n"
-        "  lamina -m MODEL.gguf [options] [engine options]\n"
-        "  lamina --config FILE [options] [engine options]\n"
+        "  lamina serve -m MODEL.gguf [options] [engine options]\n"
+        "  lamina serve --config FILE [options] [engine options]\n"
         "\n";
     out += wrapped("Each of the server's options is a key of the run config too, named in [brackets] (a dot: a key of "
                    "that section), and the other way round; the engine's options, after the server's, are the config's "
                    "\"args\" (\"max-context\": 65536, a switch true or false). A value of the command line takes the "
-                   "place of the config file's, and the file's that of the preset -m builds from (--check shows the "
-                   "engine options a start gives the model). A switch takes --no-<name> for off. docs/PARAMETERS.md "
-                   "describes every option.",
+                   "place of the config file's, and the file's that of the preset -m builds from (lamina check shows "
+                   "the engine options a start gives the model). A switch takes --no-<name> for off. "
+                   "docs/PARAMETERS.md describes every option.",
                    0, kWidth, 0);
-    out += "\nCommands\n";
-    for (const auto& [left, help] : {
-             std::pair<const char*, const char*>{"--config FILE", "the run config to start from"},
-             {"--write-config FILE", "write the config this command line runs to FILE and stop; an earlier FILE is "
-                                     "kept as FILE.bak, and its keys outside the preset stay"},
-             {"--check", "say what this PC has and, for the model, what it needs, how it would run and whether it "
-                         "starts (exit code 1: it would not); nothing is loaded"},
-             {"--verbose", "with --check of a URL that holds several files: what each one is and why it cannot start "
-                           "or is not read, under its row"},
-             {"--bench", "measure the model the way it is used: load it, send a fixed suite through this server's own "
-                         "API on a port of its own (short questions, 4K and 16K prompts, a coding agent's session; 3-10 "
-                         "minutes), write a report to share into bench-results beside the program, and stop"},
-             {"--bench-url URL", "the same against a Lamina server that runs (http://127.0.0.1:8081): nothing is "
-                                 "loaded here"},
-             {"--bench-runs N", "runs per test (default 3)"},
-             {"--bench-clients N", "also N requests at once (the server's --parallel slots run them together)"},
-             {"--bench-long", "also a prompt of ~32K tokens"},
-             {"--bench-think", "thinking on (the suite turns it off, so the answers are short and comparable)"},
-             {"--bench-out DIR", "where the report's folder goes (default: bench-results beside the program)"},
-             {"--bench-compare OLD [NEW]", "an earlier report (its folder or results.json) beside this run's; with "
-                                           "NEW and no --bench, two reports side by side"},
-             {"-h, --help", "this text"},
-             {"-v, --version", "the program's version"}})
-        out += help_line(left, help, kWidth, kCol);
+    out += "\nThe config\n" +
+           help_lines({{"--config FILE", "the run config to start from (lamina write-config writes one)"},
+                       {"-h, --help", "this text"}});
     for (const Param& p : kParams) {
         if (p.flag.empty()) {
             out += "\n" + std::string(p.help) + "\n";
@@ -517,8 +594,8 @@ std::string params_help() {
         out += help_line(l, "[" + std::string(p.key) + "] " + std::string(p.help), kWidth, kCol);
     }
     out += "\n\nENGINE OPTIONS: the config's \"args\"\n" +
-           wrapped("Their defaults are the engine's own; -m's preset sets some of them (lamina -m MODEL.gguf "
-                   "--check shows those a start gives the model).",
+           wrapped("Their defaults are the engine's own; -m's preset sets some of them (lamina check -m MODEL.gguf "
+                   "shows those a start gives the model).",
                    0, kWidth, 0);
     out += program::options_help(program::kListServed, true, kWidth, kCol);
     return out;

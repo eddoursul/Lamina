@@ -1,7 +1,7 @@
 # Setup
 
 What a PC needs: [the README](../README.md#requirements). This page covers the build from the source, a model file
-run with `lamina -m`, the release binaries, the config, the GPUs, the engine options worth knowing,
+run with `lamina serve -m`, the release binaries, the config, the GPUs, the engine options worth knowing,
 Qwen3.6-35B-A3B and Qwen3.8-27B, and Inkling 2 Mini.
 
 ## Building
@@ -19,7 +19,7 @@ build.bat                        (Windows)
 They build the preset `native` of `CMakePresets.json` into `build/`: `lamina` (the image encoder is a part of
 it) and `lamina-engine` (the engine alone, for tests and measurements), the CUDA runtime linked in (they load the NVIDIA
 driver alone), for this PC's CPU and its GPUs of the RTX 30 series and newer, as `nvidia-smi` names them at each build
-(after a card is added, build again). The programs run from there: `build\lamina -m MODEL.gguf`
+(after a card is added, build again). The programs run from there: `build\lamina serve -m MODEL.gguf`
 ([below](#a-model-file)). `build.bat portable` (`./build.sh portable`) builds them for other PCs into
 `build-portable/`, as the releases are: RTX 30, 40 and 50 GPUs (compute capability 8.6, 8.9 and 12.0, with PTX for
 newer ones), any x64 CPU with AVX2 or arm64 CPU with Armv8.2's dot product and FP16 instructions, the C++ runtime
@@ -76,10 +76,10 @@ projector of another type by its name.
 
 ## A model file
 
-`lamina -m MODEL.gguf` runs a model file as it lies, a split one by any of its shards:
+`lamina serve -m MODEL.gguf` runs a model file as it lies, a split one by any of its shards:
 
 ```
-lamina -m D:\Models\Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
+lamina serve -m D:\Models\Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
 ```
 
 The server builds a config for the file and says in its window what it took:
@@ -149,7 +149,7 @@ and 50-68% of UD-Q4_K_XL's, an edit that quotes its prompt at 92-96%. The layer'
 another (`data/draft_vocab_fr.bin`, `draft_vocab_cyrillic.bin`, `tools/draft_vocab.py`).
 
 Every key of a config is an option of the command line too ([PARAMETERS.md](PARAMETERS.md#how-options-are-given)), and a value given there
-takes the place of the config file's, the file's that of the preset: `lamina -m MODEL.gguf --port 8090
+takes the place of the config file's, the file's that of the preset: `lamina serve -m MODEL.gguf --port 8090
 --temperature 0.6`. A config file can be as short as `{"model": "D:/Models/x.gguf", "port": 8090}`: without `"args"`
 the server builds the rest from the model's preset, as with `-m`, and the file's keys take the place of the preset's;
 a config with `"args"` (an empty `{}` too) stays as it is, its `"model"` (or `-m`) naming the file. `"args"` holds the
@@ -157,23 +157,23 @@ engine's options that differ from its defaults, as an object of the options with
 switch `true` or `false`: `"kv-grow": false` is `--no-kv-grow`, a list for several values:
 `"control-vector-layer-range": [4, 44]`) or as a list of words (`"--kv", "k8v4"`). What a run writes (the log, the
 learned profile) goes beside that config file. An engine option on the command line, with the values after it, takes
-the place of the preset's or the config's: `lamina -m MODEL.gguf --max-context 65536 --kv q4_0`. The engine's own
+the place of the preset's or the config's: `lamina serve -m MODEL.gguf --max-context 65536 --kv q4_0`. The engine's own
 parser reads those options first, for the model's family, and the server stops on one it does not take ("unknown
 argument: ...", a value out of range); `--native`, `--serve` and `--vision` are the server's to set (the model is
-`"model"`, the pictures the `vision` section). `lamina --config OLD.json --write-config NEW.json` writes an
+`"model"`, the pictures the `vision` section). `lamina write-config NEW.json --config OLD.json` writes an
 earlier config in this form: its GPUs as cards (the main GPU's and the per-tier flags as their settings, into `"gpu"`'s
 own cards too), the other deprecated options renamed, its options at the engine's default and `lib_dirs` left out,
 `"args"` an object. Two keep their GPU flags, as the engine still reads them: a `"gpu"` of numbers (the cards the
 engine sees) and an `auto` card a flag would give a setting.
 
-`--write-config FILE` writes the config the command line runs to FILE (the preset's, the config file's and the command
-line's settings in one) and stops; `lamina --config FILE` then runs it, and the web app's Model settings card
-saves into it (a server started with `-m` alone has no file: the card's changes last until it stops). The log and the
-learned profile then go beside FILE. An earlier FILE is kept as `FILE.bak`, and its keys outside the preset (an
-`api_key`, an `images` section) carry over.
+`lamina write-config FILE` writes the config the rest of its command line runs to FILE (the preset's, the config
+file's and the command line's settings in one); `lamina serve --config FILE` then runs it, and the web app's Model
+settings card saves into it (a server started with `-m` alone has no file: the card's changes last until it stops). The
+log and the learned profile then go beside FILE. An earlier FILE is kept as `FILE.bak`, and its keys outside the preset
+(an `api_key`, an `images` section) carry over.
 
-`--check` says what this PC has (the CPU, the RAM, the GPUs) and, with `-m` or `--config`, the model's file, the preset,
-the GPUs it runs on, the RAM its experts take, the draft layer, the pictures, the port and the engine's options,
+`lamina check` says what this PC has (the CPU, the RAM, the GPUs) and, with `-m` or `--config`, the model's file, the
+preset, the GPUs it runs on, the RAM its experts take, the draft layer, the pictures, the port and the engine's options,
 then whether it would start; it loads nothing and exits with 1 when the model would not start (no usable GPU, too
 little RAM, a file the engine does not read, a missing encoder or projector). Whether the engine reads the file is
 decided as its load decides it, from the files' headers: the architecture and the shapes its kernels are built for,
@@ -182,14 +182,14 @@ the shards; the engine's start makes the same check first, in the same words.
 
 ### A model at a URL
 
-`lamina --check -m URL` says the same of a model before it is downloaded: of the files at the URL only their
+`lamina check -m URL` says the same of a model before it is downloaded: of the files at the URL only their
 headers are read (a GGUF's metadata and tensor list, a few MB a file, never its weights), laid out in a temporary folder
 as a download keeps them, and checked as a file on disk is.
 
 ```
-lamina --check -m https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF
-lamina --check -m https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/main/UD-Q4_K_XL
-lamina --check -m https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-UD-IQ4_XS.gguf
+lamina check -m https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF
+lamina check -m https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/main/UD-Q4_K_XL
+lamina check -m https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/Inkling-2-Mini-UD-IQ4_XS.gguf
 ```
 
 - **A Hugging Face URL**: a repository's, a folder's in it (`.../tree/REVISION/FOLDER`) or a file's (`.../blob/...`,
@@ -214,17 +214,17 @@ lamina --check -m https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/blob/main/I
   names a mirror of the Hub.
 - **Not checked from the headers**: a file's values (a weight that is not finite stops the start as it is converted).
 
-`--bench` measures the model the way it is used and writes a report to share: `lamina -m MODEL.gguf --bench`
-(or `--config FILE --bench`) loads it on a port of its own, sends a fixed suite through the server's API, three runs of
+`lamina bench` measures the model the way it is used and writes a report to share: `lamina bench -m MODEL.gguf`
+(or `--config FILE`) loads it on a port of its own, sends a fixed suite through the server's API, three runs of
 each test, and stops: three short questions (decode speed, time to the first token), fresh prompts of ~4K and ~16K
 tokens (prompt speed), and a coding agent's session of six turns with four tools (what the conversation cache
 reused), 3-10 minutes after loading. Speeds are the engine's own timings, first-token times the client's clock;
 thinking is off. The report goes into `bench-results/<date>-community-<GPU>-<model>/` beside the program:
 `README.md`, `results.json` with every request, and the engine's log lines, with home folders, user and host names,
-private addresses and API keys replaced. `--bench-clients N` adds N requests at once, `--bench-long` a ~32K prompt,
-`--bench-compare OLD` puts an earlier report beside this one (`--bench-compare OLD NEW`: two reports, nothing run),
-and `--bench-url http://127.0.0.1:8081` measures a server that runs instead. A Lamina server on the config's port
-stops it before anything loads: the two would share the GPUs.
+private addresses and API keys replaced. `--clients N` adds N requests at once, `--long` a ~32K prompt,
+`--compare OLD` puts an earlier report beside this one (`lamina bench --compare OLD NEW`: two reports, nothing run),
+and `lamina bench --url http://127.0.0.1:8081` measures a server that runs instead. A Lamina server on the config's
+port stops it before anything loads: the two would share the GPUs.
 
 ## Release binaries
 
@@ -232,7 +232,7 @@ Each [release](https://github.com/eddoursul/Lamina/releases) has the programs bu
 arm64, one download a platform: `lamina-<version>-bin-<os>-cuda-<x.y>-<cpu>`, the server with the engine, the image
 encoder and the CUDA runtime linked in (`lamina`), with the licenses, and the script that downloads
 Flash-Next's draft layer (`download-draft-layer.bat`, `.sh` on Linux). It is flat: extract it into a folder, and
-`lamina -m` runs a model file from there ([above](#a-model-file)). The server is built for RTX 30, 40 and 50
+`lamina serve -m` runs a model file from there ([above](#a-model-file)). The server is built for RTX 30, 40 and 50
 GPUs (compute capability 8.6, 8.9 and 12.x, the GB10's among them, with PTX for newer ones), any x64 CPU with AVX2
 (the AVX-512 kernels where the CPU has them) or arm64 CPU with Armv8.2's dot product and FP16 instructions, and a
 driver for CUDA 13; on Linux for glibc 2.34 and OpenSSL 3, as Ubuntu 22.04, Debian 12, RHEL 9 (and Rocky Linux,
@@ -246,8 +246,8 @@ the same way (`toolkit`, `build`, `test`, `package`).
 
 ## The config
 
-A config holds the model, its GPUs, the engine's options and the server's settings; `--write-config` writes one from a
-preset ([above](#a-model-file)). Its keys:
+A config holds the model, its GPUs, the engine's options and the server's settings; `lamina write-config` writes one
+from a preset ([above](#a-model-file)). Its keys:
 
 | Key | |
 | --- | --- |
@@ -304,7 +304,7 @@ A card's settings (`cache=`, `reserve=`, `vram-only=`, `prefetch=`, `clocks=`, `
 each optional, and what each trades: [PARAMETERS.md](PARAMETERS.md#gpus). `"gpu"` as numbers alone (`[0, 1]`,
 `--gpu 0,1`) keeps its earlier meaning: the cards the engine sees, the first its main one. An earlier config's
 `--main-gpu`, `--second-gpu` and per-tier lists (`--second-gpu-clocks 0,1395-2100/9751`: a value per tier in their
-order) still work, deprecated (`lamina --help` lists them), a card's own setting winning over them; of `--gpu`,
+order) still work, deprecated (`lamina serve --help` lists them), a card's own setting winning over them; of `--gpu`,
 `--main-gpu` and `--second-gpu` the later takes the earlier's place (`--second-gpu -1` after a config's cards: no tiers).
 lamina names the deprecated options a start uses in its window, each with what takes its place (an earlier
 config's `--native` in its `"args"`, in place of `"model"`, too).
@@ -317,7 +317,7 @@ programs run on the RTX 30, 40 and 50 series.
 ## Engine options
 
 The engine's defaults are the examples' values: a config's `args` holds what differs. Every option, its default and
-what it trades: [PARAMETERS.md](PARAMETERS.md) (`lamina --help` in short). The options off by default, and the
+what it trades: [PARAMETERS.md](PARAMETERS.md) (`lamina serve --help` in short). The options off by default, and the
 cards' `clocks` and `sleep`, are measured on the development PC in [examples/](../examples/README.md); measure them on
 yours before keeping them.
 
@@ -366,7 +366,7 @@ warning; a drafter file, `--drafter FILE`, is ignored: these models draft with t
 head, is below P; `--draft-vocab N` lets the draft head score only the first N token ids (a draft outside them is a
 rejected draft, nothing else). The 27B's example takes 7, 0.3 and 65,536: up to 8 tokens a step on text that repeats
 its prompt, fewer where the drafts are unsure. A file without the block (a model converted without it, as a merged
-fine-tune often is: no `nextn_predict_layers` in its header) runs too, a token a step; `--check` says which.
+fine-tune often is: no `nextn_predict_layers` in its header) runs too, a token a step; `lamina check` says which.
 
 With more cards than one in `"gpu"` (named as above, or `auto` after the first: every other GPU in CUDA's order; the
 examples have the main GPU, then `auto`) the path splits the layers over the fewest of those GPUs, in order, that hold
@@ -399,7 +399,7 @@ layout and unsloth's files since 2026-11-23, and `inkling2`, unsloth's first lay
 path of its own (`src/inkling2`): the engine switches to it from the model file's header. Every quant of unsloth's
 repository runs, from UD-IQ1_S (7.2 GiB) to UD-Q8_K_XL (21.3 GiB), and so do Lucebox's Inkling-2-Mini-Fast files
 (IQ4_NL 16.4 GiB, IQ4_NL-16GB 14.0, UD-Q8_K_XL 21.3: the model with its attention's output projections tuned
-for shorter thinking, the rest its own tensors); `lamina -m FILE --check` says whether a
+for shorter thinking, the rest its own tensors); `lamina check -m FILE` says whether a
 card holds one and how much context is left beside it. The model is 24 layers of which 12 run three times a token, 128 experts
 a layer with 8 used; five layers of six attend their last 1,024 tokens and the sixth every token, so K and V are kept
 whole for 8 of the 48 layer applications: 32.0 KiB a token in FP16, 17.0 with `--kv q8_0`.
@@ -410,7 +410,7 @@ hold the K and V the first has no VRAM for (`--cell-gpus`): its oldest cells mov
 each card scores its cells for every token, and the context is what the cards hold together, up to the model's
 1,048,576 tokens. A card's `clocks=` locks its clocks while it holds cells and a request runs (a card that idles
 between its scans answers late; the lock needs administrator rights), and its `reserve=SIZE` is the VRAM it leaves
-free (700 MiB, or 1,536 where the desktop draws on it). `lamina --check` says what each card holds: the
+free (700 MiB, or 1,536 where the desktop draws on it). `lamina check` says what each card holds: the
 model and K and V of how many tokens, in FP16 and in q8_0. Where no card holds the model, one later card can run a
 run of its layers instead - `layers=A-B` (`{"id": "RTX 3060", "layers": "6-17"}`): the layers' weights and their
 part of the context are on it, and the answers are one card's to the bit. The run holds the layers that repeat
@@ -516,9 +516,9 @@ layer's folder `mtp/rt-distilled` still loads.
   `build.bat --fresh` (`./build.sh --fresh`).
 - **The CUDA toolkit**: `build/` keeps the nvcc setup chose; `CUDACXX=<path to nvcc>` with `--fresh` takes another
   ([above](#building)).
-- **What setup did otherwise**: `setup --check` is `lamina --config lamina-<model>.json --check`; `BENCH.bat`
-  and `bench.sh` are `lamina --config lamina-<model>.json --bench`, and `--bench-compare <an earlier report's
-  folder>` reads the reports they wrote; a model setup did not download runs with `lamina -m`
+- **What setup did otherwise**: `setup --check` is `lamina check --config lamina-<model>.json`; `BENCH.bat`
+  and `bench.sh` are `lamina bench --config lamina-<model>.json`, and `lamina bench --compare <an earlier report's
+  folder>` reads the reports they wrote; a model setup did not download runs with `lamina serve -m`
   ([above](#a-model-file)), which downloads nothing. The image generator `tools/image/install.py` built
   (`build-image-cuda`) and the config's `images` section keep working; it is built again by hand
   ([USING.md](USING.md#image-generation)).

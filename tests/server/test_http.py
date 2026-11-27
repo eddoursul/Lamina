@@ -285,7 +285,7 @@ PHASES = (("base", lambda: CASES, []), ("key", lambda: KEY_CASES, ["--api-key", 
 
 def server_args(gguf, port, extra):
     scripts = sum((["--script", s] for s in SCRIPTS), [])
-    return ["--engine", "mock", "--port", str(port), "--tokenizer", gguf, "--script-cycle", *scripts, *extra]
+    return ["serve", "--engine", "mock", "--port", str(port), "--tokenizer", gguf, "--script-cycle", *scripts, *extra]
 
 
 def answers(gguf, exe=None, log_dir=None):
@@ -319,7 +319,7 @@ def mock_server(test, *args):
     port = free_port()
     log = Path(os.environ.get("TEMP", "/tmp")) / "lamina_http_test_single.log"
     with open(log, "w", encoding="utf-8") as f:
-        proc = subprocess.Popen([str(server_exe()), "--engine", "mock", "--port", str(port), "--tokenizer",
+        proc = subprocess.Popen([str(server_exe()), "serve", "--engine", "mock", "--port", str(port), "--tokenizer",
                                  os.environ["LAMINA_TEST_GGUF"], *args], cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
     test.addCleanup(proc.wait, 10)
     test.addCleanup(proc.terminate)

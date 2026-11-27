@@ -638,7 +638,7 @@ std::string save(const std::string& path, const json& cfg) {
     const std::string bak = with_name(pp, pp.tail.back() + ".bak");
     copy_file(target, bak);
     const std::string tmp = with_name(pp, pp.tail.back() + ".tmp");
-    write_text(tmp, py_dumps(out, true, false, 2) + "\n");   // the form --write-config writes: LF, a final line end
+    write_text(tmp, py_dumps(out, true, false, 2) + "\n");   // the form write-config writes: LF, a final line end
     replace_file(tmp, target);
     return bak;
 }

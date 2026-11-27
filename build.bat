@@ -49,7 +49,7 @@ rem CUDA's ptxas now and then fails to read a file it has just written (upstream
 echo (the build stopped: trying it once more)
 cmake --build --preset %PRESET% || exit /b 1
 :done
-echo Done: the programs are in %OUT%\ (%OUT%\lamina.exe -m MODEL.gguf runs a model)
+echo Done: the programs are in %OUT%\ (%OUT%\lamina.exe serve -m MODEL.gguf runs a model)
 exit /b 0
 
 :no_vs

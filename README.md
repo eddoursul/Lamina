@@ -44,24 +44,24 @@ download-draft-layer.bat MODEL_FOLDER      (Windows)
 ./download-draft-layer.sh MODEL_FOLDER     (Linux)
 ```
 
-Load with `--mtp <file>` or the configuration line:
-`"--mtp", "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`
+Load with `--drafter <file>` or the configuration line:
+`"--drafter", "<folder>/Lamina-Qwen3.8-Flash-Next-MTP.gguf"`
 
-For Flash-Next, `--mtp` does not accept other MTP formats.
+For Flash-Next, `--drafter` does not accept other MTP formats.
 
 ## Run
 
 ```
-lamina --help
-lamina -m Qwen3.8-27B-UD-Q6_K_XL.gguf
-lamina -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --mtp Lamina-Qwen3.8-Flash-Next-MTP.gguf
+lamina help
+lamina serve -m Qwen3.8-27B-UD-Q6_K_XL.gguf
+lamina serve -m Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf --drafter Lamina-Qwen3.8-Flash-Next-MTP.gguf
 ```
 
 Generate a configuration file:
 ```
-lamina -m Qwen3.8-27B-UD-Q6_K_XL.gguf <other parameters> --write-config qwen27b.json
+lamina write-config qwen27b.json -m Qwen3.8-27B-UD-Q6_K_XL.gguf <other parameters>
 ; Run with the created config file
-lamina --config qwen27b.json
+lamina serve --config qwen27b.json
 ```
 
 How to connect clients, images, image generation, MCP tools and serving on a network:
