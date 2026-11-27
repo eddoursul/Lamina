@@ -19,11 +19,11 @@ namespace lamina::kernels::cpu {
 struct ExpertLayout {
     bool native = false;
     int64_t n_layers = 0, n_expert = NE;
-    std::vector<NativeFmt> fmt;           ///< per layer (native packs)
-    std::vector<uint64_t> offset, bytes;  ///< per layer: where its 512 blobs start, bytes per blob
-    int version = 0;                      ///< native_experts.txt's header version (0 = none given)
+    std::vector<NativeFmt> fmt;            ///< per layer (native packs)
+    std::vector<uint64_t> offset, bytes;   ///< per layer: where its 512 blobs start, bytes per blob
+    int version = 0;                       ///< native_experts.txt's header version (0 = none given)
     uint64_t max_blob = BLOB;
-    uint64_t total = 0;                   ///< every layer's blobs
+    uint64_t total = 0;   ///< every layer's blobs
 
     uint64_t blob_bytes(int64_t layer) const { return native ? bytes[(size_t) layer] : (uint64_t) BLOB; }
     uint64_t layer_offset(int64_t layer) const {
@@ -86,8 +86,7 @@ void act_quant_any(const float* x, int n, ActQ& a);
 const ExpertLayout& expert_layout();
 /// Reads the native_experts.txt text of the pack computed from the model's GGUF (core::PackImage) into the
 /// process-wide layout.  Versions up to kExpertLayoutVersion are read; a newer one is refused.
-bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert,
-                             std::string& err);
+bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert, std::string& err);
 /// The same text read into `out` alone, the process-wide layout left as it is: what a model's experts would be
 /// (core::model_file_problem's check of a file)
 bool expert_layout_parse_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert, ExpertLayout& out,
@@ -95,4 +94,4 @@ bool expert_layout_parse_text(const std::string& native_experts, int64_t n_layer
 /// The newest native_experts.txt this engine reads: v3, each layer's expert formats, offset and blob size.
 inline constexpr int kExpertLayoutVersion = 3;
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

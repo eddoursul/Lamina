@@ -29,30 +29,57 @@
 namespace lamina::runconfig {
 
 const std::vector<Editable> kEditable = {
-    {"sampling.temperature", "sampling", "num>=0", {},
+    {"sampling.temperature",
+     "sampling",
+     "num>=0",
+     {},
      "Default temperature for requests that send none (0 = greedy; without it the model card's: 1.0 thinking, "
      "0.7 not)"},
     {"sampling.top_p", "sampling", "0<x<=1", {}, "Default top_p for requests that send none"},
     {"sampling.top_k", "sampling", "1..64", {}, "Default top_k for requests that send none (1-64)"},
     {"sampling.min_p", "sampling", "0<=x<=1", {}, "Default min_p for requests that send none"},
-    {"reasoning_budget_tokens", "int>=0", "", {},
+    {"reasoning_budget_tokens",
+     "int>=0",
+     "",
+     {},
      "Cap the thinking of every request at this many tokens (0 or empty: no cap)"},
-    {"fit_max_tokens", "bool", "", {},
+    {"fit_max_tokens",
+     "bool",
+     "",
+     {},
      "Shorten a max_tokens that does not fit the context (on by default); off: answer 400 like llama.cpp"},
-    {"anthropic_thinking", "enum", "", {"model", "on_request"},
+    {"anthropic_thinking",
+     "enum",
+     "",
+     {"model", "on_request"},
      "Anthropic requests that do not ask for thinking: think as the model does (model) or not (on_request)"},
-    {"effort_position", "enum", "", {"start", "end"},
-     "Where a non-default reasoning effort goes: start (the default) or end (keeps the cache when it changes)", false},
+    {"effort_position",
+     "enum",
+     "",
+     {"start", "end"},
+     "Where a non-default reasoning effort goes: start (the default) or end (keeps the cache when it changes)",
+     false},
     {"aliases", "names", "", {}, "Other model names the server lists and answers to (comma-separated)"},
-    {"idle_unload_s", "num>=0", "", {},
+    {"idle_unload_s",
+     "num>=0",
+     "",
+     {},
      "Unload the model after this many seconds without requests (0 or empty: never)"},
     {"lazy_load", "bool", "", {}, "Start without loading the model; the first request loads it (text only)", false},
-    {"engine_silence_s", "num>=0", "", {},
+    {"engine_silence_s",
+     "num>=0",
+     "",
+     {},
      "End a request when the engine says nothing for this long (default 300 s, 0 = wait)"},
     {"api_monitor", "bool", "", {}, "Keep the last 100 requests' prompts and answers in memory for /api-monitor"},
     {"open_browser", "bool", "", {}, "Open the chat page in the browser when the model is ready", false},
-    {"vram_reserve_mib", "arg", "--vram-reserve-mib", {},
-     "VRAM in MiB the engine leaves free for other programs (engine default 700)", false, "reserve"},
+    {"vram_reserve_mib",
+     "arg",
+     "--vram-reserve-mib",
+     {},
+     "VRAM in MiB the engine leaves free for other programs (engine default 700)",
+     false,
+     "reserve"},
 };
 
 namespace {
@@ -225,9 +252,9 @@ std::string with_name(PathParts pp, const std::string& name) {
 /// a Windows error's text as Python's OSError words it (FormatMessage without its trailing dot and line end)
 std::string win_text(DWORD code) {
     wchar_t* buf = nullptr;
-    const DWORD n = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                                   FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, code,
-                                   MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR) &buf, 0, nullptr);
+    const DWORD n =
+        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                       nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR) &buf, 0, nullptr);
     if (n == 0 || buf == nullptr) {
         char b[32];
         std::snprintf(b, sizeof b, "Windows Error 0x%lx", (unsigned long) code);
@@ -417,7 +444,7 @@ json whole_value(double d) {
 /// _number: v when it is a number in range (an int for `whole`), else what is expected
 json number(const std::string& key, const json& v, bool whole = false, double lo = 0.0,
             std::optional<double> hi = std::nullopt, bool lo_open = false) {
-    bool bad = !v.is_number();   // a bool too
+    bool bad = !v.is_number();                    // a bool too
     if (!bad && whole && v.is_number_float()) {   // int(v) first
         const double d = v.get<double>();
         if (std::isnan(d)) throw RequestError("cannot convert float NaN to integer");
@@ -432,7 +459,8 @@ json number(const std::string& key, const json& v, bool whole = false, double lo
         char rng[80];
         if (hi) std::snprintf(rng, sizeof rng, "%s %g and at most %g", lo_open ? "more than" : "at least", lo, *hi);
         else std::snprintf(rng, sizeof rng, "%s %g", lo_open ? "more than" : "at least", lo);
-        throw RequestError(key + ": expected a " + (whole ? "whole " : "") + "number, " + rng + ", not " + py_repr_value(v));
+        throw RequestError(key + ": expected a " + (whole ? "whole " : "") + "number, " + rng + ", not " +
+                           py_repr_value(v));
     }
     return whole && v.is_number_float() ? whole_value(v.get<double>()) : v;
 }
@@ -491,7 +519,7 @@ bool put(json& cfg, const Editable& e, const json& v, bool keep_null) {
     return true;
 }
 
-}  // namespace
+}   // namespace
 
 const Editable* editable(std::string_view key) { return spec(key); }
 
@@ -517,9 +545,13 @@ json view(const json& live, const json& started, const std::vector<std::string>&
         const bool numeric = e.kind == "sampling" || e.kind == "arg" || e.kind == "int>=0" || e.kind == "num>=0";
         const json v = value_of(live, e.key);
         const bool keeps = savable(e, file);
-        json k = {{"key", e.key}, {"value", v}, {"help", e.help},
-                  {"kind", numeric ? std::string_view("number") : e.kind}, {"engine_option", e.kind == "arg"},
-                  {"live", e.live}, {"savable", keeps},
+        json k = {{"key", e.key},
+                  {"value", v},
+                  {"help", e.help},
+                  {"kind", numeric ? std::string_view("number") : e.kind},
+                  {"engine_option", e.kind == "arg"},
+                  {"live", e.live},
+                  {"savable", keeps},
                   {"command_line", std::find(command_line.begin(), command_line.end(), e.key) != command_line.end()},
                   {"pending", !e.live && !py_eq(v, value_of(started, e.key))},
                   {"unsaved", keeps && !py_eq(v, value_of(file->gives, e.key))}};
@@ -565,7 +597,7 @@ json check(const std::string& key, const json& v, const json& cfg) {
     }
     if (k == "enum") {
         const bool known = v.is_string() && std::find(e->choices.begin(), e->choices.end(),
-                                                       v.get_ref<const std::string&>()) != e->choices.end();
+                                                      v.get_ref<const std::string&>()) != e->choices.end();
         if (!known) {
             std::string choices;
             for (const auto c : e->choices) choices += (choices.empty() ? "" : ", ") + std::string(c);
@@ -629,8 +661,7 @@ std::string save(const std::string& path, const json& cfg) {
         std::string text;
         try {
             text = read_file(target);
-        } catch (const std::exception&) {
-        }
+        } catch (const std::exception&) {}
         if (starts_with(text, "\xEF\xBB\xBF")) text.erase(0, 3);
         if (py_loads(text, was) && jget(was, "args").is_object())
             if (const std::optional<json> obj = args_as_object(out["args"])) out["args"] = *obj;
@@ -648,7 +679,7 @@ json load(const std::string& path) {
     std::string text = read_file(format_path(pp));
     constexpr std::string_view bom = "\xEF\xBB\xBF";
     if (starts_with(text, bom)) text.erase(0, bom.size());   // utf-8-sig
-    if (starts_with(text, bom))   // json.loads' own check
+    if (starts_with(text, bom))                              // json.loads' own check
         throw RequestError("Unexpected UTF-8 BOM (decode using utf-8-sig): line 1 column 1 (char 0)");
     json cfg;
     std::string err;
@@ -658,4 +689,4 @@ json load(const std::string& path) {
     return cfg;
 }
 
-}  // namespace lamina::runconfig
+}   // namespace lamina::runconfig

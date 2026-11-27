@@ -13,11 +13,11 @@
 // partials are reduced through shuffle; the CPU walks every chunk in order with its own accumulator shape.
 // The two agree to float rounding and not to the bit, which is the same contract `s_gemv_parity` carries for
 // the same reason.  `bench/micro/moe_hit_parity.cu` is the check.
-#include "lamina/kernels/s2_expert_grouped.hpp"
-#include "lamina/kernels/warp.cuh"
 #include "lamina/core/geometry.hpp"
 #include "lamina/kernels/dp4a.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/warp.cuh"
 
 #include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/verify_kernels.hpp"
@@ -39,12 +39,13 @@ namespace {
 // are what the CPU kernel's indexing computes, and `moe_hit_parity` compares the two end to end.
 constexpr int H = 2560;
 constexpr int FF = 640;
-static_assert(H == lamina::core::kCompiledGeometry.n_embd && FF == lamina::core::kCompiledGeometry.n_ff, "s2_expert_grouped is compiled for core/geometry.hpp");
-constexpr int QK = 64;                       // Q2_0's group: one fp16 scale per 64 weights
-constexpr int ROW_GU = H / 4;                // 640 B of codes per gate/up row (2 bits per element)
-constexpr int ROW_D = FF / 4;                // 160 B per down row
-constexpr int SC_GU = H / QK;                // 40 fp16 scales per gate/up row
-constexpr int SC_D = FF / QK;                // 10 per down row
+static_assert(H == lamina::core::kCompiledGeometry.n_embd && FF == lamina::core::kCompiledGeometry.n_ff,
+              "s2_expert_grouped is compiled for core/geometry.hpp");
+constexpr int QK = 64;          // Q2_0's group: one fp16 scale per 64 weights
+constexpr int ROW_GU = H / 4;   // 640 B of codes per gate/up row (2 bits per element)
+constexpr int ROW_D = FF / 4;   // 160 B per down row
+constexpr int SC_GU = H / QK;   // 40 fp16 scales per gate/up row
+constexpr int SC_D = FF / QK;   // 10 per down row
 constexpr size_t O_D_CODES = (size_t) 2 * FF * ROW_GU;
 constexpr size_t O_GU_SCALES = O_D_CODES + (size_t) H * ROW_D;
 constexpr size_t O_D_SCALES = O_GU_SCALES + (size_t) 2 * FF * SC_GU * 2;
@@ -158,14 +159,14 @@ __device__ __forceinline__ int load_x_chunk(const uint8_t* __restrict__ xb, int 
     }
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
-        const unsigned t0 = __byte_perm(n[4 * h], n[4 * h + 1], 0x5140);      // a0 b0 a1 b1
-        const unsigned t1 = __byte_perm(n[4 * h], n[4 * h + 1], 0x7362);      // a2 b2 a3 b3
-        const unsigned t2 = __byte_perm(n[4 * h + 2], n[4 * h + 3], 0x5140);  // c0 d0 c1 d1
-        const unsigned t3 = __byte_perm(n[4 * h + 2], n[4 * h + 3], 0x7362);  // c2 d2 c3 d3
-        X[4 * h + 0] = (int) __byte_perm(t0, t2, 0x5410);                    // a0 b0 c0 d0
-        X[4 * h + 1] = (int) __byte_perm(t0, t2, 0x7632);                    // a1 b1 c1 d1
-        X[4 * h + 2] = (int) __byte_perm(t1, t3, 0x5410);                    // a2 b2 c2 d2
-        X[4 * h + 3] = (int) __byte_perm(t1, t3, 0x7632);                    // a3 b3 c3 d3
+        const unsigned t0 = __byte_perm(n[4 * h], n[4 * h + 1], 0x5140);       // a0 b0 a1 b1
+        const unsigned t1 = __byte_perm(n[4 * h], n[4 * h + 1], 0x7362);       // a2 b2 a3 b3
+        const unsigned t2 = __byte_perm(n[4 * h + 2], n[4 * h + 3], 0x5140);   // c0 d0 c1 d1
+        const unsigned t3 = __byte_perm(n[4 * h + 2], n[4 * h + 3], 0x7362);   // c2 d2 c3 d3
+        X[4 * h + 0] = (int) __byte_perm(t0, t2, 0x5410);                      // a0 b0 c0 d0
+        X[4 * h + 1] = (int) __byte_perm(t0, t2, 0x7632);                      // a1 b1 c1 d1
+        X[4 * h + 2] = (int) __byte_perm(t1, t3, 0x5410);                      // a2 b2 c2 d2
+        X[4 * h + 3] = (int) __byte_perm(t1, t3, 0x7632);                      // a3 b3 c3 d3
     }
     return hx;
 }
@@ -192,7 +193,6 @@ void check(const char* who, void* stream) {
     (void) stream;
 }
 
-
 // The new kernels read the activations as aligned words (`load_x_chunk`), so they need 4-byte aligned activation
 // rows - the input's and the intermediate's in `scratch`; the per-hit ones also read a blob's codes as uint2, which
 // needs an 8-byte aligned arena and slot size (the grouped kernels above already did).  Anything else keeps the
@@ -201,7 +201,7 @@ bool new_grouped(const void* x_q8_0, const void* scratch) {
     return ((uintptr_t) x_q8_0 & 3) == 0 && ((uintptr_t) scratch & 3) == 0;
 }
 
-}  // namespace
+}   // namespace
 
 uint64_t moe_hit_grouped_scratch_bytes(int64_t n_hits, int64_t n_embd, int64_t n_ff) {
     if (n_hits <= 0) return 0;
@@ -210,8 +210,7 @@ uint64_t moe_hit_grouped_scratch_bytes(int64_t n_hits, int64_t n_embd, int64_t n
     // R4.2h: the fp32 scales for the INTERMEDIATE's own quantization, one per 32-element chunk per hit.
     const uint64_t hs = (uint64_t) n_hits * (uint64_t) (n_ff / 32) * 4;
     const uint64_t xh = (uint64_t) (n_embd / 32) * 4;
-    return ((gu + 15) & ~15ull) + ((q8 + 15) & ~15ull) + 2 * ((hs + 15) & ~15ull) +
-           ((xh + 15) & ~15ull);
+    return ((gu + 15) & ~15ull) + ((q8 + 15) & ~15ull) + 2 * ((hs + 15) & ~15ull) + ((xh + 15) & ~15ull);
 }
 
 namespace {
@@ -224,19 +223,19 @@ __global__ void add_hits_kernel(float* __restrict__ parts, const float* __restri
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n_embd; i += gridDim.x * blockDim.x)
         parts[row + i] += hit_out[row + i];
 }
-}  // namespace
+}   // namespace
 
 namespace {
 // Plan v0.3 P6: experts GROUPED - one blob pointer per group (a VRAM slot or a mapped host blob read over PCIe),
 // every entry of the group (a token routed to that expert) computed from ONE read of each row.  Per entry the
 // arithmetic runs chunk by chunk in the same lane order, so an entry's result does not depend on its group.
 constexpr int GU_CHUNKS = (H / 32 + 31) / 32;   // 3: chunks of a gate/up row per lane (80 chunks / 32 lanes)
-constexpr int GMAX = 8;                          // entries per group (tokens routed to one expert in a window)
+constexpr int GMAX = 8;                         // entries per group (tokens routed to one expert in a window)
 // a group holds one entry per token of the window routed to its expert, and the kernels below keep at
 // most GMAX of them (`min(..., GMAX)`): a longer window would drop entries without a word.
 static_assert(GMAX >= kVerifyMaxT, "a verify window's group can exceed GMAX entries");
-constexpr int GU_ROWS = 32;                      // gate/up rows per block: 4 per warp
-constexpr int D_ROWS = 64;                       // down rows per block: 8 per warp
+constexpr int GU_ROWS = 32;   // gate/up rows per block: 4 per warp
+constexpr int D_ROWS = 64;    // down rows per block: 8 per warp
 
 // One activation chunk's contribution: the 32 int8 of the chunk in aligned words against the row's 2-bit codes,
 // four dp4a and one float expression.
@@ -258,14 +257,12 @@ __device__ __forceinline__ float chunk_dot(uint2 cb, const int* xw, float dw, fl
 // Gate/up: a block = GU_ROWS rows of ONE group.  The group's activations (each entry's token row of x_q8_0 and
 // its fp32 scales) are staged once into shared memory as aligned words; each warp then walks its rows, loading
 // each lane's code chunks once and dotting them with every entry.
-__global__ void __launch_bounds__(256) gu_grouped_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                         const int32_t* __restrict__ grp_start,
-                                                         const int32_t* __restrict__ n_groups,
-                                                         const int32_t* __restrict__ ent_tok,
-                                                         const uint8_t* __restrict__ x_q8_0,
-                                                         const float* __restrict__ x_scales,
-                                                         float* __restrict__ gate_up, int cap_entries) {
-    __shared__ int xs_q[GMAX][H / 4];          // the entries' int8 activations as words (2560 B each)
+__global__ void __launch_bounds__(256)
+gu_grouped_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                  const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_tok,
+                  const uint8_t* __restrict__ x_q8_0, const float* __restrict__ x_scales, float* __restrict__ gate_up,
+                  int cap_entries) {
+    __shared__ int xs_q[GMAX][H / 4];   // the entries' int8 activations as words (2560 B each)
     __shared__ float xs_d[GMAX][H / 32];
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
@@ -320,13 +317,10 @@ __global__ void __launch_bounds__(256) gu_grouped_kernel(const unsigned long lon
 
 // Down: a block = D_ROWS rows of ONE group; the entries' quantized intermediates staged once.  A down row is 20
 // chunks, so lanes 0..19 each hold one chunk, as in the per-entry kernel.
-__global__ void __launch_bounds__(256) down_grouped_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                           const int32_t* __restrict__ grp_start,
-                                                           const int32_t* __restrict__ n_groups,
-                                                           const int32_t* __restrict__ ent_dst,
-                                                           const uint8_t* __restrict__ h_q8_0,
-                                                           const float* __restrict__ h_scales,
-                                                           float* __restrict__ out) {
+__global__ void __launch_bounds__(256)
+down_grouped_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                    const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_dst,
+                    const uint8_t* __restrict__ h_q8_0, const float* __restrict__ h_scales, float* __restrict__ out) {
     __shared__ int hs_q[GMAX][FF / 4];
     __shared__ float hs_d[GMAX][FF / 32];
     const int g = blockIdx.y;
@@ -393,16 +387,14 @@ __device__ __forceinline__ void stage_chunk(const uint8_t* __restrict__ xb, floa
     xs_dh[i] = make_int2(__float_as_int(dx), hx);
 }
 
-__global__ void __launch_bounds__(256) gu_grouped_t_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                           const int32_t* __restrict__ grp_start,
-                                                           const int32_t* __restrict__ n_groups,
-                                                           const int32_t* __restrict__ ent_tok,
-                                                           const uint8_t* __restrict__ x_q8_0,
-                                                           const float* __restrict__ x_scales,
-                                                           float* __restrict__ gate_up, int cap_entries) {
+__global__ void __launch_bounds__(256)
+gu_grouped_t_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                    const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_tok,
+                    const uint8_t* __restrict__ x_q8_0, const float* __restrict__ x_scales, float* __restrict__ gate_up,
+                    int cap_entries) {
     constexpr int NC = H / 32;
-    __shared__ int xs_w[8 * GMAX * NC];          // 20 KB: word j of entry k's chunk c at [j][k * NC + c]
-    __shared__ int2 xs_dh[GMAX * NC];            // 5 KB: (dx as bits, hx)
+    __shared__ int xs_w[8 * GMAX * NC];   // 20 KB: word j of entry k's chunk c at [j][k * NC + c]
+    __shared__ int2 xs_dh[GMAX * NC];     // 5 KB: (dx as bits, hx)
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int e0 = grp_start[g], ne = min(grp_start[g + 1] - e0, GMAX);
@@ -416,7 +408,7 @@ __global__ void __launch_bounds__(256) gu_grouped_t_kernel(const unsigned long l
     }
     __syncthreads();
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
-    const int row0 = blockIdx.x * GU_ROWS;                 // even: a pair is always (gate r, up r)
+    const int row0 = blockIdx.x * GU_ROWS;   // even: a pair is always (gate r, up r)
     for (int pp = warp; pp < GU_ROWS / 2; pp += 8) {
         const int i = row0 + 2 * pp;
         const uint8_t* codes = blob + (size_t) i * ROW_GU;
@@ -459,13 +451,10 @@ __global__ void __launch_bounds__(256) gu_grouped_t_kernel(const unsigned long l
     }
 }
 
-__global__ void __launch_bounds__(256) down_grouped_t_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                             const int32_t* __restrict__ grp_start,
-                                                             const int32_t* __restrict__ n_groups,
-                                                             const int32_t* __restrict__ ent_dst,
-                                                             const uint8_t* __restrict__ h_q8_0,
-                                                             const float* __restrict__ h_scales,
-                                                             float* __restrict__ out) {
+__global__ void __launch_bounds__(256)
+down_grouped_t_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                      const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_dst,
+                      const uint8_t* __restrict__ h_q8_0, const float* __restrict__ h_scales, float* __restrict__ out) {
     constexpr int NC = FF / 32;
     __shared__ int hs_w[8 * GMAX * NC];
     __shared__ int2 hs_dh[GMAX * NC];
@@ -486,7 +475,7 @@ __global__ void __launch_bounds__(256) down_grouped_t_kernel(const unsigned long
         const int r = row0 + 2 * pp;
         const uint8_t* codes = blob + O_D_CODES + (size_t) r * ROW_D;
         const uint8_t* scales = blob + O_D_SCALES + (size_t) r * SC_D * 2;
-        const int c = lane;                                // lanes 0..19 hold one chunk each, as above
+        const int c = lane;   // lanes 0..19 hold one chunk each, as above
         int m0[8], m1[8];
         float dw0 = 0.0f, dw1 = 0.0f;
         if (c < NC) {
@@ -517,7 +506,7 @@ __global__ void __launch_bounds__(256) down_grouped_t_kernel(const unsigned long
         }
     }
 }
-}  // namespace
+}   // namespace
 
 namespace {
 // Plan v0.3 P6: groups built on the device when every expert is resident at `base + id * blob` (the MTP layer):
@@ -534,7 +523,10 @@ __global__ void group_resident_kernel(const int32_t* __restrict__ ids, int n, in
     int first = i, rank = 0, size = 0;
     if (i < n) {
         for (int j = 0; j < i; ++j)
-            if (e_s[j] == e) { if (first == i) first = j; ++rank; }
+            if (e_s[j] == e) {
+                if (first == i) first = j;
+                ++rank;
+            }
         if (first == i)
             for (int j = i; j < n; ++j) size += e_s[j] == e;
     }
@@ -563,14 +555,17 @@ __global__ void group_resident_kernel(const int32_t* __restrict__ ids, int n, in
         ent_tok[at] = i / k_per_tok;
     }
 }
-}  // namespace
+}   // namespace
 
 void moe_group_resident(const int32_t* ids, int n, int k_per_tok, const uint8_t* base, int64_t blob,
                         unsigned long long* grp_ptr, int32_t* grp_start, int32_t* counts, int32_t* ent_dst,
                         int32_t* ent_tok, void* stream) {
-    if (n < 1 || n > 128) { std::fprintf(stderr, "moe_group_resident: n must be 1..128\n"); std::exit(1); }
+    if (n < 1 || n > 128) {
+        std::fprintf(stderr, "moe_group_resident: n must be 1..128\n");
+        std::exit(1);
+    }
     group_resident_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ids, n, k_per_tok, base, (long long) blob, grp_ptr,
-                                                               grp_start, counts, ent_dst, ent_tok);
+                                                                grp_start, counts, ent_dst, ent_tok);
     check("moe_group_resident", stream);
 }
 
@@ -588,8 +583,8 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
     {
         const dim3 grid((unsigned) (2 * FF / GU_ROWS), (unsigned) cap_groups);
         if (fast)
-            gu_grouped_t_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales,
-                                                      gate_up, (int) cap_entries);
+            gu_grouped_t_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales, gate_up,
+                                                      (int) cap_entries);
         else
             gu_grouped_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_tok, x_q8_0, x_scales, gate_up,
                                                     (int) cap_entries);
@@ -612,19 +607,18 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
     } else {
         const long long pairs = cap_entries * (long long) FF;
         {
-        swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
-        check("moe_grouped_s2/swiglu", stream);
-        if (x_scales != nullptr) quantize_q8_0_scaled(gate_up, h_q8_0, h_scales, cap_entries * (int64_t) FF, stream);
-        else quantize_q8_0(gate_up, h_q8_0, cap_entries * (int64_t) FF, stream);
+            swiglu_kernel<<<(unsigned) ((pairs + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate_up, pairs);
+            check("moe_grouped_s2/swiglu", stream);
+            if (x_scales != nullptr)
+                quantize_q8_0_scaled(gate_up, h_q8_0, h_scales, cap_entries * (int64_t) FF, stream);
+            else quantize_q8_0(gate_up, h_q8_0, cap_entries * (int64_t) FF, stream);
         }
     }
     {
         const dim3 grid((unsigned) (H / D_ROWS), (unsigned) cap_groups);
         const float* hs = x_scales != nullptr ? h_scales : nullptr;
-        if (fast)
-            down_grouped_t_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
-        else
-            down_grouped_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
+        if (fast) down_grouped_t_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
+        else down_grouped_kernel<<<grid, 256, 0, cs>>>(grp_ptr, grp_start, n_groups, ent_dst, h_q8_0, hs, out);
         check("moe_grouped_s2/down", stream);
     }
 }
@@ -637,4 +631,4 @@ void moe_hit_add(float* parts, const float* hit_out, const int32_t* dst, const i
     check("moe_hit_add", stream);
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

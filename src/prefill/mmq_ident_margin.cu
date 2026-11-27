@@ -92,15 +92,10 @@ struct Experts {
     const size_t eb;
     Dev w, x, xq, bd, a, b, res;
     Experts(const Shape& s, std::mt19937& rng)
-        : sh(s),
-          eb(mmq::matrix_bytes((int) s.t, s.rows, s.cols)),
-          w((size_t) G * eb + TAIL),
-          x((size_t) G * kMostRows * (size_t) s.cols * 4),
-          xq(mmq::q8_bytes((int64_t) G * kMostRows, s.cols)),
-          bd((G + 1) * 4),
-          a((size_t) G * kMostRows * (size_t) s.rows * 4),
-          b((size_t) G * kMostRows * (size_t) s.rows * 4),
-          res(8) {
+        : sh(s), eb(mmq::matrix_bytes((int) s.t, s.rows, s.cols)), w((size_t) G * eb + TAIL),
+          x((size_t) G * kMostRows * (size_t) s.cols * 4), xq(mmq::q8_bytes((int64_t) G * kMostRows, s.cols)),
+          bd((G + 1) * 4), a((size_t) G * kMostRows * (size_t) s.rows * 4),
+          b((size_t) G * kMostRows * (size_t) s.rows * 4), res(8) {
         const size_t bs = ggml_type_size(s.t);
         std::vector<uint32_t> h(((size_t) G * eb + 3) / 4);
         for (auto& v : h) v = (uint32_t) rng();
@@ -124,7 +119,9 @@ struct Run {
     cudaStream_t s = nullptr;
     int64_t margin = -1;   // the control's entries past the rows (-1: the maps in ids_table_rows)
     int products = 0, fail = 0;
-    ~Run() { if (s) cudaStreamDestroy(s); }
+    ~Run() {
+        if (s) cudaStreamDestroy(s);
+    }
 };
 
 // A group's product: gathered, or in place where the shape takes it.  The row map, its last entry at the guard: the
@@ -144,12 +141,23 @@ bool product(Run& r, const Experts& e, const std::vector<int>& cnt, bool in_plac
     const void* tab[G];
     for (int z = 0; z < n; ++z) tab[z] = e.w.b() + (size_t) z * e.eb;
     mmq::Product p;
-    p.type = (int) e.sh.t; p.w_rows = e.sh.rows; p.w_cols = e.sh.cols; p.n = n; p.xq = e.xq.p;
-    p.bounds = (const int32_t*) e.bd.p; p.ids = map; p.total_rows = total; p.max_rows = max_rows;
+    p.type = (int) e.sh.t;
+    p.w_rows = e.sh.rows;
+    p.w_cols = e.sh.cols;
+    p.n = n;
+    p.xq = e.xq.p;
+    p.bounds = (const int32_t*) e.bd.p;
+    p.ids = map;
+    p.total_rows = total;
+    p.max_rows = max_rows;
     p.ids_rows = mmq::ids_table_rows(total, max_rows);   // what run() asks for: the control's map is shorter
-    p.dst = dst; p.ld_dst = e.sh.rows;
+    p.dst = dst;
+    p.ld_dst = e.sh.rows;
     if (in_place) p.tab = tab;
-    else { p.w = e.w.p; p.expert_bytes = e.eb; }
+    else {
+        p.w = e.w.p;
+        p.expert_bytes = e.eb;
+    }
     r.ctx.run(p, r.s);
     const cudaError_t err = cudaStreamSynchronize(r.s);
     if (err == cudaErrorIllegalAddress) return false;
@@ -177,9 +185,9 @@ void group(Run& r, const Experts& e, const std::vector<int>& cnt) {
                             (r.margin >= 0 || product(r, e, cnt, in_place != 0, tail, true, (float*) e.b.p));
         if (!within) {
             std::printf("%s %s %s, %zu experts, %lld rows, %lld an expert: a launch read past its map of the rows and "
-                        "%lld entries (ids_table_rows: the rows and %lld)\n", r.margin < 0 ? "FAIL" : "caught:",
-                        e.sh.name, how, cnt.size(), (long long) total, (long long) max_rows, (long long) tail,
-                        (long long) reach);
+                        "%lld entries (ids_table_rows: the rows and %lld)\n",
+                        r.margin < 0 ? "FAIL" : "caught:", e.sh.name, how, cnt.size(), (long long) total,
+                        (long long) max_rows, (long long) tail, (long long) reach);
             std::fflush(stdout);
             std::_Exit(r.margin < 0 ? 1 : 0);   // no teardown on a faulted context
         }
@@ -194,13 +202,13 @@ void group(Run& r, const Experts& e, const std::vector<int>& cnt) {
         ck(cudaStreamSynchronize(r.s), "compare");
         if (res[0] == 0 && res[1] == 0) continue;
         std::printf("  FAIL %s %s, %zu experts, %lld rows, %lld an expert: %d values differ with the entries past the "
-                    "rows zeroed, %d are not finite\n", e.sh.name, how, cnt.size(), (long long) total,
-                    (long long) max_rows, res[0], res[1]);
+                    "rows zeroed, %d are not finite\n",
+                    e.sh.name, how, cnt.size(), (long long) total, (long long) max_rows, res[0], res[1]);
         ++r.fail;
     }
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     int64_t margin = -1;
@@ -210,11 +218,13 @@ int main(int argc, char** argv) {
         else given.push_back(std::atoi(argv[i]));
     }
     const bool bad = given.size() > (size_t) G || margin < -1 ||
-                     std::any_of(given.begin(), given.end(), [](int c) { return c < 0 || c > kMostRows; }) ||
+                     std::any_of(
+                         given.begin(), given.end(), [](int c) { return c < 0 || c > kMostRows; }) ||
                      (!given.empty() && *std::max_element(given.begin(), given.end()) == 0);
     if (bad) {
         std::printf("usage: mmq_ident_margin [--margin N] [rows of each expert ...]   (up to %d experts of up to %d "
-                    "rows)\n", G, kMostRows);
+                    "rows)\n",
+                    G, kMostRows);
         return 2;
     }
     int dev = 0;
@@ -248,8 +258,8 @@ int main(int argc, char** argv) {
                 group(r, e, given);
             } else {
                 static const int kRows[] = {0, 1, 7, 8, 9, 31, 64, 100, 512, 1000};
-                static const int kMax[] = {1, 8, 9, 16, 17, 24, 25, 32, 33, 40, 41, 48, 49, 64, 65, 80, 81, 96, 97,
-                                           112, 113, 128, 129, 200, 256, 512, 1000};
+                static const int kMax[] = {1,  8,  9,  16, 17, 24,  25,  32,  33,  40,  41,  48,  49,  64,
+                                           65, 80, 81, 96, 97, 112, 113, 128, 129, 200, 256, 512, 1000};
                 std::uniform_int_distribution<int> pick(0, 9);
                 for (int n = 1; n <= G; ++n) {   // mixed counts
                     std::vector<int> c((size_t) n);
@@ -257,13 +267,13 @@ int main(int argc, char** argv) {
                     if (*std::max_element(c.begin(), c.end()) == 0) c[0] = 1;
                     group(r, e, c);
                 }
-                for (const int mx : kMax) {      // every tile width: an expert of mx rows
+                for (const int mx : kMax) {   // every tile width: an expert of mx rows
                     std::uniform_int_distribution<int> fewer(0, mx);
                     std::vector<int> c(5);
                     for (auto& v : c) v = fewer(rng);
                     c[2] = mx;
-                    group(r, e, c);                     // among others of fewer
-                    group(r, e, {mx, 1, 0});            // before experts of few rows or none
+                    group(r, e, c);            // among others of fewer
+                    group(r, e, {mx, 1, 0});   // before experts of few rows or none
                     group(r, e, {mx, 1, 0, 3, 0, 1});
                 }
             }
@@ -276,8 +286,9 @@ int main(int argc, char** argv) {
             std::printf("FAIL: no launch read past a map of its rows and %lld entries\n", (long long) margin);
             return 1;
         }
-        std::printf("mmq_ident_margin: %d products within their maps, %d differ with the entries past the rows zeroed\n",
-                    r.products, r.fail);
+        std::printf(
+            "mmq_ident_margin: %d products within their maps, %d differ with the entries past the rows zeroed\n",
+            r.products, r.fail);
         return r.fail ? 1 : 0;
     } catch (const std::exception& e) {
         std::printf("FAIL: %s\n", e.what());

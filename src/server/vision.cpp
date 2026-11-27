@@ -95,10 +95,13 @@ std::string b64decode(std::string_view s) {
     return out;
 }
 
-bool is_jpeg(const std::string& d) { return d.size() >= 3 && (unsigned char) d[0] == 0xff && (unsigned char) d[1] == 0xd8 && (unsigned char) d[2] == 0xff; }
+bool is_jpeg(const std::string& d) {
+    return d.size() >= 3 && (unsigned char) d[0] == 0xff && (unsigned char) d[1] == 0xd8 &&
+           (unsigned char) d[2] == 0xff;
+}
 bool passes(const std::string& d) {
-    return starts_with(d, std::string_view("\x89PNG\r\n\x1a\n", 8)) || starts_with(d, "BM") || starts_with(d, "GIF87a") ||
-           starts_with(d, "GIF89a");
+    return starts_with(d, std::string_view("\x89PNG\r\n\x1a\n", 8)) || starts_with(d, "BM") ||
+           starts_with(d, "GIF87a") || starts_with(d, "GIF89a");
 }
 
 /// a JPEG's EXIF Orientation (1 when it has none): stb_image ignores the tag (#1229)
@@ -108,7 +111,9 @@ int exif_orientation(const std::string& d) {
         const auto a = (unsigned char) d[at], b = (unsigned char) d[at + 1];
         return le ? (uint32_t) (a | b << 8) : (uint32_t) (a << 8 | b);
     };
-    auto u32 = [&](size_t at, bool le) -> uint32_t { return le ? u16(at, le) | u16(at + 2, le) << 16 : u16(at, le) << 16 | u16(at + 2, le); };
+    auto u32 = [&](size_t at, bool le) -> uint32_t {
+        return le ? u16(at, le) | u16(at + 2, le) << 16 : u16(at, le) << 16 | u16(at + 2, le);
+    };
     size_t at = 2;
     while (at + 4 <= d.size() && (unsigned char) d[at] == 0xff) {
         const auto marker = (unsigned char) d[at + 1];
@@ -149,7 +154,8 @@ Pixels on_white(const unsigned char* rgba, int w, int h) {
     Pixels p{w, h, std::vector<unsigned char>((size_t) w * h * 3)};
     for (size_t i = 0; i < (size_t) w * h; ++i) {
         const unsigned a = rgba[4 * i + 3];
-        for (int c = 0; c < 3; ++c) p.rgb[3 * i + c] = (unsigned char) ((rgba[4 * i + c] * a + 255 * (255 - a) + 127) / 255);
+        for (int c = 0; c < 3; ++c)
+            p.rgb[3 * i + c] = (unsigned char) ((rgba[4 * i + c] * a + 255 * (255 - a) + 127) / 255);
     }
     return p;
 }
@@ -163,12 +169,27 @@ Pixels upright(const Pixels& s, int orientation) {
             int sx = x, sy = y;
             switch (orientation) {
                 case 2: sx = s.w - 1 - x; break;
-                case 3: sx = s.w - 1 - x; sy = s.h - 1 - y; break;
+                case 3:
+                    sx = s.w - 1 - x;
+                    sy = s.h - 1 - y;
+                    break;
                 case 4: sy = s.h - 1 - y; break;
-                case 5: sx = y; sy = x; break;
-                case 6: sx = y; sy = s.h - 1 - x; break;
-                case 7: sx = s.w - 1 - y; sy = s.h - 1 - x; break;
-                case 8: sx = s.w - 1 - y; sy = x; break;
+                case 5:
+                    sx = y;
+                    sy = x;
+                    break;
+                case 6:
+                    sx = y;
+                    sy = s.h - 1 - x;
+                    break;
+                case 7:
+                    sx = s.w - 1 - y;
+                    sy = s.h - 1 - x;
+                    break;
+                case 8:
+                    sx = s.w - 1 - y;
+                    sy = x;
+                    break;
                 default: break;
             }
             std::memcpy(&o.rgb[3 * ((size_t) y * o.w + x)], &s.rgb[3 * ((size_t) sy * s.w + sx)], 3);
@@ -232,12 +253,15 @@ std::optional<Pixels> wic_decode(const std::string& data, std::string& why) {
         SUCCEEDED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) &&
         SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(frame->GetSize(&w, &h)) && w > 0 && h > 0 &&
         (uint64_t) w * h <= kImagePixelsMax &&
-        SUCCEEDED(WICConvertBitmapSource(GUID_WICPixelFormat32bppRGBA, frame, &rgba)) && SUCCEEDED(rgba->GetSize(&w, &h)) &&
-        w > 0 && h > 0) {
+        SUCCEEDED(WICConvertBitmapSource(GUID_WICPixelFormat32bppRGBA, frame, &rgba)) &&
+        SUCCEEDED(rgba->GetSize(&w, &h)) && w > 0 && h > 0) {
         std::vector<unsigned char> px((size_t) w * h * 4);
-        if (SUCCEEDED(rgba->CopyPixels(nullptr, w * 4, (UINT) px.size(), px.data()))) out = on_white(px.data(), (int) w, (int) h);
+        if (SUCCEEDED(rgba->CopyPixels(nullptr, w * 4, (UINT) px.size(), px.data())))
+            out = on_white(px.data(), (int) w, (int) h);
     }
-    if (!out) why = (uint64_t) w * h > kImagePixelsMax ? too_many_pixels(w, h) : "not a format this computer's image codecs read";
+    if (!out)
+        why = (uint64_t) w * h > kImagePixelsMax ? too_many_pixels(w, h)
+                                                 : "not a format this computer's image codecs read";
     release();
     return out;
 }
@@ -277,7 +301,7 @@ std::string work_dir() {
     return u8_str(*d);
 }
 
-}  // namespace
+}   // namespace
 
 std::string combined_embeddings_path(const std::string& vision_dir, uintmax_t nbytes) {
     const std::string name = "req-" + random_hex(12) + ".sve";
@@ -387,17 +411,15 @@ bool vision_built() {
 #endif
 }
 
-const char* vision_not_built() {
-    return "this lamina was built without the image encoder (LAMINA_BUILD_VISION=OFF)";
-}
+const char* vision_not_built() { return "this lamina was built without the image encoder (LAMINA_BUILD_VISION=OFF)"; }
 
 #if LAMINA_VISION
 struct Vision::Loaded {
     std::unique_ptr<vision::Encoder> encoder;
-    int device = -1;                 // a resident GPU encoder's CUDA device, kept from the engine's resets
-    std::function<void()> unlend;    // a lease in the engine's memory: given back after the encoder
-    std::string where;               // a lease: what it runs in
-    double waited = 0;               // a lease: how long the engine took to lend (it waits for a prompt it reads)
+    int device = -1;                // a resident GPU encoder's CUDA device, kept from the engine's resets
+    std::function<void()> unlend;   // a lease in the engine's memory: given back after the encoder
+    std::string where;              // a lease: what it runs in
+    double waited = 0;              // a lease: how long the engine took to lend (it waits for a prompt it reads)
     std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
     int pictures = 0;
     ~Loaded() {
@@ -416,14 +438,15 @@ namespace {
 double seconds_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
-}  // namespace
+}   // namespace
 #else
 struct Vision::Loaded {};
 struct Vision::Plan {};
 #endif
 
 Vision::Vision(const json& cfg, bool lazy) : dir(work_dir()), cfg_(cfg) {
-    if (!vision_built()) throw std::runtime_error(std::string("the config has a \"vision\" section, and ") + vision_not_built());
+    if (!vision_built())
+        throw std::runtime_error(std::string("the config has a \"vision\" section, and ") + vision_not_built());
     if (!lazy) start();
 }
 
@@ -459,7 +482,9 @@ void Vision::start() {
         // counts the cards in the PCI buses' order as nvidia-smi does
         const std::vector<core::GpuInfo> gpus = core::list_gpus(true);
         const json& dev = jget(cfg, "cuda_device");
-        const std::string spec = dev.is_null() ? "" : dev.is_string() ? std::string(strip(dev.get<std::string>())) : py_dumps(dev);
+        const std::string spec = dev.is_null()     ? ""
+                                 : dev.is_string() ? std::string(strip(dev.get<std::string>()))
+                                                   : py_dumps(dev);
         std::string why;
         if (spec.empty()) {
             p.device = gpus.empty() ? -1 : 0;
@@ -476,23 +501,26 @@ void Vision::start() {
             p.device = core::find_gpu(gpus, spec, why);
         }
         if (p.device < 0)
-            throw std::runtime_error("the vision encoder did not start: its GPU" + (spec.empty() ? std::string() : " " + spec) +
-                                     " is not there (" + why + "): name a card that is there in the config's vision "
+            throw std::runtime_error("the vision encoder did not start: its GPU" +
+                                     (spec.empty() ? std::string() : " " + spec) + " is not there (" + why +
+                                     "): name a card that is there in the config's vision "
                                      "\"cuda_device\" (nvidia-smi -L lists them), or set \"gpu\" to false");
         plan->where = "on GPU " + std::to_string(p.device) + ", " + gpus[(size_t) p.device].name;
         // the encoder's kernels are the engine's: a card they do not run on (older than an RTX 30, or one this build
         // has no kernels for) is said before anything is loaded
         if (const std::string no = core::gpu_unusable(p.device); !no.empty())
-            throw std::runtime_error("the vision encoder did not start " + plan->where + ": " + no + "; name another card in "
+            throw std::runtime_error("the vision encoder did not start " + plan->where + ": " + no +
+                                     "; name another card in "
                                      "the config's vision \"cuda_device\", or set \"gpu\" to false (the CPU)");
     }
     std::string err;
     if (lend) {
         // nothing is loaded: the file is read for what a loan must hold, and that it is a projector the encoder reads
         plan->need = vision::encoder_gpu_bytes(p, err);
-        if (plan->need == 0) throw std::runtime_error("the vision encoder did not start: " + p.mmproj + " (" + err + ")");
-        std::fprintf(stderr, "lamina: the image encoder %s borrows %llu MiB of VRAM for a picture: %s\n", plan->where.c_str(),
-                     (unsigned long long) (plan->need >> 20), p.mmproj.c_str());
+        if (plan->need == 0)
+            throw std::runtime_error("the vision encoder did not start: " + p.mmproj + " (" + err + ")");
+        std::fprintf(stderr, "lamina: the image encoder %s borrows %llu MiB of VRAM for a picture: %s\n",
+                     plan->where.c_str(), (unsigned long long) (plan->need >> 20), p.mmproj.c_str());
         // said before the engine loads: one without a cache to lend from then sizes itself so that it has the bytes
         core::gpu_loan_ask(p.device, plan->need);
         const std::lock_guard<std::mutex> lk(mu_);
@@ -507,12 +535,12 @@ void Vision::start() {
     }
     const auto t0 = Clock::now();
     loaded->encoder = vision::open_encoder(p, err);
-    if (!loaded->encoder)
-        throw std::runtime_error("the vision encoder did not start: " + p.mmproj + " (" + err + ")");
+    if (!loaded->encoder) throw std::runtime_error("the vision encoder did not start: " + p.mmproj + " (" + err + ")");
     const uint64_t vram = loaded->encoder->gpu_bytes();
     std::fprintf(stderr, "lamina: the image encoder %s: %s loaded in %.1f s%s\n", plan->where.c_str(), p.mmproj.c_str(),
                  seconds_since(t0),
-                 vram == 0 ? "" : (", " + std::to_string(vram >> 20) + " MiB of VRAM for its weights and buffers").c_str());
+                 vram == 0 ? ""
+                           : (", " + std::to_string(vram >> 20) + " MiB of VRAM for its weights and buffers").c_str());
     if (p.gpu) {
         // A picture at the projector's limit now: what a picture takes of the GPU (the buffers, the kernels' images)
         // is taken before the engine sizes its caches from what is left, and the first picture's time is a
@@ -524,7 +552,8 @@ void Vision::start() {
         vision::Rows rows;
         if (!loaded->encoder->encode(grey, rows, err))
             throw std::runtime_error("the vision encoder did not start: a picture at its limit failed (" + err + ")");
-        std::fprintf(stderr, "lamina: the image encoder warmed up at %d image tokens in %.1f s\n", rows.n, seconds_since(w0));
+        std::fprintf(stderr, "lamina: the image encoder warmed up at %d image tokens in %.1f s\n", rows.n,
+                     seconds_since(w0));
     }
     const std::lock_guard<std::mutex> lk(mu_);
     plan_ = std::move(plan);
@@ -591,8 +620,10 @@ void* Vision::encoder_now(std::string& err) {
         }
         if (!plan_->said_cpu) {
             plan_->said_cpu = true;
-            std::fprintf(stderr, "lamina: the image encoder %s found no VRAM for a picture (no loan: %s; the card's free "
-                                 "VRAM: %s): the CPU encodes\n", plan_->where.c_str(), why.c_str(), err.c_str());
+            std::fprintf(stderr,
+                         "lamina: the image encoder %s found no VRAM for a picture (no loan: %s; the card's free "
+                         "VRAM: %s): the CPU encodes\n",
+                         plan_->where.c_str(), why.c_str(), err.c_str());
         }
         err.clear();
         return cpu_->encoder.get();
@@ -616,7 +647,8 @@ void Vision::lease_end() {
     // (an engine with batch slots lends once the prompt a request is reading is read: said when it took a while)
     char wait[96] = "";
     if (waited >= 1.0) std::snprintf(wait, sizeof wait, " (%.2f s of them waiting for the engine to lend)", waited);
-    std::fprintf(stderr, "lamina: the image encoder borrowed %s for %d picture%s: %.2f s%s, and %.2f s to give it back\n",
+    std::fprintf(stderr,
+                 "lamina: the image encoder borrowed %s for %d picture%s: %.2f s%s, and %.2f s to give it back\n",
                  where.c_str(), pictures, pictures == 1 ? "" : "s", used, wait, seconds_since(since) - used);
 #endif
 }
@@ -684,7 +716,8 @@ std::string Vision::load(const std::string& source) {
         if (lower(host) == "localhost") path.erase(0, host.size());
         path = unquote_to_bytes(path);
 #ifdef _WIN32
-        if (path.size() >= 3 && (path[0] == '/' || path[0] == '\\') && std::isalpha((unsigned char) path[1]) && path[2] == ':')
+        if (path.size() >= 3 && (path[0] == '/' || path[0] == '\\') && std::isalpha((unsigned char) path[1]) &&
+            path[2] == ':')
             path.erase(0, 1);
 #endif
     }
@@ -695,7 +728,8 @@ std::string Vision::load(const std::string& source) {
     std::error_code ec;
     if (!path.empty() && fs::is_regular_file(u8_path(path), ec)) {
         if (const uintmax_t size = fs::file_size(u8_path(path), ec); !ec && size > kImageBytesMax)
-            throw std::invalid_argument("the image file " + path + " is over " + std::to_string(kImageBytesMax >> 20) + " MiB");
+            throw std::invalid_argument("the image file " + path + " is over " + std::to_string(kImageBytesMax >> 20) +
+                                        " MiB");
         try {
             return read_file(u8_path(path));
         } catch (const std::exception& e) {
@@ -706,7 +740,8 @@ std::string Vision::load(const std::string& source) {
 }
 
 std::string Vision::download(const std::string& url) {
-    // at most kImageBytesMax: a huge or endless response is not read whole; one that cannot be read is a 400 that says so
+    // at most kImageBytesMax: a huge or endless response is not
+    // read whole; one that cannot be read is a 400 that says so
     const std::string too_big = "the image URL's file is over " + std::to_string(kImageBytesMax >> 20) + " MiB";
     HttpReply r;
     try {
@@ -716,7 +751,8 @@ std::string Vision::download(const std::string& url) {
         throw std::invalid_argument(std::string("the image URL could not be read: ") + e.what());
     }
     if (r.status >= 400)
-        throw std::invalid_argument("the image URL could not be read: HTTP Error " + std::to_string(r.status) + ": " + r.reason);
+        throw std::invalid_argument("the image URL could not be read: HTTP Error " + std::to_string(r.status) + ": " +
+                                    r.reason);
     const std::string size = r.header("content-length");
     if (!size.empty() && std::all_of(size.begin(), size.end(), ::isdigit) && std::stoull(size) > kImageBytesMax)
         throw std::invalid_argument(too_big);
@@ -729,7 +765,8 @@ std::string Vision::normalize(const std::string& data) {
     int w = 0, h = 0, n = 0;
     if (stbi_info_from_memory((const stbi_uc*) data.data(), (int) data.size(), &w, &h, &n) &&
         (uint64_t) w * (uint64_t) h > kImagePixelsMax)
-        throw std::invalid_argument("the image could not be read (" + too_many_pixels((uint64_t) w, (uint64_t) h) + ")");
+        throw std::invalid_argument("the image could not be read (" + too_many_pixels((uint64_t) w, (uint64_t) h) +
+                                    ")");
     const bool jpeg = is_jpeg(data);
     const int orientation = jpeg ? exif_orientation(data) : 1;
     if ((jpeg && (orientation == 0 || orientation == 1 || orientation > 8)) || passes(data)) return data;
@@ -749,8 +786,8 @@ std::string Vision::normalize(const std::string& data) {
     return bmp(*p);
 }
 
-std::vector<std::pair<std::string, int64_t>> Vision::encode_all(const std::vector<std::pair<std::string, bool>>& sources,
-                                                                Cancel* cancel) {
+std::vector<std::pair<std::string, int64_t>>
+Vision::encode_all(const std::vector<std::pair<std::string, bool>>& sources, Cancel* cancel) {
     // a borrowing encoder's lease holds for all of the request's new pictures
     struct Hold {
         Vision& v;
@@ -773,7 +810,8 @@ std::vector<std::pair<std::string, int64_t>> Vision::encode_all(const std::vecto
     return out;
 }
 
-std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool is_bytes, const std::vector<std::string>& keep) {
+std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool is_bytes,
+                                               const std::vector<std::string>& keep) {
     const std::string data = normalize(is_bytes ? source : load(source));
     const std::string key = sha256_hex(data).substr(0, 32);
     std::lock_guard<std::mutex> lk(mu_);
@@ -805,7 +843,8 @@ std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool i
     if (!vision::write_rows(u8_str(out), rows)) {
         std::error_code ec;
         fs::remove(out, ec);
-        throw std::invalid_argument("the image could not be read: its embeddings could not be written to " + u8_str(out));
+        throw std::invalid_argument("the image could not be read: its embeddings could not be written to " +
+                                    u8_str(out));
     }
     ntok = rows.n;
 #else
@@ -827,4 +866,4 @@ std::pair<std::string, int64_t> Vision::encode(const std::string& source, bool i
     return result;
 }
 
-}  // namespace lamina
+}   // namespace lamina

@@ -71,16 +71,20 @@ using lamina::kernels::f32_from_f16;
 
 /// A device buffer with the boilerplate folded in.  A test that allocates twenty buffers by hand spends its
 /// attention on memcpy arguments instead of on the kernel.
-template <typename T>
-struct Dev {
+template <typename T> struct Dev {
     T* p = nullptr;
     Dev() = default;
     explicit Dev(size_t n) { alloc(n); }
-    ~Dev() { if (p) cudaFree(p); }
+    ~Dev() {
+        if (p) cudaFree(p);
+    }
     Dev(const Dev&) = delete;
     Dev& operator=(const Dev&) = delete;
     void alloc(size_t n) {
-        if (p) { cudaFree(p); p = nullptr; }
+        if (p) {
+            cudaFree(p);
+            p = nullptr;
+        }
         if (n) check(cudaMalloc(&p, n * sizeof(T)), "cudaMalloc");
     }
     void put(const std::vector<T>& v) {
@@ -128,17 +132,17 @@ void require(const std::string& name, bool ok, const std::string& detail = "") {
 
 /// Which of the rival readings to compute.  The defaults are the SOURCE's reading.
 struct Alt {
-    bool rotate_at_block_start = true;  ///< false: rotate at the block's LAST cell         (WRONG)
-    bool pool_then_norm = true;         ///< false: mean of the per-cell norms              (WRONG)
-    bool dead_from_first = true;        ///< false: the spare key from the LAST raw key     (WRONG)
-    bool rope_raw = false;              ///< true:  rotate the raw keys before pooling      (WRONG)
-    bool relu_per_head = true;          ///< false: relu(sum of the head dots)              (WRONG)
-    bool use_relu = true;               ///< false: no relu at all                          (WRONG)
-    bool use_bias = true;               ///< false: drop the per-block bias                 (WRONG)
-    bool kv_divide = true;              ///< false: q % n_head_kv instead of q / 12          (WRONG)
-    bool apply_scale = true;            ///< false: no 1/sqrt(head_dim)                      (WRONG)
-    bool gate_second_half = true;       ///< false: the gate from the FIRST half             (WRONG)
-    bool gate_sigmoid = true;           ///< false: silu instead of sigmoid                  (WRONG)
+    bool rotate_at_block_start = true;   ///< false: rotate at the block's LAST cell         (WRONG)
+    bool pool_then_norm = true;          ///< false: mean of the per-cell norms              (WRONG)
+    bool dead_from_first = true;         ///< false: the spare key from the LAST raw key     (WRONG)
+    bool rope_raw = false;               ///< true:  rotate the raw keys before pooling      (WRONG)
+    bool relu_per_head = true;           ///< false: relu(sum of the head dots)              (WRONG)
+    bool use_relu = true;                ///< false: no relu at all                          (WRONG)
+    bool use_bias = true;                ///< false: drop the per-block bias                 (WRONG)
+    bool kv_divide = true;               ///< false: q % n_head_kv instead of q / 12          (WRONG)
+    bool apply_scale = true;             ///< false: no 1/sqrt(head_dim)                      (WRONG)
+    bool gate_second_half = true;        ///< false: the gate from the FIRST half             (WRONG)
+    bool gate_sigmoid = true;            ///< false: silu instead of sigmoid                  (WRONG)
 };
 
 /// `x*y + z` with the product ROUNDED first, i.e. no FMA contraction.
@@ -164,8 +168,7 @@ void ref_rms_norm(std::vector<double>& x, const std::vector<float>& w, float eps
 ///
 /// `terms`, when given, receives the magnitude of each component's TERMS - `|a c| + |b s|` where the
 /// rotation subtracts - so a comparison can divide by that instead of by the result, which cancels.
-void ref_rope_neox(std::vector<double>& x, double pos, int n_rot, double theta,
-                   std::vector<double>* terms = nullptr) {
+void ref_rope_neox(std::vector<double>& x, double pos, int n_rot, double theta, std::vector<double>* terms = nullptr) {
     const int half = n_rot / 2;
     std::vector<double> a(x.begin(), x.begin() + half), b(x.begin() + half, x.begin() + n_rot);
     if (terms) {
@@ -184,7 +187,7 @@ void ref_rope_neox(std::vector<double>& x, double pos, int n_rot, double theta,
     }
 }
 
-const int64_t REF_R = 4;    ///< IDX_BLOCK, checked against the shapes at the top of main
+const int64_t REF_R = 4;   ///< IDX_BLOCK, checked against the shapes at the top of main
 
 /// `QsaCache`, holding f64 rows - the reference never sees an fp16 key.
 struct RefCache {
@@ -211,9 +214,8 @@ std::vector<double> ref_pooled_raw(const RefCache& c) {
 }
 
 /// `pooled_keys` + `dead_pooled_key`, in the readback order `indexer_scores` uses: (n_bid + 1, idx_dim).
-std::vector<double> ref_pooled(const RefCache& c, const std::vector<float>& w_kn, float eps, int n_rot,
-                               double theta, const Alt& o,
-                               std::vector<double>* terms_out = nullptr) {
+std::vector<double> ref_pooled(const RefCache& c, const std::vector<float>& w_kn, float eps, int n_rot, double theta,
+                               const Alt& o, std::vector<double>* terms_out = nullptr) {
     const int64_t n_bid = c.size() / REF_R, dim = (int64_t) c.raw[0].size();
     std::vector<double> pooled((size_t) (n_bid + 1) * dim, 0.0);
     std::vector<std::vector<double>> rows(c.raw);
@@ -235,8 +237,8 @@ std::vector<double> ref_pooled(const RefCache& c, const std::vector<float>& w_kn
             }
         }
         std::vector<double> terms;
-        ref_rope_neox(m, o.rotate_at_block_start ? c.pos[(size_t) (b * REF_R)]
-                                                 : c.pos[(size_t) (b * REF_R + REF_R - 1)],
+        ref_rope_neox(m,
+                      o.rotate_at_block_start ? c.pos[(size_t) (b * REF_R)] : c.pos[(size_t) (b * REF_R + REF_R - 1)],
                       n_rot, theta, terms_out ? &terms : nullptr);
         for (int64_t d = 0; d < dim; ++d) pooled[(size_t) b * dim + d] = m[(size_t) d];
         if (terms_out) {
@@ -246,7 +248,7 @@ std::vector<double> ref_pooled(const RefCache& c, const std::vector<float>& w_kn
     }
     std::vector<double> dead = rows[o.dead_from_first ? 0 : rows.size() - 1];
     ref_rms_norm(dead, w_kn, eps);
-    ref_rope_neox(dead, 0.0, n_rot, theta);      // the identity, but computed the reference's way
+    ref_rope_neox(dead, 0.0, n_rot, theta);   // the identity, but computed the reference's way
     for (int64_t d = 0; d < dim; ++d) pooled[(size_t) n_bid * dim + d] = dead[(size_t) d];
     return pooled;
 }
@@ -313,7 +315,10 @@ std::vector<double> ref_attend(const std::vector<double>& q, int64_t n_head, int
         }
         const double mx = *std::max_element(sc.begin(), sc.end());
         double sum = 0;
-        for (auto& s : sc) { s = std::exp(s - mx); sum += s; }
+        for (auto& s : sc) {
+            s = std::exp(s - mx);
+            sum += s;
+        }
         for (auto& s : sc) s /= sum;
         if (weights_out)
             for (size_t j = 0; j < ids.size(); ++j) (*weights_out)[(size_t) h * ids.size() + j] = sc[j];
@@ -348,7 +353,7 @@ const uint32_t kOracle[] = {
 };
 constexpr int kOracleN = (int) (sizeof(kOracle) / sizeof(kOracle[0])) / 2;
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // a crash must not swallow what was printed already
@@ -380,8 +385,8 @@ int main(int argc, char** argv) {
 
     std::printf("qsa_parity: n_head %lld  n_head_kv %lld  head_dim %lld  indexer %lldx%lld r=%lld "
                 "top_k %lld  page (from the shapes) %lld   [%s]\n\n",
-                (long long) NH, (long long) NKV, (long long) HD, (long long) IDXN, (long long) IDXD,
-                (long long) R, (long long) TOPK, (long long) S.page_size, dense ? "DENSE" : "sparse");
+                (long long) NH, (long long) NKV, (long long) HD, (long long) IDXN, (long long) IDXD, (long long) R,
+                (long long) TOPK, (long long) S.page_size, dense ? "DENSE" : "sparse");
     require("the fixture's r is the artifact's IDX_BLOCK", R == REF_R, "r = " + std::to_string(R));
 
     // ================= 0. the fp16 converter, against numpy =================
@@ -404,21 +409,21 @@ int main(int argc, char** argv) {
         int bad_rev = 0;
         for (int h = 0; h < 65536; ++h) {
             const int ex = (h >> 10) & 0x1F, man = h & 0x3FF;
-            if (ex == 31) continue;                    // inf/NaN come from the vector table above
-            const double mag = ex == 0 ? (double) man * std::ldexp(1.0, -24)
-                                       : (double) (1024 + man) * std::ldexp(1.0, ex - 25);
+            if (ex == 31) continue;   // inf/NaN come from the vector table above
+            const double mag =
+                ex == 0 ? (double) man * std::ldexp(1.0, -24) : (double) (1024 + man) * std::ldexp(1.0, ex - 25);
             const double want = (h & 0x8000) ? -mag : mag;
             if ((double) f32_from_f16((uint16_t) h) != want) {
-                if (bad_rev < 5) std::printf("    f16 0x%04X -> %.9g, want %.9g\n", h, (double) f32_from_f16((uint16_t) h), want);
+                if (bad_rev < 5)
+                    std::printf("    f16 0x%04X -> %.9g, want %.9g\n", h, (double) f32_from_f16((uint16_t) h), want);
                 ++bad_rev;
             }
         }
-        require("f16->f32 is exact on all 65,536 bit patterns", bad_rev == 0,
-                std::to_string(bad_rev) + " wrong");
+        require("f16->f32 is exact on all 65,536 bit patterns", bad_rev == 0, std::to_string(bad_rev) + " wrong");
     }
 
     // ================= 1. kv_append: the paged pool, three page granules =================
-    const int64_t TCELLS = 1100;                     // 275 indexer blocks, and 3 pages at page_size 512
+    const int64_t TCELLS = 1100;   // 275 indexer blocks, and 3 pages at page_size 512
     std::vector<float> kcur_all((size_t) TCELLS * NKV * HD), vcur_all((size_t) TCELLS * NKV * HD);
     for (auto& x : kcur_all) x = rnd(1.0);
     for (auto& x : vcur_all) x = rnd(1.0);
@@ -480,16 +485,16 @@ int main(int argc, char** argv) {
                     const int64_t rl = (cell * NKV + h) * c.page_size + (cell % c.page_size);
                     if (elsewhere(rl) || hk[(size_t) rl * HD + d] != wk) ++mism_linear;
                     // rival (b): cell-major inside the page instead of head-major
-                    const int64_t rh = ((int64_t) c.table[(size_t) (cell / c.page_size)] * c.page_size +
-                                        (cell % c.page_size)) * NKV + h;
+                    const int64_t rh =
+                        ((int64_t) c.table[(size_t) (cell / c.page_size)] * c.page_size + (cell % c.page_size)) * NKV +
+                        h;
                     if (elsewhere(rh) || hk[(size_t) rh * HD + d] != wk) ++mism_head_major;
                 }
         const double n_tot = (double) (TCELLS * NKV * HD);
-        require("kv_append at page_size " + std::to_string(c.page_size) + ": the pool is BIT-EXACT",
-                mism == 0, std::to_string(mism) + " of " + std::to_string((long long) n_tot) + " bits wrong");
+        require("kv_append at page_size " + std::to_string(c.page_size) + ": the pool is BIT-EXACT", mism == 0,
+                std::to_string(mism) + " of " + std::to_string((long long) n_tot) + " bits wrong");
         verdict("  the page table is observable at page_size " + std::to_string(c.page_size),
-                (double) mism_linear / n_tot > 0.5,
-                pct((double) mism_linear / n_tot) + " (linear vs declared)");
+                (double) mism_linear / n_tot > 0.5, pct((double) mism_linear / n_tot) + " (linear vs declared)");
         // The head-major rival is IDENTICAL to the declared layout when page_size == 1 (both reduce to
         // `cell * n_head_kv + h`), so the separation is only asserted where the layouts actually differ.
         if (c.page_size >= 4) {
@@ -517,7 +522,7 @@ int main(int argc, char** argv) {
     }
 
     // ================= 2. indexer_key_append =================
-    const int64_t NT = 10;                           // 2 complete blocks + a 2-cell tail
+    const int64_t NT = 10;   // 2 complete blocks + a 2-cell tail
     // The cells sit at POSITIONS 100..109, not at 0..9: `QsaCache.pos` is what the reference rotates by,
     // and a kernel that assumes position == cell index is wrong for any sequence that does not start at 0
     // (prefix reuse, phase 5).  With base 100 the two readings are 514% apart, which is asserted below.
@@ -526,7 +531,10 @@ int main(int argc, char** argv) {
     std::vector<float> raw_flat;
     for (int64_t t = 0; t < NT; ++t) {
         std::vector<double> kk((size_t) (NKV * HD)), vv((size_t) (NKV * HD)), rr((size_t) IDXD);
-        for (int64_t i = 0; i < NKV * HD; ++i) { kk[(size_t) i] = gauss(rng); vv[(size_t) i] = gauss(rng); }
+        for (int64_t i = 0; i < NKV * HD; ++i) {
+            kk[(size_t) i] = gauss(rng);
+            vv[(size_t) i] = gauss(rng);
+        }
         // cell MAGNITUDES 1, 4, 16, 64 - for the same reason round 196 gave its residual streams different
         // scales: four i.i.d. rows of normal noise have nearly the same norm by accident, so "pool then norm"
         // and "norm then pool" would agree to within the noise and the fixture could not see its own trap.
@@ -550,16 +558,15 @@ int main(int argc, char** argv) {
     const int64_t n_bid = NT / R;
     const size_t pooled_n = (size_t) (n_bid + 1) * IDXD;
     Dev<float> dpooled(pooled_n), ddead((size_t) IDXD), dtail((size_t) (R - 1) * IDXD);
-    Dev<int32_t> dblockpos(1);      // the rotation position, which only the DEVICE may read
+    Dev<int32_t> dblockpos(1);   // the rotation position, which only the DEVICE may read
     // The POSITION is a device value now, because a host scalar would be baked into a captured graph.  One
     // `cudaMemcpy` per cell here; the layer keeps this buffer and updates it per token.
     Dev<int32_t> dpos(1);
     {
         lamina::kernels::QsaIndexerBuffers bufs{dtail.p, ddead.p, dpooled.p, dblockpos.p};
         Dev<float> draw((size_t) IDXD);
-        for (int64_t t = 0; t < NT; ++t) {      // one cell at a time: the tail is a ring and the spare row MOVES
-            check(cudaMemcpy(draw.p, &raw_flat[(size_t) t * IDXD], (size_t) IDXD * 4, cudaMemcpyHostToDevice),
-                  "raw");
+        for (int64_t t = 0; t < NT; ++t) {   // one cell at a time: the tail is a ring and the spare row MOVES
+            check(cudaMemcpy(draw.p, &raw_flat[(size_t) t * IDXD], (size_t) IDXD * 4, cudaMemcpyHostToDevice), "raw");
             const int32_t tpos = (int32_t) t;
             check(cudaMemcpy(dpos.p, &tpos, 4, cudaMemcpyHostToDevice), "pos");
             lamina::kernels::indexer_key_append(draw.p, dpos.p, POS_BASE, dw_kn.p, EPS, bufs, S, dcos.p, dsin.p,
@@ -577,8 +584,7 @@ int main(int argc, char** argv) {
             if (got_dead[(size_t) d] != (float) want[(size_t) n_bid * IDXD + d]) ++dead_bad;
         require("the spare slot's key (rms_norm of cell 0) is BIT-EXACT", dead_bad == 0,
                 std::to_string(dead_bad) + " of " + std::to_string(IDXD) + " wrong");
-        require("the spare slot is at row n_bid and nowhere else", n_bid == 2,
-                "10 cells / r=4 -> 2 complete blocks");
+        require("the spare slot is at row n_bid and nowhere else", n_bid == 2, "10 cells / r=4 -> 2 complete blocks");
 
         // (b) the pooled blocks against the reference
         // THE DENOMINATOR IS THE ROPE'S TERMS, not the result: `a*cos - b*sin` cancels, and the kernel's
@@ -592,7 +598,10 @@ int main(int argc, char** argv) {
                 worst = std::max(worst, rel_terms(wv, (double) got[(size_t) b * IDXD + d], tm));
             }
         report("pooled block keys vs the reference", worst, "rel/|rope terms|");
-        if (!(worst <= 1e-6)) { std::printf("    *** over 1e-6 ***\n"); ++g_bad; }
+        if (!(worst <= 1e-6)) {
+            std::printf("    *** over 1e-6 ***\n");
+            ++g_bad;
+        }
 
         // (c) THE INCOMPLETE TAIL IS NOT POOLED: the two tail cells take the SPARE slot's score, which is cell
         //     0's key - not their own mean.  A rival reading that pools them would still fill every row.
@@ -621,13 +630,17 @@ int main(int argc, char** argv) {
                 }
             verdict(name, num / den > 0.05, pct(num / den));
         };
-        Alt a1; a1.rotate_at_block_start = false;
+        Alt a1;
+        a1.rotate_at_block_start = false;
         sep("rotating at the block's LAST cell is observable", a1);
-        Alt a2; a2.pool_then_norm = false;
+        Alt a2;
+        a2.pool_then_norm = false;
         sep("norm-then-pool vs pool-then-norm is observable", a2);
-        Alt a3; a3.dead_from_first = false;
+        Alt a3;
+        a3.dead_from_first = false;
         sep("the spare key from the LAST raw key is observable", a3);
-        Alt a4; a4.rope_raw = true;
+        Alt a4;
+        a4.rope_raw = true;
         sep("rotating the RAW indexer keys is observable", a4);
         {   // THE POSITION BASE.  The same reference with the cells at 0..9 instead of 100..109 - i.e.
             // what a kernel that equates a cell's position with its index would compute.
@@ -640,8 +653,7 @@ int main(int argc, char** argv) {
                     num += std::fabs(alt[(size_t) b * IDXD + d] - want[(size_t) b * IDXD + d]);
                     den += std::fabs(want[(size_t) b * IDXD + d]);
                 }
-            verdict("the rotation's POSITION BASE (pos_base) is observable", num / den > 0.05,
-                    pct(num / den));
+            verdict("the rotation's POSITION BASE (pos_base) is observable", num / den > 0.05, pct(num / den));
         }
 
         // (d) THE TRAP THIS FIXTURE CANNOT SEE, measured and reported rather than hidden.  `rms_norm` divides
@@ -696,8 +708,7 @@ int main(int argc, char** argv) {
         dsc.alloc((size_t) n_kv);
         lamina::kernels::qsa_index(dp.p, n_bid, dqi.p, dbias.p, S, n_kv, dsc.p, nullptr);
         const std::vector<float> got = dsc.get((size_t) n_kv);
-        const std::vector<double> want =
-            ref_indexer_scores(p64, n_bid, q_idx64, IDXN, IDXD, bias, n_kv, Alt{});
+        const std::vector<double> want = ref_indexer_scores(p64, n_bid, q_idx64, IDXN, IDXD, bias, n_kv, Alt{});
 
         // The score is a SUM of four relu'd dots plus the bias, so the denominator is the magnitude of the
         // TERMS - |dot| bounds a relu'd dot from above and is what is used here.
@@ -714,12 +725,15 @@ int main(int argc, char** argv) {
             worst = std::max(worst, rel_terms(want[(size_t) j], (double) got[(size_t) j], terms));
         }
         report("indexer cell scores vs the reference", worst, "rel/Sum|terms|");
-        if (!(worst <= 1e-6)) { std::printf("    *** over 1e-6 ***\n"); ++g_bad; }
+        if (!(worst <= 1e-6)) {
+            std::printf("    *** over 1e-6 ***\n");
+            ++g_bad;
+        }
 
         require("cells of one block share its score (0..3)",
                 got[0] == got[1] && got[1] == got[2] && got[2] == got[3] && got[0] != got[4]);
-        require("cells 8,9 (the tail) take the SPARE slot's score, not block 1's",
-                got[8] == got[9] && got[9] != got[7], "got[8] == got[9] != got[7]");
+        require("cells 8,9 (the tail) take the SPARE slot's score, not block 1's", got[8] == got[9] && got[9] != got[7],
+                "got[8] == got[9] != got[7]");
 
         auto sep_scores = [&](const std::string& name, const Alt& a) {
             const std::vector<double> alt = ref_indexer_scores(p64, n_bid, q_idx64, IDXN, IDXD, bias, n_kv, a);
@@ -731,11 +745,14 @@ int main(int argc, char** argv) {
             }
             verdict(name, num / den > 0.05, pct(num / den));
         };
-        Alt a5; a5.relu_per_head = false;
+        Alt a5;
+        a5.relu_per_head = false;
         sep_scores("relu PER HEAD vs relu(sum of heads) is observable", a5);
-        Alt a6; a6.use_relu = false;
+        Alt a6;
+        a6.use_relu = false;
         sep_scores("dropping the relu is observable", a6);
-        Alt a7; a7.use_bias = false;
+        Alt a7;
+        a7.use_bias = false;
         sep_scores("dropping the per-block bias is observable", a7);
     }
 
@@ -762,10 +779,9 @@ int main(int argc, char** argv) {
         check(cudaStreamEndCapture(stream, &graph), "tail capture end");
         check(cudaGraphInstantiate(&exec, graph, 0), "tail instantiate");
 
-        const std::vector<int64_t> counts = {
-            1, 2, 3, 4, 511, 512, 513, 2046, 2047, 2048, 2049, 2050, 2051,
-            2052, 2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060,
-            4095, 4096, 4097, 8191, 8192, 8193, 20477, 20478, 20479, 20480};
+        const std::vector<int64_t> counts = {1,    2,    3,    4,    511,  512,  513,   2046,  2047,  2048, 2049,
+                                             2050, 2051, 2052, 2053, 2054, 2055, 2056,  2057,  2058,  2059, 2060,
+                                             4095, 4096, 4097, 8191, 8192, 8193, 20477, 20478, 20479, 20480};
         for (const int64_t n : counts) {
             const int64_t width = lamina::kernels::qsa_selection_width(n, S);
             const int64_t tail = n % R;
@@ -810,8 +826,8 @@ int main(int argc, char** argv) {
             lamina::kernels::topk_512(dsc.p, n_kv, S, CAP, dids.p, nullptr);
             const int64_t width = lamina::kernels::qsa_selection_width(n_kv, S);
             const std::vector<int32_t> g = dids.get((size_t) width);
-            const std::vector<int32_t> want = ref_select(as_d(std::vector<float>(sc.begin(), sc.begin() + n_kv)),
-                                                         n_kv, TOPK, false);
+            const std::vector<int32_t> want =
+                ref_select(as_d(std::vector<float>(sc.begin(), sc.begin() + n_kv)), n_kv, TOPK, false);
             const bool ok = g == want;
             require(name, ok, std::to_string(width) + " ids, width = min(n_kv, top_k + r - 1)");
             if (!ok) {
@@ -822,7 +838,8 @@ int main(int argc, char** argv) {
                     }
             }
             bool asc = true;
-            for (size_t i = 1; i < g.size(); ++i) if (g[i] <= g[i - 1]) asc = false;
+            for (size_t i = 1; i < g.size(); ++i)
+                if (g[i] <= g[i - 1]) asc = false;
             require("  ...ascending and unique", asc);
             return g;
         };
@@ -851,11 +868,11 @@ int main(int argc, char** argv) {
         // "selection skipped when context <= 2,048" means - and it holds to 2,051, not 2,048.
         for (int64_t n : {(int64_t) 2048, (int64_t) 2051}) {
             for (int64_t j = 0; j < n; ++j) sc[(size_t) j] = rnd(1.0);
-            const std::vector<int32_t> g = one(std::string("topk_512 n_kv = ") + std::to_string(n) +
-                                                   " selects every cell (identity)",
-                                               n);
+            const std::vector<int32_t> g =
+                one(std::string("topk_512 n_kv = ") + std::to_string(n) + " selects every cell (identity)", n);
             bool ident = (int64_t) g.size() == n;
-            for (int64_t j = 0; j < n && ident; ++j) if (g[(size_t) j] != j) ident = false;
+            for (int64_t j = 0; j < n && ident; ++j)
+                if (g[(size_t) j] != j) ident = false;
             require("  ...and it really is 0,1,2,...", ident);
         }
         {   // one past the bound the identity must FAIL, or the two checks above prove nothing
@@ -864,9 +881,11 @@ int main(int argc, char** argv) {
             std::vector<char> kept(2052, 0);
             for (int32_t id : g) kept[(size_t) id] = 1;
             int64_t missing = 0;
-            for (int64_t j = 0; j < 2052; ++j) if (!kept[(size_t) j]) ++missing;
+            for (int64_t j = 0; j < 2052; ++j)
+                if (!kept[(size_t) j]) ++missing;
             int64_t argmin = 0;
-            for (int64_t j = 1; j < 2052; ++j) if (sc[(size_t) j] < sc[(size_t) argmin]) argmin = j;
+            for (int64_t j = 1; j < 2052; ++j)
+                if (sc[(size_t) j] < sc[(size_t) argmin]) argmin = j;
             require("  ...exactly one cell is dropped, and it is the smallest score",
                     missing == 1 && !kept[(size_t) argmin], std::to_string(missing) + " dropped");
         }
@@ -885,7 +904,10 @@ int main(int argc, char** argv) {
             for (int64_t h = 0; h < NKV; ++h) vv[(size_t) (h * HD)] = 1.0;
             kk[0] = j == N - 1 ? 100.0 : 0.0;
             vv[0] = j == N - 1 ? 10.0 : 1.0;
-            for (int64_t i = 0; i < NKV * HD; ++i) { k2f.push_back((float) kk[(size_t) i]); v2f.push_back((float) vv[(size_t) i]); }
+            for (int64_t i = 0; i < NKV * HD; ++i) {
+                k2f.push_back((float) kk[(size_t) i]);
+                v2f.push_back((float) vv[(size_t) i]);
+            }
             k2.push_back(kk);
             v2.push_back(vv);
         }
@@ -896,7 +918,10 @@ int main(int argc, char** argv) {
         dq.put(as_f(q));
         const size_t scr = (size_t) N * NKV * HD;
         std::vector<uint16_t> kbits(scr), vbits(scr);
-        for (size_t i = 0; i < scr; ++i) { kbits[i] = f16_from_f32(k2f[i]); vbits[i] = f16_from_f32(v2f[i]); }
+        for (size_t i = 0; i < scr; ++i) {
+            kbits[i] = f16_from_f32(k2f[i]);
+            vbits[i] = f16_from_f32(v2f[i]);
+        }
         Dev<uint16_t> dks(scr), dvs(scr);
         dks.put(kbits);
         dvs.put(vbits);
@@ -915,8 +940,8 @@ int main(int argc, char** argv) {
 
         verdict("with every cell selected the loud cell dominates its head 0", out_all[0] > 5.0,
                 "out[0][0] = " + std::to_string(out_all[0]).substr(0, 6));
-        require("with the loud cell unselected it contributes EXACTLY nothing",
-                std::fabs(out_sel[0] - 1.0) < 1e-6, "out[0][0] = " + std::to_string(out_sel[0]).substr(0, 8));
+        require("with the loud cell unselected it contributes EXACTLY nothing", std::fabs(out_sel[0] - 1.0) < 1e-6,
+                "out[0][0] = " + std::to_string(out_sel[0]).substr(0, 8));
         double worst_sum = 0;
         for (int64_t h = 0; h < NH; ++h) {
             double s = 0;
@@ -934,7 +959,8 @@ int main(int argc, char** argv) {
             }
             verdict(name, num / den > 0.05, pct(num / den));
         };
-        Alt a8; a8.kv_divide = false;
+        Alt a8;
+        a8.kv_divide = false;
         sep_attend("q % 2 vs q / 12 for the kv head is observable", a8);
         // The scale trap is NOT asserted on this fixture: its softmax is saturated (the loud cell holds 99%
         // of the weight, so removing a 16x logit scale moves it to 100% and the output by 1.09%).  It is
@@ -957,7 +983,7 @@ int main(int argc, char** argv) {
     // ================= 6. the whole layer at n_kv = 2100, so the selection is genuinely sparse =============
     int64_t width = 0;
     {
-        const int64_t T = 2100;                      // > 2051, so `width` really truncates
+        const int64_t T = 2100;   // > 2051, so `width` really truncates
         width = lamina::kernels::qsa_selection_width(T, S);
         std::vector<float> pk((size_t) T * NKV * HD), pv((size_t) T * NKV * HD), praw((size_t) T * IDXD);
         std::vector<std::vector<double>> k16((size_t) T), v16((size_t) T);
@@ -977,7 +1003,7 @@ int main(int argc, char** argv) {
                 praw[(size_t) t * IDXD + d] = (float) rr[(size_t) d];
             }
             for (int64_t i = 0; i < NKV * HD; ++i) {
-                kk[(size_t) i] = (double) pk[(size_t) t * NKV * HD + i];       // the f32 the device got
+                kk[(size_t) i] = (double) pk[(size_t) t * NKV * HD + i];   // the f32 the device got
                 vv[(size_t) i] = (double) pv[(size_t) t * NKV * HD + i];
             }
             for (int64_t d = 0; d < IDXD; ++d) rr[(size_t) d] = (double) praw[(size_t) t * IDXD + d];
@@ -989,9 +1015,9 @@ int main(int argc, char** argv) {
                 v16[(size_t) t][(size_t) i] = (double) f32_from_f16(f16_from_f32(pv[(size_t) t * NKV * HD + i]));
             }
         }
-        const int64_t p_nbid = T / R;                // 525 complete blocks; the spare key sits at row 525
+        const int64_t p_nbid = T / R;   // 525 complete blocks; the spare key sits at row 525
         const int64_t page_size = 64, n_pages = (T + page_size - 1) / page_size;
-        lamina::kernels::QsaShapes Sp = S;           // the granule lives in the shapes: see section 1
+        lamina::kernels::QsaShapes Sp = S;   // the granule lives in the shapes: see section 1
         Sp.page_size = page_size;
         std::vector<int32_t> table((size_t) n_pages);
         for (int64_t i = 0; i < n_pages; ++i) table[(size_t) i] = (int32_t) (n_pages - 1 - i);   // REVERSED
@@ -1016,8 +1042,7 @@ int main(int argc, char** argv) {
             check(cudaMemcpy(draw.p, &praw[(size_t) t * IDXD], (size_t) IDXD * 4, cudaMemcpyHostToDevice), "raw");
             const int32_t tpos = (int32_t) t;
             check(cudaMemcpy(dpos2.p, &tpos, 4, cudaMemcpyHostToDevice), "pos2");
-            lamina::kernels::indexer_key_append(draw.p, dpos2.p, 0, dw_kn.p, EPS, bufs, S, dcos.p, dsin.p,
-                                                nullptr);
+            lamina::kernels::indexer_key_append(draw.p, dpos2.p, 0, dw_kn.p, EPS, bufs, S, dcos.p, dsin.p, nullptr);
         }
         Dev<float> dqidx, dsc;
         dqidx.put(q_idx);
@@ -1030,8 +1055,7 @@ int main(int argc, char** argv) {
         const std::vector<float> pool32 = dpp.get(ppooled_n);
         const std::vector<double> pool64 = as_d(pool32);
         const std::vector<double> q_idx64 = as_d(q_idx);
-        const std::vector<double> sc_want =
-            ref_indexer_scores(pool64, p_nbid, q_idx64, IDXN, IDXD, {}, T, Alt{});
+        const std::vector<double> sc_want = ref_indexer_scores(pool64, p_nbid, q_idx64, IDXN, IDXD, {}, T, Alt{});
         const std::vector<int32_t> sel_want = ref_select(sc_want, T, TOPK, false);
         require("the selected set matches the reference (2100 cells, width 2051)", sel_sparse == sel_want,
                 std::to_string(width) + " ids");
@@ -1043,20 +1067,23 @@ int main(int argc, char** argv) {
             for (int32_t id : sel_sparse) issel[(size_t) id] = 1;
             double lo = 1e300, hi = -1e300;
             for (int32_t id : sel_sparse) lo = std::min(lo, sc_want[(size_t) id]);
-            for (int64_t j = 0; j < T; ++j) if (!issel[(size_t) j]) hi = std::max(hi, sc_want[(size_t) j]);
+            for (int64_t j = 0; j < T; ++j)
+                if (!issel[(size_t) j]) hi = std::max(hi, sc_want[(size_t) j]);
             if (lo == hi) {
                 // The cut sits inside a group of cells that all score exactly the same - here 0.0, a relu
                 // signal with all four head dots negative - so nothing but the ascending-index rule decides
                 // which of them survive.  A gap metric is undefined there; the tie is the finding.
                 int64_t tied_in = 0, tied_out = 0;
-                for (int32_t id : sel_sparse) if (sc_want[(size_t) id] == lo) ++tied_in;
-                for (int64_t j = 0; j < T; ++j) if (!issel[(size_t) j] && sc_want[(size_t) j] == lo) ++tied_out;
-                std::printf("  %-48s      THE CUT IS A TIE at %.6f: %lld selected, %lld rejected\n",
-                            "the cut", lo, (long long) tied_in, (long long) tied_out);
+                for (int32_t id : sel_sparse)
+                    if (sc_want[(size_t) id] == lo) ++tied_in;
+                for (int64_t j = 0; j < T; ++j)
+                    if (!issel[(size_t) j] && sc_want[(size_t) j] == lo) ++tied_out;
+                std::printf("  %-48s      THE CUT IS A TIE at %.6f: %lld selected, %lld rejected\n", "the cut", lo,
+                            (long long) tied_in, (long long) tied_out);
                 require("  ...and the kernel picks the same ones as the reference", sel_sparse == sel_want);
             } else {
-                report("the selection boundary gap, in fp32 ulp of the cut",
-                       (lo - hi) / (std::fabs(lo) * 1.2e-7), "gap/ulp");
+                report("the selection boundary gap, in fp32 ulp of the cut", (lo - hi) / (std::fabs(lo) * 1.2e-7),
+                       "gap/ulp");
                 std::printf("  %-48s      last selected %.6f, first rejected %.6f\n", "the cut", lo, hi);
             }
         }
@@ -1089,7 +1116,8 @@ int main(int argc, char** argv) {
         }
         report("qsa_attend vs the reference on the SAME fp16 cache", num / den, "rel");
         {   // the SCALE trap, on data whose softmax is not saturated
-            Alt a; a.apply_scale = false;
+            Alt a;
+            a.apply_scale = false;
             const std::vector<double> alt = ref_attend(q64, NH, NKV, HD, sel, k16, v16, a, nullptr);
             double n2 = 0, d2 = 0;
             for (size_t i = 0; i < alt.size(); ++i) {
@@ -1098,7 +1126,10 @@ int main(int argc, char** argv) {
             }
             verdict("omitting 1/sqrt(head_dim) is observable (random fixture)", n2 / d2 > 0.05, pct(n2 / d2));
         }
-        if (!(num / den <= 1e-5)) { std::printf("    *** over 1e-5 ***\n"); ++g_bad; }
+        if (!(num / den <= 1e-5)) {
+            std::printf("    *** over 1e-5 ***\n");
+            ++g_bad;
+        }
         const double fp16_cost = rel_l1(attn_f64, attn_f16);
         report("the fp16 KV cache's OWN cost (f32 keys vs fp16 keys)", fp16_cost, "rel");
         if (!(fp16_cost <= 1e-3)) {
@@ -1135,7 +1166,10 @@ int main(int argc, char** argv) {
             if (gate16[i] != f16_from_f32((float) gwant[i])) ++gbits;
         }
         report("qsa_gate_apply vs the double reference", gnum / gden, "rel (f16 out quant ~2.4e-4)");
-        if (!(gnum / gden <= 1e-3)) { std::printf("    *** over 1e-3 ***\n"); ++g_bad; }
+        if (!(gnum / gden <= 1e-3)) {
+            std::printf("    *** over 1e-3 ***\n");
+            ++g_bad;
+        }
         std::printf("  %-48s      %d of %lld (CUDA's double exp vs libm's, in the last bits)\n",
                     "fp16 gate bits differing from the reference", gbits, (long long) gwant.size());
 
@@ -1148,9 +1182,11 @@ int main(int argc, char** argv) {
             }
             verdict(name, n2 / d2 > 0.05, pct(n2 / d2));
         };
-        Alt a10; a10.gate_second_half = false;
+        Alt a10;
+        a10.gate_second_half = false;
         sep_gate("the gate from the FIRST half is observable", a10);
-        Alt a11; a11.gate_sigmoid = false;
+        Alt a11;
+        a11.gate_sigmoid = false;
         sep_gate("silu instead of sigmoid on the QSA gate is observable", a11);
 
         // DENSE vs SPARSE.  Below the bound the width IS n_kv, so the two paths must agree EXACTLY (P1.S4's
@@ -1191,18 +1227,19 @@ int main(int argc, char** argv) {
         lamina::kernels::qsa_attend(dq.p, nullptr, nullptr, 0, S, dattn.p, nullptr, nullptr);
         const std::vector<float> got = dattn.get((size_t) NH * HD);
         bool allz = true;
-        for (float x : got) if (x != 0.0f) allz = false;
+        for (float x : got)
+            if (x != 0.0f) allz = false;
         require("an EMPTY selection gives a zero attention, not a NaN", allz, "all 6144 elements zero");
     }
 
     // ================= 8. --bench: what one QSA layer costs at 32K of context =================
     if (bench) {
-        const int64_t T = MAXC;                      // 32,768 cells = 32K of context
+        const int64_t T = MAXC;   // 32,768 cells = 32K of context
         const int64_t nbid = T / R;
         const int64_t ps = S.page_size, n_pages = (T + ps - 1) / ps;
         const int64_t w = lamina::kernels::qsa_selection_width(T, S);
-        std::printf("\n  --bench at n_kv = %lld, page_size %lld, selection width %lld\n", (long long) T,
-                    (long long) ps, (long long) w);
+        std::printf("\n  --bench at n_kv = %lld, page_size %lld, selection width %lld\n", (long long) T, (long long) ps,
+                    (long long) w);
         std::vector<int32_t> table((size_t) n_pages);
         for (int64_t i = 0; i < n_pages; ++i) table[(size_t) i] = (int32_t) i;
         Dev<int32_t> dtab;
@@ -1251,8 +1288,7 @@ int main(int argc, char** argv) {
         const int reps = 20;
         timeit("qsa_index  (8193 pooled rows x 4 heads)", reps,
                [&] { lamina::kernels::qsa_index(dpp.p, nbid, dqidx.p, nullptr, S, T, dsc.p, nullptr); });
-        timeit("topk_512   (32768 cells)", reps,
-               [&] { lamina::kernels::topk_512(dsc.p, T, S, w, dsel.p, nullptr); });
+        timeit("topk_512   (32768 cells)", reps, [&] { lamina::kernels::topk_512(dsc.p, T, S, w, dsel.p, nullptr); });
         lamina::kernels::topk_512(dsc.p, T, S, w, dsel.p, nullptr);
         timeit("kv_gather  (2051 ids through the page table)", reps,
                [&] { lamina::kernels::kv_gather(dpk.p, dpv.p, dtab.p, dsel.p, w, S, dks.p, dvs.p, nullptr); });
@@ -1285,7 +1321,7 @@ int main(int argc, char** argv) {
     {
         std::printf("\n-- indexer_key_append under graph capture\n");
         const int R2 = 4;
-        const int64_t NCELL = 8;                       // two complete blocks of r=4
+        const int64_t NCELL = 8;   // two complete blocks of r=4
         const size_t IDXD2 = (size_t) IDXD;
         std::vector<float> raw2((size_t) NCELL * IDXD2);
         for (size_t i = 0; i < raw2.size(); ++i) raw2[i] = (float) std::sin((double) i * 0.013) * 2.0f - 0.3f;
@@ -1335,8 +1371,7 @@ int main(int argc, char** argv) {
         int row0_same = 0;
         for (size_t d = 0; d < IDXD2; ++d)
             if (afterA[d] == afterB[d]) ++row0_same;
-        std::printf("  %-44s %d of %zu unchanged\n", "the first block's row survives replay B", row0_same,
-                    IDXD2);
+        std::printf("  %-44s %d of %zu unchanged\n", "the first block's row survives replay B", row0_same, IDXD2);
         if (row0_same != (int) IDXD2) ++g_bad;
 
         // row 1 must now be FILLED by the captured graph - the whole point
@@ -1351,8 +1386,7 @@ int main(int argc, char** argv) {
         int rows_differ = 0;
         for (size_t d = 0; d < IDXD2; ++d)
             if (afterB[d] != afterB[IDXD2 + d]) ++rows_differ;
-        std::printf("  %-44s %d of %zu differ\n", "the two pooled rows are different keys", rows_differ,
-                    IDXD2);
+        std::printf("  %-44s %d of %zu differ\n", "the two pooled rows are different keys", rows_differ, IDXD2);
         // A baked-in position would have written row 0 a second time and left row 1 at zero, so these two
         // assertions together are the negative control for the refactor.
         if (rows_differ != (int) IDXD2) ++g_bad;

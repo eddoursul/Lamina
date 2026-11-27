@@ -24,4 +24,4 @@ uint16_t cp_class(uint32_t cp);
 uint32_t cp_lower(uint32_t cp);
 uint32_t cp_upper(uint32_t cp);
 
-}  // namespace lamina
+}   // namespace lamina

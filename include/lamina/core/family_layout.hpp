@@ -71,8 +71,8 @@ inline bool geometry_from_gguf(const lamina::GgufFile& meta, ModelGeometry& g, i
     }
     if (family == lamina::ModelFamily::Qwen35Moe || dense) {
         num("nextn_predict_layers", g.n_mtp_layers);
-        g.hc = g.hc_lr = 0;                 // a plain pre-norm residual
-        g.idx_q_heads = g.idx_key_dim = 0;  // dense attention, no sparse indexer
+        g.hc = g.hc_lr = 0;                  // a plain pre-norm residual
+        g.idx_q_heads = g.idx_key_dim = 0;   // dense attention, no sparse indexer
     } else {
         num("hyper_connection.count", g.hc);
         num("hyper_connection.low_rank", g.hc_lr);
@@ -95,7 +95,8 @@ inline bool geometry_from_gguf(const lamina::GgufFile& meta, ModelGeometry& g, i
         g.ssm_k_heads <= 0 || g.ssm_v_heads <= 0 || g.ssm_d_conv <= 0 || g.qsa_interval < 2)
         return bad("a geometry key is zero or out of range");
     if (value_length >= 0 && value_length != key_length) return bad("attention.key_length != attention.value_length");
-    if (g.ssm_value_dim != g.ssm_state_size * g.ssm_v_heads) return bad("ssm.inner_size != ssm.state_size * ssm.time_step_rank");
+    if (g.ssm_value_dim != g.ssm_state_size * g.ssm_v_heads)
+        return bad("ssm.inner_size != ssm.state_size * ssm.time_step_rank");
     if (g.ssm_v_heads % g.ssm_k_heads) return bad("ssm.time_step_rank is not a multiple of ssm.group_count");
     if (g.n_head % g.n_head_kv) return bad("attention.head_count is not a multiple of attention.head_count_kv");
     if (g.n_layers % g.qsa_interval) return bad("the layer count is not a multiple of full_attention_interval");
@@ -108,8 +109,10 @@ inline bool geometry_from_gguf(const lamina::GgufFile& meta, ModelGeometry& g, i
 inline std::string compiled_geometry_mismatch(const ModelGeometry& g) {
     const ModelGeometry c;
     if (g.family != c.family)
-        return std::string("the model is ") + lamina::model_family_title(g.family) + ", this engine's kernels are built "
-               "for " + lamina::model_family_title(c.family);
+        return std::string("the model is ") + lamina::model_family_title(g.family) +
+               ", this engine's kernels are built "
+               "for " +
+               lamina::model_family_title(c.family);
     struct F {
         const char* what;
         int64_t got, want;
@@ -174,13 +177,14 @@ inline std::vector<TensorWant> layer_tensors(const ModelGeometry& g, int64_t lay
         add("ffn_gate_exps.weight", {N, FF, NE});
         add("ffn_up_exps.weight", {N, FF, NE});
         add("ffn_down_exps.weight", {FF, N, NE});
-    } else {        // a dense FFN (qwen35)
+    } else {   // a dense FFN (qwen35)
         add("ffn_gate.weight", {N, FF});
         add("ffn_up.weight", {N, FF});
         add("ffn_down.weight", {FF, N});
     }
     if (g.has_hyper_connections()) {
-        // gated residual (Flash-Next): `gr_read` transposes, so the file's orientation is [hc_dim, hc_lr] / [hc_lr, hc_dim]
+        // gated residual (Flash-Next): `gr_read` transposes, so the
+        // file's orientation is [hc_dim, hc_lr] / [hc_lr, hc_dim]
         const int64_t H = g.hc_dim();
         add("hc_attn_down.weight", {H, g.hc_lr});
         add("hc_attn_up.weight", {g.hc_lr, H});
@@ -271,7 +275,8 @@ inline bool check_gguf_layout(const lamina::GgufModel& m, const ModelGeometry& g
             std::string got, want;
             for (uint64_t d : t->shape) got += (got.empty() ? "" : ", ") + std::to_string(d);
             for (int64_t d : shape) want += (want.empty() ? "" : ", ") + std::to_string(d);
-            err = name + " is [" + got + "], the " + lamina::model_family_title(g.family) + " layout wants [" + want + "]";
+            err = name + " is [" + got + "], the " + lamina::model_family_title(g.family) + " layout wants [" + want +
+                  "]";
             return false;
         }
         if (!m.in_bounds(*t, s)) {
@@ -298,4 +303,4 @@ inline bool check_gguf_layout(const lamina::GgufModel& m, const ModelGeometry& g
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

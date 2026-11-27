@@ -23,4 +23,4 @@ std::span<const EmbeddedFile> profile_file_all();
 /// data/bench-agent-files.json, the texts of lamina bench's agent session (src/server/bench.hpp)
 const EmbeddedFile* bench_file(std::string_view path);
 
-}  // namespace lamina
+}   // namespace lamina

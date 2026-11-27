@@ -37,4 +37,4 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
                        const std::string& body, double timeout_s, size_t max_bytes = 0,
                        const std::function<bool(std::string_view)>& on_data = nullptr, bool follow = true);
 
-}  // namespace lamina
+}   // namespace lamina

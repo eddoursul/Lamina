@@ -77,7 +77,7 @@ struct Job {
     std::vector<cudaEvent_t> landed;
 };
 
-}  // namespace
+}   // namespace
 
 /// What the stages share.
 struct PromptSplit::Impl {
@@ -102,10 +102,10 @@ struct PromptSplit::Impl {
 /// prompt path, or the stage before on its own thread) hands it each chunk's residual through SplitOut.
 struct PromptSplit::Impl::St final : public SplitOut {
     Impl* im = nullptr;
-    bool last = false;        // the model's last layers: the draft layer's prompt K/V are its work
+    bool last = false;   // the model's last layers: the draft layer's prompt K/V are its work
     int dev = -1;
-    int64_t at = 0, end = 0;  // its layers
-    int64_t run_p0 = 0, run_T = 0;   // the chunk its prompt path runs (PromptSplit::on_progress)
+    int64_t at = 0, end = 0;                       // its layers
+    int64_t run_p0 = 0, run_T = 0;                 // the chunk its prompt path runs (PromptSplit::on_progress)
     std::unique_ptr<Prefill> own_p{new Prefill};   // (ends with its GPU current: ~St)
     Prefill& p = *own_p;
     // the dense weights of its layers and, the last stage, the draft layer's prompt-K/V weights: the main GPU's rows,
@@ -113,7 +113,10 @@ struct PromptSplit::Impl::St final : public SplitOut {
     std::vector<Tensor> tensors;
     uint64_t dkv_off[10] = {}, dkv_bytes[10] = {};   // MtpPromptKv's weights, in its field order
     uint64_t wbytes = 0;
-    struct WSrc { const void* dev; uint64_t off, bytes; };
+    struct WSrc {
+        const void* dev;
+        uint64_t off, bytes;
+    };
     std::vector<WSrc> wsrc;   // the main GPU's buffers and their place in the copies
     core::WeightTable wt2;
     // its session state, indexed from `at`: its QSA layers' copies, its GDN layers' (the main session's GDN states
@@ -127,12 +130,12 @@ struct PromptSplit::Impl::St final : public SplitOut {
     uint8_t *w_base = nullptr, *draft_base = nullptr;
     // its stage stream and copy stream; the main GPU's stream for the copies to and from its session
     cudaStream_t s2 = nullptr, cp2 = nullptr, back = nullptr;
-    std::vector<cudaEvent_t> ev_in;    // its GPU: a piece of the residual is in the stage's buffers
-    cudaEvent_t ev_free = nullptr;     // its GPU: the pinned residual has been read
-    cudaEvent_t ev_a = nullptr;        // its GPU's last use of the staging buffer
-    cudaEvent_t ev_m = nullptr;        // the main GPU's last use of the staging buffer
-    float* host_R = nullptr;           // pinned, portable: [max_chunk, hc * n_embd]
-    uint8_t* stage = nullptr;          // pinned, portable
+    std::vector<cudaEvent_t> ev_in;   // its GPU: a piece of the residual is in the stage's buffers
+    cudaEvent_t ev_free = nullptr;    // its GPU: the pinned residual has been read
+    cudaEvent_t ev_a = nullptr;       // its GPU's last use of the staging buffer
+    cudaEvent_t ev_m = nullptr;       // the main GPU's last use of the staging buffer
+    float* host_R = nullptr;          // pinned, portable: [max_chunk, hc * n_embd]
+    uint8_t* stage = nullptr;         // pinned, portable
     uint64_t stage_bytes = 0;
     // its thread and its queue
     std::thread th;
@@ -160,13 +163,20 @@ struct PromptSplit::Impl::St final : public SplitOut {
         }
         if (dev < 0) return;
         cudaSetDevice(dev);
-        for (cudaStream_t x : {s2, cp2}) if (x) cudaStreamSynchronize(x);
+        for (cudaStream_t x : {s2, cp2})
+            if (x) cudaStreamSynchronize(x);
         own_p.reset();
-        for (cudaStream_t x : {s2, cp2}) if (x) cudaStreamDestroy(x);
-        for (cudaEvent_t e : ev_in) if (e) cudaEventDestroy(e);
-        for (cudaEvent_t e : {ev_free, ev_a}) if (e) cudaEventDestroy(e);
+        for (cudaStream_t x : {s2, cp2})
+            if (x) cudaStreamDestroy(x);
+        for (cudaEvent_t e : ev_in)
+            if (e) cudaEventDestroy(e);
+        for (cudaEvent_t e : {ev_free, ev_a})
+            if (e) cudaEventDestroy(e);
         cudaSetDevice(im->main);
-        if (back) { cudaStreamSynchronize(back); cudaStreamDestroy(back); }
+        if (back) {
+            cudaStreamSynchronize(back);
+            cudaStreamDestroy(back);
+        }
         if (ev_m) cudaEventDestroy(ev_m);
         if (host_R) cudaFreeHost(host_R);
         if (stage) cudaFreeHost(stage);
@@ -214,7 +224,10 @@ struct PromptSplit::Impl::St final : public SplitOut {
             batch.clear();
             used = 0;
             const cudaError_t x = cudaGetLastError();
-            if (x != cudaSuccess) { e = std::string("prompt split: copies: ") + cudaGetErrorString(x); return false; }
+            if (x != cudaSuccess) {
+                e = std::string("prompt split: copies: ") + cudaGetErrorString(x);
+                return false;
+            }
             return true;
         };
         for (Run r : runs)
@@ -243,7 +256,8 @@ struct PromptSplit::Impl::St final : public SplitOut {
         for (size_t i = 0; i < qsa2.size(); ++i) {
             const auto a2 = core::qsa_kv_arrays(qsa2[i], g), am = core::qsa_kv_arrays(main_qsa(i), g);
             for (size_t k = 0; k < a2.size(); ++k)
-                if (back_to_main) cell_runs(c0, c1, s.page_size, s.n_head_kv, a2[k].row_bytes, a2[k].data, 0, am[k].data, 0, runs);
+                if (back_to_main)
+                    cell_runs(c0, c1, s.page_size, s.n_head_kv, a2[k].row_bytes, a2[k].data, 0, am[k].data, 0, runs);
                 else cell_runs(c0, c1, s.page_size, s.n_head_kv, am[k].row_bytes, am[k].data, 0, a2[k].data, 0, runs);
             const uint8_t* px = (const uint8_t*) qsa2[i].idx_pooled + (uint64_t) r0 * row;
             const uint8_t* pm = (const uint8_t*) main_qsa(i).idx_pooled + (uint64_t) r0 * row;
@@ -261,7 +275,8 @@ struct PromptSplit::Impl::St final : public SplitOut {
         uint8_t* gm = (uint8_t*) (im->ss->gdn_state + (uint64_t) gdn_first * core::gdn_state_floats(g));
         auto add = [&](const void* x2, const void* xm, uint64_t n) {
             if (n == 0) return;
-            runs.push_back(back_to_main ? Run{(const uint8_t*) x2, (uint8_t*) xm, n} : Run{(const uint8_t*) xm, (uint8_t*) x2, n});
+            runs.push_back(back_to_main ? Run{(const uint8_t*) x2, (uint8_t*) xm, n}
+                                        : Run{(const uint8_t*) xm, (uint8_t*) x2, n});
         };
         add(ss2.gdn_state, gm, gdn);
         for (size_t i = 0; i < qsa2.size(); ++i) {
@@ -274,7 +289,8 @@ struct PromptSplit::Impl::St final : public SplitOut {
     /// The draft layer's cells of one chunk: its copy for cells [p0, p0 + T).
     uint64_t draft_bytes(int64_t chunk, int64_t cells) const {
         const lamina::kernels::QsaShapes& s = im->shapes;
-        const int64_t pages = (cells + s.page_size - 1) / s.page_size, held = (chunk + s.page_size - 1) / s.page_size + 1;
+        const int64_t pages = (cells + s.page_size - 1) / s.page_size,
+                      held = (chunk + s.page_size - 1) / s.page_size + 1;
         return core::qsa_state_prompt_bytes(*im->geo, cells, std::max<int64_t>(pages - held, 0), false,
                                             core::qsa_draft_kv_format());
     }
@@ -362,7 +378,8 @@ struct PromptSplit::Impl::St final : public SplitOut {
             const auto a2 = core::qsa_kv_arrays(draft2, g), am = core::qsa_kv_arrays(dm, g);
             const int64_t c0 = std::max(im->first_cell, j.p0), fp = j.p0 / s.page_size;
             for (size_t k = 0; k < a2.size() && c0 < j.p0 + j.T; ++k)
-                cell_runs(c0, j.p0 + j.T, s.page_size, s.n_head_kv, a2[k].row_bytes, a2[k].data, fp, am[k].data, 0, runs);
+                cell_runs(c0, j.p0 + j.T, s.page_size, s.n_head_kv, a2[k].row_bytes, a2[k].data, fp, am[k].data, 0,
+                          runs);
         }
         if (!stage_copy(runs, false, e)) return false;
         // a prompt-cache checkpoint at its end: its layers' part, once the main thread has decided
@@ -446,7 +463,10 @@ struct PromptSplit::Impl::St final : public SplitOut {
 
     bool out_end(const int64_t* tokens, int64_t T, int64_t pos0, const cudaEvent_t* landed, int64_t piece, bool run_end,
                  std::string& e) override {
-        if (piece != SUB || T > im->max_chunk) { e = "prompt split: a chunk out of range"; return false; }
+        if (piece != SUB || T > im->max_chunk) {
+            e = "prompt split: a chunk out of range";
+            return false;
+        }
         Job j;
         j.chunk = true;
         j.tokens = tokens;
@@ -490,9 +510,9 @@ PromptSplit::~PromptSplit() {
     cudaSetDevice(cur);
 }
 
-bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::ModelGeometry& g, core::SessionState& ss,
-                       core::MtpDrafter* mtp, const std::vector<Stage>& stages, int main_device, core::ExpertSource* src,
-                       int64_t max_chunk, std::string& err) {
+bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::ModelGeometry& g,
+                       core::SessionState& ss, core::MtpDrafter* mtp, const std::vector<Stage>& stages, int main_device,
+                       core::ExpertSource* src, int64_t max_chunk, std::string& err) {
     Impl& m = *impl_;
     if (stages.empty() || stages.size() > 2) {
         err = "--prompt-split: one or two stages after the main GPU's";
@@ -541,7 +561,8 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
             x.bytes[0] = ref.data != nullptr ? ref.bytes : 0;
             if (ref.native_data != nullptr) {
                 int be = 0, bb = 0;
-                if (!lamina::block_geometry((uint32_t) ref.native_type, be, bb) || be <= 0 || (ref.ne0 * ref.ne1) % be != 0) {
+                if (!lamina::block_geometry((uint32_t) ref.native_type, be, bb) || be <= 0 ||
+                    (ref.ne0 * ref.ne1) % be != 0) {
                     err = "--prompt-split: " + name + " has a native type without a block geometry";
                     return false;
                 }
@@ -589,7 +610,8 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
                 ++gi;
             }
         }
-        if (t.qsa_main.empty()) {   // (its prompt path sizes its selection buffers by its first attention layer's state)
+        if (t.qsa_main.empty()) {   // (its prompt path sizes its selection buffers
+                                    // by its first attention layer's state)
             err = "--prompt-split: layers " + std::to_string(t.at) + "-" + std::to_string(t.end - 1) +
                   " hold no attention layer: a stage needs one";
             return false;
@@ -606,12 +628,16 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
         for (cudaEvent_t& e : t.ev_in) ok = ok && cudaEventCreateWithFlags(&e, cudaEventDisableTiming) == cudaSuccess;
         // a chunk's cells of every K/V state here and the pooled keys of their blocks, through one staging buffer
         {
-            uint64_t per_cell = (uint64_t) t.qsa_main.size() *
-                                (core::qsa_kv_cell_bytes(g, core::qsa_kv_format()) + (uint64_t) m.shapes.idx_dim * 4 / (uint64_t) m.shapes.idx_block);
+            uint64_t per_cell =
+                (uint64_t) t.qsa_main.size() * (core::qsa_kv_cell_bytes(g, core::qsa_kv_format()) +
+                                                (uint64_t) m.shapes.idx_dim * 4 / (uint64_t) m.shapes.idx_block);
             if (drafts) per_cell += core::qsa_kv_cell_bytes(g, core::qsa_draft_kv_format());
-            t.stage_bytes = std::max<uint64_t>(64ull << 20, up((uint64_t) (max_chunk + 4 * m.shapes.page_size) * per_cell + (4ull << 20)));
+            t.stage_bytes = std::max<uint64_t>(
+                64ull << 20, up((uint64_t) (max_chunk + 4 * m.shapes.page_size) * per_cell + (4ull << 20)));
         }
-        ok = ok && cudaHostAlloc((void**) &t.host_R, (size_t) max_chunk * (size_t) D * 4, cudaHostAllocPortable) == cudaSuccess &&
+        ok = ok &&
+             cudaHostAlloc((void**) &t.host_R, (size_t) max_chunk * (size_t) D * 4, cudaHostAllocPortable) ==
+                 cudaSuccess &&
              cudaHostAlloc((void**) &t.stage, (size_t) t.stage_bytes, cudaHostAllocPortable) == cudaSuccess;
         if (!ok) {
             (void) cudaGetLastError();
@@ -675,11 +701,17 @@ uint64_t PromptSplit::bytes_for(int stage, int64_t chunk, int64_t cells) const {
     return impl_->st[(size_t) stage]->bytes_for(chunk, cells);
 }
 
-bool PromptSplit::begin(const std::vector<Region>& regions, int64_t chunk, int64_t pos0, int64_t cells, bool checkpoints,
-                        std::string& err) {
+bool PromptSplit::begin(const std::vector<Region>& regions, int64_t chunk, int64_t pos0, int64_t cells,
+                        bool checkpoints, std::string& err) {
     Impl& m = *impl_;
-    if (m.on) { err = "prompt split: begin twice"; return false; }
-    if (regions.size() != m.st.size()) { err = "prompt split: a region for each stage"; return false; }
+    if (m.on) {
+        err = "prompt split: begin twice";
+        return false;
+    }
+    if (regions.size() != m.st.size()) {
+        err = "prompt split: a region for each stage";
+        return false;
+    }
     int cur = 0;
     cudaGetDevice(&cur);
     if (m.mtp != nullptr) m.first_cell = m.mtp->prompt_kv().first_cell;
@@ -729,7 +761,11 @@ bool PromptSplit::begin(const std::vector<Region>& regions, int64_t chunk, int64
         // its session state's copies, zeroed (the prefix's cells and the state at pos0 come in on its thread)
         for (core::QsaState& q : t.qsa2) {
             const uint64_t n = core::qsa_state_prompt_init(*m.geo, cells, 0, true, core::qsa_kv_format(), p, q, t.cp2);
-            if (n == 0) { cudaSetDevice(cur); err = "prompt split: the K/V copies"; return false; }
+            if (n == 0) {
+                cudaSetDevice(cur);
+                err = "prompt split: the K/V copies";
+                return false;
+            }
             p += up(n);
         }
         t.ss2.gdn_state = (float*) p;
@@ -784,7 +820,8 @@ bool PromptSplit::finish(std::string& err) {
     if (!m.on) return true;
     const auto t0 = Clock::now();
     bool ok = true;
-    for (auto& sp : m.st) {   // in the layers' order: a stage is done once the one before it has handed its last chunk on
+    for (auto& sp : m.st) {   // in the layers' order: a stage is done once the
+                              // one before it has handed its last chunk on
         Impl::St& t = *sp;
         std::unique_lock<std::mutex> lk(t.mu);
         t.ran_pos = INT64_MAX;
@@ -825,4 +862,4 @@ bool PromptSplit::finish(std::string& err) {
     return ok;
 }
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

@@ -14,16 +14,17 @@ namespace lamina::core {
 AdaptiveTier::~AdaptiveTier() {
     DeviceScope on(dev_, main_, dev_ >= 0);
     if (stream_) cudaStreamSynchronize(stream_);
-    for (cudaEvent_t e : evs_) if (e) cudaEventDestroy(e);
+    for (cudaEvent_t e : evs_)
+        if (e) cudaEventDestroy(e);
     cudaEvent_t evs[] = {t0_, t1_};
-    for (cudaEvent_t e : evs) if (e) cudaEventDestroy(e);
+    for (cudaEvent_t e : evs)
+        if (e) cudaEventDestroy(e);
     if (stream_) cudaStreamDestroy(stream_);
     if (stage_arena_ != nullptr) cudaFreeHost(stage_arena_);
 }
 
-bool AdaptiveTier::init(ExpertCache& cache, ExpertSource& src,
-                        std::vector<int32_t>& host_res, int64_t n_layers, int64_t n_expert,
-                        int max_moves, std::string& err, int device, int main_device,
+bool AdaptiveTier::init(ExpertCache& cache, ExpertSource& src, std::vector<int32_t>& host_res, int64_t n_layers,
+                        int64_t n_expert, int max_moves, std::string& err, int device, int main_device,
                         bool deterministic_adapt) {
     cache_ = &cache;
     src_ = &src;
@@ -124,7 +125,10 @@ bool AdaptiveTier::time_begin(bool worth) {
 // event takes this batch too).
 bool AdaptiveTier::end_batch(bool timed, uint64_t bytes, std::string& err) {
     if (timed) {
-        if (cudaEventRecord(t1_, stream_) != cudaSuccess) { err = "adaptive tier: a refill copy failed"; return false; }
+        if (cudaEventRecord(t1_, stream_) != cudaSuccess) {
+            err = "adaptive tier: a refill copy failed";
+            return false;
+        }
         timed_ = bytes;
     }
     // the pump-side kMaxFlying cap makes this ring-full overwrite path unreachable
@@ -134,7 +138,10 @@ bool AdaptiveTier::end_batch(bool timed, uint64_t bytes, std::string& err) {
     batch_stage_[i] = std::move(stage_used_);   // the batch owns its staging blocks until it retires
     stage_used_.clear();
     staged_now_ = 0;
-    if (cudaEventRecord(evs_[i], stream_) != cudaSuccess) { err = "adaptive tier: a refill copy failed"; return false; }
+    if (cudaEventRecord(evs_[i], stream_) != cudaSuccess) {
+        err = "adaptive tier: a refill copy failed";
+        return false;
+    }
     return true;
 }
 
@@ -244,9 +251,15 @@ bool AdaptiveTier::refill(const std::vector<std::array<int32_t, 3>>& moves, uint
 
 bool AdaptiveTier::adapt(std::vector<float>& usage, std::string& err, bool decay) {
     const auto t0 = std::chrono::steady_clock::now();
-    if (!failed_.empty()) { err = failed_; return false; }
+    if (!failed_.empty()) {
+        err = failed_;
+        return false;
+    }
     apply_pending(deterministic_);
-    if (!failed_.empty()) { err = failed_; return false; }
+    if (!failed_.empty()) {
+        err = failed_;
+        return false;
+    }
     if (wait_ && admitted_ < queued_.size()) return true;
     // the moves whose residents are still in place give way to this call's (ranked again if still worth it)
     for (size_t i = staged_; i < queued_.size(); ++i) {
@@ -305,8 +318,7 @@ bool AdaptiveTier::adapt(std::vector<float>& usage, std::string& err, bool decay
         for (int32_t e = 0; e < (int32_t) n_expert_; ++e) {
             const float ue = lo != nullptr && lo[e] ? 0.5f * u[e] : u[e];
             if (r[e] < 0) {
-                if (ue >= 2.0f && !bl[e] && (up == nullptr || !up[e]) && src_->in_ram(l, e))
-                    cand.emplace_back(ue, e);
+                if (ue >= 2.0f && !bl[e] && (up == nullptr || !up[e]) && src_->in_ram(l, e)) cand.emplace_back(ue, e);
             } else if (r[e] >= frozen_) {
                 vict.emplace_back(up != nullptr && up[e] ? -1.0f : u[e], e);   // the upper tier's copy goes first
             }
@@ -322,21 +334,19 @@ bool AdaptiveTier::adapt(std::vector<float>& usage, std::string& err, bool decay
         for (; c < cand.size() && c < fr.size(); ++c)
             moves.push_back({cand[c].first, (int32_t) l, cand[c].second, -1, fr[fr.size() - 1 - c]});
         const size_t nv = std::min(cand.size() - c, vict.size());
-        std::partial_sort(vict.begin(), vict.begin() + (ptrdiff_t) nv, vict.end(),
-                          [this](auto& a, auto& b) {
-                              if (a.first < b.first) return true;
-                              if (b.first < a.first) return false;
-                              return deterministic_ && a.second < b.second;
-                          });
+        std::partial_sort(vict.begin(), vict.begin() + (ptrdiff_t) nv, vict.end(), [this](auto& a, auto& b) {
+            if (a.first < b.first) return true;
+            if (b.first < a.first) return false;
+            return deterministic_ && a.second < b.second;
+        });
         for (size_t i = 0; i < nv; ++i, ++c) {
             if (cand[c].first < vict[i].first + 1.5f) break;
-            moves.push_back({cand[c].first - vict[i].first, (int32_t) l, cand[c].second, vict[i].second,
-                             r[vict[i].second]});
+            moves.push_back(
+                {cand[c].first - vict[i].first, (int32_t) l, cand[c].second, vict[i].second, r[vict[i].second]});
         }
     }
-    std::sort(moves.begin(), moves.end(), [this](const Ranked& a, const Ranked& b) {
-        return adaptive_move_less(a, b, deterministic_);
-    });
+    std::sort(moves.begin(), moves.end(),
+              [this](const Ranked& a, const Ranked& b) { return adaptive_move_less(a, b, deterministic_); });
     if ((int) moves.size() > max_moves_) moves.resize((size_t) max_moves_);
     // a move counts once queued; its resident leaves when it is staged (or sent, paced), its expert comes once landed
     for (const Ranked& m : moves) {
@@ -373,10 +383,11 @@ bool AdaptiveTier::adapt(std::vector<float>& usage, std::string& err, bool decay
 }
 
 // Retires the batches whose events have landed: advances the ring and raises `landed_` to the highest moves-sent index
-// among them.  **IT DOES NOT RETURN IT**: the pumps retire batches too (for their staging blocks and the kMaxFlying cap),
-// and when they discarded the index a batch landing just before a pump was never admitted.  Its 96 evicted residents
-// stayed empty and, with an update waiting for the previous one's (burst), the tier never ranked again: a session past
-// that point decoded on a frozen cache (edit 69 tok/s at 35% hits instead of 136 at 79%, Ryzen 9 5950X + RTX 3090, 12 pool workers).
+// among them.  **IT DOES NOT RETURN IT**: the pumps retire batches too (for their staging blocks and the kMaxFlying
+// cap), and when they discarded the index a batch landing just before a pump was never admitted.  Its 96 evicted
+// residents stayed empty and, with an update waiting for the previous one's (burst), the tier never ranked again: a
+// session past that point decoded on a frozen cache (edit 69 tok/s at 35%
+// hits instead of 136 at 79%, Ryzen 9 5950X + RTX 3090, 12 pool workers).
 void AdaptiveTier::retire() {
     for (; flying_ > 0 && cudaEventQuery(evs_[first_]) == cudaSuccess; first_ = (first_ + 1) % kBatches, --flying_) {
         for (const size_t blk : batch_stage_[first_]) stage_free_.push_back(blk);   // its copies have read the blocks
@@ -417,4 +428,4 @@ void AdaptiveTier::apply_pending(bool wait) {
     for (; admitted_ < landed_; ++admitted_) res[(size_t) pending_[admitted_].first] = pending_[admitted_].second;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

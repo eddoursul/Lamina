@@ -1,47 +1,48 @@
-
 // src/core/layer.cpp - the GDN layer, composed.  See the header for the operation order and its traps.
 #include "lamina/core/layer.hpp"
 #include "lamina/core/native_head.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/fused_gr.hpp"
 #include "lamina/kernels/gdn.hpp"
-#include "lamina/kernels/mrope.hpp"
-#include "lamina/kernels/qsa.hpp"
 #include "lamina/kernels/kv_q4.hpp"
 #include "lamina/kernels/kv_q8.hpp"
+#include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_moe.hpp"
+#include "lamina/kernels/native_qsa.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
+#include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/qsa_select.hpp"
 #include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/rope.hpp"
 #include "lamina/kernels/s2_gemv_q8.hpp"
 #include "lamina/kernels/s_gemv.hpp"
 #include "lamina/kernels/shared_expert.hpp"
-#include "lamina/kernels/native_mmvq.hpp"
-#include "lamina/kernels/native_moe.hpp"
-#include "lamina/kernels/native_router.hpp"
-#include "lamina/kernels/native_qsa.hpp"
-#include "lamina/kernels/native_qsa_indexer.hpp"
-#include "lamina/kernels/native_rope.hpp"
-#include "lamina/kernels/fused_gr.hpp"
-#include "lamina/kernels/qsa_decode_attn.hpp"
-#include "lamina/kernels/fused_gdn.hpp"
-#include "lamina/kernels/qsa_select.hpp"
 #include "lamina/kernels/verify_kernels.hpp"
-#include <exception>
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <vector>
-#include <algorithm>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <vector>
 namespace lamina::core {
 namespace {
 const std::string EMBEDDING_NAME = "token_embd.weight";
 }
 // namespace
-namespace { KvFormat g_kv_format = KvFormat::F16; }
+namespace {
+KvFormat g_kv_format = KvFormat::F16;
+}
 void qsa_set_kv_format(KvFormat f) { g_kv_format = f; }
 KvFormat qsa_kv_format() { return g_kv_format; }
 KvFormat qsa_draft_kv_format() { return g_kv_format == KvFormat::F16 ? KvFormat::F16 : KvFormat::Int8; }
@@ -54,8 +55,7 @@ uint64_t align_up16(uint64_t n) { return (n + 15) & ~15ull; }
 struct Cursor {
     uint8_t* p;
     uint64_t used = 0;
-    template <typename T>
-    T* take(uint64_t count) {
+    template <typename T> T* take(uint64_t count) {
         T* r = (T*) (p + used);
         used = align_up16(used + count * sizeof(T));
         return r;
@@ -66,17 +66,17 @@ struct Cursor {
         return r;
     }
 };
-}
+}   // namespace
 // namespace
 namespace {
 // a format's K/V arrays in the arena's order, as bytes per cell and KV head
 std::vector<uint64_t> kv_row_bytes(KvFormat kv, uint64_t hd) {
     const uint64_t s8 = hd / lamina::kernels::KV_Q8_GROUP * 2, s4 = hd / lamina::kernels::KV_Q4_GROUP * 2;
     switch (kv) {
-    case KvFormat::Int8: return {hd, hd, s8, s8};
-    case KvFormat::Q4: return {hd / 2, hd / 2, s4, s4};
-    case KvFormat::K8V4: return {hd, s8, hd / 2, s4};
-    default: return {hd * 2, hd * 2};
+        case KvFormat::Int8: return {hd, hd, s8, s8};
+        case KvFormat::Q4: return {hd / 2, hd / 2, s4, s4};
+        case KvFormat::K8V4: return {hd, s8, hd / 2, s4};
+        default: return {hd * 2, hd * 2};
     }
 }
 
@@ -165,7 +165,7 @@ bool pool_grow(ElasticPool& p, int64_t cells, const std::function<VmmChunk()>& t
         }
     return mapped_all;
 }
-}  // namespace
+}   // namespace
 
 void qsa_set_kv_elastic(bool enabled, int64_t init_cells) {
     g_kv_elastic = enabled && vmm_available();
@@ -203,7 +203,10 @@ int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, pages);
             const int64_t end = a + 1 < p->off.size() ? (int64_t) (p->off[a + 1] / G) : p->range.chunks();
             for (int64_t c = c1; c < end; ++c)
-                if (const VmmChunk h = p->range.unmap(c)) { give(h); ++n; }
+                if (const VmmChunk h = p->range.unmap(c)) {
+                    give(h);
+                    ++n;
+                }
         }
     }
     return n;
@@ -226,25 +229,26 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
     if (!g_kv_elastic)   // the K/V pools (the elastic ones are in their own VMM range)
         for (const uint64_t b : kv_row_bytes(kv, (uint64_t) s.head_dim))
             n += align_up16((uint64_t) pages * s.n_head_kv * s.page_size * b);
-n += (uint64_t) pages * 4;
-// page_table
-n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;
-// tail
-n += (uint64_t) s.idx_dim * 4;
-// dead
-if (!g_kv_elastic) n += (uint64_t) ((max_cells / s.idx_block) + 2) * s.idx_dim * 4;
-// pooled (the elastic keys are in the K/V's range)
-n += 16;
-// block_pos
-if (with_rope && !g_kv_elastic) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;
-// cos + sin tables (the elastic ones are in their own range)
-n += lamina::kernels::qsa_step_bytes() + 16; // counts and aligned attention status
-// the per-token counts
-n += (uint64_t) s.n_head * 4;
-// pos_dev
-return align_up16(n) + 256;}
-uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
-                        const QsaState* share_rope, KvFormat kv) {
+    n += (uint64_t) pages * 4;
+    // page_table
+    n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;
+    // tail
+    n += (uint64_t) s.idx_dim * 4;
+    // dead
+    if (!g_kv_elastic) n += (uint64_t) ((max_cells / s.idx_block) + 2) * s.idx_dim * 4;
+    // pooled (the elastic keys are in the K/V's range)
+    n += 16;
+    // block_pos
+    if (with_rope && !g_kv_elastic) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;
+    // cos + sin tables (the elastic ones are in their own range)
+    n += lamina::kernels::qsa_step_bytes() + 16;   // counts and aligned attention status
+    // the per-token counts
+    n += (uint64_t) s.n_head * 4;
+    // pos_dev
+    return align_up16(n) + 256;
+}
+uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st, const QsaState* share_rope,
+                        KvFormat kv) {
     const QsaShapes s = qsa_shapes(g);
     const int64_t pages = (max_cells + s.page_size - 1) / s.page_size;
     Cursor c{(uint8_t*) base};
@@ -262,7 +266,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         auto pool = std::make_unique<ElasticPool>();
         pool->n_pages = pages;
         pool->page_size = s.page_size;
-        for (const uint64_t b : kv_row_bytes(kv, (uint64_t) s.head_dim)) pool->add((uint64_t) s.n_head_kv * s.page_size * b);
+        for (const uint64_t b : kv_row_bytes(kv, (uint64_t) s.head_dim))
+            pool->add((uint64_t) s.n_head_kv * s.page_size * b);
         const uint64_t row = (uint64_t) s.idx_dim * 4;
         pool->add((uint64_t) (s.page_size / s.idx_block) * row, 2 * row);
         if (!pool->range.reserve(pool->bytes()) || !pool_grow(*pool, g_kv_elastic_init, [] { return (VmmChunk) 0; })) {
@@ -280,16 +285,25 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.idx_pooled = (float*) a.back();
     a.pop_back();
     switch (kv) {
-    case KvFormat::Int8:
-        st.k_q = (int8_t*) a[0]; st.v_q = (int8_t*) a[1]; st.k_scale = (uint16_t*) a[2]; st.v_scale = (uint16_t*) a[3];
-        break;
-    case KvFormat::Q4:
-        st.k_q4 = a[0]; st.v_q4 = a[1]; st.k_q4s = (uint16_t*) a[2]; st.v_q4s = (uint16_t*) a[3];
-        break;
-    case KvFormat::K8V4:
-        st.k_q = (int8_t*) a[0]; st.k_scale = (uint16_t*) a[1]; st.v_q4 = a[2]; st.v_q4s = (uint16_t*) a[3];
-        break;
-    default: st.k_pool = (uint16_t*) a[0]; st.v_pool = (uint16_t*) a[1];
+        case KvFormat::Int8:
+            st.k_q = (int8_t*) a[0];
+            st.v_q = (int8_t*) a[1];
+            st.k_scale = (uint16_t*) a[2];
+            st.v_scale = (uint16_t*) a[3];
+            break;
+        case KvFormat::Q4:
+            st.k_q4 = a[0];
+            st.v_q4 = a[1];
+            st.k_q4s = (uint16_t*) a[2];
+            st.v_q4s = (uint16_t*) a[3];
+            break;
+        case KvFormat::K8V4:
+            st.k_q = (int8_t*) a[0];
+            st.k_scale = (uint16_t*) a[1];
+            st.v_q4 = a[2];
+            st.v_q4s = (uint16_t*) a[3];
+            break;
+        default: st.k_pool = (uint16_t*) a[0]; st.v_pool = (uint16_t*) a[1];
     }
     st.page_table = c.take<int32_t>((uint64_t) pages);
     st.n_pages = pages;
@@ -317,7 +331,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
                 lamina::kernels::build_rope_table(n_rot, sc, (int) (hi / row), hc.data(), hs.data(), (int) (lo / row));
                 at = lo;
             }
-            return cudaMemcpy(dst, (a == 0 ? hc : hs).data(), (size_t) (hi - lo), cudaMemcpyHostToDevice) == cudaSuccess;
+            return cudaMemcpy(dst, (a == 0 ? hc : hs).data(), (size_t) (hi - lo), cudaMemcpyHostToDevice) ==
+                   cudaSuccess;
         };
         if (!pool->range.reserve(pool->bytes()) || !pool_grow(*pool, g_kv_elastic_init, [] { return (VmmChunk) 0; })) {
             std::fprintf(stderr, "lamina: the elastic rotary tables could not reserve or map their range\n");
@@ -341,28 +356,28 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         return 0;
         // the caller sees a zero byte count; a half-built state is worse than none
     }
-st.host_step[lamina::kernels::kStepCount] = 0;
-// THE ROPE TABLE IS BUILT ON THE HOST IN FLOAT64 and uploaded once, because the reference computes its
-// frequencies in float64 and reproducing that on device means double-precision `pow`/`cos` that need not
-// agree with the host's libm.  A table shorter than the sequence would have the rotation read past it.
-if (share_rope == nullptr) {
-    if (!g_kv_elastic) {   // (the elastic tables are built as they are mapped)
-        std::vector<float> hc((size_t) max_cells * (s.n_rot / 2)), hs((size_t) max_cells * (s.n_rot / 2));
-        lamina::kernels::build_rope_table((int) s.n_rot, lamina::kernels::rope_scaling(), (int) max_cells, hc.data(),
-                                          hs.data());
-        cudaMemcpy(st.cos_tab, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice);
-        cudaMemcpy(st.sin_tab, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice);
+    st.host_step[lamina::kernels::kStepCount] = 0;
+    // THE ROPE TABLE IS BUILT ON THE HOST IN FLOAT64 and uploaded once, because the reference computes its
+    // frequencies in float64 and reproducing that on device means double-precision `pow`/`cos` that need not
+    // agree with the host's libm.  A table shorter than the sequence would have the rotation read past it.
+    if (share_rope == nullptr) {
+        if (!g_kv_elastic) {   // (the elastic tables are built as they are mapped)
+            std::vector<float> hc((size_t) max_cells * (s.n_rot / 2)), hs((size_t) max_cells * (s.n_rot / 2));
+            lamina::kernels::build_rope_table((int) s.n_rot, lamina::kernels::rope_scaling(), (int) max_cells,
+                                              hc.data(), hs.data());
+            cudaMemcpy(st.cos_tab, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice);
+            cudaMemcpy(st.sin_tab, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice);
+        }
+        // the native and prompt-path rope kernels read it with LAMINA_ROPE_TABLE=1 (mrope.hpp)
+        if (s.n_rot == 64)
+            lamina::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, lamina::kernels::rope_scaling());
     }
-    // the native and prompt-path rope kernels read it with LAMINA_ROPE_TABLE=1 (mrope.hpp)
-    if (s.n_rot == 64)
-        lamina::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, lamina::kernels::rope_scaling());
-}
-// the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
-// not page at all wants.  A real allocator re-points it; nothing outside `kv_append`/`kv_gather` may care.
-std::vector<int32_t> tab((size_t) pages);
-for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
-cudaMemcpy(st.page_table, tab.data(), tab.size() * 4, cudaMemcpyHostToDevice);
-return c.used;
+    // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
+    // not page at all wants.  A real allocator re-points it; nothing outside `kv_append`/`kv_gather` may care.
+    std::vector<int32_t> tab((size_t) pages);
+    for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
+    cudaMemcpy(st.page_table, tab.data(), tab.size() * 4, cudaMemcpyHostToDevice);
+    return c.used;
 }
 void qsa_state_free(QsaState& st) {
     if (st.host_step != nullptr) cudaFreeHost(st.host_step);
@@ -376,19 +391,41 @@ std::vector<KvArray> qsa_kv_arrays(const QsaState& st, const ModelGeometry& g) {
     auto add = [&](void* p, uint64_t row) {
         if (p != nullptr) a.push_back({p, row});
     };
-    add(st.k_pool, hd * 2); add(st.v_pool, hd * 2);
-    add(st.k_q, hd); add(st.v_q, hd); add(st.k_scale, s8); add(st.v_scale, s8);
-    add(st.k_q4, hd / 2); add(st.v_q4, hd / 2); add(st.k_q4s, s4); add(st.v_q4s, s4);
+    add(st.k_pool, hd * 2);
+    add(st.v_pool, hd * 2);
+    add(st.k_q, hd);
+    add(st.v_q, hd);
+    add(st.k_scale, s8);
+    add(st.v_scale, s8);
+    add(st.k_q4, hd / 2);
+    add(st.v_q4, hd / 2);
+    add(st.k_q4s, s4);
+    add(st.v_q4s, s4);
     return a;
 }
 lamina::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {
     lamina::kernels::QsaAttnPools p;
     p.page_table = st.page_table;
     switch (st.kv) {
-    case KvFormat::Int8: p.k_q = st.k_q; p.v_q = st.v_q; p.k_scale = st.k_scale; p.v_scale = st.v_scale; break;
-    case KvFormat::Q4: p.k_q4 = st.k_q4; p.v_q4 = st.v_q4; p.k_q4s = st.k_q4s; p.v_q4s = st.v_q4s; break;
-    case KvFormat::K8V4: p.k_q = st.k_q; p.k_scale = st.k_scale; p.v_q4 = st.v_q4; p.v_q4s = st.v_q4s; break;
-    default: p.k_pool = st.k_pool; p.v_pool = st.v_pool;
+        case KvFormat::Int8:
+            p.k_q = st.k_q;
+            p.v_q = st.v_q;
+            p.k_scale = st.k_scale;
+            p.v_scale = st.v_scale;
+            break;
+        case KvFormat::Q4:
+            p.k_q4 = st.k_q4;
+            p.v_q4 = st.v_q4;
+            p.k_q4s = st.k_q4s;
+            p.v_q4s = st.v_q4s;
+            break;
+        case KvFormat::K8V4:
+            p.k_q = st.k_q;
+            p.k_scale = st.k_scale;
+            p.v_q4 = st.v_q4;
+            p.v_q4s = st.v_q4s;
+            break;
+        default: p.k_pool = st.k_pool; p.v_pool = st.v_pool;
     }
     return p;
 }
@@ -397,25 +434,25 @@ void qsa_kv_append_steps(const QsaState& st, const ModelGeometry& g, const int32
     using namespace lamina::kernels;
     const QsaShapes s = qsa_shapes(g);
     switch (st.kv) {
-    case KvFormat::Int8:
-        kv_append_q8_steps(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, step, step_stride, kcur, vcur, n_tok,
-                           s, stream);
-        break;
-    case KvFormat::Q4:
-        kv_append_q4_steps(st.k_q4, st.k_q4s, st.v_q4, st.v_q4s, st.page_table, step, step_stride, kcur, vcur, n_tok,
-                           s, stream);
-        break;
-    case KvFormat::K8V4:
-        kv_append_q8_steps(st.k_q, nullptr, st.k_scale, nullptr, st.page_table, step, step_stride, kcur, vcur, n_tok, s,
-                           stream, 1);
-        kv_append_q4_steps(nullptr, nullptr, st.v_q4, st.v_q4s, st.page_table, step, step_stride, kcur, vcur, n_tok, s,
-                           stream);
-        break;
-    default:
-        for (int t = 0; t < n_tok; ++t)
-            kv_append_step(st.k_pool, st.v_pool, st.page_table, step + (size_t) t * step_stride,
-                           kcur + (size_t) t * g.n_head_kv * g.head_dim, vcur + (size_t) t * g.n_head_kv * g.head_dim, s,
-                           stream);
+        case KvFormat::Int8:
+            kv_append_q8_steps(st.k_q, st.v_q, st.k_scale, st.v_scale, st.page_table, step, step_stride, kcur, vcur,
+                               n_tok, s, stream);
+            break;
+        case KvFormat::Q4:
+            kv_append_q4_steps(st.k_q4, st.k_q4s, st.v_q4, st.v_q4s, st.page_table, step, step_stride, kcur, vcur,
+                               n_tok, s, stream);
+            break;
+        case KvFormat::K8V4:
+            kv_append_q8_steps(st.k_q, nullptr, st.k_scale, nullptr, st.page_table, step, step_stride, kcur, vcur,
+                               n_tok, s, stream, 1);
+            kv_append_q4_steps(nullptr, nullptr, st.v_q4, st.v_q4s, st.page_table, step, step_stride, kcur, vcur, n_tok,
+                               s, stream);
+            break;
+        default:
+            for (int t = 0; t < n_tok; ++t)
+                kv_append_step(st.k_pool, st.v_pool, st.page_table, step + (size_t) t * step_stride,
+                               kcur + (size_t) t * g.n_head_kv * g.head_dim,
+                               vcur + (size_t) t * g.n_head_kv * g.head_dim, s, stream);
     }
 }
 void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
@@ -471,10 +508,25 @@ uint64_t qsa_state_prompt_init(const ModelGeometry& g, int64_t max_cells, int64_
         cudaMemsetAsync(a.back(), 0, (size_t) bytes, cs);
     }
     switch (kv) {
-    case KvFormat::Int8: st.k_q = (int8_t*) a[0]; st.v_q = (int8_t*) a[1]; st.k_scale = (uint16_t*) a[2]; st.v_scale = (uint16_t*) a[3]; break;
-    case KvFormat::Q4: st.k_q4 = a[0]; st.v_q4 = a[1]; st.k_q4s = (uint16_t*) a[2]; st.v_q4s = (uint16_t*) a[3]; break;
-    case KvFormat::K8V4: st.k_q = (int8_t*) a[0]; st.k_scale = (uint16_t*) a[1]; st.v_q4 = a[2]; st.v_q4s = (uint16_t*) a[3]; break;
-    default: st.k_pool = (uint16_t*) a[0]; st.v_pool = (uint16_t*) a[1];
+        case KvFormat::Int8:
+            st.k_q = (int8_t*) a[0];
+            st.v_q = (int8_t*) a[1];
+            st.k_scale = (uint16_t*) a[2];
+            st.v_scale = (uint16_t*) a[3];
+            break;
+        case KvFormat::Q4:
+            st.k_q4 = a[0];
+            st.v_q4 = a[1];
+            st.k_q4s = (uint16_t*) a[2];
+            st.v_q4s = (uint16_t*) a[3];
+            break;
+        case KvFormat::K8V4:
+            st.k_q = (int8_t*) a[0];
+            st.k_scale = (uint16_t*) a[1];
+            st.v_q4 = a[2];
+            st.v_q4s = (uint16_t*) a[3];
+            break;
+        default: st.k_pool = (uint16_t*) a[0]; st.v_pool = (uint16_t*) a[1];
     }
     st.page_table = c.take<int32_t>((uint64_t) pages);
     st.n_pages = held;
@@ -518,7 +570,10 @@ namespace {
 // The pack's S2/S4/S8 embedding table, checked against its planes; null with `err` when it cannot be read.
 const WeightRef* s_embedding(const WeightTable& tables, const ModelGeometry& g, std::string& err) {
     const WeightRef* w = tables.find(EMBEDDING_NAME);
-    if (w == nullptr) { err = "token_embd.weight is missing"; return nullptr; }
+    if (w == nullptr) {
+        err = "token_embd.weight is missing";
+        return nullptr;
+    }
     if (w->code_bits != 2 && w->code_bits != 4 && w->code_bits != 8) {
         err = "embed_row: token_embd.weight is not an S2/S4/S8 tensor";
         return nullptr;
@@ -527,8 +582,7 @@ const WeightRef* s_embedding(const WeightTable& tables, const ModelGeometry& g, 
         err = "embed_row: an IQ4NL embedding is not supported";
         return nullptr;
     }
-    if (w->data == nullptr || w->ne0 <= 0 || w->ne1 <= 0 ||
-        w->ne0 != g.n_embd || w->group_elems <= 0 ||
+    if (w->data == nullptr || w->ne0 <= 0 || w->ne1 <= 0 || w->ne0 != g.n_embd || w->group_elems <= 0 ||
         w->ne0 % w->group_elems != 0 || w->ne0 % (8 / w->code_bits) != 0) {
         err = "embed_row: invalid embedding pointers, dimensions or group size";
         return nullptr;
@@ -539,24 +593,25 @@ const WeightRef* s_embedding(const WeightTable& tables, const ModelGeometry& g, 
     // Division-based checks avoid overflow in rows * row_bytes and reject partial
     // code/group rows before any device pointer arithmetic.
     if (w->codes_bytes > w->bytes || w->scales_bytes > w->bytes - w->codes_bytes ||
-        w->offset_bytes != w->bytes - w->codes_bytes - w->scales_bytes ||
-        w->codes_bytes % row_codes != 0 || w->codes_bytes / row_codes != rows ||
-        w->codes_bytes % alignof(float) != 0 || w->scales_bytes % sizeof(float) != 0 ||
-        (w->scales_bytes / sizeof(float)) % row_groups != 0 ||
-        (w->scales_bytes / sizeof(float)) / row_groups != rows ||
-        w->has_offset != (w->offset_bytes != 0) ||
+        w->offset_bytes != w->bytes - w->codes_bytes - w->scales_bytes || w->codes_bytes % row_codes != 0 ||
+        w->codes_bytes / row_codes != rows || w->codes_bytes % alignof(float) != 0 ||
+        w->scales_bytes % sizeof(float) != 0 || (w->scales_bytes / sizeof(float)) % row_groups != 0 ||
+        (w->scales_bytes / sizeof(float)) / row_groups != rows || w->has_offset != (w->offset_bytes != 0) ||
         (w->has_offset && w->offset_bytes != w->scales_bytes)) {
         err = "embed_row: embedding planes do not match the loaded tensor shape";
         return nullptr;
     }
     return w;
 }
-}  // namespace
+}   // namespace
 
 bool embed_rows(const WeightTable& tables, const ModelGeometry& g, const int32_t* tokens_dev, int64_t n, float* out_dev,
                 void* stream, std::string& err) {
     if (n <= 0) return true;
-    if (tokens_dev == nullptr || out_dev == nullptr) { err = "embed_rows: invalid tokens or output"; return false; }
+    if (tokens_dev == nullptr || out_dev == nullptr) {
+        err = "embed_rows: invalid tokens or output";
+        return false;
+    }
     if (const NativeEmbed* ne = native_embed()) {
         ne->gather_dev(tokens_dev, n, out_dev, stream);
         return true;
@@ -565,13 +620,12 @@ bool embed_rows(const WeightTable& tables, const ModelGeometry& g, const int32_t
     if (w == nullptr) return false;
     const auto* codes = static_cast<const uint8_t*>(w->data);
     const auto* scales = reinterpret_cast<const float*>(codes + w->codes_bytes);
-    const auto* offsets = w->has_offset ? reinterpret_cast<const float*>(codes + w->codes_bytes + w->scales_bytes)
-                                       : nullptr;
-    lamina::kernels::embedding_gather_dev(codes, scales, offsets, tokens_dev, (int) n, w->ne0, w->code_bits, w->code_bias,
-                                          w->group_elems, (uint64_t) (w->ne0 / (8 / w->code_bits)),
+    const auto* offsets =
+        w->has_offset ? reinterpret_cast<const float*>(codes + w->codes_bytes + w->scales_bytes) : nullptr;
+    lamina::kernels::embedding_gather_dev(codes, scales, offsets, tokens_dev, (int) n, w->ne0, w->code_bits,
+                                          w->code_bias, w->group_elems, (uint64_t) (w->ne0 / (8 / w->code_bits)),
                                           (uint64_t) (w->ne0 / w->group_elems), out_dev, stream);
     return true;
 }
 
-
-}  // namespace lamina::core
+}   // namespace lamina::core

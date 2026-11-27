@@ -20,11 +20,11 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-#include "lamina/kernels/native_router.hpp"
-#include "lamina/kernels/warp.cuh"
-#include "lamina/kernels/q8_1_finite.hpp"
-#include "lamina/kernels/bf16_bits.hpp"
 #include "hit_plan.cuh"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/warp.cuh"
 #include "mmvf_multi.cuh"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -72,7 +72,10 @@ __device__ __forceinline__ void route_token(const float* __restrict__ logits, in
     int li = 0;
 #pragma unroll
     for (int i = 1; i < 16; ++i)
-        if (values[i] > lbest) { lbest = values[i]; li = i; }
+        if (values[i] > lbest) {
+            lbest = values[i];
+            li = i;
+        }
     float selected = 0.0f, selected_sum = 0.0f;
 #pragma unroll 1
     for (int rank = 0; rank < 10; ++rank) {
@@ -88,7 +91,10 @@ __device__ __forceinline__ void route_token(const float* __restrict__ logits, in
             li = 0;
 #pragma unroll
             for (int i = 1; i < 16; ++i)
-                if (values[i] > lbest) { lbest = values[i]; li = i; }
+                if (values[i] > lbest) {
+                    lbest = values[i];
+                    li = i;
+                }
             ids[rank] = expert;
             if (ids2 != nullptr) ids2[rank] = expert;
             // Deliberately accumulate by WINNING EXPERT lane, not output rank.
@@ -105,16 +111,15 @@ __device__ __forceinline__ void route_token(const float* __restrict__ logits, in
         if (weights2 != nullptr) weights2[lane] = wv;
     }
 }
-__launch_bounds__(256, 1)
-__global__ void route(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                      float* __restrict__ weights) {
+__launch_bounds__(256, 1) __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ ids,
+                                                float* __restrict__ weights) {
     // Preserve the pinned 32x8 block geometry; only row zero is active here.  Block b routes token b.
     if (threadIdx.y != 0) return;
     route_token(logits + blockIdx.x * 512, ids + blockIdx.x * 10, weights + blockIdx.x * 10, nullptr, nullptr,
                 threadIdx.x);
 }
 
-// ================================ plan v0.3 P6: the verify window's router in one kernel ================================
+// ============================== plan v0.3 P6: the verify window's router in one kernel ===============================
 //
 // For T tokens: the first blocks (scheduled first) write the input rows' other forms, and fence; then a block a row
 // of the logits (bf16_gemv_fp32_mmvf_multi's 256-thread block, mmvf_multi_row).  The last block to finish routes the
@@ -204,8 +209,8 @@ __device__ __forceinline__ void quantize_rows(const VerifyRouterArgs& a, int b) 
         int qi = 0;
         if (best != 0u) {
             const float iscale = div_rn(-127.0f, mx);
-            qi = min(127, (int) (__float_as_uint(add_rn(mul_rn(iscale, x[j]), 12582912.0f)) & 0x007fffffu) -
-                              0x00400000);
+            qi =
+                min(127, (int) (__float_as_uint(add_rn(mul_rn(iscale, x[j]), 12582912.0f)) & 0x007fffffu) - 0x00400000);
             if (t == 0) *reinterpret_cast<float*>(blk) = div_rn(1.0f, iscale);
         } else if (t == 0) {
             *reinterpret_cast<float*>(blk) = 0.0f;
@@ -230,8 +235,7 @@ __device__ __forceinline__ void quantize_rows(const VerifyRouterArgs& a, int b) 
         reinterpret_cast<float4*>(a.x_out + (size_t) tok * a.n_embd + (size_t) sb0 * 256)[t] =
             reinterpret_cast<const float4*>(xr)[t];
 }
-template <int TT>
-__global__ void __launch_bounds__(VR_THREADS) verify_router_kernel(VerifyRouterArgs a, int n_copy) {
+template <int TT> __global__ void __launch_bounds__(VR_THREADS) verify_router_kernel(VerifyRouterArgs a, int n_copy) {
     __shared__ bool s_last;
     const int t = (int) threadIdx.x, lane = t & 31, warp = t >> 5, b = (int) blockIdx.x;
     if (b < n_copy) {
@@ -266,8 +270,7 @@ __global__ void __launch_bounds__(VR_THREADS) verify_router_kernel(VerifyRouterA
         *(volatile uint32_t*) a.seq = a.ring;
         *a.counter = 0u;   // for the next launch
     }
-    if (a.plan != nullptr)
-        hit_plan_block(a.ids, TT * 10, 10, a.res, a.n_expert, a.slot_ptr, a.plan, a.cap, a.ptr_off);
+    if (a.plan != nullptr) hit_plan_block(a.ids, TT * 10, 10, a.res, a.n_expert, a.slot_ptr, a.plan, a.cap, a.ptr_off);
 }
 __global__ void __launch_bounds__(512) bias_update(const float* __restrict__ logits,
                                                    const float* __restrict__ predicted, int n_tok, float scale,
@@ -280,14 +283,15 @@ __global__ void __launch_bounds__(512) bias_update(const float* __restrict__ log
 // The router's contract for the other (experts, top-k) shapes - Qwen3.6-35B-A3B's 256 / 8 - one warp per token, n_tok
 // tokens (8 per block).  The 512 / 10 shape keeps the Flash-Next kernels above.
 template <int NE, int K>
-__launch_bounds__(256, 1)
-__global__ void route_topk(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ weights,
-                           int n_tok) {
+__launch_bounds__(256, 1) __global__ void route_topk(const float* __restrict__ logits, int32_t* __restrict__ ids,
+                                                     float* __restrict__ weights, int n_tok) {
     static_assert(NE % 32 == 0 && K <= 32, "experts in whole warps, at most 32 picks");
     constexpr int V = NE / 32;
     const int tk = (int) blockIdx.x * 8 + (int) threadIdx.y;
     if (tk >= n_tok) return;
-    logits += (size_t) tk * NE; ids += (size_t) tk * K; weights += (size_t) tk * K;
+    logits += (size_t) tk * NE;
+    ids += (size_t) tk * K;
+    weights += (size_t) tk * K;
     const int lane = threadIdx.x;
     float values[V];
 #pragma unroll
@@ -314,13 +318,19 @@ __global__ void route_topk(const float* __restrict__ logits, int32_t* __restrict
         int expert = lane;
 #pragma unroll
         for (int i = 1; i < V; ++i) {
-            if (values[i] > best) { best = values[i]; expert = lane + i * 32; }
+            if (values[i] > best) {
+                best = values[i];
+                expert = lane + i * 32;
+            }
         }
 #pragma unroll
         for (int mask = 16; mask; mask >>= 1) {
             const float other = __shfl_xor_sync(0xffffffffu, best, mask, 32);
             const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
-            if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
+            if (other > best || (other == best && other_id < expert)) {
+                best = other;
+                expert = other_id;
+            }
         }
         if ((expert & 31) == lane) {
             values[expert / 32] = -INFINITY;
@@ -341,9 +351,12 @@ bool overlap(const void* a, size_t an, const void* b, size_t bn) {
     const auto ap = reinterpret_cast<uintptr_t>(a), bp = reinterpret_cast<uintptr_t>(b);
     return ap < bp + bn && bp < ap + an;
 }
+}   // namespace
+bool native_router_topk_supported(int n_expert, int k) {
+    return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8);
 }
-bool native_router_topk_supported(int n_expert, int k) { return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8); }
-void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream) {
+void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok,
+                        void* stream) {
     if (n_expert == 512 && k == 10) {   // Flash-Next's kernels, unchanged
         if (n_tok == 1) native_router_top10(logits, ids, weights, stream);
         else native_router_top10_multi(logits, ids, weights, n_tok, stream);
@@ -359,17 +372,17 @@ void native_router_topk(const float* logits, int32_t* ids, float* weights, int n
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream) {
-    if (!stream || !valid(logits, 512 * 4) || !valid(ids, 10 * 4) || !valid(weights, 10 * 4)
-        || overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4)
-        || overlap(ids, 10 * 4, weights, 10 * 4))
+    if (!stream || !valid(logits, 512 * 4) || !valid(ids, 10 * 4) || !valid(weights, 10 * 4) ||
+        overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4) ||
+        overlap(ids, 10 * 4, weights, 10 * 4))
         throw std::invalid_argument("native router requires a stream, aligned spans, and disjoint outputs");
     route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void verify_router(const VerifyRouterArgs& a, void* stream) {
-    if (!stream || a.n_tok < 1 || a.n_tok > 8 || a.n_expert != 512 || a.n_embd <= 0 || a.n_embd % 512 != 0 ||
-        !a.x || !a.w || !a.logits || !a.ids || !a.weights || !a.seq || !a.counter || (a.plan && (!a.res || !a.slot_ptr)))
+    if (!stream || a.n_tok < 1 || a.n_tok > 8 || a.n_expert != 512 || a.n_embd <= 0 || a.n_embd % 512 != 0 || !a.x ||
+        !a.w || !a.logits || !a.ids || !a.weights || !a.seq || !a.counter || (a.plan && (!a.res || !a.slot_ptr)))
         throw std::invalid_argument("verify_router: 1..8 tokens, 512 experts, n_embd a multiple of 512, and buffers");
     if ((a.xk_out != nullptr &&
          (a.xq1 == nullptr || a.xk_stride < (a.n_embd / 256 * kQ8KBytes + 15) / 16 * 16 || a.xk_stride % 16)) ||
@@ -381,7 +394,7 @@ void verify_router(const VerifyRouterArgs& a, void* stream) {
                        : a.x_out != nullptr ? (a.n_tok * a.n_embd / 4 + VR_THREADS - 1) / VR_THREADS
                                             : 0;
     switch (a.n_tok) {
-#define LAMINA_VR(T) \
+#define LAMINA_VR(T)                                                                                                   \
     case T: verify_router_kernel<T><<<unsigned(n_copy + a.n_expert), VR_THREADS, 0, st>>>(a, n_copy); break;
         LAMINA_VR(1) LAMINA_VR(2) LAMINA_VR(3) LAMINA_VR(4) LAMINA_VR(5) LAMINA_VR(6) LAMINA_VR(7) LAMINA_VR(8)
 #undef LAMINA_VR
@@ -393,17 +406,17 @@ void verify_router_bias_update(const float* logits, const float* predicted, int 
     if (!stream || n_tok < 1 || n_tok > 8 || !logits || !predicted || !bias)
         throw std::invalid_argument("verify_router_bias_update: 1..8 tokens and buffers");
     bias_update<<<1, 512, 0, static_cast<cudaStream_t>(stream)>>>(logits, predicted, n_tok, 0.125f / (float) n_tok,
-                                                                   bias);
+                                                                  bias);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream) {
     const size_t nl = size_t(n_tok) * 512 * 4, no = size_t(n_tok) * 10 * 4;
-    if (!stream || n_tok < 1 || !valid(logits, nl) || !valid(ids, no) || !valid(weights, no)
-        || overlap(logits, nl, ids, no) || overlap(logits, nl, weights, no) || overlap(ids, no, weights, no))
+    if (!stream || n_tok < 1 || !valid(logits, nl) || !valid(ids, no) || !valid(weights, no) ||
+        overlap(logits, nl, ids, no) || overlap(logits, nl, weights, no) || overlap(ids, no, weights, no))
         throw std::invalid_argument("native router requires a stream, aligned spans, and disjoint outputs");
     route<<<unsigned(n_tok), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-}
+}   // namespace lamina::kernels

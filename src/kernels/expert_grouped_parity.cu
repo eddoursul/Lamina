@@ -9,8 +9,8 @@
 // --bench times both inside CUDA graphs (a kernel launched outside one pays WDDM's ~30-40 us), each call after an L2
 // flush, on the model files' format pairs, with routings shaped like the verify windows' (tokens share about a quarter
 // of their experts).
-#include "lamina/kernels/iq_kernels.hpp"
 #include "iq_dot.cuh"
+#include "lamina/kernels/iq_kernels.hpp"
 
 #include "ggml.h"
 #include "parity.hpp"
@@ -28,14 +28,15 @@ namespace {
 
 constexpr int64_t H = 2560, FF = 640, K = 10, MAXT = 8, SLOTS = 48, DISTINCT = 4;
 
-}  // namespace
+}   // namespace
 
 // ---- the kernels native_expert_grouped launched before, verbatim, and the i-quant dot products as they were
 // (sign masks through __vcmpne4 / __vsub4)
 namespace lamina::kernels::ref {
 
-__device__ __forceinline__ float ref_vec_dot_iq2_xxs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
-                                                      const int& kbx, const int& iqs) {
+__device__ __forceinline__ float ref_vec_dot_iq2_xxs_q8_1(const void* __restrict__ vbq,
+                                                          const block_q8_1* __restrict__ bq8_1, const int& kbx,
+                                                          const int& iqs) {
     const block_iq2_xxs* bq2 = (const block_iq2_xxs*) vbq + kbx;
     const int q2 = get_int_b2(bq2->qs, iqs);
     const uint8_t* aux8 = (const uint8_t*) &q2;
@@ -60,8 +61,9 @@ __device__ __forceinline__ float ref_vec_dot_iq2_xxs_q8_1(const void* __restrict
     return d * sumi;
 }
 
-__device__ __forceinline__ float ref_vec_dot_iq2_xs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
-                                                     const int& kbx, const int& iqs) {
+__device__ __forceinline__ float ref_vec_dot_iq2_xs_q8_1(const void* __restrict__ vbq,
+                                                         const block_q8_1* __restrict__ bq8_1, const int& kbx,
+                                                         const int& iqs) {
     const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
     const int2 q2_packed = make_int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
     const uint16_t* q2 = (const uint16_t*) &q2_packed;
@@ -91,8 +93,9 @@ __device__ __forceinline__ float ref_vec_dot_iq2_xs_q8_1(const void* __restrict_
     return d * sumi;
 }
 
-__device__ __forceinline__ float ref_vec_dot_iq2_s_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
-                                                    const int& kbx, const int& iqs) {
+__device__ __forceinline__ float ref_vec_dot_iq2_s_q8_1(const void* __restrict__ vbq,
+                                                        const block_q8_1* __restrict__ bq8_1, const int& kbx,
+                                                        const int& iqs) {
     const block_iq2_s* bq2 = (const block_iq2_s*) vbq + kbx;
     const int qs_packed = get_int_b2(bq2->qs, iqs / 2);
     const uint8_t* qs = (const uint8_t*) &qs_packed;
@@ -105,8 +108,10 @@ __device__ __forceinline__ float ref_vec_dot_iq2_s_q8_1(const void* __restrict__
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
-        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
-        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        const int signs0 =
+            __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 =
+            __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
         const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
         const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
@@ -124,8 +129,9 @@ __device__ __forceinline__ float ref_vec_dot_iq2_s_q8_1(const void* __restrict__
     return d * sumi;
 }
 
-__device__ __forceinline__ float ref_vec_dot_iq3_xxs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
-                                                      const int& kbx, const int& iqs) {
+__device__ __forceinline__ float ref_vec_dot_iq3_xxs_q8_1(const void* __restrict__ vbq,
+                                                          const block_q8_1* __restrict__ bq8_1, const int& kbx,
+                                                          const int& iqs) {
     const block_iq3_xxs* bq3 = (const block_iq3_xxs*) vbq + kbx;
     const int2 q3_packed = make_int2(get_int_b2(bq3->qs, iqs), get_int_b2(bq3->qs, iqs + 1));
     const uint8_t* q3 = (const uint8_t*) &q3_packed;
@@ -150,8 +156,9 @@ __device__ __forceinline__ float ref_vec_dot_iq3_xxs_q8_1(const void* __restrict
     return d * sumi;
 }
 
-__device__ __forceinline__ float ref_vec_dot_iq3_s_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
-                                                    const int& kbx, const int& iqs) {
+__device__ __forceinline__ float ref_vec_dot_iq3_s_q8_1(const void* __restrict__ vbq,
+                                                        const block_q8_1* __restrict__ bq8_1, const int& kbx,
+                                                        const int& iqs) {
     const block_iq3_s* bq3 = (const block_iq3_s*) vbq + kbx;
     const int2 qs_packed = make_int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
     const uint8_t* qs = (const uint8_t*) &qs_packed;
@@ -163,8 +170,10 @@ __device__ __forceinline__ float ref_vec_dot_iq3_s_q8_1(const void* __restrict__
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int2 grid_pos = make_int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
                                         iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
-        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
-        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        const int signs0 =
+            __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 =
+            __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
         const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
         const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
@@ -177,19 +186,34 @@ __device__ __forceinline__ float ref_vec_dot_iq3_s_q8_1(const void* __restrict__
     return d * sumi;
 }
 
-template<int TY> struct RefFmt : Fmt<TY> {};
-template<> struct RefFmt<16> : Fmt<16> {
-    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return ref_vec_dot_iq2_xxs_q8_1(v, y, kbx, iqs); } };
-template<> struct RefFmt<17> : Fmt<17> {
-    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return ref_vec_dot_iq2_xs_q8_1(v, y, kbx, iqs); } };
-template<> struct RefFmt<18> : Fmt<18> {
-    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return ref_vec_dot_iq3_xxs_q8_1(v, y, kbx, iqs); } };
-template<> struct RefFmt<21> : Fmt<21> {
-    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return ref_vec_dot_iq3_s_q8_1(v, y, kbx, iqs); } };
-template<> struct RefFmt<22> : Fmt<22> {
-    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return ref_vec_dot_iq2_s_q8_1(v, y, kbx, iqs); } };
+template <int TY> struct RefFmt : Fmt<TY> {};
+template <> struct RefFmt<16> : Fmt<16> {
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) {
+        return ref_vec_dot_iq2_xxs_q8_1(v, y, kbx, iqs);
+    }
+};
+template <> struct RefFmt<17> : Fmt<17> {
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) {
+        return ref_vec_dot_iq2_xs_q8_1(v, y, kbx, iqs);
+    }
+};
+template <> struct RefFmt<18> : Fmt<18> {
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) {
+        return ref_vec_dot_iq3_xxs_q8_1(v, y, kbx, iqs);
+    }
+};
+template <> struct RefFmt<21> : Fmt<21> {
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) {
+        return ref_vec_dot_iq3_s_q8_1(v, y, kbx, iqs);
+    }
+};
+template <> struct RefFmt<22> : Fmt<22> {
+    __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) {
+        return ref_vec_dot_iq2_s_q8_1(v, y, kbx, iqs);
+    }
+};
 
-template<int TY>
+template <int TY>
 __device__ __forceinline__ float ref_row_dot(const uint8_t* row, const block_q8_1* x, int nb, int lane) {
     using F = RefFmt<TY>;
     float s = 0.0f;
@@ -200,19 +224,18 @@ __device__ __forceinline__ float ref_row_dot(const uint8_t* row, const block_q8_
     return warp_sum(s);
 }
 
-constexpr int GU_ROWS = 8;     // rows per block (one warp each)
+constexpr int GU_ROWS = 8;   // rows per block (one warp each)
 
-template<int TG>
-__global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                        const int32_t* __restrict__ grp_start,
-                                                        const int32_t* __restrict__ n_groups,
-                                                        const int32_t* __restrict__ ent_tok,
-                                                        const block_q8_1* __restrict__ xq, NativeExpertLayout L,
-                                                        float* __restrict__ gate, float* __restrict__ up) {
+template <int TG>
+__global__ void __launch_bounds__(256)
+native_gu_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                 const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_tok,
+                 const block_q8_1* __restrict__ xq, NativeExpertLayout L, float* __restrict__ gate,
+                 float* __restrict__ up) {
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    const int row = blockIdx.x * GU_ROWS + warp;             // 0 .. 2*n_ff
+    const int row = blockIdx.x * GU_ROWS + warp;   // 0 .. 2*n_ff
     if (row >= 2 * L.n_ff) return;
     const bool is_up = row >= L.n_ff;
     const int r = is_up ? row - (int) L.n_ff : row;
@@ -226,21 +249,19 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
     }
 }
 
-__global__ void swiglu_entries_kernel(const float* __restrict__ gate, const float* __restrict__ up, float* __restrict__ h,
-                                      long long n) {
+__global__ void swiglu_entries_kernel(const float* __restrict__ gate, const float* __restrict__ up,
+                                      float* __restrict__ h, long long n) {
     const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float g = gate[i];
     h[i] = (g / (1.0f + __expf(-g))) * up[i];
 }
 
-template<int TD>
-__global__ void __launch_bounds__(256) native_down_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                          const int32_t* __restrict__ grp_start,
-                                                          const int32_t* __restrict__ n_groups,
-                                                          const int32_t* __restrict__ ent_dst,
-                                                          const block_q8_1* __restrict__ hq, NativeExpertLayout L,
-                                                          float* __restrict__ out) {
+template <int TD>
+__global__ void __launch_bounds__(256)
+native_down_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                   const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_dst,
+                   const block_q8_1* __restrict__ hq, NativeExpertLayout L, float* __restrict__ out) {
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -275,7 +296,8 @@ __global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __
 
 size_t scratch_bytes(int64_t cap, int64_t n_ff) {
     const size_t f = (size_t) cap * (size_t) n_ff * sizeof(float);
-    return 3 * ((f + 255) & ~(size_t) 255) + (((size_t) cap * (size_t) (n_ff / 32) * sizeof(block_q8_1) + 255) & ~(size_t) 255);
+    return 3 * ((f + 255) & ~(size_t) 255) +
+           (((size_t) cap * (size_t) (n_ff / 32) * sizeof(block_q8_1) + 255) & ~(size_t) 255);
 }
 
 void grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
@@ -289,25 +311,29 @@ void grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, con
     const auto* X = (const block_q8_1*) x_q8_1;
     const dim3 ggu((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) cap_groups);
     switch (L.gu_type) {
+        // clang-format off
 #define LAMINA_GU(T) case T: native_gu_kernel<T><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         LAMINA_FMTS(LAMINA_GU)
 #undef LAMINA_GU
         default: std::fprintf(stderr, "ref: gate/up type %d\n", L.gu_type); std::exit(1);
     }
+    // clang-format on
     const long long nh = (long long) cap_entries * L.n_ff;
     swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
     if (L.had_block > 0) hadamard_rows(h, h, cap_entries, L.n_ff, L.d_signs, s);
     quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
     const dim3 gd((unsigned) ((L.n_embd + 7) / 8), (unsigned) cap_groups);
     switch (L.d_type) {
+        // clang-format off
 #define LAMINA_DOWN(T) case T: native_down_kernel<T><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
         LAMINA_FMTS(LAMINA_DOWN)
 #undef LAMINA_DOWN
         default: std::fprintf(stderr, "ref: down type %d\n", L.d_type); std::exit(1);
     }
+    // clang-format on
 }
 
-}  // namespace lamina::kernels::ref
+}   // namespace lamina::kernels::ref
 
 namespace {
 
@@ -346,7 +372,8 @@ uint8_t* make_arena(const lamina::kernels::NativeExpertLayout& L, size_t stride,
     check(cudaMalloc(&arena, (size_t) SLOTS * stride), "arena");
     for (int i = 0; i < SLOTS; ++i)
         check(cudaMemcpy(arena + (size_t) i * stride, blobs.data() + (size_t) (i % DISTINCT) * L.bytes, L.bytes,
-                         cudaMemcpyHostToDevice), "arena upload");
+                         cudaMemcpyHostToDevice),
+              "arena upload");
     return arena;
 }
 
@@ -382,7 +409,10 @@ Plan make_plan(std::mt19937& rng, int n_tok, double hit, const uint8_t* arena, s
         p.ptr.push_back((unsigned long long) (arena + (size_t) ids[(size_t) i] * stride));
         p.start.push_back((int32_t) p.dst.size());
         for (int j = i; j < n; ++j)
-            if (ids[(size_t) j] == ids[(size_t) i]) { p.dst.push_back(j); p.tok.push_back(j / (int) K); }
+            if (ids[(size_t) j] == ids[(size_t) i]) {
+                p.dst.push_back(j);
+                p.tok.push_back(j / (int) K);
+            }
     }
     p.start.push_back((int32_t) p.dst.size());
     return p;
@@ -408,10 +438,11 @@ void upload(const Plan& p, const Dev& d) {
 
 void run(bool reference, const lamina::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap, cudaStream_t s) {
     if (reference)
-        lamina::kernels::ref::grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, d.scratch_ref, d.out_ref, s);
+        lamina::kernels::ref::grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, d.scratch_ref, d.out_ref,
+                                      s);
     else
-        lamina::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, (L.n_embd / 32) * 36,
-                                               d.scratch_new, d.out_new, s);
+        lamina::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq,
+                                               (L.n_embd / 32) * 36, d.scratch_new, d.out_new, s);
 }
 
 // reads a buffer larger than the L2, so that a call finds its experts in VRAM as the windows do
@@ -419,7 +450,8 @@ constexpr long long FLUSH_BYTES = 128ll << 20;
 float* g_flush = nullptr;
 __global__ void flush_kernel(const float4* __restrict__ p, long long n, float* sink) {
     float s = 0.f;
-    for (long long i = blockIdx.x * (long long) blockDim.x + threadIdx.x; i < n; i += (long long) gridDim.x * blockDim.x) {
+    for (long long i = blockIdx.x * (long long) blockDim.x + threadIdx.x; i < n;
+         i += (long long) gridDim.x * blockDim.x) {
         const float4 v = p[i];
         s += v.x + v.y + v.z + v.w;
     }
@@ -449,7 +481,8 @@ double time_graph1(bool call, bool reference, const lamina::kernels::NativeExper
         const auto t0 = std::chrono::steady_clock::now();
         check(cudaGraphLaunch(exec, s), "launch");
         check(cudaStreamSynchronize(s), "sync");
-        best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps);
+        best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() /
+                                  reps);
     }
     cudaGraphExecDestroy(exec);
     cudaGraphDestroy(graph);
@@ -480,11 +513,17 @@ int nvfp4_il_parity(cudaStream_t s) {
     const size_t stride = (L.scale_off + 8 + 255) & ~(size_t) 255;
     std::mt19937_64 rng(40);
     std::vector<uint8_t> blobs((size_t) SLOTS * stride);
-    for (size_t i = 0; i + 8 <= blobs.size(); i += 8) { const uint64_t v = rng(); std::memcpy(&blobs[i], &v, 8); }
+    for (size_t i = 0; i + 8 <= blobs.size(); i += 8) {
+        const uint64_t v = rng();
+        std::memcpy(&blobs[i], &v, 8);
+    }
     for (int e = 0; e < SLOTS; ++e) {
         uint8_t* b = blobs.data() + (size_t) e * stride;
         for (size_t blk = 0; blk < L.bytes / 36; ++blk)   // a sub-block's scale: any exponent, the zero codes too
-            for (int i = 0; i < 4; ++i) b[blk * 36 + i] = rng() % 16 == 0 ? (uint8_t) (rng() & 7) : rng() % 64 == 0 ? 0x7F : (uint8_t) (((3 + rng() % 6) << 3) | (rng() & 7));
+            for (int i = 0; i < 4; ++i)
+                b[blk * 36 + i] = rng() % 16 == 0   ? (uint8_t) (rng() & 7)
+                                  : rng() % 64 == 0 ? 0x7F
+                                                    : (uint8_t) (((3 + rng() % 6) << 3) | (rng() & 7));
         const float two[2] = {0.02f + 0.001f * (float) e, 0.03f};
         std::memcpy(b + L.scale_off, two, 8);
     }
@@ -518,7 +557,8 @@ int nvfp4_il_parity(cudaStream_t s) {
         check(cudaMemcpy(q.data(), d.xq, q.size(), cudaMemcpyDeviceToHost), "x");
         for (size_t b = 0; b < q.size() / 36; ++b) {
             std::memcpy(&qi[b * 36], &q[b * 36], 4);
-            for (int l = 0; l < 32; ++l) qi[b * 36 + 4 + ((l & 16) | ((l & 7) << 1) | ((l >> 3) & 1))] = q[b * 36 + 4 + l];
+            for (int l = 0; l < 32; ++l)
+                qi[b * 36 + 4 + ((l & 16) | ((l & 7) << 1) | ((l >> 3) & 1))] = q[b * 36 + 4 + l];
         }
         check(cudaMemcpy(di.xq, qi.data(), qi.size(), cudaMemcpyHostToDevice), "x");
     }
@@ -531,8 +571,8 @@ int nvfp4_il_parity(cudaStream_t s) {
             const int64_t n = n_tok * K;
             check(cudaMemset(d.out_new, 0xff, (size_t) cap * N * 4), "memset");
             check(cudaMemset(di.out_new, 0xff, (size_t) cap * N * 4), "memset");
-            lamina::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, n, n, d.xq, xb * 36, d.scratch_new,
-                                                   d.out_new, s);
+            lamina::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, n, n, d.xq, xb * 36,
+                                                   d.scratch_new, d.out_new, s);
             lamina::kernels::native_expert_grouped(Li, d.ptr, d.start, d.n, d.dst, d.tok, n, n, di.xq, xb * 36,
                                                    di.scratch_new, di.out_new, s);
             check(cudaStreamSynchronize(s), "run");
@@ -544,13 +584,21 @@ int nvfp4_il_parity(cudaStream_t s) {
         }
     std::printf("%-8s/%-7s %d plans, interleaved activations against plain: %s\n", "NVFP4", "NVFP4", cases,
                 diff ? "MISMATCH" : "bitwise equal");
-    for (Dev* v : {&d, &di}) { cudaFree(v->xq); cudaFree(v->scratch_new); cudaFree(v->out_new); }
-    cudaFree(d.ptr); cudaFree(d.start); cudaFree(d.n); cudaFree(d.dst); cudaFree(d.tok);
+    for (Dev* v : {&d, &di}) {
+        cudaFree(v->xq);
+        cudaFree(v->scratch_new);
+        cudaFree(v->out_new);
+    }
+    cudaFree(d.ptr);
+    cudaFree(d.start);
+    cudaFree(d.n);
+    cudaFree(d.dst);
+    cudaFree(d.tok);
     cudaFree(arena);
     return diff;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     const bool bench = argc > 1 && std::string(argv[1]) == "--bench";
@@ -605,7 +653,9 @@ int main(int argc, char** argv) {
         if (gu >= 147) L.had_block = 128;
         const size_t stride = (L.bytes + 255) & ~(size_t) 255;
         uint8_t* arena = make_arena(L, stride, gu * 100 + dn);
-        const auto type_name = [](int t) { return t == 147 ? "TQP5" : t == 148 ? "TQP6" : t == 149 ? "TQP7" : ggml_type_name((ggml_type) t); };
+        const auto type_name = [](int t) {
+            return t == 147 ? "TQP5" : t == 148 ? "TQP6" : t == 149 ? "TQP7" : ggml_type_name((ggml_type) t);
+        };
         const char* names = type_name(gu);
         if (!bench) {
             int cases = 0, diff = 0;
@@ -624,8 +674,7 @@ int main(int argc, char** argv) {
                     diff += a != b;
                     ++cases;
                 }
-            std::printf("%-8s/%-7s %d plans: %s\n", names, type_name(dn), cases,
-                        diff ? "MISMATCH" : "bitwise equal");
+            std::printf("%-8s/%-7s %d plans: %s\n", names, type_name(dn), cases, diff ? "MISMATCH" : "bitwise equal");
             bad += diff;
         } else {
             std::printf("%-8s/%-7s", names, type_name(dn));

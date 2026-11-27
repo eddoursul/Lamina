@@ -24,12 +24,12 @@ namespace B = lamina::bench;
 namespace fs = std::filesystem;
 
 static int fails = 0;
-#define CHECK(c)                                                                  \
-    do {                                                                          \
-        if (!(c)) {                                                               \
-            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);   \
-            ++fails;                                                              \
-        }                                                                         \
+#define CHECK(c)                                                                                                       \
+    do {                                                                                                               \
+        if (!(c)) {                                                                                                    \
+            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);                                          \
+            ++fails;                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 namespace {
@@ -53,15 +53,23 @@ public:
             reply(res, {{"total_slots", 4}, {"model_alias", "fake-model"}, {"build_info", "Lamina 9.9.9"}});
         });
         srv_.Get("/v1/status", [](const httplib::Request&, httplib::Response& res) {
-            reply(res, {{"machine", {{"gpu", {{"name", "NVIDIA GeForce RTX 9999"}, {"total_mib", 12288}}}, {"ram", {{"total_gib", 64.0}}}}},
-                        {"engine", "9.9.9"}, {"vram", {{"free_mib", 1000}}}});
+            reply(res, {{"machine",
+                         {{"gpu", {{"name", "NVIDIA GeForce RTX 9999"}, {"total_mib", 12288}}},
+                          {"ram", {{"total_gib", 64.0}}}}},
+                        {"engine", "9.9.9"},
+                        {"vram", {{"free_mib", 1000}}}});
         });
         srv_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
             std::lock_guard<std::mutex> lk(mu_);
-            reply(res, {{"engine", {{"version", "9.9.9"}, {"max_context", ctx.load()}, {"model_path", "C:\\Users\\Someone\\models\\x.gguf"}}},
-                        {"hardware_static", {{"gpu_name", gpu_name}, {"cpu_name", "Fake CPU 9"}, {"cores", 8}, {"threads", 16}}}});
+            reply(res, {{"engine",
+                         {{"version", "9.9.9"},
+                          {"max_context", ctx.load()},
+                          {"model_path", "C:\\Users\\Someone\\models\\x.gguf"}}},
+                        {"hardware_static",
+                         {{"gpu_name", gpu_name}, {"cpu_name", "Fake CPU 9"}, {"cores", 8}, {"threads", 16}}}});
         });
-        srv_.Post("/v1/chat/completions", [this](const httplib::Request& req, httplib::Response& res) { chat(req, res); });
+        srv_.Post("/v1/chat/completions",
+                  [this](const httplib::Request& req, httplib::Response& res) { chat(req, res); });
         port_ = srv_.bind_to_any_port("127.0.0.1");
         th_ = std::thread([this] { srv_.listen_after_bind(); });
         srv_.wait_until_ready();
@@ -123,11 +131,19 @@ private:
             chunk({{"role", "assistant"}}, nullptr, json::object());
             for (int64_t i = 0; i < gen; ++i) chunk({{"content", "word "}}, nullptr, json::object());
             chunk(json::object(), "stop",
-                  {{"usage", {{"prompt_tokens", prompt}, {"completion_tokens", gen}, {"total_tokens", prompt + gen},
-                              {"prompt_tokens_details", {{"cached_tokens", cached}}}}},
-                   {"timings", {{"cache_n", cached}, {"prompt_n", prompt - cached}, {"prompt_ms", 100.0},
-                                {"prompt_per_second", 1000.0 + n}, {"predicted_n", gen}, {"predicted_ms", 200.0},
-                                {"predicted_per_second", 60.0}}}});
+                  {{"usage",
+                    {{"prompt_tokens", prompt},
+                     {"completion_tokens", gen},
+                     {"total_tokens", prompt + gen},
+                     {"prompt_tokens_details", {{"cached_tokens", cached}}}}},
+                   {"timings",
+                    {{"cache_n", cached},
+                     {"prompt_n", prompt - cached},
+                     {"prompt_ms", 100.0},
+                     {"prompt_per_second", 1000.0 + n},
+                     {"predicted_n", gen},
+                     {"predicted_ms", 200.0},
+                     {"predicted_per_second", 60.0}}}});
             const std::string done = "data: [DONE]\n\n";
             sink.write(done.data(), done.size());
             sink.done();
@@ -169,8 +185,9 @@ std::vector<fs::path> dirs_in(const fs::path& d) {
 
 void the_word_lists() {
     // tools/ab_engine.py's long_prompt, as Python 3.12 writes it
-    CHECK(B::long_prompt(12) == "Here is a list of words:\norbit copper canyon stone market anchor lantern velvet violet stone "
-                                "meadow garden\n\nSummarize what kinds of words appear in the list, in five sentences.");
+    CHECK(B::long_prompt(12) ==
+          "Here is a list of words:\norbit copper canyon stone market anchor lantern velvet violet stone "
+          "meadow garden\n\nSummarize what kinds of words appear in the list, in five sentences.");
     const std::string a = B::long_prompt(1500), b = B::long_prompt(3700);
     CHECK(lamina::sha256_hex(a) == "d0bd31d1b3008cedabf5d4bbf218cefd9cae14ab95ab0c8e0a7f29066b1b546f");
     CHECK(lamina::sha256_hex(b) == "bd47e15135f6b5e95ef2492c94fc70bc92cb719eb8e3a5622795423fd5326829");
@@ -193,7 +210,8 @@ void the_full_suite(FakeLamina& srv) {
     CHECK(out["prompts"].size() == 2 && out["prompts"].contains("4K") && out["prompts"].contains("16K"));
     for (const auto& v : out["prompts"]) {
         CHECK(v["prompt_tps"]["n"] == 3);
-        CHECK(med(v["reused_tokens"]) < med(v["prompt_tokens"]) / 100);   // a fresh tag at the start: next to nothing reused
+        CHECK(med(v["reused_tokens"]) < med(v["prompt_tokens"]) / 100);   // a fresh tag at the start:
+                                                                          // next to nothing reused
     }
     const double ratio = med(out["prompts"]["16K"]["prompt_tokens"]) / med(out["prompts"]["4K"]["prompt_tokens"]);
     CHECK(ratio > 3.4 && ratio < 4.6);   // the sizes are calibrated, not guessed
@@ -213,8 +231,11 @@ void the_agent_session(FakeLamina& srv) {
         CHECK(turns[i]["read_tokens"].get<int64_t>() < turns[i]["prompt_tokens"].get<int64_t>());
     }
     CHECK(med(ag["hit_pct"]) > 50);
-    CHECK(med(ag["reread_tokens"]) < med(ag["new_tokens"]));   // the new file text dominates, not re-reading
-    CHECK(turns[5]["prompt_tokens"].get<int64_t>() > turns[1]["prompt_tokens"].get<int64_t>());   // the conversation grows
+    CHECK(med(ag["reread_tokens"]) < med(ag["new_tokens"]));                                      // the new file
+                                                                                                  // text dominates,
+                                                                                                  // not re-reading
+    CHECK(turns[5]["prompt_tokens"].get<int64_t>() > turns[1]["prompt_tokens"].get<int64_t>());   // the conversation
+                                                                                                  // grows
 }
 
 void a_small_context(FakeLamina& srv) {
@@ -246,8 +267,8 @@ void a_stop(FakeLamina& srv) {
     bool interrupted = false;
     B::Options o;
     o.runs = 3;
-    const json out = B::run_suite(srv.target(), 32768, o, [](const std::string&) {},
-                                  [&] { return ++asked > 40; }, &interrupted);
+    const json out =
+        B::run_suite(srv.target(), 32768, o, [](const std::string&) {}, [&] { return ++asked > 40; }, &interrupted);
     CHECK(interrupted && !out["prompts"].contains("16K"));
     CHECK(B::run(srv.target(), nullptr, o, "", 0, [] { return true; }) == 130);
 }
@@ -274,7 +295,8 @@ void the_report(FakeLamina& srv) {
     const std::string raw = read_file(dirs[0] / "results.json");
     const json res = json::parse(raw);
     CHECK(res["schema"] == B::kSchema && res["tool"] == "lamina bench");
-    CHECK(res["machine"]["engine_version"] == "9.9.9" && res["machine"]["gpu"] == json::array({"NVIDIA GeForce RTX 9999"}));
+    CHECK(res["machine"]["engine_version"] == "9.9.9" &&
+          res["machine"]["gpu"] == json::array({"NVIDIA GeForce RTX 9999"}));
     CHECK(med(res["results"]["chat"]["decode_tps"]) == 60.0);
     CHECK(res["params"]["started_server"] == false && res["params"]["clients"] == 2);
     CHECK((readme + raw).find("Someone") == std::string::npos);   // the engine's model_path never reaches the report
@@ -307,7 +329,8 @@ void the_cards_a_report_names(FakeLamina& srv) {
     json m = B::collect_machine(srv.target(), {{"gpu", 1}}, two);
     CHECK(names(m) == json::array({"NVIDIA GeForce RTX 9999"}) && m["gpu_vram_mib"] == 16384);
     m = B::collect_machine(srv.target(), {{"gpu", {0, 1}}}, two);
-    CHECK(names(m) == json::array({"NVIDIA GeForce RTX 3060", "NVIDIA GeForce RTX 9999"}) && m["gpu_vram_mib"] == 28672);
+    CHECK(names(m) == json::array({"NVIDIA GeForce RTX 3060", "NVIDIA GeForce RTX 9999"}) &&
+          m["gpu_vram_mib"] == 28672);
     m = B::collect_machine(srv.target(), {{"args", {"--gpu", "0"}}}, two);
     CHECK(names(m) == json::array({"NVIDIA GeForce RTX 3060"}));
     m = B::collect_machine(srv.target(), json::object(), two);   // nothing selected: the card the server names
@@ -347,11 +370,12 @@ void the_cards_a_report_names(FakeLamina& srv) {
 
 void the_redaction() {
     const B::Redactor red = B::redactor({"Jane Roe Laptop"}, "sk-secret-123456");
-    const std::string text = red("C:\\Users\\someone_else\\models\\a.gguf\n/home/bob/lamina/x.json\n/Users/alice/Library\n"
-                                 "peer 192.168.1.20 and 10.0.0.7 and 100.101.102.103\nAuthorization: Bearer abcdefghijkl12345\n"
-                                 "key sk-secret-123456 here\nname Jane Roe Laptop");
-    for (const char* s : {"someone_else", "bob", "alice", "192.168.1.20", "10.0.0.7", "100.101.102.103", "abcdefghijkl12345",
-                          "sk-secret-123456", "Jane Roe Laptop"})
+    const std::string text =
+        red("C:\\Users\\someone_else\\models\\a.gguf\n/home/bob/lamina/x.json\n/Users/alice/Library\n"
+            "peer 192.168.1.20 and 10.0.0.7 and 100.101.102.103\nAuthorization: Bearer abcdefghijkl12345\n"
+            "key sk-secret-123456 here\nname Jane Roe Laptop");
+    for (const char* s : {"someone_else", "bob", "alice", "192.168.1.20", "10.0.0.7", "100.101.102.103",
+                          "abcdefghijkl12345", "sk-secret-123456", "Jane Roe Laptop"})
         CHECK(text.find(s) == std::string::npos);
     CHECK(text.find("<user>") != std::string::npos && text.find("<ip>") != std::string::npos);
     CHECK(text.find("\n/home/<user>/lamina/x.json\n") != std::string::npos);   // the lines stay lines
@@ -365,7 +389,10 @@ void the_redaction() {
 
     const json cfg = {{"exe", "C:\\Users\\me\\Lamina\\engine\\lamina-engine.exe"},
                       {"args", {"--native", "/home/me/models/m-IQ3_XXS.gguf", "--ctx", "65536"}},
-                      {"api_key", "hunter2"}, {"model_name", "Fake Model"}, {"log", "/tmp/x.log"}, {"port", 8080},
+                      {"api_key", "hunter2"},
+                      {"model_name", "Fake Model"},
+                      {"log", "/tmp/x.log"},
+                      {"port", 8080},
                       {"vision", {{"mmproj", "D:/Models/x/mmproj-F16.gguf"}, {"token", "t"}, {"gpu", false}}},
                       {"env", {{"LAMINA_FOO", "/home/me/z"}, {"PATH", "/usr/bin"}, {"LAMINA_TOKEN", "t"}}}};
     const json v = B::config_view(cfg);
@@ -376,11 +403,13 @@ void the_redaction() {
     CHECK((v["env"] == json{{"LAMINA_FOO", "z"}}));
     CHECK(B::detect_quant(v) == "IQ3_XXS");
     CHECK(v.dump().find("hunter2") == std::string::npos);
-    CHECK(B::detect_quant({{"args", {"--native", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"}}}) == "UD-Q4_K_XL");
+    CHECK(B::detect_quant({{"args", {"--native", "Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"}}}) ==
+          "UD-Q4_K_XL");
     // a value with a slash that is no path stays; one that starts as a path is cut
-    CHECK((B::config_view({{"args", {"--second-gpu-clocks", "0,1395-2100/9751", "--control-vector-scaled",
-                                     "D:\\Models\\cv\\refusal.gguf:1.0", "--expert-profile", "data/expert-profile.bin",
-                                     "--log", "../Lamina-data/x.log"}}})["args"] ==
+    CHECK((B::config_view({{"args",
+                            {"--second-gpu-clocks", "0,1395-2100/9751", "--control-vector-scaled",
+                             "D:\\Models\\cv\\refusal.gguf:1.0", "--expert-profile", "data/expert-profile.bin", "--log",
+                             "../Lamina-data/x.log"}}})["args"] ==
            json::array({"--second-gpu-clocks", "0,1395-2100/9751", "--control-vector-scaled", "refusal.gguf:1.0",
                         "--expert-profile", "expert-profile.bin", "--log", "x.log"})));
 }
@@ -392,14 +421,16 @@ void the_profile_stays(const fs::path& d) {
         std::ofstream f(learned, std::ios::binary);
         f << "profile";
     }
-    const json by_args = {{"args", {"--expert-profile", lamina::u8_str(learned), "--expert-profile-save", lamina::u8_str(learned),
-                                    "--spec", "4"}}};
+    const json by_args = {{"args",
+                           {"--expert-profile", lamina::u8_str(learned), "--expert-profile-save",
+                            lamina::u8_str(learned), "--spec", "4"}}};
     json out = B::without_profile_save(by_args, lamina::u8_str(copy));
     CHECK(out["args"][1] == lamina::u8_str(learned) && out["args"][3] == lamina::u8_str(copy) && out["args"][5] == "4");
     CHECK(read_file(copy) == "profile" && by_args["args"][3] == lamina::u8_str(learned));   // the input as it was
     std::error_code ec;
     fs::remove(copy, ec);
-    const json by_key = {{"args", {"--spec", "4"}}, {"expert_profile_save", lamina::u8_str(learned)}, {"expert_profile_save_every", 1}};
+    const json by_key = {
+        {"args", {"--spec", "4"}}, {"expert_profile_save", lamina::u8_str(learned)}, {"expert_profile_save_every", 1}};
     out = B::without_profile_save(by_key, lamina::u8_str(copy));
     CHECK(out["expert_profile_save"] == lamina::u8_str(copy) && out["expert_profile_save_every"] == 1);
     CHECK(read_file(copy) == "profile" && read_file(learned) == "profile");
@@ -407,7 +438,7 @@ void the_profile_stays(const fs::path& d) {
     CHECK(B::without_profile_save(none, lamina::u8_str(copy)) == none);
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     the_word_lists();

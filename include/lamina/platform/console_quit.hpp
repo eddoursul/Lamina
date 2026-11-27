@@ -20,4 +20,4 @@ struct ConsoleQuit {
     ConsoleQuit& operator=(const ConsoleQuit&) = delete;
 };
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

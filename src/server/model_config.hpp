@@ -31,17 +31,17 @@ struct ModelFacts {
     std::string path;                  ///< the first shard, absolute
     std::vector<std::string> shards;   ///< every shard, the first first
     std::string arch, name, quantized_by;
-    int64_t n_embd = 0;                ///< <arch>.embedding_length: a projector made for it has that projection_dim
-    int64_t mtp_layers = 0;            ///< <arch>.nextn_predict_layers: the MTP blocks the file holds (0: none)
-    uint64_t bytes = 0;                ///< the shards' size
-    uint64_t expert_bytes = 0;         ///< its routed experts' tensors (blk.N.ffn_{gate,up,down,gate_up}_exps)
+    int64_t n_embd = 0;          ///< <arch>.embedding_length: a projector made for it has that projection_dim
+    int64_t mtp_layers = 0;      ///< <arch>.nextn_predict_layers: the MTP blocks the file holds (0: none)
+    uint64_t bytes = 0;          ///< the shards' size
+    uint64_t expert_bytes = 0;   ///< its routed experts' tensors (blk.N.ffn_{gate,up,down,gate_up}_exps)
     /// Inkling 2: a layer's tensors (blk.N.*), the full-attention applications it makes a token (0: a window layer;
     /// a looped layer one a pass), an application's K and V a token in FP16, and the looped layers [first, last]
     std::vector<uint64_t> layer_bytes;
     std::vector<int> layer_full;
     uint64_t cell_pair_bytes = 0;
     int loop_first = -1, loop_last = -1;
-    std::string unsupported;           ///< why the engine refuses the file ("" when it reads it)
+    std::string unsupported;   ///< why the engine refuses the file ("" when it reads it)
 };
 /// `path`'s model (any of its shards names it); std::runtime_error when it is not a readable GGUF or a shard is missing
 ModelFacts read_model(const std::string& path);
@@ -62,7 +62,8 @@ int pick_main_gpu(const std::vector<GpuInfo>& gpus, const std::vector<int>& allo
 /// (where the encoder's ~1.3 GB matter least) among those that drive no display, else among all of them, the higher
 /// number on a tie; else the main card itself.  Its nvidia-smi index; -1 when there is none.
 int pick_vision_gpu(const std::vector<GpuInfo>& gpus, int main);
-/// how a config names `g`: by its name when no other card has it, else by its UUID (a number moves when a card is added)
+/// how a config names `g`: by its name when no other card has
+/// it, else by its UUID (a number moves when a card is added)
 std::string gpu_spec(const GpuInfo& g, const std::vector<GpuInfo>& gpus);
 
 /// "" when the image encoder reads the projector `path` (a GGUF with a vision encoder of a type it reads, its header as
@@ -90,7 +91,8 @@ struct ModelConfig {
     ModelFacts model;
     std::string preset;
     std::vector<std::string> preset_keys;   ///< the preset's keys: a config written over an earlier one renews them
-    std::vector<std::string> notes;   ///< "[lamina] ..." lines: the model and its preset, the GPU, the pictures, the log
+    std::vector<std::string> notes;         ///< "[lamina] ..." lines: the model and its
+                                            ///< preset, the GPU, the pictures, the log
 };
 /// The config for `opts.model`: its preset's, the model's own paths in place of the preset's (--native, the
 /// projector, the log, the learned profile), the main GPU pick_main_gpu() chooses, and none of the preset's files the
@@ -105,10 +107,11 @@ ModelConfig config_from_model(const ModelOptions& opts, const std::vector<GpuInf
 /// when it cannot be written.
 std::vector<std::string> write_config(const std::string& path, json cfg, const std::vector<std::string>& renewed = {});
 
-/// lamina check, said in the window: given a config (built from -m or read), its model's summary - the file, where it runs,
-/// what it takes, its drafter and pictures - and the verdict, why not where it would not start (this PC's own reasons
-/// among them); without one, this PC (its CPU, RAM and GPUs). `model_error`: why -m's model gave no config; `ready` the
-/// last line where it would start.  False when the model would not start.
+/// lamina check, said in the window: given a config (built from -m or read), its model's summary - the file, where it
+/// runs, what it takes, its drafter and pictures - and the verdict, why not where it would not start (this PC's own
+/// reasons among them); without one, this PC (its CPU, RAM and GPUs).
+/// `model_error`: why -m's model gave no config; `ready` the last
+/// line where it would start.  False when the model would not start.
 bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::string& model_error = "",
                   const std::string& ready = "It can start.");
 
@@ -124,4 +127,4 @@ struct ModelCheck {
 /// and its pictures
 ModelCheck check_model(const json& cfg, const std::vector<GpuInfo>& gpus);
 
-}  // namespace lamina
+}   // namespace lamina

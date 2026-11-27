@@ -2,12 +2,12 @@
 //   mmq::quantize_f16 with row ids (the routed rows from the FP16 input) against gather_rows16_f32 + mmq::quantize,
 //   mmq::swiglu_quantize (H) against mmq::swiglu + mmq::quantize (gate/up rows split and interleaved),
 //   and both with a Hadamard rotation in them (`signs`) against hadamard_rows between the pair,
-// for every q8_1 layout MMQ reads (D4: Q8_0 IQ4_NL Q2_0 IQ3_S, DS4: Q5_1 Q4_K, D2S6: Q2_K), on rows routed as the prompt
-// path routes them (10 of 512 experts a token, grouped by expert), with an all-zero token and row counts that are
-// multiples of nothing.  --bench: both forms at a batch of 8192 rows (the engine's), ms and the rows' bytes moved.
+// for every q8_1 layout MMQ reads (D4: Q8_0 IQ4_NL Q2_0 IQ3_S, DS4: Q5_1 Q4_K, D2S6: Q2_K), on rows routed as the
+// prompt path routes them (10 of 512 experts a token, grouped by expert), with an all-zero token and row counts that
+// are multiples of nothing.  --bench: both forms at a batch of 8192 rows (the engine's), ms and the rows' bytes moved.
+#include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/prefill/kernels.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
-#include "lamina/kernels/iq_kernels.hpp"
 
 #include "ggml.h"
 
@@ -47,8 +47,9 @@ struct Layout {
     const char* name;
     ggml_type type;
 };
-const Layout kTypes[] = {{"Q8_0 (D4)", GGML_TYPE_Q8_0},   {"IQ4_NL (D4)", GGML_TYPE_IQ4_NL}, {"Q2_0 (D4)", GGML_TYPE_Q2_0},
-                         {"IQ3_S (D4)", GGML_TYPE_IQ3_S}, {"Q5_1 (DS4)", GGML_TYPE_Q5_1},    {"Q4_K (DS4)", GGML_TYPE_Q4_K},
+const Layout kTypes[] = {{"Q8_0 (D4)", GGML_TYPE_Q8_0},  {"IQ4_NL (D4)", GGML_TYPE_IQ4_NL},
+                         {"Q2_0 (D4)", GGML_TYPE_Q2_0},  {"IQ3_S (D4)", GGML_TYPE_IQ3_S},
+                         {"Q5_1 (DS4)", GGML_TYPE_Q5_1}, {"Q4_K (DS4)", GGML_TYPE_Q4_K},
                          {"Q2_K (D2S6)", GGML_TYPE_Q2_K}};
 
 // the prompt path's rows: each token's 10 experts, rows grouped by expert; src[row] = its token
@@ -142,7 +143,8 @@ void h_case(int64_t rows, bool interleaved, std::mt19937& rng, cudaStream_t s) {
     }
 }
 
-// The folded experts' inputs: a sign vector of the width, rows rotated inside the quantizer against rotated between the two
+// The folded experts' inputs: a sign vector of the width, rows
+// rotated inside the quantizer against rotated between the two
 std::vector<float> random_signs(int64_t n, std::mt19937& rng) {
     std::vector<float> v((size_t) n);
     for (auto& x : v) x = (rng() & 1) ? 1.0f : -1.0f;
@@ -172,7 +174,8 @@ void rotated_case(int64_t T, std::mt19937& rng, cudaStream_t s) {
     mmq::quantize_f16(xd.as<uint16_t>(), sd.as<int32_t>(), qf.p, (int) GGML_TYPE_IQ3_S, N, N, rows, s, sx.as<float>());
     ck(cudaStreamSynchronize(s), "sync");
     size_t d = diff_bytes(qa, qf, qb);
-    report(d == 0, "input rotated, " + std::to_string(rows) + " rows: " + std::to_string(d) + " of " + std::to_string(qb) + " bytes differ");
+    report(d == 0, "input rotated, " + std::to_string(rows) + " rows: " + std::to_string(d) + " of " +
+                       std::to_string(qb) + " bytes differ");
 
     std::normal_distribution<float> gate(0.0f, 4.0f), up(0.0f, 2.0f);
     std::vector<float> gu((size_t) (rows * 2 * FF));
@@ -193,7 +196,8 @@ void rotated_case(int64_t T, std::mt19937& rng, cudaStream_t s) {
     mmq::swiglu_quantize(gd.as<float>(), hf.p, (int) GGML_TYPE_IQ3_S, rows, FF, false, s, sh.as<float>());
     ck(cudaStreamSynchronize(s), "sync");
     d = diff_bytes(ha, hf, qh);
-    report(d == 0, "H rotated, " + std::to_string(rows) + " rows: " + std::to_string(d) + " of " + std::to_string(qh) + " bytes differ");
+    report(d == 0, "H rotated, " + std::to_string(rows) + " rows: " + std::to_string(d) + " of " + std::to_string(qh) +
+                       " bytes differ");
 }
 
 // both forms at the engine's batch of 8192 rows: each call's median over 50 after a warm-up, in ms
@@ -243,7 +247,7 @@ void bench(cudaStream_t s) {
                 (long long) rows, in2, in1, in2 / in1, h2, h1, h2 / h1);
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     try {

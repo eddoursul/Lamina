@@ -1,7 +1,8 @@
 // tests/core/gguf_fixture.hpp - synthetic GGUF v3 files for the loader tests (no gguf-py, no model, no GPU).
 //
-// A file is a header, metadata (strings, integers, f32, and arrays of u32 or strings), a tensor directory whose offsets are 32-byte aligned
-// in the data section, and the tensors' payloads, each filled with a pattern the test can recognise.
+// A file is a header, metadata (strings, integers, f32, and arrays of u32 or strings), a tensor directory whose offsets
+// are 32-byte aligned in the data section, and the tensors'
+// payloads, each filled with a pattern the test can recognise.
 #pragma once
 
 #include "lamina/artifact/gguf_reader.hpp"
@@ -18,11 +19,11 @@ namespace fixture {
 
 struct Kv {
     std::string key;
-    uint32_t type = 8;         ///< GGUF value type: 8 string, 2 u16, 4 u32, 5 i32, 6 f32, 9 array
+    uint32_t type = 8;   ///< GGUF value type: 8 string, 2 u16, 4 u32, 5 i32, 6 f32, 9 array
     std::string s;
     uint64_t u = 0;
     float f = 0;
-    uint32_t elem = 4;                 ///< arrays: 4 u32 (`arr`) or 8 string (`sarr`)
+    uint32_t elem = 4;   ///< arrays: 4 u32 (`arr`) or 8 string (`sarr`)
     std::vector<uint64_t> arr;
     std::vector<std::string> sarr;
 };
@@ -33,12 +34,36 @@ inline Kv make_kv(const std::string& k, uint32_t type) {
     r.type = type;
     return r;
 }
-inline Kv str(const std::string& k, const std::string& v) { Kv r = make_kv(k, 8); r.s = v; return r; }
-inline Kv u16(const std::string& k, uint64_t v) { Kv r = make_kv(k, 2); r.u = v; return r; }
-inline Kv i32(const std::string& k, uint64_t v) { Kv r = make_kv(k, 5); r.u = v; return r; }
-inline Kv u32(const std::string& k, uint64_t v) { Kv r = make_kv(k, 4); r.u = v; return r; }
-inline Kv f32(const std::string& k, float v) { Kv r = make_kv(k, 6); r.f = v; return r; }
-inline Kv u32s(const std::string& k, std::vector<uint64_t> v) { Kv r = make_kv(k, 9); r.arr = std::move(v); return r; }
+inline Kv str(const std::string& k, const std::string& v) {
+    Kv r = make_kv(k, 8);
+    r.s = v;
+    return r;
+}
+inline Kv u16(const std::string& k, uint64_t v) {
+    Kv r = make_kv(k, 2);
+    r.u = v;
+    return r;
+}
+inline Kv i32(const std::string& k, uint64_t v) {
+    Kv r = make_kv(k, 5);
+    r.u = v;
+    return r;
+}
+inline Kv u32(const std::string& k, uint64_t v) {
+    Kv r = make_kv(k, 4);
+    r.u = v;
+    return r;
+}
+inline Kv f32(const std::string& k, float v) {
+    Kv r = make_kv(k, 6);
+    r.f = v;
+    return r;
+}
+inline Kv u32s(const std::string& k, std::vector<uint64_t> v) {
+    Kv r = make_kv(k, 9);
+    r.arr = std::move(v);
+    return r;
+}
 inline Kv strs(const std::string& k, std::vector<std::string> v) {
     Kv r = make_kv(k, 9);
     r.elem = 8;
@@ -51,7 +76,7 @@ struct Tensor {
     std::string name;
     std::vector<uint64_t> shape;   ///< GGUF order: dim 0 varies fastest
     uint32_t type = 0;
-    uint8_t seed = 1;              ///< payload byte i is (seed * 131 + i * 7 + i / 4093) & 0xff
+    uint8_t seed = 1;   ///< payload byte i is (seed * 131 + i * 7 + i / 4093) & 0xff
 };
 
 inline uint8_t pattern(uint8_t seed, uint64_t i) { return (uint8_t) ((seed * 131u + i * 7u + i / 4093u) & 0xffu); }
@@ -74,7 +99,10 @@ inline Written write(const std::filesystem::path& path, const std::vector<Kv>& k
     auto put = [&](const void* p, size_t n) { b.insert(b.end(), (const uint8_t*) p, (const uint8_t*) p + n); };
     auto put32 = [&](uint32_t v) { put(&v, 4); };
     auto put64 = [&](uint64_t v) { put(&v, 8); };
-    auto puts = [&](const std::string& s) { put64(s.size()); put(s.data(), s.size()); };
+    auto puts = [&](const std::string& s) {
+        put64(s.size());
+        put(s.data(), s.size());
+    };
     put32(0x46554747u);
     put32(3);
     put64(ts.size());
@@ -83,9 +111,13 @@ inline Written write(const std::filesystem::path& path, const std::vector<Kv>& k
         puts(k.key);
         put32(k.type);
         if (k.type == 8) puts(k.s);
-        else if (k.type == 2) { const uint16_t v = (uint16_t) k.u; put(&v, 2); }
-        else if (k.type == 4 || k.type == 5) { const uint32_t v = (uint32_t) k.u; put(&v, 4); }
-        else if (k.type == 6) put(&k.f, 4);
+        else if (k.type == 2) {
+            const uint16_t v = (uint16_t) k.u;
+            put(&v, 2);
+        } else if (k.type == 4 || k.type == 5) {
+            const uint32_t v = (uint32_t) k.u;
+            put(&v, 4);
+        } else if (k.type == 6) put(&k.f, 4);
         else if (k.type == 9 && k.elem == 4) {
             put32(4);
             put64(k.arr.size());
@@ -129,4 +161,4 @@ inline Written write(const std::filesystem::path& path, const std::vector<Kv>& k
     return w;
 }
 
-}  // namespace fixture
+}   // namespace fixture

@@ -37,7 +37,11 @@ template <typename T> T* dalloc(size_t n) {
     return p;
 }
 uint32_t hash32(uint32_t x) {
-    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
     return x;
 }
 float value(uint32_t i) { return ((float) (hash32(i * 2654435761u + 977u) >> 8) / 8388608.0f - 1.0f) * 0.75f; }
@@ -82,9 +86,9 @@ struct Case {
     float alpha = 1.0f, beta = 0.0f;
     bool y_half = false;
     bool scratch = true;
-    int form = -1;         // a tensor-core instance by its index (-1: the plan's)
-    int splits = 1;        // its K in parts
-    bool x_inner = false;  // its tiles' order
+    int form = -1;          // a tensor-core instance by its index (-1: the plan's)
+    int splits = 1;         // its K in parts
+    bool x_inner = false;   // its tiles' order
 };
 
 int g_fail = 0, g_cases = 0;
@@ -105,8 +109,10 @@ void run(const Case& c, cudaStream_t st) {
     std::vector<uint8_t> xb(nx * es), wb(nw * es), yb(ny * ys);
     for (size_t i = 0; i < nx; ++i) {
         const float v = value((uint32_t) i * 3u + (uint32_t) g_cases * 7919u);
-        if (c.kind == 2) { xf[i] = v; std::memcpy(&xb[i * 4], &v, 4); }
-        else {
+        if (c.kind == 2) {
+            xf[i] = v;
+            std::memcpy(&xb[i * 4], &v, 4);
+        } else {
             const uint16_t h = c.kind == 1 ? bf16_bits(v) : half_bits(v);
             xf[i] = c.kind == 1 ? bf16_value(h) : half_value(h);
             std::memcpy(&xb[i * 2], &h, 2);
@@ -114,14 +120,17 @@ void run(const Case& c, cudaStream_t st) {
     }
     for (size_t i = 0; i < nw; ++i) {
         const float v = value((uint32_t) i * 5u + 1u + (uint32_t) g_cases * 104729u);
-        if (c.kind == 2) { wf[i] = v; std::memcpy(&wb[i * 4], &v, 4); }
-        else {
+        if (c.kind == 2) {
+            wf[i] = v;
+            std::memcpy(&wb[i * 4], &v, 4);
+        } else {
             const uint16_t h = c.kind == 1 ? bf16_bits(v) : half_bits(v);
             wf[i] = c.kind == 1 ? bf16_value(h) : half_value(h);
             std::memcpy(&wb[i * 2], &h, 2);
         }
     }
-    for (size_t i = 0; i < ny; ++i) {   // Y before the product: read where beta is not 0, kept between the rows' outputs
+    for (size_t i = 0; i < ny; ++i) {   // Y before the product: read where beta is
+                                        // not 0, kept between the rows' outputs
         const float v = value((uint32_t) i * 11u + 5u);
         if (c.y_half) {
             const uint16_t h = half_bits(v);
@@ -142,19 +151,39 @@ void run(const Case& c, cudaStream_t st) {
         cudaMemcpyAsync(g_dy, yb.data(), yb.size(), cudaMemcpyHostToDevice, st);
         if (c.kind == 2) {
             Gemm32 p;
-            p.x = (const float*) dx; p.w = (const float*) dw; p.y = (float*) g_dy;
-            p.T = c.T; p.N = c.N; p.K = c.K; p.ldx = ldx; p.ldy = ldy; p.alpha = c.alpha; p.beta = c.beta;
+            p.x = (const float*) dx;
+            p.w = (const float*) dw;
+            p.y = (float*) g_dy;
+            p.T = c.T;
+            p.N = c.N;
+            p.K = c.K;
+            p.ldx = ldx;
+            p.ldy = ldy;
+            p.alpha = c.alpha;
+            p.beta = c.beta;
             if (c.form >= 0) lamina::kernels::gemm32_form(c.form, c.splits, c.x_inner, p, sc, st);
             else lamina::kernels::gemm32(p, sc, st);
         } else {
             Gemm16 p;
-            p.x = (const uint16_t*) dx; p.w = (const uint16_t*) dw; p.y = g_dy;
-            p.T = c.T; p.N = c.N; p.K = c.K; p.ldx = ldx; p.ldy = ldy; p.alpha = c.alpha; p.beta = c.beta;
-            p.bf16 = c.kind == 1; p.y_half = c.y_half;
+            p.x = (const uint16_t*) dx;
+            p.w = (const uint16_t*) dw;
+            p.y = g_dy;
+            p.T = c.T;
+            p.N = c.N;
+            p.K = c.K;
+            p.ldx = ldx;
+            p.ldy = ldy;
+            p.alpha = c.alpha;
+            p.beta = c.beta;
+            p.bf16 = c.kind == 1;
+            p.y_half = c.y_half;
             if (c.form >= 0) lamina::kernels::gemm16_form(c.form, c.splits, c.x_inner, p, sc, st);
             else lamina::kernels::gemm16(p, sc, st);
         }
-        if (!ck(cudaStreamSynchronize(st), "a product")) { ++g_fail; return; }
+        if (!ck(cudaStreamSynchronize(st), "a product")) {
+            ++g_fail;
+            return;
+        }
         got[rep].resize(yb.size());
         cudaMemcpyAsync(got[rep].data(), g_dy, yb.size(), cudaMemcpyDeviceToHost, st);
         cudaStreamSynchronize(st);
@@ -167,8 +196,11 @@ void run(const Case& c, cudaStream_t st) {
             const size_t at = (size_t) t * ldy + n;
             if (at >= ny) break;
             float g;
-            if (c.y_half) { uint16_t h; std::memcpy(&h, &got[0][at * 2], 2); g = half_value(h); }
-            else std::memcpy(&g, &got[0][at * 4], 4);
+            if (c.y_half) {
+                uint16_t h;
+                std::memcpy(&h, &got[0][at * 2], 2);
+                g = half_value(h);
+            } else std::memcpy(&g, &got[0][at * 4], 4);
             if (n >= c.N) {   // between two rows' outputs: as before
                 touched += std::memcmp(&got[0][at * ys], &yb[at * ys], ys) != 0;
                 continue;
@@ -204,11 +236,15 @@ void run(const Case& c, cudaStream_t st) {
         std::snprintf(form, sizeof form, " [%s x%d]", name, z);
     }
     if (!ok || std::getenv("LAMINA_GEMM_PARITY_VERBOSE"))
-        std::printf("%s %s T=%-4d N=%-5d K=%-5d ldx+%d ldy+%d shift %d alpha %.2f beta %.2f%s%s%s: worst |error| / sum of "
-                    "magnitudes %.2e, %zu outputs off, %zu values outside the outputs changed, two runs %s\n",
-                    ok ? "ok  " : "FAIL", c.kind == 0 ? "f16 " : c.kind == 1 ? "bf16" : "f32 ", c.T, c.N, c.K, c.ldx_extra,
-                    c.ldy_extra, c.x_shift, c.alpha, c.beta, c.y_half ? " halves out" : "", c.scratch ? "" : " no scratch", form,
-                    worst, bad, touched, same ? "the same bits" : "DIFFER");
+        std::printf(
+            "%s %s T=%-4d N=%-5d K=%-5d ldx+%d ldy+%d shift %d alpha %.2f beta %.2f%s%s%s: worst |error| / sum of "
+            "magnitudes %.2e, %zu outputs off, %zu values outside the outputs changed, two runs %s\n",
+            ok ? "ok  " : "FAIL",
+            c.kind == 0   ? "f16 "
+            : c.kind == 1 ? "bf16"
+                          : "f32 ",
+            c.T, c.N, c.K, c.ldx_extra, c.ldy_extra, c.x_shift, c.alpha, c.beta, c.y_half ? " halves out" : "",
+            c.scratch ? "" : " no scratch", form, worst, bad, touched, same ? "the same bits" : "DIFFER");
 }
 
 // gemm16_grouped: n problems of one N and K, their rows side by side in one buffer
@@ -248,7 +284,10 @@ void run_grouped(int kind, const std::vector<int>& rows, int N, int K, cudaStrea
     for (int rep = 0; rep < 2; ++rep) {
         cudaMemsetAsync(g_dy, 0xff, (size_t) total * N * 4, st);
         lamina::kernels::gemm16_grouped(dpx, dpw, dpy, rows.data(), n, N, K, kind == 1, st);
-        if (!ck(cudaStreamSynchronize(st), "a grouped product")) { ++g_fail; return; }
+        if (!ck(cudaStreamSynchronize(st), "a grouped product")) {
+            ++g_fail;
+            return;
+        }
         got[rep].resize((size_t) total * N);
         cudaMemcpyAsync(got[rep].data(), g_dy, got[rep].size() * 4, cudaMemcpyDeviceToHost, st);
         cudaStreamSynchronize(st);
@@ -262,7 +301,8 @@ void run_grouped(int kind, const std::vector<int>& rows, int N, int K, cudaStrea
             for (int c = 0; c < N; ++c) {
                 double s = 0, mag = 0;
                 for (int k = 0; k < K; ++k) {
-                    const double pr = (double) xf[(size_t) (at + t) * K + k] * (double) wf[((size_t) i * N + c) * K + k];
+                    const double pr =
+                        (double) xf[(size_t) (at + t) * K + k] * (double) wf[((size_t) i * N + c) * K + k];
                     s += pr;
                     mag += std::fabs(pr);
                 }
@@ -275,25 +315,33 @@ void run_grouped(int kind, const std::vector<int>& rows, int N, int K, cudaStrea
     const bool ok = same && bad == 0;
     if (!ok) ++g_fail;
     if (!ok || std::getenv("LAMINA_GEMM_PARITY_VERBOSE"))
-        std::printf("%s grouped %s, %d problems of %d rows in all, N=%d K=%d: worst |error| / sum of magnitudes %.2e, %zu "
-                    "outputs off, two runs %s\n", ok ? "ok  " : "FAIL", kind == 1 ? "bf16" : "f16 ", n, total, N, K, worst,
-                    bad, same ? "the same bits" : "DIFFER");
+        std::printf(
+            "%s grouped %s, %d problems of %d rows in all, N=%d K=%d: worst |error| / sum of magnitudes %.2e, %zu "
+            "outputs off, two runs %s\n",
+            ok ? "ok  " : "FAIL", kind == 1 ? "bf16" : "f16 ", n, total, N, K, worst, bad,
+            same ? "the same bits" : "DIFFER");
     cudaFree(dpx);
     cudaFree(dpw);
     cudaFree(dpy);
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     int dev = 0, major = 0;
-    if (argc > 1 && cudaSetDevice(std::atoi(argv[1])) != cudaSuccess) { std::printf("gemm_parity: no device %s\n", argv[1]); return 77; }
+    if (argc > 1 && cudaSetDevice(std::atoi(argv[1])) != cudaSuccess) {
+        std::printf("gemm_parity: no device %s\n", argv[1]);
+        return 77;
+    }
     if (cudaGetDevice(&dev) != cudaSuccess ||
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) {
         std::printf("gemm_parity: no CUDA device, skipped\n");
         return 77;
     }
-    if (major < 8) { std::printf("gemm_parity: the products need sm_80+: skipped\n"); return 77; }
+    if (major < 8) {
+        std::printf("gemm_parity: the products need sm_80+: skipped\n");
+        return 77;
+    }
     cudaDeviceProp prop{};
     cudaGetDeviceProperties(&prop, dev);
     std::printf("gemm_parity on %s (sm_%d%d)\n", prop.name, prop.major, prop.minor);
@@ -308,8 +356,16 @@ int main(int argc, char** argv) {
     for (int kind = 0; kind < 3; ++kind) {
         // the paths' shapes at a few row counts: tiles, splits, the row-dot kernel
         for (const int T : {1, 5, 17, 33, 100, 129, 300})
-            for (const auto& nk : {std::pair<int, int>{320, 2560}, {4, 2560}, {1, 640}, {48, 640}, {513, 320}, {2560, 320},
-                                   {100, 648}, {7, 328}, {9, 1024}, {640, 96}})
+            for (const auto& nk : {std::pair<int, int>{320, 2560},
+                                   {4, 2560},
+                                   {1, 640},
+                                   {48, 640},
+                                   {513, 320},
+                                   {2560, 320},
+                                   {100, 648},
+                                   {7, 328},
+                                   {9, 1024},
+                                   {640, 96}})
                 run({kind, T, nk.first, nk.second}, st);
         run({kind, 700, 1280, 640}, st);
         run({kind, 2048, 48, 256}, st);

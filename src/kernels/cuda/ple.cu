@@ -13,15 +13,15 @@
 //
 // The opt-in native BF16 path replaces only ple_value with the pinned CUDA single-token BF16/F32 MMVF.
 // A separate opt-in native postops path follows the pinned CUDA arithmetic after both projections.
-#include "lamina/kernels/ple.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/f16_bits.hpp"
-#include "lamina/kernels/ngram.hpp"
-#include "lamina/kernels/quantize_act.hpp"
-#include "lamina/kernels/s2_gemv_q8.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/kernels/ple.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/s2_gemv_q8.hpp"
 
 #include <cuda_runtime.h>
 
@@ -50,16 +50,6 @@ __global__ void history_advance_kernel(float* __restrict__ history, const float*
     column[NG_HIST - 1] = normalized[channel];
 }
 
-
-
-
-
-
-
-
-
-
-
 void ck(cudaError_t e, const char* what) {
     if (e != cudaSuccess) {
         std::fprintf(stderr, "ple_block: %s: %s\n", what, cudaGetErrorString(e));
@@ -67,20 +57,16 @@ void ck(cudaError_t e, const char* what) {
     }
 }
 
-}  // namespace
-
+}   // namespace
 
 void ple_history_advance(float* hist, const float* normalized, void* stream) {
     if (hist == nullptr || normalized == nullptr)
         throw std::invalid_argument("ple_history_advance: null history or normalized input");
-    if (overlap(hist, (size_t) NG_HIST * NG_HC_DIM * sizeof(float),
-                normalized, (size_t) NG_HC_DIM * sizeof(float)))
+    if (overlap(hist, (size_t) NG_HIST * NG_HC_DIM * sizeof(float), normalized, (size_t) NG_HC_DIM * sizeof(float)))
         throw std::invalid_argument("ple_history_advance: history and normalized input overlap");
-    history_advance_kernel<<<(NG_HC_DIM + THREADS - 1) / THREADS, THREADS, 0, (cudaStream_t) stream>>>(hist, normalized);
+    history_advance_kernel<<<(NG_HC_DIM + THREADS - 1) / THREADS, THREADS, 0, (cudaStream_t) stream>>>(hist,
+                                                                                                       normalized);
     ck(cudaGetLastError(), "history advance launch");
 }
 
-
-
-
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

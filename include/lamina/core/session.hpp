@@ -16,14 +16,13 @@ namespace lamina::core {
 struct SessionState {
     int64_t max_cells = 0;
 
-    float* gdn_state = nullptr;     ///< (n_gdn_layers, gdn_state_floats)
+    float* gdn_state = nullptr;   ///< (n_gdn_layers, gdn_state_floats)
 
-    QsaState* qsa_states = nullptr;      ///< one per QSA layer
+    QsaState* qsa_states = nullptr;   ///< one per QSA layer
     void* qsa_state_arena = nullptr;
 
-
-    float* R = nullptr;             ///< the residual streams, (hc, n_embd)
-    int64_t k = 10;                 ///< experts per token
+    float* R = nullptr;   ///< the residual streams, (hc, n_embd)
+    int64_t k = 10;       ///< experts per token
 
     // ================================ THE PLE, AND IT IS SEQUENCE STATE ================================
     //
@@ -93,11 +92,10 @@ bool session_copy_failed(void* stream);
 /// The VRAM tier's residency table on the device (`n_layers x n_expert`, a slot or -1) and its slot arena: the
 /// verify windows decide their GPU hits by it.
 struct TokenHits {
-    const int32_t* d_res = nullptr;      ///< device [n_layers * n_expert]
+    const int32_t* d_res = nullptr;   ///< device [n_layers * n_expert]
     int64_t n_expert = 0;
-    const uint8_t* cache_base = nullptr; ///< slot 0 of the VRAM expert arena
-    int64_t blob = 0;                    ///< bytes per slot
+    const uint8_t* cache_base = nullptr;   ///< slot 0 of the VRAM expert arena
+    int64_t blob = 0;                      ///< bytes per slot
 };
 
-
-}  // namespace lamina::core
+}   // namespace lamina::core

@@ -1,6 +1,6 @@
-// src/platform/slice_read.cpp - see lamina/platform/slice_read.hpp.  A copy out of a mapped file faults its pages in a few at a time (the routed
-// experts at 1.2-1.5 GiB/s from this PC's SSD); large reads go at the drive's rate (4.3-4.4 GiB/s), and past the cache
-// they leave the file's pages out of RAM the arena needs.
+// src/platform/slice_read.cpp - see lamina/platform/slice_read.hpp.  A copy out of a mapped file faults its pages in a
+// few at a time (the routed experts at 1.2-1.5 GiB/s from this PC's SSD); large reads go at the drive's rate (4.3-4.4
+// GiB/s), and past the cache they leave the file's pages out of RAM the arena needs.
 #include "lamina/platform/slice_read.hpp"
 
 #include <algorithm>
@@ -28,8 +28,8 @@ namespace {
 
 struct Piece {
     size_t run = 0;
-    int64_t first = 0, n = 0;   // slices
-    uint64_t off = 0, len = 0;  // a part of one slice larger than a piece (n = 1); len 0: the slices whole
+    int64_t first = 0, n = 0;    // slices
+    uint64_t off = 0, len = 0;   // a part of one slice larger than a piece (n = 1); len 0: the slices whole
 };
 
 constexpr uint64_t kSector = 4096;   // unbuffered reads: offset, length and buffer in whole sectors
@@ -43,7 +43,7 @@ std::wstring widen(const std::string& s) {
 }
 #endif
 
-}  // namespace
+}   // namespace
 
 bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, uint64_t piece,
                  const std::function<uint8_t*(int)>& base, std::string& err, double* seconds) {
@@ -55,7 +55,8 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
         if (s.bytes == 0 || s.count <= 0) continue;
         if (s.bytes > piece) {   // a slice larger than a piece: in parts
             for (int64_t i = 0; i < s.count; ++i)
-                for (uint64_t o = 0; o < s.bytes; o += piece) pieces.push_back({r, i, 1, o, std::min(piece, s.bytes - o)});
+                for (uint64_t o = 0; o < s.bytes; o += piece)
+                    pieces.push_back({r, i, 1, o, std::min(piece, s.bytes - o)});
             largest = std::max(largest, piece);
             continue;
         }
@@ -76,7 +77,10 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
         std::map<std::string, FILE*> files;
         const size_t buf_bytes = (size_t) ((largest + 2 * kSector + kSector - 1) / kSector * kSector);
         uint8_t* buf = (uint8_t*) VirtualAlloc(nullptr, buf_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (buf == nullptr) { fail("no memory for the read buffer"); return; }
+        if (buf == nullptr) {
+            fail("no memory for the read buffer");
+            return;
+        }
 #else
         std::map<std::string, int> fds;
         std::vector<struct iovec> iov;
@@ -85,7 +89,10 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
             const Piece& pc = pieces[p];
             const SliceRun& s = runs[pc.run];
             uint8_t* const group = base(s.group);
-            if (group == nullptr) { fail("no memory for the routed experts"); break; }
+            if (group == nullptr) {
+                fail("no memory for the routed experts");
+                break;
+            }
             // slice i's place: its own (places) or the run's stride
             auto place = [&](int64_t i) {
                 return s.places ? s.places[pc.first + i] + s.dst_off + pc.off
@@ -93,7 +100,7 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
             };
             const uint64_t at = s.offset + (uint64_t) pc.first * s.bytes + pc.off;
             const uint64_t n = pc.len ? pc.len : (uint64_t) pc.n * s.bytes;   // bytes
-            const uint64_t slice = pc.len ? pc.len : s.bytes;                  // one slice's (or part's)
+            const uint64_t slice = pc.len ? pc.len : s.bytes;                 // one slice's (or part's)
 #if defined(_WIN32)
             (void) slice;
             const uint8_t* src = nullptr;
@@ -102,7 +109,11 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
                 if (h == nullptr) {
                     h = CreateFileW(widen(s.path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                     FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-                    if (h == INVALID_HANDLE_VALUE) { fail("cannot open " + s.path); h = nullptr; break; }
+                    if (h == INVALID_HANDLE_VALUE) {
+                        fail("cannot open " + s.path);
+                        h = nullptr;
+                        break;
+                    }
                 }
                 const uint64_t at0 = at / kSector * kSector, head = at - at0;
                 const uint64_t len = (head + n + kSector - 1) / kSector * kSector;
@@ -110,12 +121,18 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
                 ov.Offset = (DWORD) at0;
                 ov.OffsetHigh = (DWORD) (at0 >> 32);
                 DWORD got = 0;
-                if (!ReadFile(h, buf, (DWORD) len, &got, &ov) || got < head + n) { fail("a read of " + s.path + " failed"); break; }
+                if (!ReadFile(h, buf, (DWORD) len, &got, &ov) || got < head + n) {
+                    fail("a read of " + s.path + " failed");
+                    break;
+                }
                 src = buf + head;
             } else {
                 FILE*& f = files[s.path];
                 if (f == nullptr) f = std::fopen(s.path.c_str(), "rb");
-                if (f == nullptr) { fail("cannot open " + s.path); break; }
+                if (f == nullptr) {
+                    fail("cannot open " + s.path);
+                    break;
+                }
                 if (_fseeki64(f, (long long) at, SEEK_SET) != 0 || std::fread(buf, 1, (size_t) n, f) != (size_t) n) {
                     fail("a read of " + s.path + " failed");
                     break;
@@ -125,7 +142,8 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
             if (pc.n == 1 || (!s.places && s.stride == s.bytes)) {
                 std::memcpy(place(0), src, (size_t) n);
             } else {
-                for (int64_t i = 0; i < pc.n; ++i) std::memcpy(place(i), src + (uint64_t) i * s.bytes, (size_t) s.bytes);
+                for (int64_t i = 0; i < pc.n; ++i)
+                    std::memcpy(place(i), src + (uint64_t) i * s.bytes, (size_t) s.bytes);
             }
 #else
             int fd = -1;
@@ -133,7 +151,10 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
                 fd = it->second;
             } else {
                 fd = ::open(s.path.c_str(), O_RDONLY | O_CLOEXEC);
-                if (fd < 0) { fail("cannot open " + s.path); break; }
+                if (fd < 0) {
+                    fail("cannot open " + s.path);
+                    break;
+                }
                 (void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
                 fds[s.path] = fd;
             }
@@ -159,7 +180,10 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
                     }
                 }
             }
-            if (left_n > 0) { fail("a read of " + s.path + " failed"); break; }
+            if (left_n > 0) {
+                fail("a read of " + s.path + " failed");
+                break;
+            }
             if (uncached) (void) posix_fadvise(fd, (off_t) at, (off_t) n, POSIX_FADV_DONTNEED);
 #endif
         }
@@ -181,4 +205,4 @@ bool read_slices(const std::vector<SliceRun>& runs, int threads, bool uncached, 
     return !bad;
 }
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

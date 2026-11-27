@@ -52,4 +52,4 @@ void moe_group_resident(const int32_t* ids, int n, int k_per_tok, const uint8_t*
                         unsigned long long* grp_ptr, int32_t* grp_start, int32_t* counts, int32_t* ent_dst,
                         int32_t* ent_tok, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

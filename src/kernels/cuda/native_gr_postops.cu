@@ -36,18 +36,16 @@ constexpr int THREADS = 256;
 __device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 // ggml SCALE uses scale*x+bias, including its +0 bias. Retain this operation
 // explicitly so compile-time zero does not change signed-zero behavior.
-__device__ __forceinline__ float scale_zero_bias(float x, float scale) {
-    return __fmaf_rn(scale, x, 0.0f);
-}
+__device__ __forceinline__ float scale_zero_bias(float x, float scale) { return __fmaf_rn(scale, x, 0.0f); }
 __global__ void down_silu(float* lo, int count, float scale) {
     const std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= std::size_t(count)) return;
     const float x = scale_zero_bias(lo[i], scale);
     lo[i] = x / (1.0f + expf(-x));
 }
-template<bool Fused>
-__global__ void pre_gated(const float* __restrict__ xn, float* __restrict__ gate,
-                          float* __restrict__ mixed, int n_embd, int hc, float scale) {
+template <bool Fused>
+__global__ void pre_gated(const float* __restrict__ xn, float* __restrict__ gate, float* __restrict__ mixed, int n_embd,
+                          int hc, float scale) {
     const std::size_t d = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (d >= std::size_t(n_embd)) return;
     const std::size_t t = blockIdx.y;
@@ -66,9 +64,8 @@ __global__ void pre_gated(const float* __restrict__ xn, float* __restrict__ gate
     if constexpr (Fused) mixed[d] = scale * sum;
     else mixed[d] = scale_zero_bias(sum, scale);
 }
-__global__ void post(const float* residual, const float* __restrict__ block_out,
-                     const float* __restrict__ inject, float* output,
-                     int n_embd, int hc, float scale) {
+__global__ void post(const float* residual, const float* __restrict__ block_out, const float* __restrict__ inject,
+                     float* output, int n_embd, int hc, float scale) {
     const std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= std::size_t(n_embd) * hc) return;
     const std::size_t t = blockIdx.y;
@@ -82,13 +79,16 @@ __global__ void post(const float* residual, const float* __restrict__ block_out,
     output[i] = __fmaf_rn(block_out[d], weight, residual[i]);
 }
 // `post` for n tokens (blockIdx.y = token): the same expression per element
-__global__ void post_multi(const float* residual, const float* __restrict__ block_out,
-                           const float* __restrict__ inject, float* output, int n_embd, int hc, float scale,
-                           long long r_stride, long long b_stride, long long i_stride) {
+__global__ void post_multi(const float* residual, const float* __restrict__ block_out, const float* __restrict__ inject,
+                           float* output, int n_embd, int hc, float scale, long long r_stride, long long b_stride,
+                           long long i_stride) {
     const std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= std::size_t(n_embd) * hc) return;
     const long long t = blockIdx.y;
-    residual += t * r_stride; output += t * r_stride; block_out += t * b_stride; inject += t * i_stride;
+    residual += t * r_stride;
+    output += t * r_stride;
+    block_out += t * b_stride;
+    inject += t * i_stride;
     const int c = int(i / n_embd), d = int(i % n_embd);
     const float weight = scale_zero_bias(sigmoid(scale_zero_bias(inject[c], scale)), 2.0f);
     // Exact residual/output alias is supported; no other thread reads residual[i].
@@ -108,7 +108,7 @@ void check_launch() {
     if (error != cudaSuccess)
         throw std::runtime_error(std::string("native GR postops launch: ") + cudaGetErrorString(error));
 }
-} // namespace
+}   // namespace
 
 void native_gr_down_silu(float* lo, int hc_lr, int hc, void* stream) {
     check_shape(hc_lr, hc);
@@ -116,46 +116,54 @@ void native_gr_down_silu(float* lo, int hc_lr, int hc, void* stream) {
     down_silu<<<blocks(hc_lr), THREADS, 0, static_cast<cudaStream_t>(stream)>>>(lo, hc_lr, 1.0f / float(hc));
     check_launch();
 }
-void native_gr_pre_gated(const float* xn, float* gate, float* mixed,
-                         int n_embd, int hc, bool fused_layer, void* stream) {
+void native_gr_pre_gated(const float* xn, float* gate, float* mixed, int n_embd, int hc, bool fused_layer,
+                         void* stream) {
     native_gr_pre_gated_multi(xn, gate, mixed, n_embd, hc, 1, fused_layer, stream);
 }
-void native_gr_pre_gated_multi(const float* xn, float* gate, float* mixed,
-                               int n_embd, int hc, int n_tok, bool fused_layer, void* stream) {
-    if (n_tok <= 0)
-        throw std::invalid_argument("native GR postops require positive n_tok");
+void native_gr_pre_gated_multi(const float* xn, float* gate, float* mixed, int n_embd, int hc, int n_tok,
+                               bool fused_layer, void* stream) {
+    if (n_tok <= 0) throw std::invalid_argument("native GR postops require positive n_tok");
     check_shape(n_embd, hc);
-    check_pointer(xn); check_pointer(gate); check_pointer(mixed);
+    check_pointer(xn);
+    check_pointer(gate);
+    check_pointer(mixed);
     const dim3 grid{blocks(n_embd), unsigned(n_tok), 1u};
     if (fused_layer)
-        pre_gated<true><<<grid, THREADS, 0, static_cast<cudaStream_t>(stream)>>>(xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
+        pre_gated<true>
+            <<<grid, THREADS, 0, static_cast<cudaStream_t>(stream)>>>(xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
     else
-        pre_gated<false><<<grid, THREADS, 0, static_cast<cudaStream_t>(stream)>>>(xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
+        pre_gated<false>
+            <<<grid, THREADS, 0, static_cast<cudaStream_t>(stream)>>>(xn, gate, mixed, n_embd, hc, 1.0f / float(hc));
     check_launch();
 }
-void native_gr_post(const float* residual, const float* block_out, const float* inject,
-                    float* output, int n_embd, int hc, void* stream) {
+void native_gr_post(const float* residual, const float* block_out, const float* inject, float* output, int n_embd,
+                    int hc, void* stream) {
     native_gr_post_multi(residual, block_out, inject, output, n_embd, hc, 1, stream);
 }
-void native_gr_post_multi(const float* residual, const float* block_out, const float* inject,
-                          float* output, int n_embd, int hc, int n_tok, void* stream) {
-    if (n_tok <= 0)
-        throw std::invalid_argument("native GR postops require positive n_tok");
+void native_gr_post_multi(const float* residual, const float* block_out, const float* inject, float* output, int n_embd,
+                          int hc, int n_tok, void* stream) {
+    if (n_tok <= 0) throw std::invalid_argument("native GR postops require positive n_tok");
     check_shape(n_embd, hc);
-    check_pointer(residual); check_pointer(block_out); check_pointer(inject); check_pointer(output);
+    check_pointer(residual);
+    check_pointer(block_out);
+    check_pointer(inject);
+    check_pointer(output);
     const dim3 grid{blocks(std::size_t(n_embd) * hc), unsigned(n_tok), 1u};
-    post<<<grid, THREADS, 0, static_cast<cudaStream_t>(stream)>>>(
-        residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc));
+    post<<<grid, THREADS, 0, static_cast<cudaStream_t>(stream)>>>(residual, block_out, inject, output, n_embd, hc,
+                                                                  1.0f / float(hc));
     check_launch();
 }
-void native_gr_post_multi(const float* residual, const float* block_out, const float* inject, float* output,
-                          int n_embd, int hc, int n_tok, long long r_stride, long long b_stride, long long i_stride,
-                          void* stream) {
+void native_gr_post_multi(const float* residual, const float* block_out, const float* inject, float* output, int n_embd,
+                          int hc, int n_tok, long long r_stride, long long b_stride, long long i_stride, void* stream) {
     check_shape(n_embd, hc);
-    check_pointer(residual); check_pointer(block_out); check_pointer(inject); check_pointer(output);
+    check_pointer(residual);
+    check_pointer(block_out);
+    check_pointer(inject);
+    check_pointer(output);
     if (n_tok < 1) return;
-    post_multi<<<dim3(blocks(std::size_t(n_embd) * hc), unsigned(n_tok)), THREADS, 0, static_cast<cudaStream_t>(stream)>>>(
-        residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc), r_stride, b_stride, i_stride);
+    post_multi<<<dim3(blocks(std::size_t(n_embd) * hc), unsigned(n_tok)), THREADS, 0,
+                 static_cast<cudaStream_t>(stream)>>>(residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc),
+                                                      r_stride, b_stride, i_stride);
     check_launch();
 }
-} // namespace lamina::kernels
+}   // namespace lamina::kernels

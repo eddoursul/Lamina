@@ -32,5 +32,5 @@ const struct CpuFloorCheck {
 __attribute__((constructor(101))) void cpu_floor_at_start() { cpu_floor_check(); }
 #endif
 
-}  // namespace
+}   // namespace
 #endif

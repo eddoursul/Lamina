@@ -16,8 +16,8 @@
 namespace lamina {
 
 struct Hy4Tags {
-    std::string think_open, think_close, calls_open, calls_close, call_open, call_close, key_open, key_close,
-        val_open, val_close;
+    std::string think_open, think_close, calls_open, calls_close, call_open, call_close, key_open, key_close, val_open,
+        val_close;
     std::string image_start, image_pad;   // a picture: <｜hy_image▁start｜><｜hy_image▁pad｜><｜hy_image▁end｜>
     /// a Hy4-flash template's tags (from its HYTK), or nullopt for another template
     static std::optional<Hy4Tags> from_template(std::string_view source);
@@ -58,7 +58,9 @@ struct BlockTags {
 };
 /// the tags as the output parser's block mode reads them
 inline constexpr char kBlkModel = '\x1c', kBlkThink = '\x1d', kBlkText = '\x1e', kBlkCall = '\x1f', kBlkEnd = '\x1a';
-inline bool is_block_control(char c) { return c == kBlkModel || c == kBlkThink || c == kBlkText || c == kBlkCall || c == kBlkEnd; }
+inline bool is_block_control(char c) {
+    return c == kBlkModel || c == kBlkThink || c == kBlkText || c == kBlkCall || c == kBlkEnd;
+}
 /// a token's text for the block mode: a whole tag (the tags are special tokens) as its control character, any other
 /// text without those characters
 std::string block_piece(std::string_view piece, const BlockTags& t);
@@ -72,4 +74,4 @@ std::string qwen_to_blocks(std::string_view s, const BlockTags& t, bool in_block
 /// reasoning_effort (none / low / medium / high, the template's default)
 json block_kwargs(const json& kwargs);
 
-}  // namespace lamina
+}   // namespace lamina

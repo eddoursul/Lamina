@@ -53,7 +53,8 @@ std::string control_vector_problem(const lamina::GgufFile& gguf, int64_t n_embd)
         char* end = nullptr;
         if (t.name.rfind("direction.", 0) == 0 && t.name[10] >= '0' && t.name[10] <= '9')
             l = std::strtol(t.name.c_str() + 10, &end, 10);
-        if (l < 1 || end == nullptr || *end != '\0') return t.name + " is not a direction.<layer> tensor of a layer from 1 on";
+        if (l < 1 || end == nullptr || *end != '\0')
+            return t.name + " is not a direction.<layer> tensor of a layer from 1 on";
         if (t.type != 0 || t.shape.size() != 1 || t.shape[0] != (uint64_t) n_embd)
             return t.name + " must be " + std::to_string((long long) n_embd) + " F32 values (the model's n_embd)";
         const uint64_t bytes = (uint64_t) n_embd * 4;
@@ -172,4 +173,4 @@ bool ControlVector::load(const ControlVectorSpec& spec, const ModelGeometry& g, 
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

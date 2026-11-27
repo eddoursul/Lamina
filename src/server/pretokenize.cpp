@@ -19,11 +19,17 @@ uint32_t decode_at(std::string_view s, size_t i, size_t& n) {
     size_t len = 0;
     uint32_t c = 0, least = 0;   // the lead's bits; the smallest value of the length (below it: an overlong form)
     if (b >= 0xC0 && b < 0xE0) {
-        len = 2; c = b & 0x1F; least = 0x80;
+        len = 2;
+        c = b & 0x1F;
+        least = 0x80;
     } else if (b >= 0xE0 && b < 0xF0) {
-        len = 3; c = b & 0x0F; least = 0x800;
+        len = 3;
+        c = b & 0x0F;
+        least = 0x800;
     } else if (b >= 0xF0 && b < 0xF8) {
-        len = 4; c = b & 0x07; least = 0x10000;
+        len = 4;
+        c = b & 0x07;
+        least = 0x10000;
     } else {
         return kReplacement;   // a continuation byte, or 0xF8-0xFF
     }
@@ -157,8 +163,7 @@ Cuts split_qwen35(const Text& t) {
 /// matches left to right, each the one at the earliest position, and the text between two matches as a piece.
 /// `match(t, p, e)` is the end of the match at p in the piece that ends at e (which the expression cannot see past),
 /// or p when none starts there.
-template <class Match>
-Cuts regex_pass(const Text& t, const Cuts& pieces, Match&& match) {
+template <class Match> Cuts regex_pass(const Text& t, const Cuts& pieces, Match&& match) {
     Cuts out{0};
     for (size_t i = 1; i < pieces.size(); ++i) {
         const size_t e = pieces[i];
@@ -183,9 +188,9 @@ size_t match_spaces(const Text& t, size_t p, size_t e) {
     size_t w = p, past_nl = p;
     for (; w < e && (t.cls[w] & kWs); ++w)
         if (t.nl(w)) past_nl = w + 1;
-    if (past_nl > p) return past_nl;            // to the run's last line break
-    if (w < e && w - p > 1) return w - 1;       // \s+(?!\S): all but the last before a character
-    return w;                                   // all of it (or nothing)
+    if (past_nl > p) return past_nl;        // to the run's last line break
+    if (w < e && w - p > 1) return w - 1;   // \s+(?!\S): all but the last before a character
+    return w;                               // all of it (or nothing)
 }
 
 /// hy_v4's first: \p{N}{1,3}
@@ -293,7 +298,7 @@ size_t match_gpt4o(const Text& t, size_t p, size_t e) {
     return match_spaces(t, p, e);
 }
 
-}  // namespace
+}   // namespace
 
 std::optional<PreTokenizer> pre_tokenizer(std::string_view pre) {
     if (pre == "qwen35" || pre == "qwen2" || pre == "qwen3") return PreTokenizer::Qwen35;
@@ -306,17 +311,13 @@ std::vector<std::string_view> pretokenize(PreTokenizer kind, std::string_view te
     const Text t = decode(text);
     Cuts cuts;
     switch (kind) {
-        case PreTokenizer::Qwen35:
-            cuts = split_qwen35(t);
-            break;
+        case PreTokenizer::Qwen35: cuts = split_qwen35(t); break;
         case PreTokenizer::HyV4:
             cuts = regex_pass(t, Cuts{0, t.size()}, match_hy4_numbers);
             cuts = regex_pass(t, cuts, match_hy4_cjk);
             cuts = regex_pass(t, cuts, match_hy4_words);
             break;
-        case PreTokenizer::Gpt4o:
-            cuts = regex_pass(t, Cuts{0, t.size()}, match_gpt4o);
-            break;
+        case PreTokenizer::Gpt4o: cuts = regex_pass(t, Cuts{0, t.size()}, match_gpt4o); break;
     }
     std::vector<std::string_view> out;
     out.reserve(cuts.size());
@@ -337,4 +338,4 @@ std::optional<std::string> replace_invalid_utf8(std::string_view text) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

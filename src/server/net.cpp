@@ -15,11 +15,11 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
-#include <cerrno>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <cerrno>
 #endif
 
 namespace lamina {
@@ -54,7 +54,7 @@ bool all_digits(std::string_view s) {
     return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) { return c >= '0' && c <= '9'; });
 }
 
-}  // namespace
+}   // namespace
 
 const std::vector<std::string> kLoopbackNames = {"localhost", "127.0.0.1", "::1"};
 
@@ -196,7 +196,8 @@ std::set<std::string> host_names_for(const std::string& bind_host, const std::ve
 bool host_allowed(const std::string& host, const std::set<std::string>& names, bool any_host) {
     if (any_host || strip(host).empty()) return true;
     const std::string name = host_name(host);
-    return !name.empty() && (is_ip(name) || name == "localhost" || ends_with(name, ".localhost") || name_in(name, names));
+    return !name.empty() &&
+           (is_ip(name) || name == "localhost" || ends_with(name, ".localhost") || name_in(name, names));
 }
 
 std::vector<std::string> key_list(const json& value) {
@@ -218,20 +219,24 @@ std::vector<std::string> key_list(const json& value) {
 json api_key_of(const json& value) {
     if (value.is_array()) {
         json keys = json::array();
-        for (const auto& k : value) keys.push_back(std::string(strip(k.is_string() ? k.get<std::string>() : py_dumps(k))));
-        if (keys.empty() || std::any_of(keys.begin(), keys.end(), [](const json& k) { return k.get<std::string>().empty(); }))
+        for (const auto& k : value)
+            keys.push_back(std::string(strip(k.is_string() ? k.get<std::string>() : py_dumps(k))));
+        if (keys.empty() ||
+            std::any_of(keys.begin(), keys.end(), [](const json& k) { return k.get<std::string>().empty(); }))
             throw std::invalid_argument("an API key was given but it is empty");
         return keys;
     }
     const std::string key = value.is_null() ? "" : value.is_string() ? value.get<std::string>() : py_dumps(value);
-    if (!key.empty() && key_list(json(key)).empty()) throw std::invalid_argument("an API key was given but it is empty");
+    if (!key.empty() && key_list(json(key)).empty())
+        throw std::invalid_argument("an API key was given but it is empty");
     return std::string(strip(key));
 }
 
 bool key_matches(std::string_view given, const json& key) {
     auto same = [](std::string_view a, std::string_view b) {   // constant time in b's length
         unsigned diff = a.size() == b.size() ? 0u : 1u;
-        for (size_t i = 0; i < b.size(); ++i) diff |= (unsigned) (unsigned char) b[i] ^ (i < a.size() ? (unsigned char) a[i] : 0u);
+        for (size_t i = 0; i < b.size(); ++i)
+            diff |= (unsigned) (unsigned char) b[i] ^ (i < a.size() ? (unsigned char) a[i] : 0u);
         return diff == 0;
     };
     bool ok = false;
@@ -279,7 +284,8 @@ std::vector<std::string> origins_of(const json& value, const std::string& key, b
     std::vector<std::string> items;
     if (value.is_string()) {
         items.push_back(value.get<std::string>());
-    } else if (value.is_array() && std::all_of(value.begin(), value.end(), [](const json& x) { return x.is_string(); })) {
+    } else if (value.is_array() &&
+               std::all_of(value.begin(), value.end(), [](const json& x) { return x.is_string(); })) {
         for (const auto& x : value) items.push_back(x.get<std::string>());
     } else {
         throw std::invalid_argument(key + ": expected an origin or a list of origins");
@@ -295,7 +301,8 @@ std::vector<std::string> origins_of(const json& value, const std::string& key, b
         const std::string rest = sep == std::string::npos ? "" : x.substr(sep + 3);
         if ((scheme != "http" && scheme != "https") || sep == std::string::npos || rest.empty() ||
             rest.find('/') != std::string::npos || rest.find('*') != std::string::npos)
-            throw std::invalid_argument(key + ": " + py_repr_value(json(x)) + " is not an origin like https://chat.example.com" +
+            throw std::invalid_argument(key + ": " + py_repr_value(json(x)) +
+                                        " is not an origin like https://chat.example.com" +
                                         (wildcard ? "" : " (no wildcards here)"));
         out.push_back(x);
     }
@@ -315,17 +322,17 @@ std::string listen_problem(const std::string& host, int port, int code) {
     std::string what = std::strerror(code);
 #endif
     if (in_use)
-        return "port " + std::to_string(port) + " is already in use - is Lamina (or another server) already running? "
+        return "port " + std::to_string(port) +
+               " is already in use - is Lamina (or another server) already running? "
                "Close it, or start this one with a different --port";
     std::string hint;
     if (denied)
         hint = "Windows may keep this port for itself (see `netsh int ipv4 show excludedportrange protocol=tcp`) or a "
                "firewall rule forbids it: start this one with a different --port";
-    else if (no_addr)
-        hint = host + " is not an address of this PC: check \"host\" in the config or --host";
-    else
-        hint = "check --host and --port";
-    return "cannot listen on " + host + ":" + std::to_string(port) + ": " + what + " [" + std::to_string(code) + "]. " + hint;
+    else if (no_addr) hint = host + " is not an address of this PC: check \"host\" in the config or --host";
+    else hint = "check --host and --port";
+    return "cannot listen on " + host + ":" + std::to_string(port) + ": " + what + " [" + std::to_string(code) + "]. " +
+           hint;
 }
 
 int probe_listen(const std::string& host, int port) {
@@ -360,4 +367,4 @@ int probe_listen(const std::string& host, int port) {
     return code;
 }
 
-}  // namespace lamina
+}   // namespace lamina

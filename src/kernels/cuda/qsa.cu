@@ -46,8 +46,8 @@
 
 #include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/kv_stream.hpp"
-#include "lamina/kernels/rope.hpp"
 #include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/rope.hpp"
 
 #include <cuda_runtime.h>
 
@@ -95,8 +95,8 @@ void validate(const QsaShapes& s, const char* who) {
         std::exit(1);
     }
     if (s.n_head % s.n_head_kv != 0) {
-        std::fprintf(stderr, "qsa: %s: n_head %lld is not a multiple of n_head_kv %lld\n", who,
-                     (long long) s.n_head, (long long) s.n_head_kv);
+        std::fprintf(stderr, "qsa: %s: n_head %lld is not a multiple of n_head_kv %lld\n", who, (long long) s.n_head,
+                     (long long) s.n_head_kv);
         std::exit(1);
     }
     if (s.head_dim % 4 != 0) {
@@ -156,8 +156,8 @@ __global__ void kv_append_kernel(uint16_t* __restrict__ k_pool, uint16_t* __rest
 __global__ void indexer_key_append_kernel(const float* __restrict__ raw, const int32_t* __restrict__ pos_dev,
                                           int pos_base, const float* __restrict__ w_k_norm, float eps,
                                           float* __restrict__ tail, float* __restrict__ dead,
-                                          float* __restrict__ pooled, int32_t* __restrict__ block_pos,
-                                          int idx_dim, int r, int n_rot, const float* __restrict__ cos_tab,
+                                          float* __restrict__ pooled, int32_t* __restrict__ block_pos, int idx_dim,
+                                          int r, int n_rot, const float* __restrict__ cos_tab,
                                           const float* __restrict__ sin_tab, const int32_t* __restrict__ mtab) {
     extern __shared__ double s_mean[];   // idx_dim doubles
     const int d = threadIdx.x;
@@ -201,7 +201,7 @@ __global__ void indexer_key_append_kernel(const float* __restrict__ raw, const i
     }
 
     if (slot != r - 1) return;
-    __syncthreads();                     // the tail rows this thread is about to read are written above
+    __syncthreads();   // the tail rows this thread is about to read are written above
 
     // The mean of this block's r raw keys, in CELL order: the r-1 tail rows (slots 0..r-2) then the incoming
     // cell (slot r-1).  The sum of r f32 values is exact in double, so the mean's order cannot matter here -
@@ -247,9 +247,8 @@ __global__ void indexer_key_append_kernel(const float* __restrict__ raw, const i
 
 /// One warp per indexer head, one block per pooled row; thread 0 sums the relu'd dots IN HEAD ORDER and maps
 /// the row's score onto its cells.  The reference's Relu is PER HEAD, so the dots cannot be summed first.
-__global__ void qsa_index_kernel(const float* __restrict__ pooled,
-                                 const float* __restrict__ q_idx, const float* __restrict__ bias,
-                                 int idx_n_head, int idx_dim, long long r,
+__global__ void qsa_index_kernel(const float* __restrict__ pooled, const float* __restrict__ q_idx,
+                                 const float* __restrict__ bias, int idx_n_head, int idx_dim, long long r,
                                  const int32_t* __restrict__ step, float* __restrict__ cell_scores) {
     const long long n_bid = (long long) __ldg(step + kStepNBid);
     const long long n_kv = (long long) __ldg(step + kStepNKv);
@@ -262,13 +261,13 @@ __global__ void qsa_index_kernel(const float* __restrict__ pooled,
     // reading zeros and producing a plausible score for a block that does not exist.
     if (b > n_bid) return;
     const int wid = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    if (wid == 0) s_dot[lane] = 0.0;     // thread 0 reads all idx_n_head entries; zero the unused ones
+    if (wid == 0) s_dot[lane] = 0.0;   // thread 0 reads all idx_n_head entries; zero the unused ones
     __syncthreads();
 
     double acc = 0.0;
     for (int d = lane; d < idx_dim; d += 32)
-        acc = __dadd_rn(acc, __dmul_rn((double) pooled[(size_t) b * idx_dim + d],
-                                       (double) q_idx[(size_t) wid * idx_dim + d]));
+        acc = __dadd_rn(
+            acc, __dmul_rn((double) pooled[(size_t) b * idx_dim + d], (double) q_idx[(size_t) wid * idx_dim + d]));
     for (int o = 16; o > 0; o >>= 1) acc = __dadd_rn(acc, __shfl_xor_sync(0xffffffffu, acc, o));
     if (lane == 0) s_dot[wid] = acc;
     __syncthreads();
@@ -306,7 +305,7 @@ __device__ __forceinline__ uint32_t order_key(float s) {
 constexpr int TOPK_THREADS = 256;
 
 __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __restrict__ step,
-                           int* __restrict__ out_ids) {
+                            int* __restrict__ out_ids) {
     const long long n_kv = (long long) __ldg(step + kStepNKv);
     const long long width = (long long) __ldg(step + kStepWidth);
     __shared__ int s_a[TOPK_THREADS];
@@ -324,7 +323,8 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
     for (int bit = 31; bit >= 0; --bit) {
         const uint32_t cand = v | (1u << bit);
         int c = 0;
-        for (long long j = lo; j < hi; ++j) if (order_key(scores[j]) >= cand) ++c;
+        for (long long j = lo; j < hi; ++j)
+            if (order_key(scores[j]) >= cand) ++c;
         s_a[t] = c;
         __syncthreads();
         for (int s = TOPK_THREADS / 2; s > 0; s >>= 1) {
@@ -332,7 +332,7 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
             __syncthreads();
         }
         const int tot = s_a[0];
-        __syncthreads();     // before the next round overwrites s_a
+        __syncthreads();   // before the next round overwrites s_a
         if (tot >= (int) width) v = cand;
     }
     const uint32_t thr = v;
@@ -358,7 +358,7 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
             ag += g;
             ae += e;
         }
-        s_cgt = ag;    // how many are strictly above the threshold, i.e. where the equals start
+        s_cgt = ag;   // how many are strictly above the threshold, i.e. where the equals start
     }
     __syncthreads();
     // THE RANK VS THE COUNT.  `off_eq` is how many equal-to-threshold cells come BEFORE this chunk, and it is
@@ -377,7 +377,10 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
         for (long long j = lo; j < hi; ++j) {
             const uint32_t k = order_key(scores[j]);
             if (k > thr) ++sel;
-            else if (k == thr && e < eq_budget) { ++sel; ++e; }
+            else if (k == thr && e < eq_budget) {
+                ++sel;
+                ++e;
+            }
         }
     }
     s_a[t] = sel;
@@ -398,7 +401,10 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
     for (long long j = lo; j < hi; ++j) {
         const uint32_t k = order_key(scores[j]);
         if (k > thr) out_ids[w++] = (int) j;
-        else if (k == thr && e < eq_budget) { ++e; out_ids[w++] = (int) j; }
+        else if (k == thr && e < eq_budget) {
+            ++e;
+            out_ids[w++] = (int) j;
+        }
     }
 }
 
@@ -406,10 +412,10 @@ __global__ void topk_kernel(const float* __restrict__ scores, const int32_t* __r
 
 __global__ void kv_gather_kernel(const uint16_t* __restrict__ k_pool, const uint16_t* __restrict__ v_pool,
                                  const int32_t* __restrict__ table, const int32_t* __restrict__ ids,
-                                const int32_t* __restrict__ step, int kv_heads, int head_dim, int page_size,
-                                uint16_t* __restrict__ k_scratch, uint16_t* __restrict__ v_scratch) {
+                                 const int32_t* __restrict__ step, int kv_heads, int head_dim, int page_size,
+                                 uint16_t* __restrict__ k_scratch, uint16_t* __restrict__ v_scratch) {
     const long long n_ids = (long long) __ldg(step + kStepWidth);
-    const int per = head_dim / 4;                       // 4 halfs per uint2
+    const int per = head_dim / 4;   // 4 halfs per uint2
     const long long total = n_ids * kv_heads * per;
     const long long i = blockIdx.x * (long long) blockDim.x + threadIdx.x;
     if (i >= total) return;
@@ -428,12 +434,11 @@ __global__ void kv_gather_kernel(const uint16_t* __restrict__ k_pool, const uint
 
 /// One block per query head.  `s` holds the scores, which are then overwritten with the softmax weights.
 __global__ void qsa_attend_kernel(const float* __restrict__ q, const uint16_t* __restrict__ k_scratch,
-                                  const uint16_t* __restrict__ v_scratch, const int32_t* __restrict__ step,
-                                 int n_head, int n_head_kv, int head_dim,
-                                 float* __restrict__ attn, float* __restrict__ weights) {
+                                  const uint16_t* __restrict__ v_scratch, const int32_t* __restrict__ step, int n_head,
+                                  int n_head_kv, int head_dim, float* __restrict__ attn, float* __restrict__ weights) {
     const long long n_ids = (long long) __ldg(step + kStepWidth);
-    extern __shared__ float s_w[];       // CAPACITY floats (scores, then weights) + 32 for the reductions
-    float* red = s_w;                    // red[0..31] live past the scores/weights: see the launch
+    extern __shared__ float s_w[];   // CAPACITY floats (scores, then weights) + 32 for the reductions
+    float* red = s_w;                // red[0..31] live past the scores/weights: see the launch
     float* w = s_w + 32;
     const int h = blockIdx.x;
     const int d = threadIdx.x;
@@ -446,7 +451,7 @@ __global__ void qsa_attend_kernel(const float* __restrict__ q, const uint16_t* _
         for (int i = d; i < head_dim; i += blockDim.x) attn[(size_t) h * head_dim + i] = 0.0f;
         return;
     }
-    const int kv = h / (n_head / n_head_kv);       // ops.cpp L8729: iv2 = iq2 / rv2, NOT h % n_head_kv
+    const int kv = h / (n_head / n_head_kv);   // ops.cpp L8729: iv2 = iq2 / rv2, NOT h % n_head_kv
     const float scale = 1.0f / sqrtf((float) head_dim);
     const int lane = d & 31, wid = d >> 5, nwarp = (int) ((blockDim.x + 31) >> 5);
 
@@ -458,7 +463,7 @@ __global__ void qsa_attend_kernel(const float* __restrict__ q, const uint16_t* _
     }
     __syncthreads();
 
-    float mx = -FLT_MAX;    // not -inf, whose double -> float conversion nvcc warns about
+    float mx = -FLT_MAX;   // not -inf, whose double -> float conversion nvcc warns about
     for (long long j = d; j < n_ids; j += blockDim.x) mx = fmaxf(mx, w[j]);
     mx = warp_max(mx);
     if (lane == 0) red[wid] = mx;
@@ -491,8 +496,7 @@ __global__ void qsa_attend_kernel(const float* __restrict__ q, const uint16_t* _
     __syncthreads();
 
     float acc = 0.0f;
-    for (long long j = 0; j < n_ids; ++j)
-        acc += (w[j] * inv) * h2f(v_scratch[(j * n_head_kv + kv) * head_dim + d]);
+    for (long long j = 0; j < n_ids; ++j) acc += (w[j] * inv) * h2f(v_scratch[(j * n_head_kv + kv) * head_dim + d]);
     attn[(size_t) h * head_dim + d] = acc;
     if (weights != nullptr) {
         for (long long j = d; j < n_ids; j += blockDim.x) weights[(size_t) h * n_ids + j] = w[j] * inv;
@@ -501,8 +505,8 @@ __global__ void qsa_attend_kernel(const float* __restrict__ q, const uint16_t* _
 
 // ================= 7. qsa_gate_apply =================
 
-__global__ void qsa_gate_apply_kernel(const float* __restrict__ attn, const float* __restrict__ q_full,
-                                      int n_head, int head_dim, uint16_t* __restrict__ out) {
+__global__ void qsa_gate_apply_kernel(const float* __restrict__ attn, const float* __restrict__ q_full, int n_head,
+                                      int head_dim, uint16_t* __restrict__ out) {
     const long long i = blockIdx.x * (long long) blockDim.x + threadIdx.x;
     if (i >= (long long) n_head * head_dim) return;
     const int h = (int) (i / head_dim), d = (int) (i % head_dim);
@@ -511,11 +515,9 @@ __global__ void qsa_gate_apply_kernel(const float* __restrict__ attn, const floa
     out[i] = f16_from_f32((float) ((double) attn[i] * sig));
 }
 
-inline unsigned grid_for(long long n, int threads) {
-    return (unsigned) ((n + threads - 1) / threads);
-}
+inline unsigned grid_for(long long n, int threads) { return (unsigned) ((n + threads - 1) / threads); }
 
-}  // namespace
+}   // namespace
 
 /// THE STEP STATE, UPLOADED.  Every kernel below reads its per-token counts from here rather than from a kernel
 /// argument, because a CUDA graph bakes arguments in at capture time - see the long note in `qsa.hpp`.  This
@@ -575,7 +577,7 @@ const int32_t* step_upload_width(int64_t width, const QsaShapes& s) {
     return step_scratch();
 }
 
-}  // namespace
+}   // namespace
 
 // ================= THE CAPTURABLE ENTRY POINTS =================
 //
@@ -596,8 +598,8 @@ void kv_append_step(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_tabl
     if (stream == nullptr) check_sync("kv_append");
 }
 
-void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, const QsaShapes& s,
-                    const int32_t* step, int64_t max_blocks, float* cell_scores, void* stream) {
+void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, const QsaShapes& s, const int32_t* step,
+                    int64_t max_blocks, float* cell_scores, void* stream) {
     validate(s, "qsa_index");
     if (step == nullptr) fail("qsa_index: step is null");
     if (max_blocks <= 0) fail("qsa_index: max_blocks must be positive");
@@ -610,8 +612,8 @@ void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, 
     if (stream == nullptr) check_sync("qsa_index");
 }
 
-void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, const int32_t* step,
-                   int32_t* ids, void* stream) {
+void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, const int32_t* step, int32_t* ids,
+                   void* stream) {
     validate(s, "topk_512");
     if (step == nullptr) fail("topk_512: step is null");
     // `cap` is checked against the GEOMETRY'S largest possible width rather than this token's, because this
@@ -619,8 +621,8 @@ void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, co
     // `n_kv <= kTopkMaxCells`, so this is the most the kernel can ever write.
     const int64_t width_max = qsa_selection_width(kTopkMaxCells, s);
     if (cap < width_max) {
-        std::fprintf(stderr, "qsa: topk_512: cap %lld < the largest possible selection width %lld\n",
-                     (long long) cap, (long long) width_max);
+        std::fprintf(stderr, "qsa: topk_512: cap %lld < the largest possible selection width %lld\n", (long long) cap,
+                     (long long) width_max);
         std::exit(1);
     }
     // One block, so the launch is already constant; the kernel reads `n_kv` and `width` from `step`.
@@ -629,25 +631,24 @@ void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, co
     if (stream == nullptr) check_sync("topk_512");
 }
 
-void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* page_table,
-                    const int32_t* ids, const int32_t* step, int64_t max_ids, const QsaShapes& s,
-                    uint16_t* k_scratch, uint16_t* v_scratch, void* stream) {
+void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* page_table, const int32_t* ids,
+                    const int32_t* step, int64_t max_ids, const QsaShapes& s, uint16_t* k_scratch, uint16_t* v_scratch,
+                    void* stream) {
     validate(s, "kv_gather");
     if (step == nullptr) fail("kv_gather: step is null");
     if (max_ids <= 0) return;
     // THE GRID IS THE CAPACITY.  The kernel reads the real `n_ids` from `step` and its `if (i >= total) return;`
     // guard leaves the surplus threads idle.
     const long long total = max_ids * s.n_head_kv * (s.head_dim / 4);
-    kv_gather_kernel<<<grid_for(total, 256), 256, 0, (cudaStream_t) stream>>>(
-        k_pool, v_pool, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
-        k_scratch, v_scratch);
+    kv_gather_kernel<<<grid_for(total, 256), 256, 0, (cudaStream_t) stream>>>(k_pool, v_pool, page_table, ids, step,
+                                                                              (int) s.n_head_kv, (int) s.head_dim,
+                                                                              (int) s.page_size, k_scratch, v_scratch);
     check_launch("kv_gather");
     if (stream == nullptr) check_sync("kv_gather");
 }
 
-void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch,
-                     const int32_t* step, int64_t max_ids, const QsaShapes& s, float* attn, float* weights,
-                     void* stream) {
+void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch, const int32_t* step,
+                     int64_t max_ids, const QsaShapes& s, float* attn, float* weights, void* stream) {
     validate(s, "qsa_attend");
     if (step == nullptr) fail("qsa_attend: step is null");
     if (max_ids <= 0) fail("qsa_attend: max_ids must be positive");
@@ -704,15 +705,18 @@ void qsa_step_fill(int32_t* host_step, int64_t pos, const QsaShapes& s) {
     host_step[kStepWidth] = (int32_t) qsa_selection_width(n_kv, s);
 }
 
-void kv_append(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_table, int64_t pos,
-               const float* kcur, const float* vcur, const QsaShapes& s, void* stream) {
-    if (pos < 0) { validate(s, "kv_append"); fail("kv_append: pos < 0"); }
+void kv_append(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_table, int64_t pos, const float* kcur,
+               const float* vcur, const QsaShapes& s, void* stream) {
+    if (pos < 0) {
+        validate(s, "kv_append");
+        fail("kv_append: pos < 0");
+    }
     kv_append_step(k_pool, v_pool, page_table, step_upload(pos, -1, s), kcur, vcur, s, stream);
 }
 
-void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_base, const float* w_k_norm,
-                        float eps, const QsaIndexerBuffers& b, const QsaShapes& s, const float* cos_tab,
-                        const float* sin_tab, void* stream) {
+void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_base, const float* w_k_norm, float eps,
+                        const QsaIndexerBuffers& b, const QsaShapes& s, const float* cos_tab, const float* sin_tab,
+                        void* stream) {
     validate(s, "indexer_key_append");
     if (pos_dev == nullptr) fail("indexer_key_append: pos_dev is null");
     if (b.tail == nullptr || b.dead == nullptr || b.pooled == nullptr || b.block_pos == nullptr)
@@ -745,8 +749,7 @@ void qsa_index(const float* pooled, int64_t n_bid, const float* q_idx, const flo
     qsa_index_step(pooled, q_idx, bias, s, step_upload(n_kv - 1, n_kv, s), n_bid + 1, cell_scores, stream);
 }
 
-void topk_512(const float* cell_scores, int64_t n_kv, const QsaShapes& s, int64_t cap, int32_t* ids,
-              void* stream) {
+void topk_512(const float* cell_scores, int64_t n_kv, const QsaShapes& s, int64_t cap, int32_t* ids, void* stream) {
     validate(s, "topk_512");
     if (n_kv <= 0) return;
     if (n_kv > kTopkMaxCells) {
@@ -761,19 +764,19 @@ void kv_gather(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* pa
                int64_t n_ids, const QsaShapes& s, uint16_t* k_scratch, uint16_t* v_scratch, void* stream) {
     validate(s, "kv_gather");
     if (n_ids <= 0) return;
-    kv_gather_step(k_pool, v_pool, page_table, ids, step_upload_width(n_ids, s), n_ids, s, k_scratch,
-                   v_scratch, stream);
+    kv_gather_step(k_pool, v_pool, page_table, ids, step_upload_width(n_ids, s), n_ids, s, k_scratch, v_scratch,
+                   stream);
 }
 
-void qsa_attend(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch, int64_t n_ids,
-                const QsaShapes& s, float* attn, float* weights, void* stream) {
+void qsa_attend(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch, int64_t n_ids, const QsaShapes& s,
+                float* attn, float* weights, void* stream) {
     validate(s, "qsa_attend");
     if (n_ids < 0) fail("qsa_attend: n_ids < 0");
     if (n_ids == 0) {
         // The empty selection goes through the kernel's own zero path; `max_ids` must still be positive, so the
         // wrapper gives it the geometry's capacity rather than 0.
-        qsa_attend_step(q, k_scratch, v_scratch, step_upload_width(0, s),
-                        qsa_selection_width(kTopkMaxCells, s), s, attn, weights, stream);
+        qsa_attend_step(q, k_scratch, v_scratch, step_upload_width(0, s), qsa_selection_width(kTopkMaxCells, s), s,
+                        attn, weights, stream);
         return;
     }
     qsa_attend_step(q, k_scratch, v_scratch, step_upload_width(n_ids, s), n_ids, s, attn, weights, stream);
@@ -783,9 +786,9 @@ void qsa_gate_apply(const float* attn, const float* q_full, const QsaShapes& s, 
     validate(s, "qsa_gate_apply");
     const long long n = s.n_head * s.head_dim;
     qsa_gate_apply_kernel<<<grid_for(n, 256), 256, 0, (cudaStream_t) stream>>>(attn, q_full, (int) s.n_head,
-                                                                              (int) s.head_dim, out);
+                                                                               (int) s.head_dim, out);
     check_launch("qsa_gate_apply");
     if (stream == nullptr) check_sync("qsa_gate_apply");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

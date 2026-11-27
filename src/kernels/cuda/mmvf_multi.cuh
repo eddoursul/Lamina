@@ -19,8 +19,7 @@ constexpr int kMmvfMaxRows = 8;
 
 __device__ __forceinline__ float mmvf_warp_sum(float value) {
 #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        value += __shfl_xor_sync(0xffffffffu, value, offset, 32);
+    for (int offset = 16; offset > 0; offset >>= 1) value += __shfl_xor_sync(0xffffffffu, value, offset, 32);
     return value;
 }
 
@@ -71,10 +70,11 @@ __device__ __forceinline__ void mmvf_multi_row(const float* __restrict__ x, cons
 }
 
 // mmvf_multi_row for R consecutive rows of one matrix (the first `rows` of them real): each pair's inputs are loaded
-// once for the R rows, and every row's sums and their order are mmvf_multi_row's; thread 0 ends with acc[r][0 .. n_tok).
+// once for the R rows, and every row's sums and their order
+// are mmvf_multi_row's; thread 0 ends with acc[r][0 .. n_tok).
 template <int BLOCK_SIZE, int R>
-__device__ __forceinline__ void mmvf_multi_rows(const float* __restrict__ x, const uint16_t* __restrict__ row0, int n_in,
-                                                int n_tok, int rows, float (&acc)[R][kMmvfMaxRows]) {
+__device__ __forceinline__ void mmvf_multi_rows(const float* __restrict__ x, const uint16_t* __restrict__ row0,
+                                                int n_in, int n_tok, int rows, float (&acc)[R][kMmvfMaxRows]) {
     const int t = threadIdx.x;
     __shared__ float partials[R][kMmvfMaxRows][32];
     if constexpr (BLOCK_SIZE > 32) {
@@ -137,5 +137,5 @@ __device__ __forceinline__ void mmvf_multi_rows(const float* __restrict__ x, con
     }
 }
 
-}  // namespace
-}  // namespace lamina::kernels
+}   // namespace
+}   // namespace lamina::kernels

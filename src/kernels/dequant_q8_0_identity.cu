@@ -21,7 +21,10 @@ int main() {
             for (int k = 0; k < 32; ++k) b[2 + k] = (uint8_t) rng();
         }
     uint8_t* db = nullptr;
-    if (cudaMalloc(&db, h.size()) != cudaSuccess) { std::fprintf(stderr, "no device memory\n"); return 2; }
+    if (cudaMalloc(&db, h.size()) != cudaSuccess) {
+        std::fprintf(stderr, "no device memory\n");
+        return 2;
+    }
     cudaMemcpy(db, h.data(), h.size(), cudaMemcpyHostToDevice);
     const size_t n = (size_t) (rows * cols);
     auto run = [&](int kind, uint8_t* out) {
@@ -54,8 +57,10 @@ int main() {
         const bool same = std::memcmp(a.data(), b.data(), n * es) == 0;
         bad += same ? 0 : 1;
         std::printf("%s: %s | coalesced %.3f ms, per block %.3f ms (x%.1f)\n",
-                    kind == 0 ? "BF16" : kind == 1 ? "FP16" : "FP32", same ? "identical" : "DIFFERENT", ms[0] / 50,
-                    ms[1] / 50, ms[1] / ms[0]);
+                    kind == 0   ? "BF16"
+                    : kind == 1 ? "FP16"
+                                : "FP32",
+                    same ? "identical" : "DIFFERENT", ms[0] / 50, ms[1] / 50, ms[1] / ms[0]);
         cudaEventDestroy(e0);
         cudaEventDestroy(e1);
         cudaFree(o);

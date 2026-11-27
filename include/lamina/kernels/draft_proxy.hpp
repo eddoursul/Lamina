@@ -23,4 +23,4 @@ std::size_t draft_proxy_scratch_bytes(int64_t n_rows);
 void draft_proxy_top1(int ggml_type, const void* proxy, const void* rows, const void* x_q8_1, int64_t n_rows,
                       const int32_t* map, int32_t* out_id, float* out_prob, void* scratch, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

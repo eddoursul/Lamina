@@ -47,4 +47,4 @@ inline double ms_since(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

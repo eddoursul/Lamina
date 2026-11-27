@@ -39,10 +39,10 @@ Rgb resample(const Rgb& src, int w, int h, Filter filter);
 /// How a projector sizes a picture: sides in multiples of `align` pixels, the area from `min_pixels` to `max_pixels`.
 struct SizeRule {
     int align = 32;
-    int min_pixels = 0;      ///< 0: no lower limit
-    int max_pixels = 0;      ///< 0: no upper limit
-    bool half_even = false;  ///< a side that is a whole number of aligns and a half rounds to the even one (Python's
-                             ///< round() in transformers' smart_resize), not away from zero
+    int min_pixels = 0;       ///< 0: no lower limit
+    int max_pixels = 0;       ///< 0: no upper limit
+    bool half_even = false;   ///< a side that is a whole number of aligns and a half rounds to the even one (Python's
+                              ///< round() in transformers' smart_resize), not away from zero
 };
 /// The size a w x h picture is brought to (smart_resize): the sides rounded to `align`, then scaled down to at most
 /// max_pixels (the sides floored) or up to at least min_pixels (the sides ceiled), the ratio kept as the grid allows.
@@ -62,4 +62,4 @@ std::vector<float> planes(const Rgb& img, const float mean[3], const float std[3
 std::vector<float> planes_padded(const Rgb& src, const SizeRule& rule, Filter filter, const float mean[3],
                                  const float std[3], int& w, int& h);
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

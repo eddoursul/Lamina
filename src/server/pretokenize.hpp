@@ -42,4 +42,4 @@ std::vector<std::string_view> pretokenize(PreTokenizer kind, std::string_view te
 /// nothing when it holds none
 std::optional<std::string> replace_invalid_utf8(std::string_view text);
 
-}  // namespace lamina
+}   // namespace lamina

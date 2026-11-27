@@ -1,6 +1,6 @@
-// tests/core/cpu_floor_test.cpp - cpu_floor_missing, the programs' CPU check at their start (src/platform/cpu_floor.cpp):
-// this CPU meets the build's floor (the development PC and the CI runners have AVX2), and LAMINA_FORCE_ISA, which caps
-// the engine's own probes, leaves the answer alone.  (CPU only.)
+// tests/core/cpu_floor_test.cpp - cpu_floor_missing, the programs' CPU check at their start
+// (src/platform/cpu_floor.cpp): this CPU meets the build's floor (the development PC and the CI runners have AVX2), and
+// LAMINA_FORCE_ISA, which caps the engine's own probes, leaves the answer alone.  (CPU only.)
 #include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include <cstdio>

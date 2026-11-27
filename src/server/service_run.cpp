@@ -1,9 +1,9 @@
 // src/server/service_run.cpp - Service::prepare, choose and run: a request's prompt, and its generation as events.
-#include "log.hpp"
-#include "vision.hpp"
-#include "keepawake.hpp"
-#include "service.hpp"
 #include "dialect.hpp"
+#include "keepawake.hpp"
+#include "log.hpp"
+#include "service.hpp"
+#include "vision.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -14,21 +14,22 @@
 namespace lamina {
 namespace {
 
-constexpr double kQueueBeatS = 10.0;     // a request waiting for the single turn sends a keep-alive this often
-constexpr double kKeepaliveS = 10.0;     // a held-back tool argument leaves the stream quiet: ping at least this often
+constexpr double kQueueBeatS = 10.0;   // a request waiting for the single turn sends a keep-alive this often
+constexpr double kKeepaliveS = 10.0;   // a held-back tool argument leaves the stream quiet: ping at least this often
 constexpr int64_t kAnswerRoomMinCap = 1024, kAnswerReserveMin = 512;
 constexpr int64_t kLoopCheckEvery = 512;
 constexpr double kLoopCoverage = 0.25;
 const char* kReasoningClose = "\n</think>\n\n";
 const char* kReasoningWrapUp = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n";
 const char* kPrefixEnd = "\x01lamina-prefix-end\x01";   // where a message's shared part ends in the rendered prompt
-constexpr int kMarkerNames = 64;         // the stop markers a reply may name in its text before one ends it
+constexpr int kMarkerNames = 64;                        // the stop markers a reply may name
+                                                        // in its text before one ends it
 
 bool is_url(const std::string& s) { return starts_with(s, "http://") || starts_with(s, "https://"); }
 
 int64_t jint(const json& v, int64_t dflt = 0) { return v.is_number() ? v.get<int64_t>() : dflt; }
 
-}  // namespace
+}   // namespace
 
 std::unique_lock<std::timed_mutex> Service::turn(Cancel* cancel) {
     std::unique_lock<std::timed_mutex> held(fifo_, std::defer_lock);
@@ -60,7 +61,8 @@ json Service::note_unreadable_tool_images(json& messages, Cancel* cancel) {
                 const std::string src = jstr(item, "source");
                 try {
                     if (cancel != nullptr && cancel->is_set()) throw ClientGone();
-                    if (offline && is_url(src)) throw std::invalid_argument("offline mode cannot download an image URL");
+                    if (offline && is_url(src))
+                        throw std::invalid_argument("offline mode cannot download an image URL");
                     std::string bytes;
                     bool raw = false;
                     if (is_url(src)) {
@@ -94,12 +96,16 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
     std::vector<int32_t> ids = encoded_ids;
     // the prompt's end says, where a template decides for itself (a <|think_off|> or <|think_low|> in a message)
     const std::string prompt_end = ids.size() >= 2 ? tok.decode(std::vector<int32_t>(ids.end() - 2, ids.end())) : "";
-    bool thinking_off = prompt_end == "</think>\n\n" || (prompt_end != "<think>\n" && jget(kwargs, "enable_thinking").is_boolean() &&
-                                                         !kwargs["enable_thinking"].get<bool>());
-    if (tok.hy4 && !ids.empty()) thinking_off = tok.token_bytes(ids.back()) != tok.hy4->think_open;   // its last tag says
+    bool thinking_off =
+        prompt_end == "</think>\n\n" || (prompt_end != "<think>\n" && jget(kwargs, "enable_thinking").is_boolean() &&
+                                         !kwargs["enable_thinking"].get<bool>());
+    if (tok.hy4 && !ids.empty())
+        thinking_off = tok.token_bytes(ids.back()) != tok.hy4->think_open;   // its last tag says
     if (force && thinking_off) {
         const std::vector<int32_t> f = tok.encode(tok.blocks ? qwen_to_blocks(*force, *tok.blocks, false)
-                                                             : tok.hy4 ? qwen_to_hy4(*force, *tok.hy4) : *force, true);
+                                                  : tok.hy4  ? qwen_to_hy4(*force, *tok.hy4)
+                                                             : *force,
+                                                  true);
         ids.insert(ids.end(), f.begin(), f.end());
     }
     embeddings = Embeddings{};
@@ -109,14 +115,19 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         if (offline && std::any_of(pics.begin(), pics.end(), is_url))
             throw RequestError("offline mode cannot download an image URL; send a data: image instead");
         if (vision == nullptr)
-            throw RequestError("this server was started without the vision encoder (an image projector beside the model, or the "
-                               "config's vision section), so it cannot read images");
+            throw RequestError(
+                "this server was started without the vision encoder (an image projector beside the model, or the "
+                "config's vision section), so it cannot read images");
         // a picture's tags: Qwen's, or Hy4's (its template writes the same three), or a block form's (the marker
         // its template writes after the picture block's tag)
         if (tok.blocks && tok.blocks->image_pad.empty())
             throw RequestError("this model's chat template has no place for a picture");
-        const std::string pad_tag = tok.blocks ? tok.blocks->image_pad : tok.hy4 ? tok.hy4->image_pad : "<|image_pad|>",
-                          start_tag = tok.blocks ? tok.blocks->image : tok.hy4 ? tok.hy4->image_start : "<|vision_start|>";
+        const std::string pad_tag = tok.blocks ? tok.blocks->image_pad
+                                    : tok.hy4  ? tok.hy4->image_pad
+                                               : "<|image_pad|>",
+                          start_tag = tok.blocks ? tok.blocks->image
+                                      : tok.hy4  ? tok.hy4->image_start
+                                                 : "<|vision_start|>";
         const int32_t pad = tok.encode(pad_tag, true)[0], start = tok.encode(start_tag, true)[0];
         // an image URL is downloaded first, outside the turn: under it, a slow server held every other request
         std::vector<std::pair<std::string, bool>> sources;
@@ -174,12 +185,16 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
             forget_prompt(encoded_ids);
             throw RequestError("request exceeds the context window: prompt (" + std::to_string(ids.size()) +
                                " tokens) + max tokens (" + std::to_string(max_new) + ") exceeds the context (" +
-                               std::to_string(ctx) + "); requests are never truncated. Send a smaller max_tokens (at "
-                               "most " + std::to_string(std::max<int64_t>(0, room)) + " here), or add \"fit_max_tokens\": "
+                               std::to_string(ctx) +
+                               "); requests are never truncated. Send a smaller max_tokens (at "
+                               "most " +
+                               std::to_string(std::max<int64_t>(0, room)) +
+                               " here), or add \"fit_max_tokens\": "
                                "true to the config to shorten it to the room left (#545)");
         }
-        say("[lamina] max_tokens " + std::to_string(max_new) + " shortened to " + std::to_string(std::max<int64_t>(1, room)) +
-            ": the prompt (" + std::to_string(ids.size()) + " tokens) leaves that much of the context (" + std::to_string(ctx) +
+        say("[lamina] max_tokens " + std::to_string(max_new) + " shortened to " +
+            std::to_string(std::max<int64_t>(1, room)) + ": the prompt (" + std::to_string(ids.size()) +
+            " tokens) leaves that much of the context (" + std::to_string(ctx) +
             "); \"fit_max_tokens\": false answers 400 instead");
         max_new = std::max<int64_t>(1, room);   // a shorter completion beats a 400 (the default)
     }
@@ -198,7 +213,8 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         write_temporary(embeddings.path, parts);
     }
     if (req != nullptr && !jget(*req, "lamina_prefix").is_null())
-        (*req)["lamina_prefix"] = resolve_prefix((*req)["lamina_prefix"], messages, tools, kwargs, ids, !encoded.empty());
+        (*req)["lamina_prefix"] =
+            resolve_prefix((*req)["lamina_prefix"], messages, tools, kwargs, ids, !encoded.empty());
     return {ids, !thinking_off, max_new};
 }
 
@@ -217,8 +233,9 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         }
     if (!ok || !(given == std::set<std::string>{"messages"} || given == std::set<std::string>{"tokens"} ||
                  given == std::set<std::string>{"message", "chars"}))
-        throw RequestError("lamina_prefix: {\"messages\": K} (the first K messages), {\"message\": I, \"chars\": N} (the "
-                           "first N characters of message I) or {\"tokens\": N}");
+        throw RequestError(
+            "lamina_prefix: {\"messages\": K} (the first K messages), {\"message\": I, \"chars\": N} (the "
+            "first N characters of message I) or {\"tokens\": N}");
     for (auto it = spec.begin(); it != spec.end(); ++it) {
         const int64_t lo = it.key() == "message" ? 0 : 1;
         if (!is_int(it.value()) || it.value().get<int64_t>() < lo)
@@ -243,7 +260,8 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         json kw = json::object();
         const bool strip_effort = effort_end && (off || !(effort.empty() || effort == "xhigh" || effort == "high"));
         for (auto it = kwargs.begin(); it != kwargs.end(); ++it)
-            if (!strip_effort || (it.key() != "reasoning_effort" && it.key() != "enable_thinking")) kw[it.key()] = it.value();
+            if (!strip_effort || (it.key() != "reasoning_effort" && it.key() != "enable_thinking"))
+                kw[it.key()] = it.value();
         std::string text = tpl->render(m.messages, m.tools, false, kw);
         const size_t cut = text.find(kPrefixEnd);
         if (cut != std::string::npos) text = text.substr(0, cut);
@@ -268,10 +286,11 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         n = lcp(head_ids(json(std::vector<json>(messages.begin(), messages.begin() + k))), ids);
     } else {
         const int64_t i = spec["message"].get<int64_t>(), chars = spec["chars"].get<int64_t>();
-        const json text = i >= 0 && i < (int64_t) messages.size() ? jget(messages[(size_t) i], "content") : json(nullptr);
+        const json text =
+            i >= 0 && i < (int64_t) messages.size() ? jget(messages[(size_t) i], "content") : json(nullptr);
         if (!text.is_string() || chars > (int64_t) utf8_len(text.get_ref<const std::string&>())) {
-            say("[lamina] lamina_prefix ignored: message " + std::to_string(i) + " has no text of " + std::to_string(chars) +
-                " characters");
+            say("[lamina] lamina_prefix ignored: message " + std::to_string(i) + " has no text of " +
+                std::to_string(chars) + " characters");
             return json::object();
         }
         json cut(std::vector<json>(messages.begin(), messages.begin() + i));
@@ -288,8 +307,8 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         n = lcp(head_ids(cut), ids);
     }
     if (n < 1 || n >= (int64_t) ids.size() - 1) {
-        say("[lamina] lamina_prefix " + what + " ignored: it leaves no usable prefix of the " + std::to_string(ids.size()) +
-            "-token prompt (common start " + std::to_string(n) + ")");
+        say("[lamina] lamina_prefix " + what + " ignored: it leaves no usable prefix of the " +
+            std::to_string(ids.size()) + "-token prompt (common start " + std::to_string(n) + ")");
         return json::object();
     }
     return {{"tokens", n}};
@@ -324,8 +343,8 @@ json Service::choose(const json& req, Cancel& cancel) {
     p.ids.insert(p.ids.end(), pre.begin(), pre.end());
     if ((int64_t) p.ids.size() + 1 + kCtxSlack > engine->max_context()) {
         drop_embeddings();
-        throw RequestError("choose: the prompt (" + std::to_string(p.ids.size()) + " tokens) does not fit the context (" +
-                           std::to_string(engine->max_context()) + ")");
+        throw RequestError("choose: the prompt (" + std::to_string(p.ids.size()) +
+                           " tokens) does not fit the context (" + std::to_string(engine->max_context()) + ")");
     }
     const double t0 = now_s();
     json done = json::object();
@@ -364,8 +383,14 @@ json Service::choose(const json& req, Cancel& cancel) {
             choice = it.key();
         }
     }
-    return {{"probs", probs}, {"logprobs", logprobs}, {"mass", mass}, {"choice", choice}, {"confidence", best},
-            {"prompt_tokens", p.ids.size()}, {"reused", jget(done, "reused")}, {"seconds", py_round(now_s() - t0, 3)}};
+    return {{"probs", probs},
+            {"logprobs", logprobs},
+            {"mass", mass},
+            {"choice", choice},
+            {"confidence", best},
+            {"prompt_tokens", p.ids.size()},
+            {"reused", jget(done, "reused")},
+            {"seconds", py_round(now_s() - t0, 3)}};
 }
 
 void Service::run(const std::vector<int32_t>& ids, bool thinking, const json& tools, int64_t max_new, json sampling,
@@ -399,18 +424,20 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     }
     std::optional<int64_t> budget = thinking ? reasoning_budget(sampling) : std::nullopt;
     if (thinking && !budget && answer_room && max_new && max_new >= kAnswerRoomMinCap) {
-        // max_tokens counts the thinking too: thinking is closed early enough to leave the answer its quarter of the cap
+        // max_tokens counts the thinking too: thinking is closed
+        // early enough to leave the answer its quarter of the cap
         budget = max_new - std::min(std::max(kAnswerReserveMin, max_new / 4), max_new / 2);
         if (max_new <= 32768)
-            say("[lamina] thinking limited to " + std::to_string(*budget) + " of max_tokens " + std::to_string(max_new) +
+            say("[lamina] thinking limited to " + std::to_string(*budget) + " of max_tokens " +
+                std::to_string(max_new) +
                 " so the answer has room (\"answer_room\": false in the config turns this off)");
     }
     if (budget && max_new > 0) {
         // #984: a budget at or near max_tokens never fires before the reply is cut off while still thinking
         const int64_t reserve = std::min(std::max(kAnswerReserveMin, max_new / 4), max_new / 2);
         if (*budget > max_new - reserve) {
-            say("[lamina] thinking capped at " + std::to_string(max_new - reserve) + " of max_tokens " + std::to_string(max_new) +
-                " to leave room for the answer (budget " + std::to_string(*budget) + ")");
+            say("[lamina] thinking capped at " + std::to_string(max_new - reserve) + " of max_tokens " +
+                std::to_string(max_new) + " to leave room for the answer (budget " + std::to_string(*budget) + ")");
             budget = std::max<int64_t>(1, max_new - reserve);
         }
     }
@@ -449,7 +476,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     };
     std::vector<Event> opening;   // without thinking the prompt ends with the forced opening: parsed as the model's
     if (force && !thinking) {
-        opening = parser.feed(tok.blocks ? blocks_control(qwen_to_blocks(*force, *tok.blocks, false), *tok.blocks) : *force);
+        opening =
+            parser.feed(tok.blocks ? blocks_control(qwen_to_blocks(*force, *tok.blocks, false), *tok.blocks) : *force);
         force.reset();
     }
     std::string tail;   // the last characters written (the newlines before a call)
@@ -484,7 +512,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     json& st = par ? own_st : status;
     std::deque<std::pair<double, int64_t>>& rt = par ? own_rate : rate;
     const std::string request_id = random_hex(12);
-    const std::optional<double> deadline = queue_timeout_s ? std::optional<double>(mono_s() + *queue_timeout_s) : std::nullopt;
+    const std::optional<double> deadline =
+        queue_timeout_s ? std::optional<double>(mono_s() + *queue_timeout_s) : std::nullopt;
     cancel.queue_deadline = deadline;   // with batch slots the engine waits for its turn, and keeps the deadline
     cancel.queue_started = [this, request_id] {
         std::lock_guard<std::mutex> lk(status_mu);
@@ -496,8 +525,11 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         std::lock_guard<std::mutex> lk(status_mu);
         status["queued"] = jint(status["queued"]) + 1;
         cancel.request_id = request_id;   // (the client watch reads it under the lock)
-        terminal_requests[request_id] = {{"id", request_id}, {"state", "queued"}, {"queued_at", now_s()},
-                                         {"admitted_at", nullptr}, {"prompt_tokens", ids.size()}};
+        terminal_requests[request_id] = {{"id", request_id},
+                                         {"state", "queued"},
+                                         {"queued_at", now_s()},
+                                         {"admitted_at", nullptr},
+                                         {"prompt_tokens", ids.size()}};
         active_cancels.insert(&cancel);
     }
     auto outer_finally = [&] {
@@ -530,8 +562,14 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     } catch (const QueueCancelled&) {
         if (turn.owns_lock()) turn.unlock();
         outer_finally();
-        sink("done", json{{"finish", "cancel"}, {"completion_tokens", 0}, {"reused", 0}, {"timings", nullptr},
-                          {"reasoning_tokens", 0}, {"reasoning_recoveries", 0}}, nullptr);
+        sink("done",
+             json{{"finish", "cancel"},
+                  {"completion_tokens", 0},
+                  {"reused", 0},
+                  {"timings", nullptr},
+                  {"reasoning_tokens", 0},
+                  {"reasoning_recoveries", 0}},
+             nullptr);
         return;
     } catch (const QueueWaitExpired&) {
         if (turn.owns_lock()) turn.unlock();
@@ -549,27 +587,43 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         if (truthy(jget(st, "busy")) && !timed_out) {
             const json last = request_stats(segments);   // only this request's own DONEs count
             const double started = jget(st, "started").is_number() ? st["started"].get<double>() : now_s();
-            const json hit_rate = jint(jget(last, "lookups")) ? json(py_round((double) jint(last["hits"]) / (double) jint(last["lookups"]), 3))
-                                                              : json(nullptr);
+            const json hit_rate = jint(jget(last, "lookups"))
+                                      ? json(py_round((double) jint(last["hits"]) / (double) jint(last["lookups"]), 3))
+                                      : json(nullptr);
             // #588: the share another GPU computed or the GPU read over PCIe (not in the hit rate's lookups)
             const int64_t routed = jint(jget(last, "lookups")) + jint(jget(last, "offloaded"));
             const json pcie_share = !jget(last, "offloaded").is_null() && routed
-                                        ? json(py_round((double) jint(last["offloaded"]) / (double) routed, 3)) : json(nullptr);
+                                        ? json(py_round((double) jint(last["offloaded"]) / (double) routed, 3))
+                                        : json(nullptr);
             const int64_t seen = prompt_tokens_seen((int64_t) ids.size(), last);
-            json h = {{"id", request_id}, {"time", started}, {"duration_s", py_round(now_s() - started, 1)},
-                      {"finish", finish}, {"prompt_tokens", seen}, {"reused", jget(last, "reused")}, {"output_tokens", n},
-                      {"first_engine_token_s", first_engine_token_s ? json(*first_engine_token_s) : json(nullptr)},
-                      {"prompt_total", ids.size()}, {"prompt_read", jget(last, "prompt_read")},
-                      {"reasoning_recoveries", recovery_count}, {"reasoning_repeat_coverage", py_round(repeat_coverage, 3)},
-                      {"engine_generated", jget(last, "generated")}, {"prompt_ms", jget(last, "prompt_ms")},
-                      {"decode_ms", jget(last, "decode_ms")},
-                      {"decode_tok_s", n && jint(jget(last, "generated")) && jget(last, "decode_ms").is_number() &&
-                                               last["decode_ms"].get<double>() > 0
-                                           ? json(py_round((double) jint(last["generated"]) / (last["decode_ms"].get<double>() / 1000), 1))
-                                           : json(nullptr)},
-                      {"hit_rate", hit_rate}, {"pcie_share", pcie_share}, {"ram_blobs", jget(last, "ram_blobs")},
-                      {"file_blobs", jget(last, "file_blobs")}, {"file_mb", jget(last, "file_mb")},
-                      {"drafts_offered", jget(last, "drafts_offered")}, {"drafts_accepted", jget(last, "drafts_accepted")}};
+            json h = {
+                {"id", request_id},
+                {"time", started},
+                {"duration_s", py_round(now_s() - started, 1)},
+                {"finish", finish},
+                {"prompt_tokens", seen},
+                {"reused", jget(last, "reused")},
+                {"output_tokens", n},
+                {"first_engine_token_s", first_engine_token_s ? json(*first_engine_token_s) : json(nullptr)},
+                {"prompt_total", ids.size()},
+                {"prompt_read", jget(last, "prompt_read")},
+                {"reasoning_recoveries", recovery_count},
+                {"reasoning_repeat_coverage", py_round(repeat_coverage, 3)},
+                {"engine_generated", jget(last, "generated")},
+                {"prompt_ms", jget(last, "prompt_ms")},
+                {"decode_ms", jget(last, "decode_ms")},
+                {"decode_tok_s",
+                 n && jint(jget(last, "generated")) && jget(last, "decode_ms").is_number() &&
+                         last["decode_ms"].get<double>() > 0
+                     ? json(py_round((double) jint(last["generated"]) / (last["decode_ms"].get<double>() / 1000), 1))
+                     : json(nullptr)},
+                {"hit_rate", hit_rate},
+                {"pcie_share", pcie_share},
+                {"ram_blobs", jget(last, "ram_blobs")},
+                {"file_blobs", jget(last, "file_blobs")},
+                {"file_mb", jget(last, "file_mb")},
+                {"drafts_offered", jget(last, "drafts_offered")},
+                {"drafts_accepted", jget(last, "drafts_accepted")}};
             if (truthy(jget(last, "expert_tiers"))) h["expert_tiers"] = last["expert_tiers"];
             history.push_back(h);
             while (history.size() > 500) history.pop_front();
@@ -578,12 +632,15 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
             t["prompt_tokens"] = jint(t["prompt_tokens"]) + seen;
             t["reused"] = jint(t["reused"]) + jint(jget(last, "reused"));
             t["output_tokens"] = jint(t["output_tokens"]) + n;
-            t["prompt_ms"] = t["prompt_ms"].get<double>() + (jget(last, "prompt_ms").is_number() ? last["prompt_ms"].get<double>() : 0.0);
-            t["decode_ms"] = t["decode_ms"].get<double>() + (jget(last, "decode_ms").is_number() ? last["decode_ms"].get<double>() : 0.0);
+            t["prompt_ms"] = t["prompt_ms"].get<double>() +
+                             (jget(last, "prompt_ms").is_number() ? last["prompt_ms"].get<double>() : 0.0);
+            t["decode_ms"] = t["decode_ms"].get<double>() +
+                             (jget(last, "decode_ms").is_number() ? last["decode_ms"].get<double>() : 0.0);
             t["drafts_offered"] = jint(t["drafts_offered"]) + jint(jget(last, "drafts_offered"));
             t["drafts_accepted"] = jint(t["drafts_accepted"]) + jint(jget(last, "drafts_accepted"));
-            const std::optional<double> ft0 = jget(st, "first_token").is_number() ? std::optional<double>(st["first_token"].get<double>())
-                                                                                  : std::nullopt;
+            const std::optional<double> ft0 = jget(st, "first_token").is_number()
+                                                  ? std::optional<double>(st["first_token"].get<double>())
+                                                  : std::nullopt;
             if (observe_latencies)
                 observe_latencies(ft0 ? std::optional<double>(*ft0 - started) : std::nullopt, n,
                                   (jget(last, "decode_ms").is_number() ? last["decode_ms"].get<double>() : 0.0) / 1000,
@@ -607,18 +664,20 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 std::snprintf(hb, sizeof hb, ", expert cache %.1f%% hit", hit_rate.get<double>() * 100);
                 hit_msg = hb;
                 if (pcie_share.is_number() && pcie_share.get<double>() > 0) {
-                    std::snprintf(hb, sizeof hb, " (+%.1f%% of the routed experts over PCIe)", pcie_share.get<double>() * 100);
+                    std::snprintf(hb, sizeof hb, " (+%.1f%% of the routed experts over PCIe)",
+                                  pcie_share.get<double>() * 100);
                     hit_msg += hb;
                 }
             }
             char buf[256];
-            std::snprintf(buf, sizeof buf, "[lamina] done: %lld tokens in %.0f s (%.1f tok/s) (%s, cancel=%s)", (long long) n, el, r,
-                          finish.c_str(), cancel.is_set() ? "True" : "False");
+            std::snprintf(buf, sizeof buf, "[lamina] done: %lld tokens in %.0f s (%.1f tok/s) (%s, cancel=%s)",
+                          (long long) n, el, r, finish.c_str(), cancel.is_set() ? "True" : "False");
             say(std::string(buf) + hit_msg);
             if (finish == "length" && (parser.state() == "reasoning" || parser.state() == "rcall"))
                 say("[lamina] the reply reached max tokens while still thinking, so it has no answer: a thinking budget "
                     "(reasoning_budget_tokens, in the request or in the config for every request) leaves room to answer");
-            if (std::getenv("LAMINA_DEBUG") != nullptr && !raw_ids.empty()) say("[lamina] raw: " + py_repr_value(json(tok.decode(raw_ids))));
+            if (std::getenv("LAMINA_DEBUG") != nullptr && !raw_ids.empty())
+                say("[lamina] raw: " + py_repr_value(json(tok.decode(raw_ids))));
         }
         st["busy"] = false;
         st.erase("tail");   // #212: the answer's end is not kept once it is done
@@ -626,7 +685,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         if (par) {
             live_reqs_.erase(&st);
             if (!live_reqs_.empty()) {
-                for (auto it = live_reqs_.rbegin()->second.first->begin(); it != live_reqs_.rbegin()->second.first->end(); ++it)
+                for (auto it = live_reqs_.rbegin()->second.first->begin();
+                     it != live_reqs_.rbegin()->second.first->end(); ++it)
                     status[it.key()] = it.value();
             } else {
                 status["busy"] = false;
@@ -719,7 +779,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                         return false;
                     }
                     if (literal_markers && marker_names < kMarkerNames && parser.buf() != kThinkEnd &&
-                        names_stop_marker(tok.hy4 ? TagTranslator(*tok.hy4).text(tok.decode(raw_ids)) : tok.decode(raw_ids),
+                        names_stop_marker(tok.hy4 ? TagTranslator(*tok.hy4).text(tok.decode(raw_ids))
+                                                  : tok.decode(raw_ids),
                                           parser.state(), tok.blocks ? &*tok.blocks : nullptr)) {
                         --n;   // its text comes in plain tokens
                         named_marker = t;
@@ -789,7 +850,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                     }
                 }
                 if (force) {
-                    if (std::any_of(evs.begin(), evs.end(), [](const Event& e) { return e.kind == "tool_start" || e.kind == "tool_call"; })) {
+                    if (std::any_of(evs.begin(), evs.end(),
+                                    [](const Event& e) { return e.kind == "tool_start" || e.kind == "tool_call"; })) {
                         force.reset();   // the model is writing a call of its own
                     } else if (parser.state() == "content" && parser.buf().empty() && !detok.pending()) {
                         opens = true;
@@ -869,10 +931,12 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                     finish = "error";
                     say("[lamina] the engine's logits became non-finite again on the retry (#879): the request ends "
                         "with an error");
-                    throw EngineNonFinite("the model's output became non-finite (NaN) twice in a row (#879); the engine "
-                                          "has dropped its cached state - send the request again");
+                    throw EngineNonFinite(
+                        "the model's output became non-finite (NaN) twice in a row (#879); the engine "
+                        "has dropped its cached state - send the request again");
                 }
-                say("[lamina] the engine's logits became non-finite after " + std::to_string(n) + " tokens (#879): the "
+                say("[lamina] the engine's logits became non-finite after " + std::to_string(n) +
+                    " tokens (#879): the "
                     "reply ends here as \"length\"; the engine dropped its cached state, so the next request reads its "
                     "prompt from the start");
                 finish = "length";
@@ -882,8 +946,10 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 ++recovery_count;
                 // only the two settings that keep the same words coming are raised: temperature to at least 1.0,
                 // presence penalty to at least 1.5
-                const double t0 = jget(sampling, "temperature").is_number() ? sampling["temperature"].get<double>() : 0.0;
-                const double p0 = jget(sampling, "presence_penalty").is_number() ? sampling["presence_penalty"].get<double>() : 0.0;
+                const double t0 =
+                    jget(sampling, "temperature").is_number() ? sampling["temperature"].get<double>() : 0.0;
+                const double p0 =
+                    jget(sampling, "presence_penalty").is_number() ? sampling["presence_penalty"].get<double>() : 0.0;
                 if (std::max(1.0, t0) != t0 || std::max(1.5, p0) != p0) {
                     sampling["temperature"] = std::max(1.0, t0);
                     sampling["presence_penalty"] = std::max(1.5, p0);
@@ -898,18 +964,21 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                     }
                 }
                 char buf[200];
-                std::snprintf(buf, sizeof buf, "[lamina] repeated reasoning detected at %lld tokens (coverage=%.3f); "
+                std::snprintf(buf, sizeof buf,
+                              "[lamina] repeated reasoning detected at %lld tokens (coverage=%.3f); "
                               "resuming the same output with the low-effort instruction (reasoning_loop_recovery)",
                               (long long) n, repeat_coverage);
                 say(buf);
                 continue;
             }
             if (named_marker && !cancel.is_set()) {
-                // the marker's text in plain tokens, as a message's text reads it; the engine continues from what it holds
+                // the marker's text in plain tokens, as a message's text
+                // reads it; the engine continues from what it holds
                 const std::vector<int32_t> extra = tok.encode(tok.decode({*named_marker}), false);
                 if (max_new - n - (int64_t) extra.size() < 1) break;   // no room left: "length"
                 ++marker_names;
-                say("[lamina] the reply named " + tok.decode({*named_marker}) + " in its text: continuing past it (literal_markers)");
+                say("[lamina] the reply named " + tok.decode({*named_marker}) +
+                    " in its text: continuing past it (literal_markers)");
                 join_tokens(extra);
                 if (stops && stops->hit) {
                     finish = "stop";
@@ -918,9 +987,11 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 prompt.insert(prompt.end(), seg.begin(), seg.end());
                 continue;
             }
-            if (reasoning_close_retry && thinking && finish == "stop" && !close_retried && !answered && !wrap && !opens &&
-                parser.state() == "reasoning" && parser.buf() != kThinkEnd && !(stops && stops->hit) && !cancel.is_set()) {
-                // #1053: the model wrote its reasoning and stopped before </think>: close the thinking once and let it answer
+            if (reasoning_close_retry && thinking && finish == "stop" && !close_retried && !answered && !wrap &&
+                !opens && parser.state() == "reasoning" && parser.buf() != kThinkEnd && !(stops && stops->hit) &&
+                !cancel.is_set()) {
+                // #1053: the model wrote its reasoning and stopped before
+                // </think>: close the thinking once and let it answer
                 close_retried = true;
                 const std::vector<int32_t> extra = tok.encode(to_model(kReasoningClose), true);
                 if (max_new - n - (int64_t) extra.size() >= 1) {
@@ -947,7 +1018,8 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
             // engine continues from the prefix it already holds. A forced call opens the same way.
             const std::vector<int32_t> spill = wrap ? engine->drained_tokens() : std::vector<int32_t>{};
             const std::string spill_text = spill.empty() ? "" : tok.decode(spill);
-            if (!spill.empty() && std::none_of(spill.begin(), spill.end(), [&](int32_t t) { return stop_ids.count(t) > 0; }) &&
+            if (!spill.empty() &&
+                std::none_of(spill.begin(), spill.end(), [&](int32_t t) { return stop_ids.count(t) > 0; }) &&
                 spill_text.find('<') == std::string::npos && spill_text.find("\xEF\xBF\xBD") == std::string::npos &&
                 max_new - n - (int64_t) spill.size() > 1) {
                 // the engine generated these past the budget's stop before the STOP reached it, and its session holds
@@ -970,7 +1042,9 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
             force.reset();
             const std::vector<int32_t> extra = tok.encode(to_model(text), true);
             if (max_new - n - (int64_t) extra.size() < 1) break;   // no room left to answer: "length"
-            if (wrap) say("[lamina] thinking budget reached (" + std::to_string(thought) + " tokens): wrapping up the thinking");
+            if (wrap)
+                say("[lamina] thinking budget reached (" + std::to_string(thought) +
+                    " tokens): wrapping up the thinking");
             for (const int32_t t : extra) {
                 ++n;
                 raw_ids.push_back(t);
@@ -991,20 +1065,23 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         // text differs (PromptEncoder.remember_reply)
         if (!par && emb.empty() && engine->held && engine->held->ids.size() >= ids.size() &&
             std::equal(ids.begin(), ids.end(), engine->held->ids.begin()))
-            prompts->remember_reply(ids, std::vector<int32_t>(engine->held->ids.begin() + (ptrdiff_t) ids.size(),
-                                                              engine->held->ids.end()));
+            prompts->remember_reply(
+                ids, std::vector<int32_t>(engine->held->ids.begin() + (ptrdiff_t) ids.size(), engine->held->ids.end()));
         if (leaving) {
             finish = "disconnect";   // the client disconnected mid-stream
         } else if (cancel.is_set()) {
             finish = "cancel";
         } else if (looped) {
             char buf[256];
-            std::snprintf(buf, sizeof buf, "[lamina] the thinking repeated the same passages (coverage=%.3f) at %lld tokens: "
+            std::snprintf(buf, sizeof buf,
+                          "[lamina] the thinking repeated the same passages (coverage=%.3f) at %lld tokens: "
                           "ended as \"length\" (reasoning_loop_recovery: \"stop\" in the config; remove it to turn "
-                          "this off)", repeat_coverage, (long long) n);
+                          "this off)",
+                          repeat_coverage, (long long) n);
             say(buf);
         } else if (repeated) {
-            say("[lamina] the reply repeated one token (" + py_repr_value(json(tok.decode({run_tok}))) + ") " + std::to_string(run_len) +
+            say("[lamina] the reply repeated one token (" + py_repr_value(json(tok.decode({run_tok}))) + ") " +
+                std::to_string(run_len) +
                 " times in a row: ended as \"length\" (repeat_stop_tokens in the config; 0 turns this off). If a "
                 "new request with a short prompt does the same, restart the server and report it (#606)");
         }
@@ -1033,11 +1110,11 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
         const Event ev{"content", stops->flush(), nullptr};   // the held tail was not a stop string after all
         if (!sink("event", nullptr, &ev)) return;
     }
-    json done = {{"finish", finish}, {"completion_tokens", n}, {"reused", jint(jget(timings, "cache_n"))},
+    json done = {{"finish", finish},   {"completion_tokens", n},         {"reused", jint(jget(timings, "cache_n"))},
                  {"timings", timings}, {"reasoning_tokens", thinking_n}, {"reasoning_recoveries", recovery_count}};
     if (!segments.empty() && segments.back().contains("scores")) done["scores"] = segments.back()["scores"];
     if (stops && stops->hit) done["stop_sequence"] = *stops->hit;
     sink("done", done, nullptr);
 }
 
-}  // namespace lamina
+}   // namespace lamina

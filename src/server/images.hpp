@@ -58,10 +58,11 @@ struct ImageJobFailed : std::runtime_error {
     explicit ImageJobFailed(const std::string& m) : std::runtime_error(m), message(m) {}
     std::string message;   ///< the whole message: what() ends at a NUL byte, which sd-cli's log can have
 };
-/// a config value of a type the Python failed on with a TypeError, AttributeError or KeyError (`kind`), which its server
-/// answered as a malformed request: 400, "the request is malformed ({kind}: {what()})"
+/// a config value of a type the Python failed on with a TypeError, AttributeError or KeyError (`kind`), which its
+/// server answered as a malformed request: 400, "the request is malformed ({kind}: {what()})"
 struct ConfigTypeError : std::invalid_argument {
-    ConfigTypeError(std::string kind_, const std::string& message) : std::invalid_argument(message), kind(std::move(kind_)) {}
+    ConfigTypeError(std::string kind_, const std::string& message)
+        : std::invalid_argument(message), kind(std::move(kind_)) {}
     std::string kind;
 };
 
@@ -104,12 +105,14 @@ public:
     /// runs sd-cli for `job` -> (the PNG files' bytes in order, the figures); the caller holds the GPU turn.
     /// ImageJobFailed when sd-cli fails, times out or is cancelled. `policy_used`: the policy the GPU turn used, the
     /// figures' "gpu_policy" (also in status()'s "last"; "": none)
-    std::pair<std::vector<std::string>, json> run(const Job& job, Cancel* cancel = nullptr, const std::string& policy_used = "");
+    std::pair<std::vector<std::string>, json> run(const Job& job, Cancel* cancel = nullptr,
+                                                  const std::string& policy_used = "");
     /// keeps one PNG for response_format url -> its file name (32 random hex digits: the name is the access); the
     /// newest keep_files stay
     std::string store(const std::string& data);
     /// the /v1/images/generations answer: each image as base64, or (url) stored and named by its URL under base_url
-    json response(const std::vector<std::string>& images, const Job& job, const json& figures, const std::string& base_url);
+    json response(const std::vector<std::string>& images, const Job& job, const json& figures,
+                  const std::string& base_url);
     /// /v1/status' "image_generation": the totals, the running job's step, the last job's figures
     json status() const;
     /// a line on the console ("[lamina] text") and in the log ("[images] text")
@@ -130,8 +133,8 @@ private:
     std::mutex run_mu_;             // one sd-cli at a time even when the service's turn is not taken
     std::mutex files_mu_;           // store and prune
     json totals_ = {{"images", 0}, {"jobs", 0}, {"seconds", 0.0}, {"failed", 0}};
-    json last_;                                              // the last job's figures (null: none yet)
-    std::optional<std::pair<int64_t, int64_t>> progress_;    // (step, steps) of the running job
+    json last_;                                             // the last job's figures (null: none yet)
+    std::optional<std::pair<int64_t, int64_t>> progress_;   // (step, steps) of the running job
 };
 
-}  // namespace lamina::images
+}   // namespace lamina::images

@@ -24,15 +24,26 @@
 
 using namespace lamina::kernels;
 
-#define CK(x) do { const cudaError_t e_ = (x); if (e_ != cudaSuccess) { std::printf("%s: %s\n", #x, cudaGetErrorString(e_)); std::exit(1); } } while (0)
+#define CK(x)                                                                                                          \
+    do {                                                                                                               \
+        const cudaError_t e_ = (x);                                                                                    \
+        if (e_ != cudaSuccess) {                                                                                       \
+            std::printf("%s: %s\n", #x, cudaGetErrorString(e_));                                                       \
+            std::exit(1);                                                                                              \
+        }                                                                                                              \
+    } while (0)
 
 namespace {
 
-struct Fmt { int type; const char* name; int block_elems, block_bytes, d_off, dmin_off; };
+struct Fmt {
+    int type;
+    const char* name;
+    int block_elems, block_bytes, d_off, dmin_off;
+};
 // the dense formats of the IQ3_XXS and UD-Q4_K_XL files; d_off: the fp16 block scale (random bytes elsewhere)
 const Fmt kFmts[] = {
     {23, "IQ4_XS", 256, 136, 0, -1}, {12, "Q4_K", 256, 144, 0, 2}, {13, "Q5_K", 256, 176, 0, 2},
-    {14, "Q6_K", 256, 210, 208, -1}, {8, "Q8_0", 32, 34, 0, -1},     {21, "IQ3_S", 256, 110, 0, -1},
+    {14, "Q6_K", 256, 210, 208, -1}, {8, "Q8_0", 32, 34, 0, -1},   {21, "IQ3_S", 256, 110, 0, -1},
 };
 
 cudaStream_t g_s;
@@ -46,7 +57,10 @@ void* dev_weights(const Fmt& f, int n_in, int n_out) {
     for (size_t o = 0; o < bytes; o += (size_t) f.block_bytes) {
         const uint16_t d = (uint16_t) e(g_rng);
         std::memcpy(&h[o + f.d_off], &d, 2);
-        if (f.dmin_off >= 0) { const uint16_t m = (uint16_t) e(g_rng); std::memcpy(&h[o + f.dmin_off], &m, 2); }
+        if (f.dmin_off >= 0) {
+            const uint16_t m = (uint16_t) e(g_rng);
+            std::memcpy(&h[o + f.dmin_off], &m, 2);
+        }
     }
     void* p;
     CK(cudaMalloc(&p, bytes));
@@ -66,7 +80,7 @@ Act make_act(int n_in) {
     std::vector<float> h((size_t) 8 * n_in);
     std::normal_distribution<float> nd(0.0f, 1.0f);
     for (auto& v : h) v = nd(g_rng);
-    for (size_t i = 0; i < h.size(); i += 97) h[i] *= 20.0f;   // outliers set some blocks' scales
+    for (size_t i = 0; i < h.size(); i += 97) h[i] *= 20.0f;             // outliers set some blocks' scales
     for (int j = 0; j < 32; ++j) h[(size_t) 3 * n_in + 64 + j] = 0.0f;   // an all-zero block
     CK(cudaMalloc(&a.x, h.size() * 4));
     CK(cudaMemcpy(a.x, h.data(), h.size() * 4, cudaMemcpyHostToDevice));
@@ -78,8 +92,7 @@ Act make_act(int n_in) {
     return a;
 }
 
-template <typename T>
-std::vector<T> fetch(const void* d, size_t n) {
+template <typename T> std::vector<T> fetch(const void* d, size_t n) {
     std::vector<T> h(n);
     CK(cudaMemcpy(h.data(), d, n * sizeof(T), cudaMemcpyDeviceToHost));
     return h;
@@ -116,7 +129,8 @@ int check_shape(const Fmt& f, const Act& a, int n_out) {
             native_quantize_q8_1_il(a.x, a.q, a.il, n_in, nc, g_s);
             native_q8_1_il_from(a.q_ref, a.il2, n_in, nc, g_s);
             CK(cudaStreamSynchronize(g_s));
-            if (fetch<uint8_t>(a.il, native_q8_1_il_bytes(n_in, nc)) != fetch<uint8_t>(a.il2, native_q8_1_il_bytes(n_in, nc))) {
+            if (fetch<uint8_t>(a.il, native_q8_1_il_bytes(n_in, nc)) !=
+                fetch<uint8_t>(a.il2, native_q8_1_il_bytes(n_in, nc))) {
                 ++bad;
                 std::printf("  %s %d->%d, %d columns: native_q8_1_il_from's copy differs\n", f.name, n_in, n_out, nc);
             }
@@ -144,10 +158,12 @@ int check_shape(const Fmt& f, const Act& a, int n_out) {
                 std::printf("  %s %d->%d: the tensor-core columns at %d columns differ from those at %d\n", f.name,
                             n_in, n_out, nc, mma_from);
             }
-            mma_err = std::max(mma_err, rel_err(fetch<float>(y2, (size_t) nc * n_out), fetch<float>(y0, (size_t) nc * n_out)));
+            mma_err = std::max(mma_err,
+                               rel_err(fetch<float>(y2, (size_t) nc * n_out), fetch<float>(y0, (size_t) nc * n_out)));
         } else if (mma_from != 0) {
             ++bad;
-            std::printf("  %s %d->%d: the tensor-core path took %d columns, not %d\n", f.name, n_in, n_out, mma_from, nc);
+            std::printf("  %s %d->%d: the tensor-core path took %d columns, not %d\n", f.name, n_in, n_out, mma_from,
+                        nc);
         }
         for (int rows : {0, 1, 2, 4}) {
             CK(cudaMemsetAsync(y1, 0xee, (size_t) 8 * n_out * 4, g_s));
@@ -228,10 +244,10 @@ void bench_shape(const Fmt& f, const Act& a, int n_out) {
     for (int nc : {2, 3, 4}) {
         native_quantize_q8_1(a.x, a.q_ref, n_in, nc, g_s);
         native_quantize_q8_1_il(a.x, a.q, a.il, n_in, nc, g_s);
-        const double t0 = time_calls([&](int r) { native_mmvq(f.type, w[(size_t) (r % copies)], a.q_ref, y, n_in, n_out, nc, g_s); });
-        const double t1 = time_calls([&](int r) {
-            native_mmvq_il(f.type, w[(size_t) (r % copies)], a.q, a.il, y, n_in, n_out, nc, g_s);
-        });
+        const double t0 =
+            time_calls([&](int r) { native_mmvq(f.type, w[(size_t) (r % copies)], a.q_ref, y, n_in, n_out, nc, g_s); });
+        const double t1 = time_calls(
+            [&](int r) { native_mmvq_il(f.type, w[(size_t) (r % copies)], a.q, a.il, y, n_in, n_out, nc, g_s); });
         std::printf("  %d: %5.1f -> %5.1f (%3.0f)", nc, t0, t1, mb * 1e3 / t1);
     }
     std::printf("\n");
@@ -267,7 +283,7 @@ void bench27_shape(const Fmt& f, const Act& a, int n_out) {
     cudaFree(y);
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     const bool bench = argc > 1 && std::strcmp(argv[1], "--bench") == 0;
@@ -277,12 +293,12 @@ int main(int argc, char** argv) {
         std::printf("us at 1..8 columns\n");
         for (const Fmt& f : kFmts) {
             if (f.type != 14 && f.type != 13 && f.type != 8) continue;   // the file's Q6_K, Q5_K and Q8_0
-            bench27_shape(f, a5120, 17408);   // ffn_gate, ffn_up
-            bench27_shape(f, a17408, 5120);   // ffn_down
-            bench27_shape(f, a5120, 10240);   // GDN qkv
-            bench27_shape(f, a5120, 12288);   // attention q (with its gate)
-            bench27_shape(f, a5120, 6144);    // GDN z
-            bench27_shape(f, a6144, 5120);    // ssm_out, attention output
+            bench27_shape(f, a5120, 17408);                              // ffn_gate, ffn_up
+            bench27_shape(f, a17408, 5120);                              // ffn_down
+            bench27_shape(f, a5120, 10240);                              // GDN qkv
+            bench27_shape(f, a5120, 12288);                              // attention q (with its gate)
+            bench27_shape(f, a5120, 6144);                               // GDN z
+            bench27_shape(f, a6144, 5120);                               // ssm_out, attention output
         }
         return 0;
     }
@@ -300,8 +316,8 @@ int main(int argc, char** argv) {
     int bad = 0, cases = 0;
     for (const Fmt& f : kFmts) {
         const std::pair<Act*, int> shapes[] = {{&a2560, 10240}, {&a2560, 6144}, {&a6144, 2560}, {&a2560, 12288},
-                                               {&a2560, 2050}, {&a2560, 4097}, {&a2560, 8192}, {&a2560, 512},
-                                               {&a2560, 640},  {&a2560, 65541}};   // the last: a head's class
+                                               {&a2560, 2050},  {&a2560, 4097}, {&a2560, 8192}, {&a2560, 512},
+                                               {&a2560, 640},   {&a2560, 65541}};   // the last: a head's class
         for (const auto& sh : shapes) {
             bad += check_shape(f, *sh.first, sh.second);
             ++cases;

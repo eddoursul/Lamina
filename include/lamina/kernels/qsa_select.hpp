@@ -48,4 +48,4 @@ int64_t qsa_select_max_cells(const QsaShapes& s);
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                     const QsaShapes& s, int32_t* ids, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

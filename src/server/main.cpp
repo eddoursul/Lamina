@@ -17,8 +17,8 @@
 #include "log.hpp"
 #include "mcp.hpp"
 #include "model_config.hpp"
-#include "params.hpp"
 #include "net.hpp"
+#include "params.hpp"
 #include "process.hpp"
 #include "prometheus.hpp"
 #include "remote_model.hpp"
@@ -64,9 +64,9 @@ namespace {
 // a config or a command line that asks for replicas (an engine on each group of the cards) is refused
 constexpr const char* kOneEngine = "replicas are no longer supported, a server runs one engine";
 
-std::atomic<int> g_stops{0};              // stop requests so far (a second Ctrl+C ends the engine at once)
+std::atomic<int> g_stops{0};   // stop requests so far (a second Ctrl+C ends the engine at once)
 std::atomic<const char*> g_reason{"sigint"};
-std::atomic<bool> g_finished{false};      // the clean stop is over (a Windows console event waits for it)
+std::atomic<bool> g_finished{false};   // the clean stop is over (a Windows console event waits for it)
 
 void request_stop(const char* reason) {
     g_reason = reason;
@@ -82,7 +82,9 @@ BOOL WINAPI on_console(DWORD event) {
         case CTRL_LOGOFF_EVENT:
         case CTRL_SHUTDOWN_EVENT:
             // the system ends the process a few seconds after this returns: wait for the clean stop (up to 4.5 s)
-            request_stop(event == CTRL_CLOSE_EVENT ? "console-close" : event == CTRL_LOGOFF_EVENT ? "logoff" : "shutdown");
+            request_stop(event == CTRL_CLOSE_EVENT    ? "console-close"
+                         : event == CTRL_LOGOFF_EVENT ? "logoff"
+                                                      : "shutdown");
             for (int i = 0; i < 45 && !g_finished; ++i) Sleep(100);
             return TRUE;
         default: return FALSE;
@@ -100,7 +102,7 @@ void install_stop_handlers() {
 #else
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
-    struct sigaction old {};
+    struct sigaction old{};
     sigaction(SIGHUP, nullptr, &old);
     if (old.sa_handler != SIG_IGN) std::signal(SIGHUP, on_signal);   // nohup: a hangup ignored at start stays ignored
 #endif
@@ -128,8 +130,7 @@ void open_browser(const std::string& url) {
         o.contain = false;
         Process p(o);
         p.wait(-1);
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
 #endif
 }
 
@@ -171,7 +172,8 @@ std::string server_names(const McpHub& hub) {
 std::string items(const json& d) {
     std::string out;
     for (auto it = d.begin(); it != d.end(); ++it)
-        out += (out.empty() ? "" : ", ") + it.key() + "=" + (it.value().is_string() ? it.value().get<std::string>() : py_repr_value(it.value()));
+        out += (out.empty() ? "" : ", ") + it.key() + "=" +
+               (it.value().is_string() ? it.value().get<std::string>() : py_repr_value(it.value()));
     return out;
 }
 
@@ -247,7 +249,8 @@ std::string no_lending(const json& cfg, const std::string& arch, std::vector<Gpu
     if (card < 0 || on.empty()) return "";   // (nvidia-smi lists nothing: the engine answers when asked)
     if (std::find(on.begin(), on.end(), card) == on.end()) return "the engine does not work on the encoder's card";
     if (arch == "hy_v4_flash" && card != on.front()) return "Hy4-flash's engine lends on its main GPU alone";
-    if (lamina::model_family_from_arch(arch) == lamina::ModelFamily::Inkling2 && card != on.front()) return "Inkling 2's engine lends on its own GPU alone";
+    if (lamina::model_family_from_arch(arch) == lamina::ModelFamily::Inkling2 && card != on.front())
+        return "Inkling 2's engine lends on its own GPU alone";
     return "";
 }
 
@@ -332,12 +335,12 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
     file.erase("model");
     const bool from_preset = !jget(file_cfg, "args").is_array();
     struct Row {
-        std::string path, kind, arch;     // the file (a split model's first shard), what it is, its architecture
+        std::string path, kind, arch;   // the file (a split model's first shard), what it is, its architecture
         size_t shards = 0;
         uint64_t bytes = 0;
-        std::string reads = "-";          // "yes", "no": the engine, the drafter's path or the image encoder reads it
-        std::string here = "-";           // a model's: "can start", "would not start"
-        std::vector<std::string> why;     // said with --verbose
+        std::string reads = "-";        // "yes", "no": the engine, the drafter's path or the image encoder reads it
+        std::string here = "-";         // a model's: "can start", "would not start"
+        std::vector<std::string> why;   // said with --verbose
     };
     // a file's general.architecture, from its copy
     auto arch_of = [&](const std::string& local) -> std::string {
@@ -351,8 +354,8 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
     };
     std::vector<Row> rows;
     size_t can = 0, models_n = 0;
-    std::set<int64_t> widths;        // the models' that the engine reads
-    std::set<std::string> folders;   // their folders
+    std::set<int64_t> widths;                                                     // the models' that the engine reads
+    std::set<std::string> folders;                                                // their folders
     std::vector<std::tuple<std::string, std::string, std::string>> read_models;   // their architectures, copies, paths
     for (const RemoteFound* f : models) {
         Row row;
@@ -405,7 +408,8 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
                 lift_reasoning_effort_arg(cfg);
                 if (!cl.engine.empty()) {
                     apply_engine_options(cfg, cl.engine);
-                    if (!engine_options_ok(cfg, cl.engine)) why = "the engine of this model does not take an option of the command line";
+                    if (!engine_options_ok(cfg, cl.engine))
+                        why = "the engine of this model does not take an option of the command line";
                 }
                 if (why.empty()) {
                     settle_vision(cfg);
@@ -422,11 +426,11 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
         if (reads) {   // (its width and folder: which projectors are made for it, and beside it; its LoRAs)
             try {
                 widths.insert(read_model(local).n_embd);
-            } catch (const std::exception&) {
-            }
+            } catch (const std::exception&) {}
             read_models.emplace_back(row.arch, local, f->model.path);
-            folders.insert(f->model.path.rfind('/') == std::string::npos ? std::string()
-                                                                         : f->model.path.substr(0, f->model.path.rfind('/')));
+            folders.insert(f->model.path.rfind('/') == std::string::npos
+                               ? std::string()
+                               : f->model.path.substr(0, f->model.path.rfind('/')));
         }
         for (const std::string& n : f->notes) row.why.push_back(n);
         if (!reads) {
@@ -462,18 +466,21 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
             problem = local.empty() ? (f.error.empty() ? "not read" : f.error) : projector_check(local, &width);
             if (problem.empty()) {
                 const std::string folder = f.model.path.rfind('/') == std::string::npos
-                                               ? std::string() : f.model.path.substr(0, f.model.path.rfind('/'));
+                                               ? std::string()
+                                               : f.model.path.substr(0, f.model.path.rfind('/'));
                 std::string list;   // the models' widths
                 for (const int64_t each : widths) list += (list.empty() ? "" : ", ") + std::to_string(each);
-                what = widths.empty()              ? "made for a model " + std::to_string(width) + " wide"
-                       : widths.count(width) == 0 ? "made for another model, " + std::to_string(width) + " wide; these are " + list
-                       : widths.size() == 1       ? "made for these models"
-                                                  : "made for the models " + std::to_string(width) + " wide";
+                what = widths.empty() ? "made for a model " + std::to_string(width) + " wide"
+                       : widths.count(width) == 0
+                           ? "made for another model, " + std::to_string(width) + " wide; these are " + list
+                       : widths.size() == 1 ? "made for these models"
+                                            : "made for the models " + std::to_string(width) + " wide";
                 if (widths.count(width) != 0 && folders.count(folder) == 0)
                     what += "; in no model's folder: pictures take one beside the model";
                 use.clear();
             }
-        } else if (f.kind == "LoRA" && problem.empty() && !local.empty()) {   // against a model here of its architecture
+        } else if (f.kind == "LoRA" && problem.empty() && !local.empty()) {   // against a model here
+                                                                              // of its architecture
             for (const auto& [arch, model_local, model_path] : read_models) {
                 if (arch != row.arch) continue;
                 try {
@@ -487,11 +494,12 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
                 break;
             }
         }
-        const bool judged = f.kind == "drafter" || f.kind == "projector" || f.kind == "LoRA" || f.kind == "control vector" ||
-                            f.kind == "engram";
+        const bool judged = f.kind == "drafter" || f.kind == "projector" || f.kind == "LoRA" ||
+                            f.kind == "control vector" || f.kind == "engram";
         if (judged) row.reads = problem.empty() ? "yes" : "no";
         row.why.push_back(what + (!problem.empty() ? "; Lamina does not read it: " + problem
-                                  : !use.empty() ? "; Lamina reads it: " + use : ""));
+                                  : !use.empty()   ? "; Lamina reads it: " + use
+                                                   : ""));
         for (const std::string& n : f.notes) row.why.push_back(n);
         rows.push_back(std::move(row));
     }
@@ -527,19 +535,19 @@ int check_table(const RemoteModels& r, const json& file_cfg, const json& given, 
             std::string(shards.size() < 6 ? 6 - shards.size() : 0, ' ') + shards + "  " + gb(row.bytes));
         if (cl.verbose)
             for (const std::string& y : row.why) say("      " + y);
-        else if (!row.why.empty())
-            (row.kind == "model" ? why_models : what_files) = true;
+        else if (!row.why.empty()) (row.kind == "model" ? why_models : what_files) = true;
     }
     say("");
-    const std::string more = why_models && what_files ? " --verbose says why the rest cannot, and what the other files are."
+    const std::string more = why_models && what_files
+                                 ? " --verbose says why the rest cannot, and what the other files are."
                              : !why_models && what_files && models_n == 0 ? " --verbose says what each is."
-                             : why_models             ? " --verbose says why the rest cannot."
-                             : what_files             ? " --verbose says what the other files are."
-                                                      : "";
+                             : why_models                                 ? " --verbose says why the rest cannot."
+                             : what_files                                 ? " --verbose says what the other files are."
+                                                                          : "";
     if (models_n == 0) {   // the files a model is run with: 0 where Lamina reads one
         const bool any = std::any_of(rows.begin(), rows.end(), [](const Row& row) { return row.reads == "yes"; });
-        say(std::string("No model here; Lamina reads ") + (any ? "the files marked yes beside one." : "none of these files.") +
-            more);
+        say(std::string("No model here; Lamina reads ") +
+            (any ? "the files marked yes beside one." : "none of these files.") + more);
         return any ? 0 : 1;
     }
     if (!pc_stops.empty()) {
@@ -607,7 +615,8 @@ int run(int argc, char** argv) {
     if (cl.bench_runs != 3) bench_opts.command += " --runs " + std::to_string(cl.bench_runs);
     for (const EngineOption& eo : cl.engine) {   // the ones the server sets itself
         if (eo[0] == "--replicas" || starts_with(eo[0], "--replica-") || eo[0] == "--no-replica-cpus")
-            usage_error(eo[0] + ": " + kOneEngine + "; for engines on other cards start a server for each, with its own "
+            usage_error(eo[0] + ": " + kOneEngine +
+                        "; for engines on other cards start a server for each, with its own "
                         "--gpu and --port");
         if (eo[0] == "--native") usage_error("--native: the model is -m MODEL.gguf, or the config's");
         if (eo[0] == "--serve") usage_error("--serve: the server runs the engine in serve mode itself");
@@ -626,7 +635,8 @@ int run(int argc, char** argv) {
         return bench::run({url, keys.empty() ? "" : keys[0]}, json(nullptr), bench_opts, "", 0,
                           [] { return g_stops.load() > 0; });
     }
-    if (!cl.config.empty()) cl.config = u8_str(std::filesystem::absolute(u8_path(cl.config)));   // before the change to its cwd
+    if (!cl.config.empty())
+        cl.config = u8_str(std::filesystem::absolute(u8_path(cl.config)));   // before the change to its cwd
     json file_cfg = json::object();
     try {
         if (!cl.config.empty()) file_cfg = read_config(cl.config);
@@ -635,7 +645,8 @@ int run(int argc, char** argv) {
         return 1;
     }
     if (file_cfg.contains("replicas")) {   // refused, not run as one engine on every card of its "gpu"
-        say_err(std::string("[lamina] config \"replicas\": ") + kOneEngine + "; remove the key, and for engines on other "
+        say_err(std::string("[lamina] config \"replicas\": ") + kOneEngine +
+                "; remove the key, and for engines on other "
                 "cards start a server for each, with its own \"gpu\" and \"port\"");
         return 1;
     }
@@ -657,7 +668,8 @@ int run(int argc, char** argv) {
     std::optional<SayRedirect> remote_lines;
     if (const std::string url = jstr(given, "model"); !mock && is_url(url)) {
         if (!cl.check)
-            usage_error("-m " + url + ": a model at a URL is checked (lamina check -m URL), not run here: download its "
+            usage_error("-m " + url +
+                        ": a model at a URL is checked (lamina check -m URL), not run here: download its "
                         "files, then name the first one's path");
         gpus = nvidia_gpus();
         say_err("[lamina] reading the GGUF files' headers at " + url);
@@ -679,7 +691,8 @@ int run(int argc, char** argv) {
         if (!one.error.empty() || local.empty())
             return check_report(nullptr, gpus, one.error.empty() ? one.model.path + ": not read" : one.error) ? 0 : 1;
         const RemoteModels& r = *remote;
-        remote_lines.emplace([&r](std::string_view text, bool err) { print_line(err ? stderr : stdout, shown_remote(r, text)); });
+        remote_lines.emplace(
+            [&r](std::string_view text, bool err) { print_line(err ? stderr : stdout, shown_remote(r, text)); });
         say(remote_read(r) + "; below, <download> is the folder a download of it keeps its files in");
         for (json* j : {&given, &cl.settings, &file_cfg})
             if (j->contains("model")) (*j)["model"] = local;
@@ -695,10 +708,10 @@ int run(int argc, char** argv) {
     }
     const bool from_preset = !mock && !model.empty() && !jget(file_cfg, "args").is_array();
     json cfg = json::object();
-    std::string model_arch;      // the preset's model's general.architecture
+    std::string model_arch;                 // the preset's model's general.architecture
     std::vector<std::string> preset_keys;   // its keys, which write-config renews
-    std::vector<std::string> notes;   // the preset's lines for the window: the model, the pictures, the log
-    json preset_base = json::object();   // the preset's settings, under the file's (the Settings view compares)
+    std::vector<std::string> notes;         // the preset's lines for the window: the model, the pictures, the log
+    json preset_base = json::object();      // the preset's settings, under the file's (the Settings view compares)
     if ((from_preset || cl.check) && gpus.empty()) gpus = nvidia_gpus();
     try {
         if (from_preset) {
@@ -758,7 +771,8 @@ int run(int argc, char** argv) {
     if (!cl.write_config.empty()) {
         json out;
         std::string arch = model_arch;   // (a config's own args: its model file's)
-        try {   // the form a config is written in now: its cards, its options past the engine's defaults, an object
+        try {                            // the form a config is written in now: its cards,
+                                         // its options past the engine's defaults, an object
             if (arch.empty()) arch = read_model(model_file(cfg)).arch;
             out = modern_config(cfg, arch == "qwen4exp");
         } catch (const std::exception& e) {
@@ -770,9 +784,11 @@ int run(int argc, char** argv) {
             json probe = cfg;   // the draft layer, or the drafter, as a start would find it
             if (const std::string w = resolve_draft_layer(probe, arch); !w.empty()) say(w);
             if (const std::string w = resolve_drafter(probe, arch); !w.empty()) say(w);
-            say("[lamina] wrote " + cl.write_config + (kept.empty() ? "" : " (kept from the earlier file, now " +
-                cl.write_config + ".bak: " + join(kept, ", ") + ")") + "; start it with  lamina serve --config " +
-                cl.write_config);
+            say("[lamina] wrote " + cl.write_config +
+                (kept.empty()
+                     ? ""
+                     : " (kept from the earlier file, now " + cl.write_config + ".bak: " + join(kept, ", ") + ")") +
+                "; start it with  lamina serve --config " + cl.write_config);
         } catch (const std::exception& e) {
             say_err(std::string("[lamina] ") + e.what());
             return 1;
@@ -781,7 +797,9 @@ int run(int argc, char** argv) {
     }
     if (cl.check)
         return check_report(cl.config.empty() && model.empty() ? nullptr : &cfg, gpus, "",
-                            remote ? "Once downloaded, it can start." : "It can start.") ? 0 : 1;
+                            remote ? "Once downloaded, it can start." : "It can start.")
+                   ? 0
+                   : 1;
     // bench: the config as the report shows it, then this run's own server: this PC only, on a port of its own (not
     // the one the user's clients use), loaded at once and kept loaded, the expert profile saved into a copy
     json bench_cfg;
@@ -791,7 +809,8 @@ int run(int argc, char** argv) {
         bench_cfg = cfg;
         const int64_t listed = jget(cfg, "port").is_number_integer() ? cfg["port"].get<int64_t>() : 8095;
         if (listed > 0 && bench::lamina_answers("http://127.0.0.1:" + std::to_string(listed))) {
-            say_err("[lamina] a Lamina server answers on port " + std::to_string(listed) + ": the benchmark needs the GPUs "
+            say_err("[lamina] a Lamina server answers on port " + std::to_string(listed) +
+                    ": the benchmark needs the GPUs "
                     "to itself. Stop that server, or measure it as it runs:  lamina bench --url http://127.0.0.1:" +
                     std::to_string(listed));
             return 2;
@@ -802,20 +821,23 @@ int run(int argc, char** argv) {
         cfg["idle_unload_s"] = 0;
         cfg["open_browser"] = false;
         cfg.erase("ready_file");
-        bench_scratch.path = u8_str(u8_path(temp_dir()) / ("lamina-bench-" + std::to_string(self_pid()) + ".profile.bin"));
+        bench_scratch.path =
+            u8_str(u8_path(temp_dir()) / ("lamina-bench-" + std::to_string(self_pid()) + ".profile.bin"));
         cfg = bench::without_profile_save(cfg, bench_scratch.path);
     }
     // the config's relative paths are its cwd's (itself the start directory's), some read before the change to it
     const std::string cfg_cwd = jstr(cfg, "cwd");
     const std::filesystem::path cfg_dir = std::filesystem::absolute(u8_path(cfg_cwd.empty() ? "." : cfg_cwd));
     if (const std::string log = jstr(cfg, "log"); !log.empty() && !u8_path(log).is_absolute())
-        cfg["log"] = u8_str(cfg_dir / u8_path(log));   // the engine's stderr goes to it before the change, the rest after
+        cfg["log"] = u8_str(cfg_dir / u8_path(log));   // the engine's stderr goes to it
+                                                       // before the change, the rest after
     std::string ready_path;
     if (const std::string rf = jstr(cfg, "ready_file"); !rf.empty()) {
         const std::filesystem::path p = u8_path(rf);
         std::error_code ec;
         if (!p.is_absolute()) usage_error("ready_file (--ready-file) must be an absolute path");
-        if (!std::filesystem::is_directory(p.parent_path(), ec)) usage_error("ready_file (--ready-file): its folder must exist");
+        if (!std::filesystem::is_directory(p.parent_path(), ec))
+            usage_error("ready_file (--ready-file): its folder must exist");
         if (std::filesystem::exists(std::filesystem::symlink_status(p, ec)))
             usage_error("ready_file (--ready-file) already exists; verify and remove a stale file before reuse");
         ready_path = rf;
@@ -827,20 +849,23 @@ int run(int argc, char** argv) {
         shutdown_timeout = st.get<double>();
     }
     const json max_queue = jget(cfg, "max_queue");
-    if (!max_queue.is_null() && (!max_queue.is_number_integer() || max_queue.get<int64_t>() < 0 || max_queue.get<int64_t>() > 4096))
+    if (!max_queue.is_null() &&
+        (!max_queue.is_number_integer() || max_queue.get<int64_t>() < 0 || max_queue.get<int64_t>() > 4096))
         usage_error("max_queue (--max-queue) must be a whole number in 0..4096");
     const json queue_timeout = jget(cfg, "queue_timeout");
-    if (!queue_timeout.is_null() && (queue_timeout.is_boolean() || !queue_timeout.is_number() ||
-                                     !std::isfinite(queue_timeout.get<double>()) || queue_timeout.get<double>() < 0.1 ||
-                                     queue_timeout.get<double>() > 600))
+    if (!queue_timeout.is_null() &&
+        (queue_timeout.is_boolean() || !queue_timeout.is_number() || !std::isfinite(queue_timeout.get<double>()) ||
+         queue_timeout.get<double>() < 0.1 || queue_timeout.get<double>() > 600))
         usage_error("queue_timeout (--queue-timeout) must be finite seconds in 0.1..600");
     if (!queue_timeout.is_null() && max_queue.is_null())
         usage_error("queue_timeout (--queue-timeout) needs max_queue (--max-queue) to bound pending calls");
     if (cl.settings.contains("parallel")) {   // the command line's (a config's is taken as it always was: engine_args)
         const int64_t n = cl.settings["parallel"].get<int64_t>();
-        if (n < 1 || n > 1024) usage_error("--parallel must be in 1..1024; the engine may reduce it to the supported count");
+        if (n < 1 || n > 1024)
+            usage_error("--parallel must be in 1..1024; the engine may reduce it to the supported count");
         const json& args = jget(cfg, "args");
-        if (args.is_array() && std::any_of(args.begin(), args.end(), [](const json& x) { return x == "--batch" || x == "--slots"; }))
+        if (args.is_array() &&
+            std::any_of(args.begin(), args.end(), [](const json& x) { return x == "--batch" || x == "--slots"; }))
             usage_error("--parallel conflicts with an explicit --batch/--slots in the saved engine args");
     }
     const std::string host = jstr(cfg, "host").empty() ? "127.0.0.1" : jstr(cfg, "host");
@@ -887,7 +912,8 @@ int run(int argc, char** argv) {
         say_err(std::string("[lamina] the model's tokenizer could not be read from ") + gguf + ": " + e.what());
         return 1;
     }
-    if (!mock) {   // Flash-Next's draft layer and Inkling 2's drafter, found beside the model or warned about in this window
+    if (!mock) {   // Flash-Next's draft layer and Inkling 2's drafter,
+                   // found beside the model or warned about in this window
         if (const std::string w = resolve_draft_layer(cfg, tok->architecture); !w.empty()) say(w);
         if (const std::string w = resolve_drafter(cfg, tok->architecture); !w.empty()) say(w);
     }
@@ -903,7 +929,8 @@ int run(int argc, char** argv) {
         usage_error("offline (--offline) requires MCP servers and before_load commands to be disabled in this profile");
     if (offline) {
         const std::vector<std::string> blocked = offline_blockers(cfg);
-        if (!blocked.empty()) usage_error("offline (--offline) cannot be strict for this profile: " + join(blocked, "; "));
+        if (!blocked.empty())
+            usage_error("offline (--offline) cannot be strict for this profile: " + join(blocked, "; "));
     }
     std::shared_ptr<Engine> engine;
     std::shared_ptr<Vision> vision;
@@ -923,12 +950,14 @@ int run(int argc, char** argv) {
                 const auto size = std::filesystem::file_size(u8_path(log), ec);
                 bench_log_from = ec ? 0 : (uint64_t) size;
             }
-            apply_engine_env(cfg, offline);   // the engine runs in this process: its environment is this one
-            show_vision_gpu(cfg, gpus);       // and the image encoder's
+            apply_engine_env(cfg, offline);           // the engine runs in this process: its environment is this one
+            show_vision_gpu(cfg, gpus);               // and the image encoder's
             if (!log.empty()) redirect_stderr(log);   // the engine's messages go to its log; the server's stay here
-            monitor_gpus = engine_gpus(cfg);   // in the config's "env", before the engine and the image encoder start
+            monitor_gpus = engine_gpus(cfg);          // in the config's "env", before the
+                                                      // engine and the image encoder start
             sampling_defaults = sampling_defaults_from_config(cfg);
-            if (!sampling_defaults.empty()) say("[lamina] sampling defaults from the config: " + items(sampling_defaults));
+            if (!sampling_defaults.empty())
+                say("[lamina] sampling defaults from the config: " + items(sampling_defaults));
             std::vector<std::string> args = engine_args(cfg);
             if (const std::vector<std::string> old = deprecated_options(file_cfg, args); !old.empty()) {
                 say("[lamina] deprecated options, still taken (lamina write-config FILE writes a config with what "
@@ -937,8 +966,7 @@ int run(int argc, char** argv) {
             }
             lazy = jget(cfg, "lazy_load") == true;
             if (truthy(jget(cfg, "vision"))) {
-                if (!vision_built())
-                    throw ConfigError(std::string("\"vision\": ") + vision_not_built());
+                if (!vision_built()) throw ConfigError(std::string("\"vision\": ") + vision_not_built());
                 say(lazy ? "vision encoder unloaded; it starts with the model ..." : "loading the vision encoder ...");
                 // in this process, before the engine: what it takes of a GPU is taken when the engine sizes its caches
                 json vcfg = cfg["vision"];   // a relative path is the config's cwd's, as for the engine
@@ -948,14 +976,16 @@ int run(int argc, char** argv) {
                 // CPU's borrows none: said where its card was settled)
                 if (truthy(jget(vcfg, "lend")) && !truthy(jget(vcfg, "gpu"))) vcfg["lend"] = false;
                 if (truthy(jget(vcfg, "lend")) && !lend_no.empty()) {
-                    say("[lamina] the vision section's \"lend\" is left out (" + lend_no + "): the image encoder keeps "
+                    say("[lamina] the vision section's \"lend\" is left out (" + lend_no +
+                        "): the image encoder keeps "
                         "its VRAM");
                     vcfg["lend"] = false;
                 }
                 vision_lends = truthy(jget(vcfg, "lend"));
                 vision = std::make_shared<Vision>(vcfg, lazy);
             }
-            say(lazy ? "model unloaded; the first request loads it ..." : "loading the model (the first start takes a minute or two) ...");
+            say(lazy ? "model unloaded; the first request loads it ..."
+                     : "loading the model (the first start takes a minute or two) ...");
             const double silence = engine_silence_s(cfg);   // #481: checked before the (minutes-long) start
             effort_end = effort_end_args(cfg, *tok);        // #458
             if (effort_end) args.insert(args.end(), effort_end->begin(), effort_end->end());
@@ -968,13 +998,15 @@ int run(int argc, char** argv) {
             le->silence_s = silence;
             engine = le;
             if (vision != nullptr && vision_lends) {   // the encoder's loans for its pictures, and the first one now
-                vision->set_lender([engine](int device, uint64_t bytes, std::string& why) { return engine->lend(device, bytes, why); },
-                                   [engine] { engine->unlend(); });
+                vision->set_lender(
+                    [engine](int device, uint64_t bytes, std::string& why) { return engine->lend(device, bytes, why); },
+                    [engine] { engine->unlend(); });
                 if (!lazy) vision->warm_up();
             }
         } else {
             std::vector<std::string> scripts;
-            for (const auto& x : jget(cfg, "scripts")) scripts.push_back(x.is_string() ? x.get<std::string>() : py_dumps(x));
+            for (const auto& x : jget(cfg, "scripts"))
+                scripts.push_back(x.is_string() ? x.get<std::string>() : py_dumps(x));
             if (scripts.empty()) scripts.push_back("Thinking about it.</think>\n\nHello from the mock engine.");
             const json& delay = jget(cfg, "script_delay");
             engine = std::make_shared<MockEngine>(*tok, scripts, 32768, delay.is_number() ? delay.get<double>() : 0.0,
@@ -1014,18 +1046,19 @@ int run(int argc, char** argv) {
                     if ((args[i] == "--batch" || args[i] == "--slots") && args[i + 1].is_string()) {
                         try {
                             requested = std::stoi(args[i + 1].get<std::string>());
-                        } catch (const std::exception&) {
-                        }
+                        } catch (const std::exception&) {}
                     }
             }
-            svc.requested_slots = requested.is_number_integer() && requested.get<int64_t>() > 0 ? requested.get<int64_t>() : 1;
+            svc.requested_slots =
+                requested.is_number_integer() && requested.get<int64_t>() > 0 ? requested.get<int64_t>() : 1;
         }
         svc.answer_room = jget(cfg, "answer_room") != false;
         svc.reasoning_close_retry = jget(cfg, "reasoning_close_retry") == true;   // #1053: opt-in
         svc.literal_markers = jget(cfg, "literal_markers") != false;
         if (const json& n = jget(cfg, "short_opening_tokens"); !n.is_null()) {
             if (!n.is_number_integer() || n.get<int64_t>() < 0)
-                throw ConfigError("\"short_opening_tokens\" must be a whole number, 0 or more, not " + py_repr_value(n));
+                throw ConfigError("\"short_opening_tokens\" must be a whole number, 0 or more, not " +
+                                  py_repr_value(n));
             svc.short_opening_tokens = n.get<int64_t>();
         }
         if (truthy(jget(cfg, "images"))) {   // image generation (docs/USING.md, Image generation)
@@ -1036,24 +1069,28 @@ int run(int argc, char** argv) {
             svc.images = std::make_shared<images::ImageGen>(icfg, jstr(cfg, "log"));
             const std::vector<std::string> gone = svc.images->missing();
             if (!gone.empty())
-                say("[lamina] image generation: missing " + join(gone, ", ") + " - requests fail until the images section names files that are there");
+                say("[lamina] image generation: missing " + join(gone, ", ") +
+                    " - requests fail until the images section names files that are there");
             say("[lamina] image generation: " + py_str(svc.images->model) + " " + jstr(icfg, "quant") + " on " +
-                (jstr(icfg, "backend").empty() ? "?" : jstr(icfg, "backend")) + " (POST /v1/images/generations; GPU policy " +
-                svc.images->policy + ")");
+                (jstr(icfg, "backend").empty() ? "?" : jstr(icfg, "backend")) +
+                " (POST /v1/images/generations; GPU policy " + svc.images->policy + ")");
         }
         const json& ps = jget(cfg, "prevent_sleep");
         if (!ps.is_null() && !ps.is_boolean())
             throw ConfigError("\"prevent_sleep\" must be true or false, not " + py_repr_value(ps));
         svc.keep_awake = KeepAwake::create(ps == true);   // #1727: opt-in, Windows only
         if (!jget(cfg, "reasoning_effort").is_null()) {   // #1641: the thinking level of requests that name none
-            svc.config_effort = jstr(clean_shared_defaults({{"reasoning_effort", cfg["reasoning_effort"]}}), "reasoning_effort");
+            svc.config_effort =
+                jstr(clean_shared_defaults({{"reasoning_effort", cfg["reasoning_effort"]}}), "reasoning_effort");
             if (!svc.config_effort.empty())
-                say("[lamina] thinking level: " + svc.config_effort + " (reasoning_effort in the config; a request, or the Chat "
+                say("[lamina] thinking level: " + svc.config_effort +
+                    " (reasoning_effort in the config; a request, or the Chat "
                     "settings shared with other apps, can set its own)");
         }
-        svc.codex_thread_titles = jget(cfg, "codex_thread_titles") == true;       // #923: opt-in
-        svc.codex_compaction_cache = jget(cfg, "codex_compaction_cache") == true; // #924: opt-in
-        svc.set_aliases(jget(cfg, "aliases"));   // #297: other names the model answers to
+        svc.codex_thread_titles = jget(cfg, "codex_thread_titles") == true;         // #923: opt-in
+        svc.codex_compaction_cache = jget(cfg, "codex_compaction_cache") == true;   // #924: opt-in
+        svc.set_aliases(jget(cfg, "aliases"));                                      // #297: other names
+                                                                                    // the model answers to
         if (!svc.aliases_now().empty()) say("[lamina] model aliases: " + join(svc.aliases_now(), ", "));
         svc.set_lora_models(jget(cfg, "lora_models"));   // names that pick LoRA adapters
         if (const json lm = svc.lora_models_now(); !lm.empty()) {
@@ -1063,8 +1100,9 @@ int run(int argc, char** argv) {
         }
         svc.api_key = api_key;
         if (!truthy(svc.api_key) && cfg.contains("api_key"))   // #569: written, but empty: a warning, not a stop
-            say_err("[lamina] the api_key in the config is empty: this server has no API key (anyone who can reach it can use "
-                    "it); set one, or leave api_key out");
+            say_err(
+                "[lamina] the api_key in the config is empty: this server has no API key (anyone who can reach it can use "
+                "it); set one, or leave api_key out");
         svc.cors_origins = origins_of(jget(cfg, "cors_origins"), "cors_origins", true);
         svc.trusted_origins = origins_of(jget(cfg, "trusted_origins"), "trusted_origins", false);
         const char* env_hosts = std::getenv("LAMINA_ALLOWED_HOSTS");
@@ -1075,34 +1113,46 @@ int run(int argc, char** argv) {
                     : "[lamina] also answers to the host names " + join(svc.allowed_hosts, ", ") + " (allowed_hosts)");
         svc.api_monitor = jget(cfg, "api_monitor") == true;
         if (svc.api_monitor)
-            say(std::string("[lamina] API request monitor on (/api-monitor): the last 100 requests' prompts and answers are kept "
-                            "in memory") + (truthy(svc.api_key) ? "" : "; anyone who can reach this server can read them (no API key)"));
+            say(std::string(
+                    "[lamina] API request monitor on (/api-monitor): the last 100 requests' prompts and answers are kept "
+                    "in memory") +
+                (truthy(svc.api_key) ? "" : "; anyone who can reach this server can read them (no API key)"));
         if (!svc.cors_origins.empty())
             say("[lamina] CORS on /v1/* for " + join(svc.cors_origins, ", ") +
-                (truthy(svc.api_key) || std::find(svc.cors_origins.begin(), svc.cors_origins.end(), "*") == svc.cors_origins.end()
-                     ? "" : " - WARNING: any web page may use the model (no API key)"));
+                (truthy(svc.api_key) ||
+                         std::find(svc.cors_origins.begin(), svc.cors_origins.end(), "*") == svc.cors_origins.end()
+                     ? ""
+                     : " - WARNING: any web page may use the model (no API key)"));
         svc.idle_unload_s = jget(cfg, "idle_unload_s").is_number() ? cfg["idle_unload_s"].get<double>() : 0.0;
-        svc.min_free_vram_mib = jget(cfg, "min_free_vram_mib").is_number() ? cfg["min_free_vram_mib"].get<int64_t>() : 0;
+        svc.min_free_vram_mib =
+            jget(cfg, "min_free_vram_mib").is_number() ? cfg["min_free_vram_mib"].get<int64_t>() : 0;
         svc.before_load = truthy(jget(cfg, "before_load")) ? cfg["before_load"] : json(nullptr);
         const json& blt = jget(cfg, "before_load_timeout_s");
         if (truthy(blt)) {
             if (blt.is_number()) svc.before_load_timeout_s = blt.get<double>();
-            else say("[lamina] \"before_load_timeout_s\" in the config is not a number; using " + py_g(svc.before_load_timeout_s) + " s");
+            else
+                say("[lamina] \"before_load_timeout_s\" in the config is not a number; using " +
+                    py_g(svc.before_load_timeout_s) + " s");
         }
         svc.before_load_ignore_failure = jget(cfg, "before_load_ignore_failure") == true;
         svc.before_load_strict = jget(cfg, "before_load_strict") == true;
-        const std::string mode = jget(cfg, "anthropic_thinking").is_string() && !cfg["anthropic_thinking"].get<std::string>().empty()
-                                     ? cfg["anthropic_thinking"].get<std::string>() : "model";   // #278
+        const std::string mode =
+            jget(cfg, "anthropic_thinking").is_string() && !cfg["anthropic_thinking"].get<std::string>().empty()
+                ? cfg["anthropic_thinking"].get<std::string>()
+                : "model";   // #278
         if (mode != "model" && mode != "on_request")
-            throw ConfigError("anthropic_thinking must be \"model\" or \"on_request\", not " + py_repr_value(json(mode)));
+            throw ConfigError("anthropic_thinking must be \"model\" or \"on_request\", not " +
+                              py_repr_value(json(mode)));
         svc.anthropic_think_unasked = mode == "model";
         const json recovery = cfg.contains("tool_call_recovery") ? cfg["tool_call_recovery"] : json(false);
-        if (!recovery.is_boolean()) throw ConfigError("\"tool_call_recovery\" must be true or false, not " + py_repr_value(recovery));
+        if (!recovery.is_boolean())
+            throw ConfigError("\"tool_call_recovery\" must be true or false, not " + py_repr_value(recovery));
         svc.tool_call_recovery = recovery.get<bool>();
         const json etu = cfg.contains("env_to_user") ? cfg["env_to_user"] : json(false);
         if (!etu.is_boolean()) throw ConfigError("\"env_to_user\" must be true or false, not " + py_repr_value(etu));
         g_env_to_user = etu.get<bool>();
-        const json rs = cfg.contains("repeat_stop_tokens") ? cfg["repeat_stop_tokens"] : json(256);   // #606: 0 turns it off
+        const json rs = cfg.contains("repeat_stop_tokens") ? cfg["repeat_stop_tokens"] : json(256);   // #606: 0 turns
+                                                                                                      // it off
         if (!rs.is_number_integer() || rs.get<int64_t>() < 0)
             throw ConfigError("\"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not " + py_repr_value(rs));
         svc.repeat_stop_tokens = rs.get<int64_t>();
@@ -1111,12 +1161,14 @@ int run(int argc, char** argv) {
             svc.set_reasoning_budget_tokens(cfg["reasoning_budget_tokens"]);
             const auto budget = svc.reasoning_budget(json::object());
             if (budget && *budget)
-                say("[lamina] thinking budget: " + std::to_string(*budget) + " tokens (reasoning_budget_tokens; a request can set its own)");
+                say("[lamina] thinking budget: " + std::to_string(*budget) +
+                    " tokens (reasoning_budget_tokens; a request can set its own)");
         }
         json loop = cfg.contains("reasoning_loop_recovery") ? cfg["reasoning_loop_recovery"] : json(false);   // #728
         if (loop == true) loop = "recover";
         if (loop != false && loop != "stop" && loop != "recover")
-            throw ConfigError("\"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", not " + py_repr_value(loop));
+            throw ConfigError("\"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", not " +
+                              py_repr_value(loop));
         svc.reasoning_loop_recovery = loop.is_string() ? loop.get<std::string>() : "";
         // the Monitor reads every card the engine uses (#112), the first its own (#51)
         svc.gpu_indices = monitor_gpus ? *monitor_gpus : engine_gpus(cfg);
@@ -1164,14 +1216,18 @@ int run(int argc, char** argv) {
     }
     if (hub != nullptr) {
         svc.mcp = hub;
-        say("[lamina] starting " + std::to_string(hub->servers.size()) + " MCP server" + (hub->servers.size() != 1 ? "s" : "") +
-            " for the web app's chat: " + server_names(*hub));
+        say("[lamina] starting " + std::to_string(hub->servers.size()) + " MCP server" +
+            (hub->servers.size() != 1 ? "s" : "") + " for the web app's chat: " + server_names(*hub));
         hub->start();
     }
     // the HTTP side
     svc.host_names = host_names_for(host, svc.allowed_hosts, svc.trusted_origins);
     svc.telemetry = std::make_shared<Telemetry>(
-        [&svc] { return json{{"tok_s", svc.tok_s()}, {"tok_s_mean", svc.tok_s_mean()}, {"prefill_tok_s_mean", svc.prefill_tok_s_mean()}}; },
+        [&svc] {
+            return json{{"tok_s", svc.tok_s()},
+                        {"tok_s_mean", svc.tok_s_mean()},
+                        {"prefill_tok_s_mean", svc.prefill_tok_s_mean()}};
+        },
         svc.gpu_index, svc.gpu_indices);
     HttpServer http(svc);
     http.latencies = std::make_shared<prometheus::Latencies>();
@@ -1188,37 +1244,46 @@ int run(int argc, char** argv) {
     svc.start_idle_unload();
     const int bound = http.port();
     const std::string here = host == "0.0.0.0" || host.empty() || host == "::" ? "127.0.0.1" : host;
-    say("ready: http://" + here + ":" + std::to_string(bound) + "/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
-        "context " + std::to_string(engine->max_context()) + " tokens" + (vision != nullptr ? ", images on" : "") +
+    say("ready: http://" + here + ":" + std::to_string(bound) +
+        "/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
+        "context " +
+        std::to_string(engine->max_context()) + " tokens" + (vision != nullptr ? ", images on" : "") +
         (truthy(svc.api_key) ? ", API key required" : "") + ")");
     if (!cl.bench)
-        say("       open http://" + here + ":" + std::to_string(bound) + "/ in a browser to chat; close this window to stop the model");
+        say("       open http://" + here + ":" + std::to_string(bound) +
+            "/ in a browser to chat; close this window to stop the model");
     if (!loopback) {   // issue #26: reachable from other devices - at which address, and what can still block it
         const std::vector<std::string> ips = lan_addresses();
         for (const auto& ip : ips)
-            say("       from other devices: http://" + ip + ":" + std::to_string(bound) + "/   (API: http://" + ip + ":" +
-                std::to_string(bound) + "/v1)");
+            say("       from other devices: http://" + ip + ":" + std::to_string(bound) + "/   (API: http://" + ip +
+                ":" + std::to_string(bound) + "/v1)");
         if (ips.empty()) say("       from other devices: http://<this PC's IP address>:" + std::to_string(bound) + "/");
         if (!truthy(svc.api_key))
             say("       WARNING: no API key - anyone on your network can use this model. Add \"api_key\": \"...\" to the config "
                 "(clients send it as their API key; the web page asks for it)");
 #ifdef _WIN32
         say("       nothing arrives? Windows Firewall blocks it until allowed: accept its prompt for lamina, or run in an "
-            "admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Lamina " + std::to_string(bound) + "\" -Direction "
-            "Inbound -Protocol TCP -LocalPort " + std::to_string(bound) + " -Action Allow -Profile Private\n       (and set "
+            "admin PowerShell:\n         New-NetFirewallRule -DisplayName \"Lamina " +
+            std::to_string(bound) +
+            "\" -Direction "
+            "Inbound -Protocol TCP -LocalPort " +
+            std::to_string(bound) +
+            " -Action Allow -Profile Private\n       (and set "
             "this network to Private in Windows' network settings)");
 #endif
     }
     if (jget(cfg, "open_browser") == true) {   // --open-browser (--open), or the config's
-        const std::string url = "http://" + std::string(host == "0.0.0.0" || host.empty() ? "127.0.0.1" : host) + ":" + std::to_string(bound) + "/";
+        const std::string url = "http://" + std::string(host == "0.0.0.0" || host.empty() ? "127.0.0.1" : host) + ":" +
+                                std::to_string(bound) + "/";
         std::thread([url] { open_browser(url); }).detach();
     }
     if (!ready_path.empty()) {
         const std::string rh = here.find(':') != std::string::npos && !starts_with(here, "[") ? "[" + here + "]" : here;
-        json record = {{"api_state", "ready"}, {"api_url", "http://" + rh + ":" + std::to_string(bound)}, {"bound_host", host},
-                       {"bound_port", bound}, {"created_at", now_s()}, {"instance_id", svc.instance_id},
-                       {"model_id", svc.model}, {"model_state", lazy ? "unloaded" : "ready"}, {"pid", self_pid()},
-                       {"schema_version", 1}};   // sorted keys, as json.dumps(sort_keys=True)
+        json record = {{"api_state", "ready"},  {"api_url", "http://" + rh + ":" + std::to_string(bound)},
+                       {"bound_host", host},    {"bound_port", bound},
+                       {"created_at", now_s()}, {"instance_id", svc.instance_id},
+                       {"model_id", svc.model}, {"model_state", lazy ? "unloaded" : "ready"},
+                       {"pid", self_pid()},     {"schema_version", 1}};   // sorted keys, as json.dumps(sort_keys=True)
         std::FILE* f = std::fopen(ready_path.c_str(), "wx");
         if (f == nullptr || std::fputs((py_dumps(record, false) + "\n").c_str(), f) < 0 || std::fclose(f) != 0) {
             say_err("[lamina] could not write ready file (OSError)");
@@ -1239,7 +1304,9 @@ int run(int argc, char** argv) {
     bool drained = true;
     if (shutdown_timeout) {
         int64_t pending = svc.begin_drain();
-        if (pending) say("[lamina] draining " + std::to_string(pending) + " inference call(s) for up to " + py_g(*shutdown_timeout) + " s ...");
+        if (pending)
+            say("[lamina] draining " + std::to_string(pending) + " inference call(s) for up to " +
+                py_g(*shutdown_timeout) + " s ...");
         pending = svc.wait_for_drain(*shutdown_timeout);
         if (pending) {
             const int64_t cancelled = svc.cancel_owned_requests();
@@ -1249,7 +1316,8 @@ int run(int argc, char** argv) {
         }
     } else {   // no time given to finish: the running and the queued requests stop now (a console close allows 4.5 s)
         svc.begin_drain();
-        if (const int64_t n = svc.cancel_owned_requests()) say("[lamina] stopping " + std::to_string(n) + " request(s) ...");
+        if (const int64_t n = svc.cancel_owned_requests())
+            say("[lamina] stopping " + std::to_string(n) + " request(s) ...");
         svc.wait_for_drain(5);
     }
     http.stop();
@@ -1265,8 +1333,8 @@ int run(int argc, char** argv) {
     if (!ready_path.empty()) {   // only this instance's own record
         std::ifstream f(u8_path(ready_path), std::ios::binary);
         json rec;
-        if (f && py_loads(std::string(std::istreambuf_iterator<char>(f), {}), rec) && jstr(rec, "instance_id") == svc.instance_id &&
-            jget(rec, "pid") == self_pid()) {
+        if (f && py_loads(std::string(std::istreambuf_iterator<char>(f), {}), rec) &&
+            jstr(rec, "instance_id") == svc.instance_id && jget(rec, "pid") == self_pid()) {
             f.close();
             std::error_code ec;
             std::filesystem::remove(u8_path(ready_path), ec);
@@ -1278,7 +1346,7 @@ int run(int argc, char** argv) {
     return drained ? 0 : 8;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
 #ifdef _WIN32

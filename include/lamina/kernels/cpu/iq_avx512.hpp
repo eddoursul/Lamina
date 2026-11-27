@@ -15,4 +15,4 @@ void iq512_gu_rows(int ggml_type, const uint8_t* blob, size_t gu_row, size_t up_
 void iq512_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
                 float* const* out, int r0, int r1);
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

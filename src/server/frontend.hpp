@@ -49,15 +49,15 @@ public:
 private:
     json detect_caps() const;
     std::string source_;
-    std::optional<Hy4Tags> hy4_;   ///< Hy4-flash's tags: the probes read their renders translated
+    std::optional<Hy4Tags> hy4_;        ///< Hy4-flash's tags: the probes read their renders translated
     std::optional<BlockTags> blocks_;   ///< a block form's tags (Inkling 2's): the probes read its calls' JSON
     std::unique_ptr<jinja::program> prog_;
     json caps_;
 };
 
 // ---- requests
-extern const std::vector<std::string_view> kTextParts;     ///< "text", "input_text" (and a part without a type)
-extern const std::vector<std::string_view> kImageParts;    ///< "image_url", "input_image", "image"
+extern const std::vector<std::string_view> kTextParts;    ///< "text", "input_text" (and a part without a type)
+extern const std::vector<std::string_view> kImageParts;   ///< "image_url", "input_image", "image"
 std::string text_of(const json& content);
 bool has_image(const json& content);
 std::string image_source(const json& part);
@@ -82,7 +82,7 @@ struct Marked {
 Marked mark_think_literals(const json& messages, const json& tools, const LiteralTags& tags);
 /// the rendered prompt with the marks turned back into their tags' text, and the byte spans of those tags in it
 std::pair<std::string, std::vector<std::pair<size_t, size_t>>> unmark_think_literals(const std::string& prompt,
-                                                                                      const LiteralTags& tags);
+                                                                                     const LiteralTags& tags);
 
 /// the config's "env_to_user": opencode's <env> block moved from the system message to the first user message
 extern bool g_env_to_user;
@@ -155,9 +155,11 @@ public:
     int rescued = 0;   ///< calls delivered from the reasoning
     int refused = 0;   ///< declared calls kept as reasoning text
     const std::string& state() const { return state_; }
-    const std::string& buf() const { return buf_; }      ///< text held back (a tag still arriving)
+    const std::string& buf() const { return buf_; }          ///< text held back (a tag still arriving)
     bool has_pending() const { return !pending_.empty(); }   ///< calls from the reasoning waiting to settle
-    bool in_block() const { return bk_ == Blk::Think || bk_ == Blk::Text || bk_ == Blk::Call; }   ///< block mode: one is open
+    bool in_block() const {
+        return bk_ == Blk::Think || bk_ == Blk::Text || bk_ == Blk::Call;
+    }   ///< block mode: one is open
 
 private:
     bool ok_at(size_t p);
@@ -200,11 +202,11 @@ private:
     void block_close(std::vector<Event>& out);
     bool blocks_ = false;
     enum class Blk { None, Header, Think, Text, Call } bk_ = Blk::None;
-    std::string hdr_, body_;   ///< a block's header (a call's name), a call's JSON so far
-    bool texts_ = false;       ///< a text block has written something: the next one starts a paragraph
-    bool sep_ = false;         ///< that paragraph break is due
+    std::string hdr_, body_;               ///< a block's header (a call's name), a call's JSON so far
+    bool texts_ = false;                   ///< a text block has written something: the next one starts a paragraph
+    bool sep_ = false;                     ///< that paragraph break is due
     bool thinks_ = false, tsep_ = false;   ///< the same for the thinking blocks
-    bool args_sent_ = false;   ///< a piece of the call's arguments went out
+    bool args_sent_ = false;               ///< a piece of the call's arguments went out
     /// where a call's JSON {"name": ..., "args": {...}} holds its arguments' object, found as the text arrives
     struct ArgScan {
         int st = 0, depth = 0;
@@ -216,4 +218,4 @@ private:
     } as_;
 };
 
-}  // namespace lamina
+}   // namespace lamina

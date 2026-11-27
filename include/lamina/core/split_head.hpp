@@ -54,10 +54,10 @@ private:
     int64_t n_in_ = 0, split_ = 0, rows_ = 0;
     uint64_t bytes_ = 0;
     cudaStream_t s_ = nullptr;
-    void* w_ = nullptr;                                         // the rows' GGUF blocks
-    float *mixed_ = nullptr, *out_ = nullptr;                   // device: the input, the logits
+    void* w_ = nullptr;                         // the rows' GGUF blocks
+    float *mixed_ = nullptr, *out_ = nullptr;   // device: the input, the logits
     uint8_t *xq_ = nullptr, *xil_ = nullptr, *scratch_ = nullptr;
-    float* h_in_ = nullptr;                                     // mapped (portable)
+    float* h_in_ = nullptr;   // mapped (portable)
     uint32_t *h_hand_ = nullptr, *h_done_ = nullptr;
     int32_t* h_idx_ = nullptr;
     float *h_val_ = nullptr, *h_logits_ = nullptr;
@@ -65,4 +65,4 @@ private:
     cudaGraphExec_t exec_[9][2] = {};
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

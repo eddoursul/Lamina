@@ -22,9 +22,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "lamina/kernels/mrope.hpp"
 #include "lamina/kernels/native_qsa.hpp"
 #include "lamina/kernels/warp.cuh"
-#include "lamina/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <atomic>
 #include <cmath>
@@ -36,12 +36,12 @@
 
 namespace lamina::kernels {
 namespace {
-template<int BlockSize>
-__global__ void norm(const float* input, const float* __restrict__ gamma, float* output,
-                     int n_cols, float epsilon) {
+template <int BlockSize>
+__global__ void norm(const float* input, const float* __restrict__ gamma, float* output, int n_cols, float epsilon) {
     const int tid = threadIdx.x;
     const std::size_t row_offset = std::size_t(blockIdx.x) * n_cols;
-    input += row_offset; output += row_offset;
+    input += row_offset;
+    output += row_offset;
     float partial = 0.0f;
     for (std::size_t col = tid; col < std::size_t(n_cols); col += BlockSize) {
         const float x = input[col];
@@ -64,8 +64,8 @@ __global__ void norm(const float* input, const float* __restrict__ gamma, float*
 // `norm<256>`, then native_rope.cu's `apply` on its output, one block a row of at most 256 columns: the normalized
 // row waits in shared memory.  Row r is read at input + r * in_stride.
 template <int MODE>
-__global__ void norm_rope(const float* input, int in_stride, const float* __restrict__ gamma, float* output,
-                          int n_cols, float epsilon, int n_rot, float theta_scale, const int* __restrict__ positions,
+__global__ void norm_rope(const float* input, int in_stride, const float* __restrict__ gamma, float* output, int n_cols,
+                          float epsilon, int n_rot, float theta_scale, const int* __restrict__ positions,
                           const int32_t* __restrict__ mtab, int heads, int pos_stride, RopeKernelArgs k, RopeTab rt) {
     constexpr int BlockSize = 256;
     const int tid = threadIdx.x, row = blockIdx.x;
@@ -103,8 +103,7 @@ __global__ void norm_rope(const float* input, int in_stride, const float* __rest
     output[pair] = a * c - b * s;
     output[pair + n_rot / 2] = a * s + b * c;
 }
-__global__ void gate(const float* attn, const float* __restrict__ q_full, float* output,
-                     int n_head, int head_dim) {
+__global__ void gate(const float* attn, const float* __restrict__ q_full, float* output, int n_head, int head_dim) {
     const std::size_t i = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= std::size_t(n_head) * head_dim) return;
     const std::size_t head = i / head_dim, channel = i % head_dim;
@@ -125,30 +124,33 @@ bool overlap(const void* a, std::size_t an, const void* b, std::size_t bn) {
     const auto ap = reinterpret_cast<std::uintptr_t>(a), bp = reinterpret_cast<std::uintptr_t>(b);
     return ap < bp + bn && bp < ap + an;
 }
-void buffers(const float* input, std::size_t in_bytes, const float* weight, std::size_t weight_bytes,
-             float* output, void* stream) {
+void buffers(const float* input, std::size_t in_bytes, const float* weight, std::size_t weight_bytes, float* output,
+             void* stream) {
     if (!stream || !valid(input, in_bytes) || !valid(weight, weight_bytes) || !valid(output, in_bytes) ||
         overlap(input, in_bytes, weight, weight_bytes) || overlap(output, in_bytes, weight, weight_bytes) ||
         (input != output && overlap(input, in_bytes, output, in_bytes)))
-        throw std::invalid_argument("native QSA requires a stream, aligned spans, and disjoint buffers or exact input/output alias");
+        throw std::invalid_argument(
+            "native QSA requires a stream, aligned spans, and disjoint buffers or exact input/output alias");
 }
 void check_launch() {
     const auto result = cudaGetLastError();
     if (result != cudaSuccess)
         throw std::runtime_error(std::string("native QSA launch: ") + cudaGetErrorString(result));
 }
-} // namespace
+}   // namespace
 
-void native_qsa_rms_norm_weighted(const float* input, const float* gamma, float* output,
-                                  int n_cols, int n_rows, float epsilon, void* stream) {
+void native_qsa_rms_norm_weighted(const float* input, const float* gamma, float* output, int n_cols, int n_rows,
+                                  float epsilon, void* stream) {
     const auto count = elements(n_cols, n_rows);
     if (!std::isfinite(epsilon) || epsilon < 0.0f)
         throw std::invalid_argument("native QSA requires finite nonnegative epsilon");
     buffers(input, count * 4, gamma, std::size_t(n_cols) * 4, output, stream);
     if (n_cols < 1024)
-        norm<256><<<unsigned(n_rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(input, gamma, output, n_cols, epsilon);
+        norm<256>
+            <<<unsigned(n_rows), 256, 0, static_cast<cudaStream_t>(stream)>>>(input, gamma, output, n_cols, epsilon);
     else
-        norm<1024><<<unsigned(n_rows), 1024, 0, static_cast<cudaStream_t>(stream)>>>(input, gamma, output, n_cols, epsilon);
+        norm<1024>
+            <<<unsigned(n_rows), 1024, 0, static_cast<cudaStream_t>(stream)>>>(input, gamma, output, n_cols, epsilon);
     check_launch();
 }
 void native_qsa_norm_rope_tokens(const float* input, int in_stride, const float* gamma, float* output, int n_cols,
@@ -161,8 +163,8 @@ void native_qsa_norm_rope_tokens(const float* input, int in_stride, const float*
                                     "epsilon and base");
     const std::size_t in_bytes = (std::size_t(n_rows - 1) * in_stride + n_cols) * 4;
     if (!stream || !valid(input, in_bytes) || !valid(gamma, std::size_t(n_cols) * 4) || !valid(output, count * 4) ||
-        (input != output && overlap(input, in_bytes, output, count * 4)) ||
-        (input == output && in_stride != n_cols) || overlap(output, count * 4, gamma, std::size_t(n_cols) * 4))
+        (input != output && overlap(input, in_bytes, output, count * 4)) || (input == output && in_stride != n_cols) ||
+        overlap(output, count * 4, gamma, std::size_t(n_cols) * 4))
         throw std::invalid_argument("native QSA norm-rope requires a stream, aligned spans, and disjoint buffers or an "
                                     "exact input/output alias");
     // pinned host-side float powf, as native_rope_apply_tokens
@@ -173,23 +175,24 @@ void native_qsa_norm_rope_tokens(const float* input, int in_stride, const float*
     const cudaStream_t st = static_cast<cudaStream_t>(stream);
     if (mode == ROPE_TABLE)
         norm_rope<ROPE_TABLE><<<unsigned(n_rows), 256, 0, st>>>(input, in_stride, gamma, output, n_cols, epsilon, n_rot,
-                                                               theta_scale, positions, mrope_table(), heads, pos_stride,
-                                                               k, rt);
+                                                                theta_scale, positions, mrope_table(), heads,
+                                                                pos_stride, k, rt);
     else if (mode == ROPE_SCALED)
-        norm_rope<ROPE_SCALED><<<unsigned(n_rows), 256, 0, st>>>(input, in_stride, gamma, output, n_cols, epsilon, n_rot,
-                                                                theta_scale, positions, mrope_table(), heads, pos_stride,
-                                                                k, rt);
+        norm_rope<ROPE_SCALED><<<unsigned(n_rows), 256, 0, st>>>(input, in_stride, gamma, output, n_cols, epsilon,
+                                                                 n_rot, theta_scale, positions, mrope_table(), heads,
+                                                                 pos_stride, k, rt);
     else
         norm_rope<ROPE_PLAIN><<<unsigned(n_rows), 256, 0, st>>>(input, in_stride, gamma, output, n_cols, epsilon, n_rot,
-                                                               theta_scale, positions, mrope_table(), heads, pos_stride,
-                                                               k, rt);
+                                                                theta_scale, positions, mrope_table(), heads,
+                                                                pos_stride, k, rt);
     check_launch();
 }
-void native_qsa_gate_apply(const float* attn, const float* q_full, float* output,
-                           int n_head, int head_dim, void* stream) {
+void native_qsa_gate_apply(const float* attn, const float* q_full, float* output, int n_head, int head_dim,
+                           void* stream) {
     const auto count = elements(head_dim, n_head);
     buffers(attn, count * 4, q_full, count * 8, output, stream);
-    gate<<<unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(attn, q_full, output, n_head, head_dim);
+    gate<<<unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(attn, q_full, output, n_head,
+                                                                                       head_dim);
     check_launch();
 }
-} // namespace lamina::kernels
+}   // namespace lamina::kernels

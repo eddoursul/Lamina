@@ -43,4 +43,4 @@ inline void device_store_fence() {
 #endif
 }
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

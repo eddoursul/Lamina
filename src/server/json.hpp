@@ -41,8 +41,8 @@ const json& jget(const json& o, std::string_view key);
 bool truthy(const json& v);
 /// a string member, or `dflt` when it is missing or not a string
 std::string jstr(const json& o, std::string_view key, std::string_view dflt = "");
-bool is_int(const json& v);       ///< an int, not a bool
-bool is_num(const json& v);       ///< an int or a float, not a bool
+bool is_int(const json& v);                       ///< an int, not a bool
+bool is_num(const json& v);                       ///< an int or a float, not a bool
 bool is_str(const json& v, std::string_view s);   ///< v == s: a str, equal to `s`
 
 // ---- str methods on UTF-8 text
@@ -61,16 +61,16 @@ bool starts_with(std::string_view s, std::string_view p);
 bool ends_with(std::string_view s, std::string_view p);
 /// s.startswith(p) for any of `ps`
 bool starts_with_any(std::string_view s, std::initializer_list<std::string_view> ps);
-bool contains_space(std::string_view s);       ///< any(c.isspace() for c in s)
+bool contains_space(std::string_view s);   ///< any(c.isspace() for c in s)
 std::string replace_all(std::string s, std::string_view from, std::string_view to);
 std::vector<std::string> split(std::string_view s, std::string_view sep);
 std::vector<std::string> split_ws(std::string_view s);   ///< str.split(): the fields between ASCII whitespace
 /// str.splitlines(): \n, \r, \r\n, \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029 end a line
 std::vector<std::string_view> splitlines(std::string_view s);
-std::string lower(std::string_view s);         ///< ASCII lower case (str.lower on the inputs that reach it)
+std::string lower(std::string_view s);   ///< ASCII lower case (str.lower on the inputs that reach it)
 /// urllib.parse.unquote_to_bytes: each %XX as its byte, the rest (a % without two hex digits too) as it is
 std::string unquote_to_bytes(std::string_view s);
-size_t utf8_len(std::string_view s);           ///< len() of the decoded text
+size_t utf8_len(std::string_view s);   ///< len() of the decoded text
 /// the code point at s[i] and its length (an invalid byte reads as itself, length 1)
 uint32_t utf8_at(std::string_view s, size_t i, size_t* n);
 void utf8_append(std::string& out, uint32_t cp);
@@ -84,4 +84,4 @@ std::string narrow(std::wstring_view w);   ///< the Windows API's UTF-16 -> UTF-
 /// a random hex string of n digits (uuid.uuid4().hex[:n])
 std::string random_hex(size_t n);
 
-}  // namespace lamina
+}   // namespace lamina

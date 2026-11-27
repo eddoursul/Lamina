@@ -26,8 +26,8 @@ struct PinnedArena {
     void* base = nullptr;
     uint64_t capacity = 0;
     PageBacking backing = PageBacking::NormalPages;
-    std::string note;              // why the backing is what it is, for the startup print
-    uint64_t locked_bytes = 0;     // resident via the working-set lock when CUDA could not pin it
+    std::string note;            // why the backing is what it is, for the startup print
+    uint64_t locked_bytes = 0;   // resident via the working-set lock when CUDA could not pin it
     /// Plan v0.3 P5: when the whole arena cannot be registered, it is registered in `slice`-byte pieces from the
     /// start; this is the pinned prefix (a copy that stays inside one slice can then DMA straight from the arena).
     uint64_t registered_bytes = 0;
@@ -57,5 +57,4 @@ struct LoadStats {
     double gib_per_second() const { return seconds > 0 ? (double) bytes / (1024.0 * 1024 * 1024) / seconds : 0.0; }
 };
 
-
-}  // namespace lamina::core
+}   // namespace lamina::core

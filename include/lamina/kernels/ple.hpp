@@ -30,7 +30,6 @@
 
 namespace lamina::kernels {
 
-
 /// Weights of the single PLE layer (`ple.layers = [1]`).  `blk.1.*` in the pack.
 ///
 ///   key_codes / key_scales   `ple_key.weight`   S2, [n_embd, hc_dim], code_bias -1, group 64.
@@ -42,11 +41,11 @@ namespace lamina::kernels {
 ///   norm_key/query/conv      F32 [hc_dim], NO (1+w) folding - `ref/gdn.py` records the same for `ssm_norm`
 ///   conv1d_f16               `ple_conv1d.weight` F16, GGML-NATIVE `kW[k + kern*c]`
 struct PleWeights {
-    const uint16_t* value_bf16 = nullptr;  // n_embd * n_embd
-    const float* norm_key = nullptr;       // hc_dim
-    const float* norm_query = nullptr;     // hc_dim
-    const float* norm_conv = nullptr;      // hc_dim
-    const uint16_t* conv1d_f16 = nullptr;  // PLE_CONV_KERNEL * hc_dim, flat index k + 4*c
+    const uint16_t* value_bf16 = nullptr;   // n_embd * n_embd
+    const float* norm_key = nullptr;        // hc_dim
+    const float* norm_query = nullptr;      // hc_dim
+    const float* norm_conv = nullptr;       // hc_dim
+    const uint16_t* conv1d_f16 = nullptr;   // PLE_CONV_KERNEL * hc_dim, flat index k + 4*c
 
     /// Optional unchanged GGUF Q2_0 [2560,10240] key projection. Nonnull data
     /// requires type 42 and caller-owned native_q8_1_bytes(2560) device scratch,
@@ -61,9 +60,6 @@ struct PleWeights {
     const uint16_t* key_bf16 = nullptr;
 };
 
-
-
-
 /// Advance the row-fastest normalized history by one token: hist[r,c] = old_hist[r+1,c], then append
 /// normalized[c] at row NG_HIST-1. One thread owns each channel, making the in-place shift well-defined.
 /// hist and normalized must be nonnull, disjoint device regions of NG_HIST*NG_HC_DIM and NG_HC_DIM floats.
@@ -73,4 +69,4 @@ void ple_history_advance(float* hist, const float* normalized, void* stream);
 /// Whether the CUDA path is available.  The host hash and the table read work without it; the block does not.
 bool ple_block_available();
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

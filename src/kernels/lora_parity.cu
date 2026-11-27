@@ -20,13 +20,13 @@
 
 namespace {
 
-#define CK(x)                                                                                    \
-    do {                                                                                         \
-        cudaError_t e_ = (x);                                                                    \
-        if (e_ != cudaSuccess) {                                                                 \
-            std::fprintf(stderr, "%s failed: %s (line %d)\n", #x, cudaGetErrorString(e_), __LINE__); \
-            std::exit(1);                                                                        \
-        }                                                                                        \
+#define CK(x)                                                                                                          \
+    do {                                                                                                               \
+        cudaError_t e_ = (x);                                                                                          \
+        if (e_ != cudaSuccess) {                                                                                       \
+            std::fprintf(stderr, "%s failed: %s (line %d)\n", #x, cudaGetErrorString(e_), __LINE__);                   \
+            std::exit(1);                                                                                              \
+        }                                                                                                              \
     } while (0)
 
 struct Pair {   // one adapter's pair at one product, on the host (the padded layout) and the GPU
@@ -66,10 +66,10 @@ int fails = 0;
 
 /// the site of a case, with the rows' scales `scale` [kRows][n_ad], on T rows of x (and u); out [member][kRows][n_out]
 /// starts as `base`; returns the outputs after the two launches
-std::vector<std::vector<float>> run(const Case& c, std::vector<Pair>& pairs, const std::vector<float>& x, const std::vector<float>& u,
-                                    const std::vector<float>& scale, const std::vector<std::vector<float>>& base, int T,
-                                    float* d_scale, float* d_part, const float* d_x,
-                                    const float* d_u, std::vector<float*>& d_out, int kslice) {
+std::vector<std::vector<float>> run(const Case& c, std::vector<Pair>& pairs, const std::vector<float>& x,
+                                    const std::vector<float>& u, const std::vector<float>& scale,
+                                    const std::vector<std::vector<float>>& base, int T, float* d_scale, float* d_part,
+                                    const float* d_x, const float* d_u, std::vector<float*>& d_out, int kslice) {
     (void) x;
     (void) u;
     CK(cudaMemcpy(d_scale, scale.data(), scale.size() * 4, cudaMemcpyHostToDevice));
@@ -155,7 +155,8 @@ void check_case(const Case& c, std::mt19937& rng) {
     std::vector<float> scale((size_t) R * c.n_ad, 0.f);
     for (int r = 0; r < R; ++r)
         for (int a = 0; a < c.n_ad; ++a)
-            scale[(size_t) r * c.n_ad + a] = (r + a) % 3 == 0 || r == 5 ? 0.f : 0.5f + (float) r / 8.f + (float) a / 4.f;
+            scale[(size_t) r * c.n_ad + a] =
+                (r + a) % 3 == 0 || r == 5 ? 0.f : 0.5f + (float) r / 8.f + (float) a / 4.f;
     std::vector<std::vector<float>> base(c.n_out.size());
     for (size_t m = 0; m < c.n_out.size(); ++m) {
         base[m].resize((size_t) R * c.n_out[m]);
@@ -180,8 +181,8 @@ void check_case(const Case& c, std::mt19937& rng) {
     }
     double worst = 0.0;
     for (int kslice : {1024, 512, 256}) {
-        const std::vector<std::vector<float>> got8 = run(c, pairs, x, u, scale, base, R, d_scale, d_part, d_x, d_u, d_out,
-                                                         kslice);
+        const std::vector<std::vector<float>> got8 =
+            run(c, pairs, x, u, scale, base, R, d_scale, d_part, d_x, d_u, d_out, kslice);
         for (size_t m = 0; m < c.n_out.size(); ++m) {
             const int n_out = c.n_out[m];
             for (int r = 0; r < R; ++r) {
@@ -195,8 +196,10 @@ void check_case(const Case& c, std::mt19937& rng) {
                     const double sc = p.alpha != 0.f ? (double) us * p.alpha / p.rank_true : (double) us;
                     for (int k = 0; k < p.rank_true; ++k) {
                         double t = 0.0;
-                        for (int i = 0; i < c.n_in; ++i) t += (double) p.a[(size_t) k * c.n_in + i] * xin[(size_t) r * c.n_in + i];
-                        for (int j = 0; j < n_out; ++j) ref[(size_t) j] += sc * (double) p.b[(size_t) j * p.rank + k] * t;
+                        for (int i = 0; i < c.n_in; ++i)
+                            t += (double) p.a[(size_t) k * c.n_in + i] * xin[(size_t) r * c.n_in + i];
+                        for (int j = 0; j < n_out; ++j)
+                            ref[(size_t) j] += sc * (double) p.b[(size_t) j * p.rank + k] * t;
                     }
                 }
                 double mag = 0.0, err = 0.0;
@@ -205,7 +208,8 @@ void check_case(const Case& c, std::mt19937& rng) {
                     if (!any) {   // untouched, bit for bit
                         if (std::memcmp(&b0, &g, 4) != 0) {
                             if (fails++ < 10)
-                                std::printf("FAIL %s: row %d (no adapter) member %zu column %d changed\n", c.name.c_str(), r, m, j);
+                                std::printf("FAIL %s: row %d (no adapter) member %zu column %d changed\n",
+                                            c.name.c_str(), r, m, j);
                         }
                         continue;
                     }
@@ -217,16 +221,17 @@ void check_case(const Case& c, std::mt19937& rng) {
                     worst = std::max(worst, rel);
                     if (rel > 2e-5) {
                         if (fails++ < 10)
-                            std::printf("FAIL %s: row %d member %zu kslice %d: max error %.3g of the delta's %.3g (%.2e)\n",
-                                        c.name.c_str(), r, m, kslice, err, mag, rel);
+                            std::printf(
+                                "FAIL %s: row %d member %zu kslice %d: max error %.3g of the delta's %.3g (%.2e)\n",
+                                c.name.c_str(), r, m, kslice, err, mag, rel);
                     }
                 }
             }
         }
         // each row alone (T = 1, its own row first in x): the same bits as in the 8-row launch
         for (int r = 0; r < R; ++r) {
-            std::vector<float> x1(x.begin() + (long) r * c.n_in, x.begin() + (long) (r + 1) * c.n_in), u1(u.begin() + (long) r * c.n_in,
-                                                                                                    u.begin() + (long) (r + 1) * c.n_in);
+            std::vector<float> x1(x.begin() + (long) r * c.n_in, x.begin() + (long) (r + 1) * c.n_in),
+                u1(u.begin() + (long) r * c.n_in, u.begin() + (long) (r + 1) * c.n_in);
             CK(cudaMemcpy(d_x, x1.data(), x1.size() * 4, cudaMemcpyHostToDevice));
             CK(cudaMemcpy(d_u, u1.data(), u1.size() * 4, cudaMemcpyHostToDevice));
             std::vector<float> s1(scale.begin() + (long) r * c.n_ad, scale.begin() + (long) (r + 1) * c.n_ad);
@@ -234,9 +239,11 @@ void check_case(const Case& c, std::mt19937& rng) {
             std::vector<std::vector<float>> b1(c.n_out.size());
             for (size_t m = 0; m < c.n_out.size(); ++m)
                 b1[m].assign(base[m].begin() + (long) r * c.n_out[m], base[m].begin() + (long) (r + 1) * c.n_out[m]);
-            const std::vector<std::vector<float>> got1 = run(c, pairs, x1, u1, s1, b1, 1, d_scale, d_part, d_x, d_u, d_out, kslice);
+            const std::vector<std::vector<float>> got1 =
+                run(c, pairs, x1, u1, s1, b1, 1, d_scale, d_part, d_x, d_u, d_out, kslice);
             for (size_t m = 0; m < c.n_out.size(); ++m)
-                if (std::memcmp(got1[m].data(), got8[m].data() + (size_t) r * c.n_out[m], (size_t) c.n_out[m] * 4) != 0) {
+                if (std::memcmp(got1[m].data(), got8[m].data() + (size_t) r * c.n_out[m], (size_t) c.n_out[m] * 4) !=
+                    0) {
                     if (fails++ < 10)
                         std::printf("FAIL %s: row %d member %zu kslice %d: alone it is not its bits in a window of 8\n",
                                     c.name.c_str(), r, m, kslice);
@@ -293,7 +300,8 @@ void bench() {
         s.u = b.swiglu ? d_u : nullptr;
         s.ldx = s.n_in = b.n_in;
         const char* kv = std::getenv("LAMINA_Q36_LORA_KSLICE");
-        s.kslice = std::min(q36lora::kSliceMax, kv ? std::max(1, std::atoi(kv) / q36lora::kChunk) * q36lora::kChunk : q36lora::kSliceMax);
+        s.kslice = std::min(q36lora::kSliceMax,
+                            kv ? std::max(1, std::atoi(kv) / q36lora::kChunk) * q36lora::kChunk : q36lora::kSliceMax);
         s.ks = (b.n_in + s.kslice - 1) / s.kslice;
         s.n_ad = 1;
         s.scale = d_scale;
@@ -373,7 +381,7 @@ void bench() {
     }
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--bench") == 0) {
@@ -382,10 +390,19 @@ int main(int argc, char** argv) {
     }
     std::mt19937 rng(1234);
     const std::vector<Case> cases = {
-        {"q/k/v: 3 products, 2 adapters", 5120, {1536, 256, 256}, false, 2,
+        {"q/k/v: 3 products, 2 adapters",
+         5120,
+         {1536, 256, 256},
+         false,
+         2,
          {{0, 32, 0, false}, {0, 32, 1, false}, {0, 32, 2, false}, {1, 16, 0, true}, {1, 16, 2, true}}},
         {"gate/up: rank 12 padded to 16", 5120, {2048, 2048}, false, 1, {{0, 12, 0, false}, {0, 12, 1, false}}},
-        {"down: SwiGLU input, 3 adapters", 4352, {1024}, true, 3, {{0, 32, 0, false}, {1, 8, 0, true}, {2, 24, 0, false}}},
+        {"down: SwiGLU input, 3 adapters",
+         4352,
+         {1024},
+         true,
+         3,
+         {{0, 32, 0, false}, {1, 8, 0, true}, {2, 24, 0, false}}},
         {"one F32 pair, a tail chunk", 2056, {777}, false, 1, {{0, 40, 0, true}}},
     };
     for (const Case& c : cases) check_case(c, rng);

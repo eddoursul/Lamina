@@ -55,8 +55,8 @@ GpuInfo info_of(int ordinal) {
                   (unsigned) p.pciDeviceID);
     g.bus_id = buf;
     const auto* u = (const unsigned char*) p.uuid.bytes;
-    std::snprintf(buf, sizeof buf, "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                  u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    std::snprintf(buf, sizeof buf, "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", u[0],
+                  u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
     g.uuid = buf;
     return g;
 }
@@ -132,7 +132,7 @@ bool desktop(void* h, bool& known) {
     return known && (active != 0 || r == 7 || procs > 0);
 }
 
-}  // namespace
+}   // namespace
 
 bool gpu_in_desktop_use(const std::string& bus_id) {
     bool known = false;
@@ -146,7 +146,7 @@ bool gpu_in_desktop_use(const std::string& bus_id, bool& known) {
 
 namespace {
 std::atomic<int> g_engine_gpus{-1};
-}  // namespace
+}   // namespace
 
 void engine_gpu_count(int n) { g_engine_gpus = n; }
 
@@ -232,7 +232,7 @@ int find_gpu(const std::vector<GpuInfo>& gpus, const std::string& spec_in, std::
 namespace {
 std::mutex g_keep_mu;
 std::vector<int> g_keep;   // a device's keeps, by its ordinal
-}  // namespace
+}   // namespace
 
 void gpu_keep(int device, bool keep) {
     if (device < 0) return;
@@ -253,7 +253,7 @@ void gpu_reset_unused(int device) {
 
 namespace {
 std::vector<uint64_t> g_loan;   // a device's asked loan, by its ordinal (g_keep_mu)
-}  // namespace
+}   // namespace
 
 void gpu_loan_ask(int device, uint64_t bytes) {
     if (device < 0) return;
@@ -433,7 +433,9 @@ bool GpuClocks::set_one(const Gpu& g, bool lock) {
     if (lock && !st_->off.exchange(true))
         std::fprintf(stderr, "lamina: GPU %d's %s clock could not be locked (%s%s): it runs at the driver's clocks\n",
                      g.device, clock,
-                     g.nvml == nullptr || r < 0 ? "no NVML" : n.error != nullptr ? n.error(r) : "NVML refused",
+                     g.nvml == nullptr || r < 0 ? "no NVML"
+                     : n.error != nullptr       ? n.error(r)
+                                                : "NVML refused",
                      r == 4 ? ": the lock needs administrator rights, root on Linux" : "");
     return false;
 }
@@ -511,8 +513,8 @@ void GpuClocks::release_after(double seconds) {
     if (st_ == nullptr || !st_->want.load(std::memory_order_relaxed)) return;
     {
         const std::lock_guard<std::mutex> lk(st_->mu);
-        st_->due = std::chrono::steady_clock::now() +
-                   std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+        st_->due = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                          std::chrono::duration<double>(seconds));
         st_->want.store(false);
         ++st_->wishes;
     }
@@ -541,9 +543,10 @@ bool GpuClocks::at_speed(int device) const {
         if (st_->off.load(std::memory_order_relaxed)) return true;
         const std::lock_guard<std::mutex> lk(st_->mu);
         return st_->locked[i] != 0 &&
-               std::chrono::duration<double>(std::chrono::steady_clock::now() - st_->since[i]).count() >= kAtSpeedSeconds;
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - st_->since[i]).count() >=
+                   kAtSpeedSeconds;
     }
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

@@ -72,7 +72,7 @@ std::vector<float> ramp(int n, float k) {
     for (int j = 0; j < n; ++j) v[(size_t) j] = k * (float) (j + 1) * (j % 2 ? -1.0f : 1.0f);
     return v;
 }
-}  // namespace
+}   // namespace
 
 int main() {
     using lamina::core::ControlVectorSpec;
@@ -121,7 +121,8 @@ int main() {
                 double want = 2.0 * base[(size_t) j];
                 if (l == 2) want -= d1[(size_t) j];
                 if (l == 4) want -= d2[(size_t) j];
-                same = same && t.rows[(size_t) (i * 2 * E + j)] == (float) want && t.rows[(size_t) (i * 2 * E + E + j)] == 0.0f;
+                same = same && t.rows[(size_t) (i * 2 * E + j)] == (float) want &&
+                       t.rows[(size_t) (i * 2 * E + E + j)] == 0.0f;
             }
         }
         check(same, "add: a = the sum, u = 0");
@@ -170,7 +171,8 @@ int main() {
         std::string err;
         const bool ok = lamina::core::control_vector_tables(s, L, E, t, err);
         check(ok && t.last == L - 1 && t.layers == std::vector<int64_t>({3, 4, 5}), "single: layers 3..5 " + err);
-        check(ok && std::memcmp(t.rows.data() + E, t.rows.data() + 5 * E, E * 4) == 0, "single: layer 4's u everywhere");
+        check(ok && std::memcmp(t.rows.data() + E, t.rows.data() + 5 * E, E * 4) == 0,
+              "single: layer 4's u everywhere");
     }
     // ---- refused
     auto refused = [&](const ControlVectorSpec& s, const char* what) {

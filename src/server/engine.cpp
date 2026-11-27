@@ -1,8 +1,8 @@
 #include "engine.hpp"
 
-#include "log.hpp"
 #include "lamina/program/engine.hpp"
 #include "lamina/program/serve_io.hpp"
+#include "log.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -39,7 +39,7 @@ bool digits(const std::string& s, bool sign = false) {
 /// Python's repr of a float, as the keys of a GEN line write it
 std::string fr(double v) { return py_repr(v); }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------------------------- LaminaEngine
 double LaminaEngine::ready_timeout_s = 900.0;
@@ -78,7 +78,7 @@ void LaminaEngine::start() {
     std::lock_guard<std::mutex> lk(start_mu_);
     unloaded_ = false;
     loan_unanswered_ = false;   // (a loan was its predecessor's)
-    max_context_ = 0;   // before this start is visible: never its predecessor's
+    max_context_ = 0;           // before this start is visible: never its predecessor's
     {
         const std::lock_guard<std::mutex> g(cache_mu_);
         cache_ = json::object();   // nor its cache's state: this one prints its own before READY
@@ -138,7 +138,7 @@ void LaminaEngine::start() {
     const auto t0 = Clock::now();
     std::string line;
     bool timed_out = false;
-    json info = json::object();   // this start's INFO facts
+    json info = json::object();      // this start's INFO facts
     json adapters = json::array();   // its LoRA adapters (ADAPTER lines), INFO's "adapters"
     while (true) {
         double left = ready_timeout_s > 0 ? ready_timeout_s - since(t0) : -1;
@@ -161,7 +161,7 @@ void LaminaEngine::start() {
             if (py_loads(line.substr(8), a) && a.is_object()) adapters.push_back(std::move(a));
         } else if (starts_with(line, "CACHE ")) {   // the prompt cache at rest
             cache_line(line);
-        } else if (starts_with(line, "WARN ")) {    // the engine's warning, as its start goes (RAM that is tight)
+        } else if (starts_with(line, "WARN ")) {   // the engine's warning, as its start goes (RAM that is tight)
             say("[lamina] WARNING: " + line.substr(5));
         } else if (starts_with(line, "READY")) {
             const std::vector<std::string> f = split_ws(line);
@@ -173,8 +173,8 @@ void LaminaEngine::start() {
     if (max_context_ <= 0) {
         if (timed_out) {
             // an engine thread cannot be ended from here: it keeps its GPU until it returns
-            throw EngineDied("the engine did not report READY within " + std::to_string((int) ready_timeout_s) +
-                             " s" + (log_.empty() ? "" : " (see " + log_ + ")"));
+            throw EngineDied("the engine did not report READY within " + std::to_string((int) ready_timeout_s) + " s" +
+                             (log_.empty() ? "" : " (see " + log_ + ")"));
         }
         if (thread_.joinable()) thread_.join();
         throw EngineDied("the engine exited before it was ready (exit code " + std::to_string(rc_.load()) + ")" +
@@ -182,8 +182,10 @@ void LaminaEngine::start() {
     }
     known_ctx_ = max_context_;
     if (!adapters.empty()) info["adapters"] = std::move(adapters);
-    if (info.contains("engine")) info["version"] = info["engine"].is_string() ? info["engine"] : json(py_dumps(info["engine"]));
-    batch_ = info.contains("batch_slots") && info["batch_slots"].is_number_integer() ? info["batch_slots"].get<int>() : 0;
+    if (info.contains("engine"))
+        info["version"] = info["engine"].is_string() ? info["engine"] : json(py_dumps(info["engine"]));
+    batch_ =
+        info.contains("batch_slots") && info["batch_slots"].is_number_integer() ? info["batch_slots"].get<int>() : 0;
     set_info(std::move(info));
     for (size_t i = 0; i + 1 < args_.size(); ++i)
         if ((args_[i] == "--batch" || args_[i] == "--slots") && std::atoi(args_[i + 1].c_str()) != batch_)
@@ -208,9 +210,11 @@ void LaminaEngine::close() {
         }
         in_->close();
     }
-    for (int i = 0; i < kQuitWaitS * 20 && !finished_.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    for (int i = 0; i < kQuitWaitS * 20 && !finished_.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if (!finished_.load())
-        throw EngineStuck("the engine did not stop within " + std::to_string(kQuitWaitS) + " s of QUIT: it still holds "
+        throw EngineStuck("the engine did not stop within " + std::to_string(kQuitWaitS) +
+                          " s of QUIT: it still holds "
                           "its GPU and RAM; restart the server");
     if (thread_.joinable()) thread_.join();
     ended_ = true;
@@ -290,7 +294,8 @@ void* LaminaEngine::lend(int device, uint64_t bytes, std::string& why) {
         if (starts_with(why, "no loan: ")) why.erase(0, 9);   // (the caller says that it is none)
         return nullptr;
     }
-    const unsigned long long at = std::strtoull(f[1].c_str(), nullptr, 10), got = std::strtoull(f[2].c_str(), nullptr, 10);
+    const unsigned long long at = std::strtoull(f[1].c_str(), nullptr, 10),
+                             got = std::strtoull(f[2].c_str(), nullptr, 10);
     if (at == 0 || got < bytes) {   // (not what was asked for: handed back)
         unlend();
         why = "the engine lent " + f[2] + " bytes";
@@ -299,7 +304,9 @@ void* LaminaEngine::lend(int device, uint64_t bytes, std::string& why) {
     // what it is: the engine's words after the counts, else its expert cache's slots
     why.clear();
     for (size_t i = 5; i < f.size(); ++i) why += (i > 5 ? " " : "") + f[i];
-    if (why.empty()) why = f.size() >= 5 ? "the engine's cache (" + f[3] + " slots, " + f[4] + " experts out)" : "the engine's memory";
+    if (why.empty())
+        why =
+            f.size() >= 5 ? "the engine's cache (" + f[3] + " slots, " + f[4] + " experts out)" : "the engine's memory";
     return (void*) (uintptr_t) at;
 }
 
@@ -322,8 +329,8 @@ void LaminaEngine::unlend() {
 }
 
 void LaminaEngine::send(const std::string& line) {
-    if (in_ == nullptr || ended_.load()) throw EngineDied("the engine stopped unexpectedly (exit code " +
-                                                          std::to_string(rc_.load()) + ")");
+    if (in_ == nullptr || ended_.load())
+        throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
     in_->push(line);
 }
 
@@ -343,7 +350,8 @@ std::string LaminaEngine::death_note() {
     for (auto it = lines.rbegin(); it != lines.rend(); ++it)
         if (it->find("issue #29") != std::string::npos)
             return "The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                   "line: " + std::string(strip(*it)) + " - please report it at github.com/eddoursul/Lamina/issues.";
+                   "line: " +
+                   std::string(strip(*it)) + " - please report it at github.com/eddoursul/Lamina/issues.";
     static const std::regex message(R"(^lamina( [a-z0-9_-]+)?:)");   // not the usage's "lamina-engine --native ..."
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
         const std::string_view s = strip(*it);
@@ -418,7 +426,10 @@ void LaminaEngine::parse_done(const std::string& line) {
     auto i = [&](size_t k) { return k < f.size() ? (int64_t) std::atoll(f[k].c_str()) : 0; };
     auto d = [&](size_t k) { return k < f.size() ? std::atof(f[k].c_str()) : 0.0; };
     json& fig = figures();
-    fig = {{"generated", i(1)}, {"prompt_tokens", i(2)}, {"prompt_ms", d(3)}, {"decode_ms", d(4)},
+    fig = {{"generated", i(1)},
+           {"prompt_tokens", i(2)},
+           {"prompt_ms", d(3)},
+           {"decode_ms", d(4)},
            {"finish", f.size() > 5 ? f[5] : ""}};
     for (auto it = pending_.begin(); it != pending_.end(); ++it) fig[it.key()] = it.value();
     pending_ = json::object();
@@ -471,7 +482,8 @@ std::string LaminaEngine::sampling_keys(const json& s) {
     if (rp_on || pf_on || pp_on) {
         // a penalty without a window counts over nothing: the engine's default is the last 64 tokens
         const json& pln = jget(s, "penalty_last_n");
-        keys += " penalty_last_n=" + (is_int(pln) && pln.get<int64_t>() > 0 ? std::to_string(pln.get<int64_t>()) : "64");
+        keys +=
+            " penalty_last_n=" + (is_int(pln) && pln.get<int64_t>() > 0 ? std::to_string(pln.get<int64_t>()) : "64");
     }
     if (const json& seed = jget(s, "seed"); is_int(seed) && seed.get<int64_t>() > 0)
         keys += " seed=" + std::to_string(seed.get<int64_t>());
@@ -482,7 +494,8 @@ std::string LaminaEngine::sampling_keys(const json& s) {
     // the LoRA adapters' scales, every adapter's in their order (the engine keeps a conversation's state per choice)
     if (const json& ls = jget(s, "lamina_lora"); ls.is_array() && !ls.empty()) {
         keys += " lora=";
-        for (size_t k = 0; k < ls.size(); ++k) keys += (k ? "," : "") + fr(ls[k].is_number() ? ls[k].get<double>() : 0.0);
+        for (size_t k = 0; k < ls.size(); ++k)
+            keys += (k ? "," : "") + fr(ls[k].is_number() ? ls[k].get<double>() : 0.0);
     }
     // "lamina_checkpoint": false - a one-shot call no later request extends: no conversation checkpoint for it (#830)
     if (const json& c = jget(s, "lamina_checkpoint"); c.is_boolean() && !c.get<bool>()) keys += " ckpt=0";
@@ -518,9 +531,11 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
     update_progress([](Progress& p) { p = Progress{}; });
     pending_ = json::object();
     // an image request takes the same sampling keys as text
-    std::string head = embeddings.empty() ? "GEN " + std::to_string(max_new) + sampling_keys(sampling)
-                                          : "GENI " + std::to_string(max_new) + sampling_keys(sampling) + " " + embeddings;
-    if (std::getenv("LAMINA_DEBUG") != nullptr) say("[lamina] to the engine: " + head);   // its sampling, without the ids
+    std::string head = embeddings.empty()
+                           ? "GEN " + std::to_string(max_new) + sampling_keys(sampling)
+                           : "GENI " + std::to_string(max_new) + sampling_keys(sampling) + " " + embeddings;
+    if (std::getenv("LAMINA_DEBUG") != nullptr)
+        say("[lamina] to the engine: " + head);   // its sampling, without the ids
     std::string line = head + " ";
     for (size_t k = 0; k < ids.size(); ++k) {
         if (k) line += ',';
@@ -532,7 +547,8 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
     // #481: how long the engine may stay silent: until the first line, the request's first prompt chunk at the slowest
     // prompt reading on top of silence_s; a PP line sets it to its own chunk's time
     const double silence = silence_s;
-    double allow = silence > 0 ? silence + (double) std::min<int64_t>((int64_t) ids.size(), kPpChunkMax) / kPpFloorTokS : 0;
+    double allow =
+        silence > 0 ? silence + (double) std::min<int64_t>((int64_t) ids.size(), kPpChunkMax) / kPpFloorTokS : 0;
     auto heard = Clock::now(), beat = heard;
     int64_t read_to = 0;
     auto stop_engine = [&] {
@@ -541,8 +557,7 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
         if (can_stop) {
             try {
                 send("STOP");
-            } catch (const EngineDied&) {
-            }
+            } catch (const EngineDied&) {}
         }
     };
     auto drain = [&] {
@@ -593,7 +608,8 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
             wait = std::min(wait, allow - since(heard));
             if (wait <= 0) {
                 done = true;   // no STOP and no drain: nothing is listening
-                throw silent("the engine said nothing for " + std::to_string((int) since(heard)) + " s during the request");
+                throw silent("the engine said nothing for " + std::to_string((int) since(heard)) +
+                             " s during the request");
             }
         }
         std::string l;
@@ -639,7 +655,8 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
             const std::vector<std::string> f = split_ws(l);
             if (f.size() >= 3 && digits(f[1]) && digits(f[2])) {
                 const std::pair<int64_t, int64_t> pp(std::atoll(f[1].c_str()), std::atoll(f[2].c_str()));
-                const double ms = f.size() >= 4 ? std::atof(f[3].c_str()) : 0.0, mean = f.size() >= 5 ? std::atof(f[4].c_str()) : -1;
+                const double ms = f.size() >= 4 ? std::atof(f[3].c_str()) : 0.0,
+                             mean = f.size() >= 5 ? std::atof(f[4].c_str()) : -1;
                 update_progress([&](Progress& p) {
                     p.read = pp;
                     p.ms = ms;
@@ -667,7 +684,8 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
         } else if (starts_with(l, "DONE")) {
             parse_done(l);
             done = true;
-            if (jstr(last, "finish") == "nonfinite") throw EngineNonFinite("the engine's logits became non-finite (#879)");
+            if (jstr(last, "finish") == "nonfinite")
+                throw EngineNonFinite("the engine's logits became non-finite (#879)");
             if (embeddings.empty()) {
                 Held h{ids.size(), ids};
                 h.ids.insert(h.ids.end(), sent.begin(), sent.end());
@@ -703,8 +721,9 @@ void MockEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, cons
         std::lock_guard<std::mutex> lk(mu_);
         last_prompt = ids;
         last_embeddings = embeddings;
-        script = scripts_.size() > 1 ? scripts_[cycle_ ? turns_ % scripts_.size() : std::min(turns_, scripts_.size() - 1)]
-                                     : scripts_[0];
+        script = scripts_.size() > 1
+                     ? scripts_[cycle_ ? turns_ % scripts_.size() : std::min(turns_, scripts_.size() - 1)]
+                     : scripts_[0];
         if (scripts_.size() > 1) ++turns_;
     }
     held.reset();
@@ -716,4 +735,4 @@ void MockEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, cons
     }
 }
 
-}  // namespace lamina
+}   // namespace lamina

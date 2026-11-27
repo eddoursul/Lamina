@@ -23,12 +23,13 @@ json read_config(const std::string& path);
 void split_joined_args(json& cfg);
 /// #1641: "--reasoning-effort X" in the args is the config's reasoning_effort, not an engine option (said once)
 void lift_reasoning_effort_arg(json& cfg);
-/// Qwen3.8-Flash-Next's draft layer (`arch` "qwen4exp"), which no model file holds: args that name none (--drafter FILE,
-/// or an earlier name of it: artifact/drafter.hpp; of several the last, the others taken out) take kDraftLayerFile
-/// (artifact/draft_layer.hpp) beside the model, else beside the program; a named file that is not there, or a folder
-/// without the earlier layout's files, is taken out of them: the engine starts and generates without drafts.  The line for the server's window: the file found, or the warning with the download's command; empty when
-/// the args name a file or a folder of the earlier layout that is there, or the model is another (Qwen3.6-35B-A3B and
-/// Qwen3.8-27B draft with their files' own MTP block)
+/// Qwen3.8-Flash-Next's draft layer (`arch` "qwen4exp"), which no model file holds: args that name none (--drafter
+/// FILE, or an earlier name of it: artifact/drafter.hpp; of several the last, the others taken out) take
+/// kDraftLayerFile (artifact/draft_layer.hpp) beside the model, else beside the program; a named file that is not
+/// there, or a folder without the earlier layout's files, is taken out of them: the engine starts and generates without
+/// drafts.  The line for the server's window: the file found, or the warning with the download's command; empty when
+/// the args name a file or a folder of the earlier layout that is there, or the model
+/// is another (Qwen3.6-35B-A3B and Qwen3.8-27B draft with their files' own MTP block)
 std::string resolve_draft_layer(json& cfg, const std::string& arch);
 /// The drafter file beside the model of Inkling 2 (`arch` "inkling2" or "inkling2_loop") and of Hy4-flash
 /// ("hy_v4_flash"), for args that name none (--drafter FILE, or an earlier name of it, as above) and ask for drafts
@@ -100,16 +101,17 @@ double engine_silence_s(const json& cfg);
 /// the engine's arguments: the config's, with what "vision", "parallel" and "expert_profile_save" ask for
 std::vector<std::string> engine_args(const json& cfg);
 /// the deprecated options a start uses, "FLAG VALUE: what takes its place" each, once: the engine's deprecated
-/// spellings (program::deprecated_option) in its command line `line` (engine_args), and --native in place of "model".  `file`: the config as its file has it (the server writes its "model" into the merged
-/// config's args as --native)
+/// spellings (program::deprecated_option) in its command line
+/// `line` (engine_args), and --native in place of "model".  `file`: the config as its
+/// file has it (the server writes its "model" into the merged config's args as --native)
 std::vector<std::string> deprecated_options(const json& file, const std::vector<std::string>& line);
 /// An engine option on lamina's command line: the flag ("--max-context") and the values that follow it.
 using EngineOption = std::vector<std::string>;
 /// `opts` into the config's args, each in place of the args' own instances of its flag (with their values: the words
 /// after a flag that do not start with "--") and of its other form ("--kv-grow" for "--no-kv-grow" and back; a drafter
 /// file's --drafter for its earlier names, --mtp, --dspark and --dfly, and back: Hy4-flash's --no-mtp is no form of
-/// them), at the end in their order.  The engine takes an option's last value, so the command line's wins either way; the args stay
-/// without the old ones for a config that is written.
+/// them), at the end in their order.  The engine takes an option's last value, so the command line's wins either way;
+/// the args stay without the old ones for a config that is written.
 void apply_engine_options(json& cfg, const std::vector<EngineOption>& opts);
 /// the model file of the engine's arguments (--native), relative ones the config's cwd's
 std::string model_file(const json& cfg);
@@ -126,4 +128,4 @@ const std::vector<std::pair<std::string, std::string>>& offline_env();
 /// why this config cannot be strictly offline (empty: it can)
 std::vector<std::string> offline_blockers(const json& cfg);
 
-}  // namespace lamina
+}   // namespace lamina

@@ -1,7 +1,7 @@
 // src/kernels/cuda/fused_gdn.cu - see include/lamina/kernels/fused_gdn.hpp.
+#include "lamina/core/geometry.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
 #include "lamina/kernels/warp.cuh"
-#include "lamina/core/geometry.hpp"
 
 #include <cuda_runtime.h>
 
@@ -11,31 +11,32 @@
 namespace lamina::kernels {
 namespace {
 
-constexpr int S = 128;          // state size (rows = cols = 128)
+constexpr int S = 128;   // state size (rows = cols = 128)
 static_assert(S == lamina::core::kCompiledGeometry.ssm_state_size, "fused_gdn is compiled for core/geometry.hpp");
-constexpr int RG = 4;           // row groups
-constexpr int RPG = S / RG;     // 32 rows per thread
+constexpr int RG = 4;         // row groups
+constexpr int RPG = S / RG;   // 32 rows per thread
 
 // SILU: the output gate is SiLU(z) (Qwen3.6, qwen35moe) instead of sigmoid(z) (Flash-Next); a compile-time flag, so
 // the sigmoid instantiation is the kernel it was.
 template <bool SILU>
-__global__ void __launch_bounds__(S * RG) gdn_step_norm_kernel(float* __restrict__ state, const float* __restrict__ q,
-                                                               const float* __restrict__ k, const float* __restrict__ v,
-                                                               const float* __restrict__ gate,
-                                                               const float* __restrict__ beta,
-                                                               const float* __restrict__ z,
-                                                               const float* __restrict__ gamma, float eps,
-                                                               float* __restrict__ y, int h_k, int h_v) {
+__global__ void __launch_bounds__(S* RG)
+gdn_step_norm_kernel(float* __restrict__ state, const float* __restrict__ q, const float* __restrict__ k,
+                     const float* __restrict__ v, const float* __restrict__ gate, const float* __restrict__ beta,
+                     const float* __restrict__ z, const float* __restrict__ gamma, float eps, float* __restrict__ y,
+                     int h_k, int h_v) {
     __shared__ float sk[S], sq[S];
     __shared__ float red_kv[RG][S];
     __shared__ float red_o[RG][S];
     __shared__ float wsum[S * RG / 32];
     const int head = blockIdx.x;
-    const int col = threadIdx.x;          // 0..127
-    const int rg = threadIdx.y;           // 0..3
+    const int col = threadIdx.x;   // 0..127
+    const int rg = threadIdx.y;    // 0..3
     const int tid = rg * S + col;
     const int qh = head % h_k;
-    if (tid < S) { sk[tid] = k[qh * S + tid]; sq[tid] = q[qh * S + tid]; }
+    if (tid < S) {
+        sk[tid] = k[qh * S + tid];
+        sq[tid] = q[qh * S + tid];
+    }
     float s[RPG];
     float* base = state + ((size_t) (rg * RPG) * h_v + head) * S + col;
     const size_t row_stride = (size_t) h_v * S;
@@ -106,10 +107,14 @@ __global__ void __launch_bounds__(256) gdn_ab_kernel(const float* __restrict__ x
         const uint4 wv = __ldg(w4 + j);
         const float4 xa = *reinterpret_cast<const float4*>(x + j * 8);
         const float4 xb = *reinterpret_cast<const float4*>(x + j * 8 + 4);
-        acc = fmaf(__uint_as_float(wv.x << 16), xa.x, acc); acc = fmaf(__uint_as_float(wv.x & 0xffff0000u), xa.y, acc);
-        acc = fmaf(__uint_as_float(wv.y << 16), xa.z, acc); acc = fmaf(__uint_as_float(wv.y & 0xffff0000u), xa.w, acc);
-        acc = fmaf(__uint_as_float(wv.z << 16), xb.x, acc); acc = fmaf(__uint_as_float(wv.z & 0xffff0000u), xb.y, acc);
-        acc = fmaf(__uint_as_float(wv.w << 16), xb.z, acc); acc = fmaf(__uint_as_float(wv.w & 0xffff0000u), xb.w, acc);
+        acc = fmaf(__uint_as_float(wv.x << 16), xa.x, acc);
+        acc = fmaf(__uint_as_float(wv.x & 0xffff0000u), xa.y, acc);
+        acc = fmaf(__uint_as_float(wv.y << 16), xa.z, acc);
+        acc = fmaf(__uint_as_float(wv.y & 0xffff0000u), xa.w, acc);
+        acc = fmaf(__uint_as_float(wv.z << 16), xb.x, acc);
+        acc = fmaf(__uint_as_float(wv.z & 0xffff0000u), xb.y, acc);
+        acc = fmaf(__uint_as_float(wv.w << 16), xb.z, acc);
+        acc = fmaf(__uint_as_float(wv.w & 0xffff0000u), xb.w, acc);
     }
     for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, o);
     if (lane != 0) return;
@@ -122,7 +127,7 @@ __global__ void __launch_bounds__(256) gdn_ab_kernel(const float* __restrict__ x
     }
 }
 
-}  // namespace
+}   // namespace
 
 void fused_gdn_conv_l2(float* history, const float* qkv, const float* conv_w, float* h, int channels, int qk_heads,
                        float eps, void* stream) {
@@ -130,9 +135,13 @@ void fused_gdn_conv_l2(float* history, const float* qkv, const float* conv_w, fl
         std::fprintf(stderr, "fused_gdn_conv_l2: invalid arguments\n");
         std::exit(1);
     }
-    gdn_conv_l2_kernel<<<(unsigned) (channels / S), S, 0, (cudaStream_t) stream>>>(history, qkv, conv_w, h, qk_heads, eps);
+    gdn_conv_l2_kernel<<<(unsigned) (channels / S), S, 0, (cudaStream_t) stream>>>(history, qkv, conv_w, h, qk_heads,
+                                                                                   eps);
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "fused_gdn_conv_l2: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "fused_gdn_conv_l2: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 void fused_gdn_ab(const float* x, const uint16_t* w_alpha, const uint16_t* w_beta, const float* dt, const float* ssm_a,
@@ -141,10 +150,13 @@ void fused_gdn_ab(const float* x, const uint16_t* w_alpha, const uint16_t* w_bet
         std::fprintf(stderr, "fused_gdn_ab: invalid arguments\n");
         std::exit(1);
     }
-    gdn_ab_kernel<<<(unsigned) ((2 * h_v + 7) / 8), 256, 0, (cudaStream_t) stream>>>(x, w_alpha, w_beta, dt, ssm_a, gate,
-                                                                                     beta, n_embd, h_v);
+    gdn_ab_kernel<<<(unsigned) ((2 * h_v + 7) / 8), 256, 0, (cudaStream_t) stream>>>(x, w_alpha, w_beta, dt, ssm_a,
+                                                                                     gate, beta, n_embd, h_v);
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "fused_gdn_ab: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "fused_gdn_ab: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 namespace {
@@ -155,15 +167,15 @@ void step_norm(float* state, const float* q, const float* k, const float* v, con
         std::fprintf(stderr, "fused_gdn_step_norm: invalid arguments\n");
         std::exit(1);
     }
-    gdn_step_norm_kernel<SILU><<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, q, k, v, gate, beta,
-                                                                                         z, gamma, eps, y, h_k, h_v);
+    gdn_step_norm_kernel<SILU><<<(unsigned) h_v, dim3(S, RG), 0, (cudaStream_t) stream>>>(state, q, k, v, gate, beta, z,
+                                                                                          gamma, eps, y, h_k, h_v);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "fused_gdn_step_norm: %s\n", cudaGetErrorString(e));
         std::exit(1);
     }
 }
-}  // namespace
+}   // namespace
 
 void fused_gdn_step_norm(float* state, const float* q, const float* k, const float* v, const float* gate,
                          const float* beta, const float* z, const float* gamma, float eps, float* y, int h_k, int h_v,
@@ -177,4 +189,4 @@ void fused_gdn_step_norm_silu(float* state, const float* q, const float* k, cons
     step_norm<true>(state, q, k, v, gate, beta, z, gamma, eps, y, h_k, h_v, stream);
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

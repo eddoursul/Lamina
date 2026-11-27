@@ -48,13 +48,14 @@ std::string card_refused(const char* s) {
     check(!lamina::program::parse_gpu_card(s, c, e), std::string("card ") + s + " accepted");
     return e;
 }
-}  // namespace
+}   // namespace
 
 int main() {
     using lamina::program::gpu_card_text;
     // sizes: binary units, with or without i and B, any case, fractions; 0 alone
     check(size_of("8G") == 8ull << 30, "8G");
-    check(size_of("8GiB") == 8ull << 30 && size_of("8gb") == 8ull << 30 && size_of(" 8 g ") == 8ull << 30, "8 GiB forms");
+    check(size_of("8GiB") == 8ull << 30 && size_of("8gb") == 8ull << 30 && size_of(" 8 g ") == 8ull << 30,
+          "8 GiB forms");
     check(size_of("700M") == 700ull << 20, "700M");
     check(size_of("1.5G") == 1536ull << 20, "1.5G");
     check(size_of("512K") == 512ull << 10 && size_of("2T") == 2ull << 40 && size_of("4096B") == 4096, "K, T, B");

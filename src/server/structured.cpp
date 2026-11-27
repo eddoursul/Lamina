@@ -17,10 +17,10 @@
 // 400, too deep an answer a 502, with Python's "maximum recursion depth exceeded".
 //
 // Where Python would run on for hours, budgets stop the work: the schema's object walk (1,000,000 calls), a
-// validation's frames (5,000,000), its pattern searches (100,000,000 steps, 256 MiB of backtracking state): a 400 for the
-// schema, a 502 for an answer. One CPython quirk is not reproduced: a search whose pattern starts with a character set
-// under flags of its own, as (?a)(?u:\d), is prefiltered with the pattern's global flags (sre_compile._compile_info's
-// charset prefix), so there "١" finds no match, here it matches as the pattern says.
+// validation's frames (5,000,000), its pattern searches (100,000,000 steps, 256 MiB of backtracking state): a 400 for
+// the schema, a 502 for an answer. One CPython quirk is not reproduced: a search whose pattern starts with a character
+// set under flags of its own, as (?a)(?u:\d), is prefiltered with the pattern's global flags
+// (sre_compile._compile_info's charset prefix), so there "١" finds no match, here it matches as the pattern says.
 //
 // Generated tables: kMetaDocs (jsonschema-specifications 2025.9.1's files, compact), kXidStart and kXidContinue
 // (str.isidentifier()'s sets), kDecimal and sre_upper's kExtended (these four from Python 3.12's unicodedata);
@@ -77,7 +77,7 @@ struct Val {
     bool b = false;
     int64_t i = 0;
     double f = 0;
-    std::string s;                 ///< Str: UTF-8 (a lone surrogate as its 3 bytes); Big: the digits, '-' first if negative
+    std::string s;   ///< Str: UTF-8 (a lone surrogate as its 3 bytes); Big: the digits, '-' first if negative
     std::vector<Val> list;
     std::vector<Member> dict;
     std::vector<uint32_t> order;   ///< a big Dict's member positions sorted by key, for get()
@@ -319,18 +319,19 @@ bool py_word(uint32_t cp) {
 
 /// the Nd category (str.isdecimal(), re's \d), Unicode 15.0
 constexpr std::pair<uint32_t, uint32_t> kDecimal[] = {
-    {0x30, 0x39}, {0x660, 0x669}, {0x6F0, 0x6F9}, {0x7C0, 0x7C9}, {0x966, 0x96F}, {0x9E6, 0x9EF}, {0xA66, 0xA6F},
-    {0xAE6, 0xAEF}, {0xB66, 0xB6F}, {0xBE6, 0xBEF}, {0xC66, 0xC6F}, {0xCE6, 0xCEF}, {0xD66, 0xD6F}, {0xDE6, 0xDEF},
-    {0xE50, 0xE59}, {0xED0, 0xED9}, {0xF20, 0xF29}, {0x1040, 0x1049}, {0x1090, 0x1099}, {0x17E0, 0x17E9},
-    {0x1810, 0x1819}, {0x1946, 0x194F}, {0x19D0, 0x19D9}, {0x1A80, 0x1A89}, {0x1A90, 0x1A99}, {0x1B50, 0x1B59},
-    {0x1BB0, 0x1BB9}, {0x1C40, 0x1C49}, {0x1C50, 0x1C59}, {0xA620, 0xA629}, {0xA8D0, 0xA8D9}, {0xA900, 0xA909},
-    {0xA9D0, 0xA9D9}, {0xA9F0, 0xA9F9}, {0xAA50, 0xAA59}, {0xABF0, 0xABF9}, {0xFF10, 0xFF19}, {0x104A0, 0x104A9},
-    {0x10D30, 0x10D39}, {0x11066, 0x1106F}, {0x110F0, 0x110F9}, {0x11136, 0x1113F}, {0x111D0, 0x111D9},
-    {0x112F0, 0x112F9}, {0x11450, 0x11459}, {0x114D0, 0x114D9}, {0x11650, 0x11659}, {0x116C0, 0x116C9},
-    {0x11730, 0x11739}, {0x118E0, 0x118E9}, {0x11950, 0x11959}, {0x11C50, 0x11C59}, {0x11D50, 0x11D59},
-    {0x11DA0, 0x11DA9}, {0x11F50, 0x11F59}, {0x16A60, 0x16A69}, {0x16AC0, 0x16AC9}, {0x16B50, 0x16B59},
-    {0x1D7CE, 0x1D7FF}, {0x1E140, 0x1E149}, {0x1E2F0, 0x1E2F9}, {0x1E4F0, 0x1E4F9}, {0x1E950, 0x1E959},
-    {0x1FBF0, 0x1FBF9}};
+    {0x30, 0x39},       {0x660, 0x669},     {0x6F0, 0x6F9},     {0x7C0, 0x7C9},     {0x966, 0x96F},
+    {0x9E6, 0x9EF},     {0xA66, 0xA6F},     {0xAE6, 0xAEF},     {0xB66, 0xB6F},     {0xBE6, 0xBEF},
+    {0xC66, 0xC6F},     {0xCE6, 0xCEF},     {0xD66, 0xD6F},     {0xDE6, 0xDEF},     {0xE50, 0xE59},
+    {0xED0, 0xED9},     {0xF20, 0xF29},     {0x1040, 0x1049},   {0x1090, 0x1099},   {0x17E0, 0x17E9},
+    {0x1810, 0x1819},   {0x1946, 0x194F},   {0x19D0, 0x19D9},   {0x1A80, 0x1A89},   {0x1A90, 0x1A99},
+    {0x1B50, 0x1B59},   {0x1BB0, 0x1BB9},   {0x1C40, 0x1C49},   {0x1C50, 0x1C59},   {0xA620, 0xA629},
+    {0xA8D0, 0xA8D9},   {0xA900, 0xA909},   {0xA9D0, 0xA9D9},   {0xA9F0, 0xA9F9},   {0xAA50, 0xAA59},
+    {0xABF0, 0xABF9},   {0xFF10, 0xFF19},   {0x104A0, 0x104A9}, {0x10D30, 0x10D39}, {0x11066, 0x1106F},
+    {0x110F0, 0x110F9}, {0x11136, 0x1113F}, {0x111D0, 0x111D9}, {0x112F0, 0x112F9}, {0x11450, 0x11459},
+    {0x114D0, 0x114D9}, {0x11650, 0x11659}, {0x116C0, 0x116C9}, {0x11730, 0x11739}, {0x118E0, 0x118E9},
+    {0x11950, 0x11959}, {0x11C50, 0x11C59}, {0x11D50, 0x11D59}, {0x11DA0, 0x11DA9}, {0x11F50, 0x11F59},
+    {0x16A60, 0x16A69}, {0x16AC0, 0x16AC9}, {0x16B50, 0x16B59}, {0x1D7CE, 0x1D7FF}, {0x1E140, 0x1E149},
+    {0x1E2F0, 0x1E2F9}, {0x1E4F0, 0x1E4F9}, {0x1E950, 0x1E959}, {0x1FBF0, 0x1FBF9}};
 
 /// the digit's value (0-9), or -1 when not a decimal
 int py_decimal(uint32_t cp) {
@@ -349,19 +350,19 @@ uint32_t sre_lower(uint32_t cp) { return cp_lower(cp); }
 /// sre's upper case: the simple mapping, or the first character of a multi-character one
 uint32_t sre_upper(uint32_t cp) {
     static constexpr std::pair<uint32_t, uint32_t> kExtended[] = {
-        {0xDF, 0x53}, {0x149, 0x2BC}, {0x1F0, 0x4A}, {0x390, 0x399}, {0x3B0, 0x3A5}, {0x587, 0x535},
-        {0x1E96, 0x48}, {0x1E97, 0x54}, {0x1E98, 0x57}, {0x1E99, 0x59}, {0x1E9A, 0x41}, {0x1F50, 0x3A5},
-        {0x1F52, 0x3A5}, {0x1F54, 0x3A5}, {0x1F56, 0x3A5}, {0x1F88, 0x1F08}, {0x1F89, 0x1F09}, {0x1F8A, 0x1F0A},
+        {0xDF, 0x53},     {0x149, 0x2BC},   {0x1F0, 0x4A},    {0x390, 0x399},   {0x3B0, 0x3A5},   {0x587, 0x535},
+        {0x1E96, 0x48},   {0x1E97, 0x54},   {0x1E98, 0x57},   {0x1E99, 0x59},   {0x1E9A, 0x41},   {0x1F50, 0x3A5},
+        {0x1F52, 0x3A5},  {0x1F54, 0x3A5},  {0x1F56, 0x3A5},  {0x1F88, 0x1F08}, {0x1F89, 0x1F09}, {0x1F8A, 0x1F0A},
         {0x1F8B, 0x1F0B}, {0x1F8C, 0x1F0C}, {0x1F8D, 0x1F0D}, {0x1F8E, 0x1F0E}, {0x1F8F, 0x1F0F}, {0x1F98, 0x1F28},
         {0x1F99, 0x1F29}, {0x1F9A, 0x1F2A}, {0x1F9B, 0x1F2B}, {0x1F9C, 0x1F2C}, {0x1F9D, 0x1F2D}, {0x1F9E, 0x1F2E},
         {0x1F9F, 0x1F2F}, {0x1FA8, 0x1F68}, {0x1FA9, 0x1F69}, {0x1FAA, 0x1F6A}, {0x1FAB, 0x1F6B}, {0x1FAC, 0x1F6C},
-        {0x1FAD, 0x1F6D}, {0x1FAE, 0x1F6E}, {0x1FAF, 0x1F6F}, {0x1FB2, 0x1FBA}, {0x1FB4, 0x386}, {0x1FB6, 0x391},
-        {0x1FB7, 0x391}, {0x1FBC, 0x391}, {0x1FC2, 0x1FCA}, {0x1FC4, 0x389}, {0x1FC6, 0x397}, {0x1FC7, 0x397},
-        {0x1FCC, 0x397}, {0x1FD2, 0x399}, {0x1FD3, 0x399}, {0x1FD6, 0x399}, {0x1FD7, 0x399}, {0x1FE2, 0x3A5},
-        {0x1FE3, 0x3A5}, {0x1FE4, 0x3A1}, {0x1FE6, 0x3A5}, {0x1FE7, 0x3A5}, {0x1FF2, 0x1FFA}, {0x1FF4, 0x38F},
-        {0x1FF6, 0x3A9}, {0x1FF7, 0x3A9}, {0x1FFC, 0x3A9}, {0xFB00, 0x46}, {0xFB01, 0x46}, {0xFB02, 0x46},
-        {0xFB03, 0x46}, {0xFB04, 0x46}, {0xFB05, 0x53}, {0xFB06, 0x53}, {0xFB13, 0x544}, {0xFB14, 0x544},
-        {0xFB15, 0x544}, {0xFB16, 0x54E}, {0xFB17, 0x544}};
+        {0x1FAD, 0x1F6D}, {0x1FAE, 0x1F6E}, {0x1FAF, 0x1F6F}, {0x1FB2, 0x1FBA}, {0x1FB4, 0x386},  {0x1FB6, 0x391},
+        {0x1FB7, 0x391},  {0x1FBC, 0x391},  {0x1FC2, 0x1FCA}, {0x1FC4, 0x389},  {0x1FC6, 0x397},  {0x1FC7, 0x397},
+        {0x1FCC, 0x397},  {0x1FD2, 0x399},  {0x1FD3, 0x399},  {0x1FD6, 0x399},  {0x1FD7, 0x399},  {0x1FE2, 0x3A5},
+        {0x1FE3, 0x3A5},  {0x1FE4, 0x3A1},  {0x1FE6, 0x3A5},  {0x1FE7, 0x3A5},  {0x1FF2, 0x1FFA}, {0x1FF4, 0x38F},
+        {0x1FF6, 0x3A9},  {0x1FF7, 0x3A9},  {0x1FFC, 0x3A9},  {0xFB00, 0x46},   {0xFB01, 0x46},   {0xFB02, 0x46},
+        {0xFB03, 0x46},   {0xFB04, 0x46},   {0xFB05, 0x53},   {0xFB06, 0x53},   {0xFB13, 0x544},  {0xFB14, 0x544},
+        {0xFB15, 0x544},  {0xFB16, 0x54E},  {0xFB17, 0x544}};
     auto by_first = [](const std::pair<uint32_t, uint32_t>& p, uint32_t c) { return p.first < c; };
     const auto e = std::lower_bound(std::begin(kExtended), std::end(kExtended), cp, by_first);
     return e != std::end(kExtended) && e->first == cp ? e->second : cp_upper(cp);
@@ -372,16 +373,19 @@ bool sre_iscased(uint32_t cp) { return sre_lower(cp) != cp || sre_upper(cp) != c
 /// re._casefix._EXTRA_CASES: a lower cased character -> the other lower cased characters with its upper case
 const std::vector<uint32_t>* sre_extra_cases(uint32_t lo) {
     static const std::map<uint32_t, std::vector<uint32_t>> kCases = {
-        {0x69, {0x131}}, {0x73, {0x17F}}, {0xB5, {0x3BC}}, {0x131, {0x69}}, {0x17F, {0x73}},
-        {0x345, {0x3B9, 0x1FBE}}, {0x390, {0x1FD3}}, {0x3B0, {0x1FE3}}, {0x3B2, {0x3D0}}, {0x3B5, {0x3F5}},
-        {0x3B8, {0x3D1}}, {0x3B9, {0x345, 0x1FBE}}, {0x3BA, {0x3F0}}, {0x3BC, {0xB5}}, {0x3C0, {0x3D6}},
-        {0x3C1, {0x3F1}}, {0x3C2, {0x3C3}}, {0x3C3, {0x3C2}}, {0x3C6, {0x3D5}}, {0x3D0, {0x3B2}}, {0x3D1, {0x3B8}},
-        {0x3D5, {0x3C6}}, {0x3D6, {0x3C0}}, {0x3F0, {0x3BA}}, {0x3F1, {0x3C1}}, {0x3F5, {0x3B5}}, {0x432, {0x1C80}},
-        {0x434, {0x1C81}}, {0x43E, {0x1C82}}, {0x441, {0x1C83}}, {0x442, {0x1C84, 0x1C85}}, {0x44A, {0x1C86}},
-        {0x463, {0x1C87}}, {0x1C80, {0x432}}, {0x1C81, {0x434}}, {0x1C82, {0x43E}}, {0x1C83, {0x441}},
-        {0x1C84, {0x442, 0x1C85}}, {0x1C85, {0x442, 0x1C84}}, {0x1C86, {0x44A}}, {0x1C87, {0x463}},
-        {0x1C88, {0xA64B}}, {0x1E61, {0x1E9B}}, {0x1E9B, {0x1E61}}, {0x1FBE, {0x345, 0x3B9}}, {0x1FD3, {0x390}},
-        {0x1FE3, {0x3B0}}, {0xA64B, {0x1C88}}, {0xFB05, {0xFB06}}, {0xFB06, {0xFB05}}};
+        {0x69, {0x131}},          {0x73, {0x17F}},           {0xB5, {0x3BC}},           {0x131, {0x69}},
+        {0x17F, {0x73}},          {0x345, {0x3B9, 0x1FBE}},  {0x390, {0x1FD3}},         {0x3B0, {0x1FE3}},
+        {0x3B2, {0x3D0}},         {0x3B5, {0x3F5}},          {0x3B8, {0x3D1}},          {0x3B9, {0x345, 0x1FBE}},
+        {0x3BA, {0x3F0}},         {0x3BC, {0xB5}},           {0x3C0, {0x3D6}},          {0x3C1, {0x3F1}},
+        {0x3C2, {0x3C3}},         {0x3C3, {0x3C2}},          {0x3C6, {0x3D5}},          {0x3D0, {0x3B2}},
+        {0x3D1, {0x3B8}},         {0x3D5, {0x3C6}},          {0x3D6, {0x3C0}},          {0x3F0, {0x3BA}},
+        {0x3F1, {0x3C1}},         {0x3F5, {0x3B5}},          {0x432, {0x1C80}},         {0x434, {0x1C81}},
+        {0x43E, {0x1C82}},        {0x441, {0x1C83}},         {0x442, {0x1C84, 0x1C85}}, {0x44A, {0x1C86}},
+        {0x463, {0x1C87}},        {0x1C80, {0x432}},         {0x1C81, {0x434}},         {0x1C82, {0x43E}},
+        {0x1C83, {0x441}},        {0x1C84, {0x442, 0x1C85}}, {0x1C85, {0x442, 0x1C84}}, {0x1C86, {0x44A}},
+        {0x1C87, {0x463}},        {0x1C88, {0xA64B}},        {0x1E61, {0x1E9B}},        {0x1E9B, {0x1E61}},
+        {0x1FBE, {0x345, 0x3B9}}, {0x1FD3, {0x390}},         {0x1FE3, {0x3B0}},         {0xA64B, {0x1C88}},
+        {0xFB05, {0xFB06}},       {0xFB06, {0xFB05}}};
     const auto it = kCases.find(lo);
     return it == kCases.end() ? nullptr : &it->second;
 }
@@ -553,7 +557,8 @@ double to_float(const Val& v) {
     if (v.k == K::Int) return (double) v.i;
     double d = 0;
     const auto r = std::from_chars(v.s.data(), v.s.data() + v.s.size(), d);
-    if (r.ec == std::errc::result_out_of_range || std::isinf(d)) raise("OverflowError", "int too large to convert to float");
+    if (r.ec == std::errc::result_out_of_range || std::isinf(d))
+        raise("OverflowError", "int too large to convert to float");
     return d;
 }
 
@@ -595,7 +600,8 @@ bool remainder_zero(const Val& inst, const Val& dB) {
     if (d == "0") raise("ZeroDivisionError", inst.k == K::Float ? "float modulo" : "integer modulo by zero");
     if (inst.k == K::Float) return std::fmod(inst.f, to_float(dB)) == 0;
     uint64_t m = 0;
-    if (std::from_chars(d.data(), d.data() + d.size(), m).ec != std::errc()) return false;   // beyond the request's ints
+    if (std::from_chars(d.data(), d.data() + d.size(), m).ec != std::errc())
+        return false;   // beyond the request's ints
     return mod_digits(int_digits(inst), m) == 0;
 }
 
@@ -760,8 +766,7 @@ bool uniq(const std::vector<Val>& items, int frames) {
             for (size_t j = 1; j < sorted.size(); ++j)
                 if (js_equal(*sorted[j - 1], *sorted[j], frames)) return false;
             return true;
-        } catch (const Unordered&) {
-        }
+        } catch (const Unordered&) {}
     }
     for (size_t j = 1; j < n; ++j)
         for (size_t m = 0; m < j; ++m)
@@ -1013,7 +1018,8 @@ Val Decoder::number(size_t start, size_t* next) const {
     const size_t digits = num.size() - (num[0] == '-' ? 1 : 0);
     if (digits > 4300)
         raise("ValueError", "Exceeds the limit (4300 digits) for integer string conversion: value has " +
-                                std::to_string(digits) + " digits; use sys.set_int_max_str_digits() to increase the limit");
+                                std::to_string(digits) +
+                                " digits; use sys.set_int_max_str_digits() to increase the limit");
     int64_t v = 0;
     if (std::from_chars(num.data(), num.data() + num.size(), v).ec == std::errc()) return Val::integer(v);
     Val big;
@@ -1200,19 +1206,43 @@ constexpr int kTypeFlags = kAscii | kLocale | kUnicode;
 constexpr int kGlobalFlags = kDebug | kTemplate;
 constexpr uint32_t kMaxRepeat = 0xFFFFFFFFu;   // _sre.MAXREPEAT
 constexpr uint64_t kMaxCode = 0xFFFFFFFFu;
-constexpr int64_t kMaxGroups = 1073741823;     // _sre.MAXGROUPS
-constexpr int kMaxNesting = 100;               // _parse levels (Python's recursion limit allows about 490): a
-                                               // pattern's stack, here, grows by about 2 KB a level
-constexpr uint64_t kMaxSteps = 100000000;      // the searches' budget in one validation (Python's has none)
-constexpr size_t kMaxMatchBytes = 256u << 20;  // a search's backtracking state (choices and undo entries)
+constexpr int64_t kMaxGroups = 1073741823;      // _sre.MAXGROUPS
+constexpr int kMaxNesting = 100;                // _parse levels (Python's recursion limit allows about 490): a
+                                                // pattern's stack, here, grows by about 2 KB a level
+constexpr uint64_t kMaxSteps = 100000000;       // the searches' budget in one validation (Python's has none)
+constexpr size_t kMaxMatchBytes = 256u << 20;   // a search's backtracking state (choices and undo entries)
 
 enum class Op : uint8_t {
-    Literal, NotLiteral, Any, In, At, Branch, Subpattern, Atomic, MaxRepeat, MinRepeat, PossRepeat, GroupRef,
-    GroupRefExists, Assert, AssertNot, Category, Range, Negate
+    Literal,
+    NotLiteral,
+    Any,
+    In,
+    At,
+    Branch,
+    Subpattern,
+    Atomic,
+    MaxRepeat,
+    MinRepeat,
+    PossRepeat,
+    GroupRef,
+    GroupRefExists,
+    Assert,
+    AssertNot,
+    Category,
+    Range,
+    Negate
 };
 enum AtCode : uint32_t {
-    AtBeginning, AtBeginningLine, AtBeginningString, AtBoundary, AtNonBoundary, AtEnd, AtEndLine, AtEndString,
-    AtUniBoundary, AtUniNonBoundary
+    AtBeginning,
+    AtBeginningLine,
+    AtBeginningString,
+    AtBoundary,
+    AtNonBoundary,
+    AtEnd,
+    AtEndLine,
+    AtEndString,
+    AtUniBoundary,
+    AtUniNonBoundary
 };
 enum CatCode : uint32_t { CatDigit, CatNotDigit, CatSpace, CatNotSpace, CatWord, CatNotWord };
 
@@ -1246,7 +1276,7 @@ struct State {
     int flags = 0;
     std::map<std::u32string, int> groupdict;
     std::vector<std::optional<std::pair<uint64_t, uint64_t>>> widths{std::nullopt};   ///< per group, once closed
-    std::optional<int> lookbehind;                                                     ///< lookbehindgroups
+    std::optional<int> lookbehind;                                                    ///< lookbehindgroups
     std::vector<std::pair<int64_t, size_t>> grouprefpos;
     int groups() const { return (int) widths.size(); }
     bool checkgroup(int64_t gid) const { return gid < groups() && widths[(size_t) gid].has_value(); }
@@ -1336,8 +1366,8 @@ std::pair<uint64_t, uint64_t> width(const Seq& p, const State& st) {
                     nl = k;
                 }
             }
-            msg += " (line " + std::to_string(line) + ", column " +
-                   std::to_string(nl == npos ? *pos + 1 : *pos - nl) + ")";
+            msg += " (line " + std::to_string(line) + ", column " + std::to_string(nl == npos ? *pos + 1 : *pos - nl) +
+                   ")";
         }
     }
     raise("re.error", std::move(msg));
@@ -1364,265 +1394,300 @@ int flag_of(const std::u32string& t) {
 
 // str.isidentifier()'s characters, Python 3.12.13 (Unicode 15.0.0)
 constexpr uint32_t kXidStart[][2] = {
-    {0x41, 0x5A}, {0x5F, 0x5F}, {0x61, 0x7A}, {0xAA, 0xAA}, {0xB5, 0xB5}, {0xBA, 0xBA}, {0xC0, 0xD6}, {0xD8, 0xF6},
-    {0xF8, 0x2C1}, {0x2C6, 0x2D1}, {0x2E0, 0x2E4}, {0x2EC, 0x2EC}, {0x2EE, 0x2EE}, {0x370, 0x374}, {0x376, 0x377},
-    {0x37B, 0x37D}, {0x37F, 0x37F}, {0x386, 0x386}, {0x388, 0x38A}, {0x38C, 0x38C}, {0x38E, 0x3A1}, {0x3A3, 0x3F5},
-    {0x3F7, 0x481}, {0x48A, 0x52F}, {0x531, 0x556}, {0x559, 0x559}, {0x560, 0x588}, {0x5D0, 0x5EA}, {0x5EF, 0x5F2},
-    {0x620, 0x64A}, {0x66E, 0x66F}, {0x671, 0x6D3}, {0x6D5, 0x6D5}, {0x6E5, 0x6E6}, {0x6EE, 0x6EF}, {0x6FA, 0x6FC},
-    {0x6FF, 0x6FF}, {0x710, 0x710}, {0x712, 0x72F}, {0x74D, 0x7A5}, {0x7B1, 0x7B1}, {0x7CA, 0x7EA}, {0x7F4, 0x7F5},
-    {0x7FA, 0x7FA}, {0x800, 0x815}, {0x81A, 0x81A}, {0x824, 0x824}, {0x828, 0x828}, {0x840, 0x858}, {0x860, 0x86A},
-    {0x870, 0x887}, {0x889, 0x88E}, {0x8A0, 0x8C9}, {0x904, 0x939}, {0x93D, 0x93D}, {0x950, 0x950}, {0x958, 0x961},
-    {0x971, 0x980}, {0x985, 0x98C}, {0x98F, 0x990}, {0x993, 0x9A8}, {0x9AA, 0x9B0}, {0x9B2, 0x9B2}, {0x9B6, 0x9B9},
-    {0x9BD, 0x9BD}, {0x9CE, 0x9CE}, {0x9DC, 0x9DD}, {0x9DF, 0x9E1}, {0x9F0, 0x9F1}, {0x9FC, 0x9FC}, {0xA05, 0xA0A},
-    {0xA0F, 0xA10}, {0xA13, 0xA28}, {0xA2A, 0xA30}, {0xA32, 0xA33}, {0xA35, 0xA36}, {0xA38, 0xA39}, {0xA59, 0xA5C},
-    {0xA5E, 0xA5E}, {0xA72, 0xA74}, {0xA85, 0xA8D}, {0xA8F, 0xA91}, {0xA93, 0xAA8}, {0xAAA, 0xAB0}, {0xAB2, 0xAB3},
-    {0xAB5, 0xAB9}, {0xABD, 0xABD}, {0xAD0, 0xAD0}, {0xAE0, 0xAE1}, {0xAF9, 0xAF9}, {0xB05, 0xB0C}, {0xB0F, 0xB10},
-    {0xB13, 0xB28}, {0xB2A, 0xB30}, {0xB32, 0xB33}, {0xB35, 0xB39}, {0xB3D, 0xB3D}, {0xB5C, 0xB5D}, {0xB5F, 0xB61},
-    {0xB71, 0xB71}, {0xB83, 0xB83}, {0xB85, 0xB8A}, {0xB8E, 0xB90}, {0xB92, 0xB95}, {0xB99, 0xB9A}, {0xB9C, 0xB9C},
-    {0xB9E, 0xB9F}, {0xBA3, 0xBA4}, {0xBA8, 0xBAA}, {0xBAE, 0xBB9}, {0xBD0, 0xBD0}, {0xC05, 0xC0C}, {0xC0E, 0xC10},
-    {0xC12, 0xC28}, {0xC2A, 0xC39}, {0xC3D, 0xC3D}, {0xC58, 0xC5A}, {0xC5D, 0xC5D}, {0xC60, 0xC61}, {0xC80, 0xC80},
-    {0xC85, 0xC8C}, {0xC8E, 0xC90}, {0xC92, 0xCA8}, {0xCAA, 0xCB3}, {0xCB5, 0xCB9}, {0xCBD, 0xCBD}, {0xCDD, 0xCDE},
-    {0xCE0, 0xCE1}, {0xCF1, 0xCF2}, {0xD04, 0xD0C}, {0xD0E, 0xD10}, {0xD12, 0xD3A}, {0xD3D, 0xD3D}, {0xD4E, 0xD4E},
-    {0xD54, 0xD56}, {0xD5F, 0xD61}, {0xD7A, 0xD7F}, {0xD85, 0xD96}, {0xD9A, 0xDB1}, {0xDB3, 0xDBB}, {0xDBD, 0xDBD},
-    {0xDC0, 0xDC6}, {0xE01, 0xE30}, {0xE32, 0xE32}, {0xE40, 0xE46}, {0xE81, 0xE82}, {0xE84, 0xE84}, {0xE86, 0xE8A},
-    {0xE8C, 0xEA3}, {0xEA5, 0xEA5}, {0xEA7, 0xEB0}, {0xEB2, 0xEB2}, {0xEBD, 0xEBD}, {0xEC0, 0xEC4}, {0xEC6, 0xEC6},
-    {0xEDC, 0xEDF}, {0xF00, 0xF00}, {0xF40, 0xF47}, {0xF49, 0xF6C}, {0xF88, 0xF8C}, {0x1000, 0x102A},
-    {0x103F, 0x103F}, {0x1050, 0x1055}, {0x105A, 0x105D}, {0x1061, 0x1061}, {0x1065, 0x1066}, {0x106E, 0x1070},
-    {0x1075, 0x1081}, {0x108E, 0x108E}, {0x10A0, 0x10C5}, {0x10C7, 0x10C7}, {0x10CD, 0x10CD}, {0x10D0, 0x10FA},
-    {0x10FC, 0x1248}, {0x124A, 0x124D}, {0x1250, 0x1256}, {0x1258, 0x1258}, {0x125A, 0x125D}, {0x1260, 0x1288},
-    {0x128A, 0x128D}, {0x1290, 0x12B0}, {0x12B2, 0x12B5}, {0x12B8, 0x12BE}, {0x12C0, 0x12C0}, {0x12C2, 0x12C5},
-    {0x12C8, 0x12D6}, {0x12D8, 0x1310}, {0x1312, 0x1315}, {0x1318, 0x135A}, {0x1380, 0x138F}, {0x13A0, 0x13F5},
-    {0x13F8, 0x13FD}, {0x1401, 0x166C}, {0x166F, 0x167F}, {0x1681, 0x169A}, {0x16A0, 0x16EA}, {0x16EE, 0x16F8},
-    {0x1700, 0x1711}, {0x171F, 0x1731}, {0x1740, 0x1751}, {0x1760, 0x176C}, {0x176E, 0x1770}, {0x1780, 0x17B3},
-    {0x17D7, 0x17D7}, {0x17DC, 0x17DC}, {0x1820, 0x1878}, {0x1880, 0x18A8}, {0x18AA, 0x18AA}, {0x18B0, 0x18F5},
-    {0x1900, 0x191E}, {0x1950, 0x196D}, {0x1970, 0x1974}, {0x1980, 0x19AB}, {0x19B0, 0x19C9}, {0x1A00, 0x1A16},
-    {0x1A20, 0x1A54}, {0x1AA7, 0x1AA7}, {0x1B05, 0x1B33}, {0x1B45, 0x1B4C}, {0x1B83, 0x1BA0}, {0x1BAE, 0x1BAF},
-    {0x1BBA, 0x1BE5}, {0x1C00, 0x1C23}, {0x1C4D, 0x1C4F}, {0x1C5A, 0x1C7D}, {0x1C80, 0x1C88}, {0x1C90, 0x1CBA},
-    {0x1CBD, 0x1CBF}, {0x1CE9, 0x1CEC}, {0x1CEE, 0x1CF3}, {0x1CF5, 0x1CF6}, {0x1CFA, 0x1CFA}, {0x1D00, 0x1DBF},
-    {0x1E00, 0x1F15}, {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, {0x1F48, 0x1F4D}, {0x1F50, 0x1F57}, {0x1F59, 0x1F59},
-    {0x1F5B, 0x1F5B}, {0x1F5D, 0x1F5D}, {0x1F5F, 0x1F7D}, {0x1F80, 0x1FB4}, {0x1FB6, 0x1FBC}, {0x1FBE, 0x1FBE},
-    {0x1FC2, 0x1FC4}, {0x1FC6, 0x1FCC}, {0x1FD0, 0x1FD3}, {0x1FD6, 0x1FDB}, {0x1FE0, 0x1FEC}, {0x1FF2, 0x1FF4},
-    {0x1FF6, 0x1FFC}, {0x2071, 0x2071}, {0x207F, 0x207F}, {0x2090, 0x209C}, {0x2102, 0x2102}, {0x2107, 0x2107},
-    {0x210A, 0x2113}, {0x2115, 0x2115}, {0x2118, 0x211D}, {0x2124, 0x2124}, {0x2126, 0x2126}, {0x2128, 0x2128},
-    {0x212A, 0x2139}, {0x213C, 0x213F}, {0x2145, 0x2149}, {0x214E, 0x214E}, {0x2160, 0x2188}, {0x2C00, 0x2CE4},
-    {0x2CEB, 0x2CEE}, {0x2CF2, 0x2CF3}, {0x2D00, 0x2D25}, {0x2D27, 0x2D27}, {0x2D2D, 0x2D2D}, {0x2D30, 0x2D67},
-    {0x2D6F, 0x2D6F}, {0x2D80, 0x2D96}, {0x2DA0, 0x2DA6}, {0x2DA8, 0x2DAE}, {0x2DB0, 0x2DB6}, {0x2DB8, 0x2DBE},
-    {0x2DC0, 0x2DC6}, {0x2DC8, 0x2DCE}, {0x2DD0, 0x2DD6}, {0x2DD8, 0x2DDE}, {0x3005, 0x3007}, {0x3021, 0x3029},
-    {0x3031, 0x3035}, {0x3038, 0x303C}, {0x3041, 0x3096}, {0x309D, 0x309F}, {0x30A1, 0x30FA}, {0x30FC, 0x30FF},
-    {0x3105, 0x312F}, {0x3131, 0x318E}, {0x31A0, 0x31BF}, {0x31F0, 0x31FF}, {0x3400, 0x4DBF}, {0x4E00, 0xA48C},
-    {0xA4D0, 0xA4FD}, {0xA500, 0xA60C}, {0xA610, 0xA61F}, {0xA62A, 0xA62B}, {0xA640, 0xA66E}, {0xA67F, 0xA69D},
-    {0xA6A0, 0xA6EF}, {0xA717, 0xA71F}, {0xA722, 0xA788}, {0xA78B, 0xA7CA}, {0xA7D0, 0xA7D1}, {0xA7D3, 0xA7D3},
-    {0xA7D5, 0xA7D9}, {0xA7F2, 0xA801}, {0xA803, 0xA805}, {0xA807, 0xA80A}, {0xA80C, 0xA822}, {0xA840, 0xA873},
-    {0xA882, 0xA8B3}, {0xA8F2, 0xA8F7}, {0xA8FB, 0xA8FB}, {0xA8FD, 0xA8FE}, {0xA90A, 0xA925}, {0xA930, 0xA946},
-    {0xA960, 0xA97C}, {0xA984, 0xA9B2}, {0xA9CF, 0xA9CF}, {0xA9E0, 0xA9E4}, {0xA9E6, 0xA9EF}, {0xA9FA, 0xA9FE},
-    {0xAA00, 0xAA28}, {0xAA40, 0xAA42}, {0xAA44, 0xAA4B}, {0xAA60, 0xAA76}, {0xAA7A, 0xAA7A}, {0xAA7E, 0xAAAF},
-    {0xAAB1, 0xAAB1}, {0xAAB5, 0xAAB6}, {0xAAB9, 0xAABD}, {0xAAC0, 0xAAC0}, {0xAAC2, 0xAAC2}, {0xAADB, 0xAADD},
-    {0xAAE0, 0xAAEA}, {0xAAF2, 0xAAF4}, {0xAB01, 0xAB06}, {0xAB09, 0xAB0E}, {0xAB11, 0xAB16}, {0xAB20, 0xAB26},
-    {0xAB28, 0xAB2E}, {0xAB30, 0xAB5A}, {0xAB5C, 0xAB69}, {0xAB70, 0xABE2}, {0xAC00, 0xD7A3}, {0xD7B0, 0xD7C6},
-    {0xD7CB, 0xD7FB}, {0xF900, 0xFA6D}, {0xFA70, 0xFAD9}, {0xFB00, 0xFB06}, {0xFB13, 0xFB17}, {0xFB1D, 0xFB1D},
-    {0xFB1F, 0xFB28}, {0xFB2A, 0xFB36}, {0xFB38, 0xFB3C}, {0xFB3E, 0xFB3E}, {0xFB40, 0xFB41}, {0xFB43, 0xFB44},
-    {0xFB46, 0xFBB1}, {0xFBD3, 0xFC5D}, {0xFC64, 0xFD3D}, {0xFD50, 0xFD8F}, {0xFD92, 0xFDC7}, {0xFDF0, 0xFDF9},
-    {0xFE71, 0xFE71}, {0xFE73, 0xFE73}, {0xFE77, 0xFE77}, {0xFE79, 0xFE79}, {0xFE7B, 0xFE7B}, {0xFE7D, 0xFE7D},
-    {0xFE7F, 0xFEFC}, {0xFF21, 0xFF3A}, {0xFF41, 0xFF5A}, {0xFF66, 0xFF9D}, {0xFFA0, 0xFFBE}, {0xFFC2, 0xFFC7},
-    {0xFFCA, 0xFFCF}, {0xFFD2, 0xFFD7}, {0xFFDA, 0xFFDC}, {0x10000, 0x1000B}, {0x1000D, 0x10026}, {0x10028, 0x1003A},
-    {0x1003C, 0x1003D}, {0x1003F, 0x1004D}, {0x10050, 0x1005D}, {0x10080, 0x100FA}, {0x10140, 0x10174},
-    {0x10280, 0x1029C}, {0x102A0, 0x102D0}, {0x10300, 0x1031F}, {0x1032D, 0x1034A}, {0x10350, 0x10375},
+    {0x41, 0x5A},       {0x5F, 0x5F},       {0x61, 0x7A},       {0xAA, 0xAA},       {0xB5, 0xB5},
+    {0xBA, 0xBA},       {0xC0, 0xD6},       {0xD8, 0xF6},       {0xF8, 0x2C1},      {0x2C6, 0x2D1},
+    {0x2E0, 0x2E4},     {0x2EC, 0x2EC},     {0x2EE, 0x2EE},     {0x370, 0x374},     {0x376, 0x377},
+    {0x37B, 0x37D},     {0x37F, 0x37F},     {0x386, 0x386},     {0x388, 0x38A},     {0x38C, 0x38C},
+    {0x38E, 0x3A1},     {0x3A3, 0x3F5},     {0x3F7, 0x481},     {0x48A, 0x52F},     {0x531, 0x556},
+    {0x559, 0x559},     {0x560, 0x588},     {0x5D0, 0x5EA},     {0x5EF, 0x5F2},     {0x620, 0x64A},
+    {0x66E, 0x66F},     {0x671, 0x6D3},     {0x6D5, 0x6D5},     {0x6E5, 0x6E6},     {0x6EE, 0x6EF},
+    {0x6FA, 0x6FC},     {0x6FF, 0x6FF},     {0x710, 0x710},     {0x712, 0x72F},     {0x74D, 0x7A5},
+    {0x7B1, 0x7B1},     {0x7CA, 0x7EA},     {0x7F4, 0x7F5},     {0x7FA, 0x7FA},     {0x800, 0x815},
+    {0x81A, 0x81A},     {0x824, 0x824},     {0x828, 0x828},     {0x840, 0x858},     {0x860, 0x86A},
+    {0x870, 0x887},     {0x889, 0x88E},     {0x8A0, 0x8C9},     {0x904, 0x939},     {0x93D, 0x93D},
+    {0x950, 0x950},     {0x958, 0x961},     {0x971, 0x980},     {0x985, 0x98C},     {0x98F, 0x990},
+    {0x993, 0x9A8},     {0x9AA, 0x9B0},     {0x9B2, 0x9B2},     {0x9B6, 0x9B9},     {0x9BD, 0x9BD},
+    {0x9CE, 0x9CE},     {0x9DC, 0x9DD},     {0x9DF, 0x9E1},     {0x9F0, 0x9F1},     {0x9FC, 0x9FC},
+    {0xA05, 0xA0A},     {0xA0F, 0xA10},     {0xA13, 0xA28},     {0xA2A, 0xA30},     {0xA32, 0xA33},
+    {0xA35, 0xA36},     {0xA38, 0xA39},     {0xA59, 0xA5C},     {0xA5E, 0xA5E},     {0xA72, 0xA74},
+    {0xA85, 0xA8D},     {0xA8F, 0xA91},     {0xA93, 0xAA8},     {0xAAA, 0xAB0},     {0xAB2, 0xAB3},
+    {0xAB5, 0xAB9},     {0xABD, 0xABD},     {0xAD0, 0xAD0},     {0xAE0, 0xAE1},     {0xAF9, 0xAF9},
+    {0xB05, 0xB0C},     {0xB0F, 0xB10},     {0xB13, 0xB28},     {0xB2A, 0xB30},     {0xB32, 0xB33},
+    {0xB35, 0xB39},     {0xB3D, 0xB3D},     {0xB5C, 0xB5D},     {0xB5F, 0xB61},     {0xB71, 0xB71},
+    {0xB83, 0xB83},     {0xB85, 0xB8A},     {0xB8E, 0xB90},     {0xB92, 0xB95},     {0xB99, 0xB9A},
+    {0xB9C, 0xB9C},     {0xB9E, 0xB9F},     {0xBA3, 0xBA4},     {0xBA8, 0xBAA},     {0xBAE, 0xBB9},
+    {0xBD0, 0xBD0},     {0xC05, 0xC0C},     {0xC0E, 0xC10},     {0xC12, 0xC28},     {0xC2A, 0xC39},
+    {0xC3D, 0xC3D},     {0xC58, 0xC5A},     {0xC5D, 0xC5D},     {0xC60, 0xC61},     {0xC80, 0xC80},
+    {0xC85, 0xC8C},     {0xC8E, 0xC90},     {0xC92, 0xCA8},     {0xCAA, 0xCB3},     {0xCB5, 0xCB9},
+    {0xCBD, 0xCBD},     {0xCDD, 0xCDE},     {0xCE0, 0xCE1},     {0xCF1, 0xCF2},     {0xD04, 0xD0C},
+    {0xD0E, 0xD10},     {0xD12, 0xD3A},     {0xD3D, 0xD3D},     {0xD4E, 0xD4E},     {0xD54, 0xD56},
+    {0xD5F, 0xD61},     {0xD7A, 0xD7F},     {0xD85, 0xD96},     {0xD9A, 0xDB1},     {0xDB3, 0xDBB},
+    {0xDBD, 0xDBD},     {0xDC0, 0xDC6},     {0xE01, 0xE30},     {0xE32, 0xE32},     {0xE40, 0xE46},
+    {0xE81, 0xE82},     {0xE84, 0xE84},     {0xE86, 0xE8A},     {0xE8C, 0xEA3},     {0xEA5, 0xEA5},
+    {0xEA7, 0xEB0},     {0xEB2, 0xEB2},     {0xEBD, 0xEBD},     {0xEC0, 0xEC4},     {0xEC6, 0xEC6},
+    {0xEDC, 0xEDF},     {0xF00, 0xF00},     {0xF40, 0xF47},     {0xF49, 0xF6C},     {0xF88, 0xF8C},
+    {0x1000, 0x102A},   {0x103F, 0x103F},   {0x1050, 0x1055},   {0x105A, 0x105D},   {0x1061, 0x1061},
+    {0x1065, 0x1066},   {0x106E, 0x1070},   {0x1075, 0x1081},   {0x108E, 0x108E},   {0x10A0, 0x10C5},
+    {0x10C7, 0x10C7},   {0x10CD, 0x10CD},   {0x10D0, 0x10FA},   {0x10FC, 0x1248},   {0x124A, 0x124D},
+    {0x1250, 0x1256},   {0x1258, 0x1258},   {0x125A, 0x125D},   {0x1260, 0x1288},   {0x128A, 0x128D},
+    {0x1290, 0x12B0},   {0x12B2, 0x12B5},   {0x12B8, 0x12BE},   {0x12C0, 0x12C0},   {0x12C2, 0x12C5},
+    {0x12C8, 0x12D6},   {0x12D8, 0x1310},   {0x1312, 0x1315},   {0x1318, 0x135A},   {0x1380, 0x138F},
+    {0x13A0, 0x13F5},   {0x13F8, 0x13FD},   {0x1401, 0x166C},   {0x166F, 0x167F},   {0x1681, 0x169A},
+    {0x16A0, 0x16EA},   {0x16EE, 0x16F8},   {0x1700, 0x1711},   {0x171F, 0x1731},   {0x1740, 0x1751},
+    {0x1760, 0x176C},   {0x176E, 0x1770},   {0x1780, 0x17B3},   {0x17D7, 0x17D7},   {0x17DC, 0x17DC},
+    {0x1820, 0x1878},   {0x1880, 0x18A8},   {0x18AA, 0x18AA},   {0x18B0, 0x18F5},   {0x1900, 0x191E},
+    {0x1950, 0x196D},   {0x1970, 0x1974},   {0x1980, 0x19AB},   {0x19B0, 0x19C9},   {0x1A00, 0x1A16},
+    {0x1A20, 0x1A54},   {0x1AA7, 0x1AA7},   {0x1B05, 0x1B33},   {0x1B45, 0x1B4C},   {0x1B83, 0x1BA0},
+    {0x1BAE, 0x1BAF},   {0x1BBA, 0x1BE5},   {0x1C00, 0x1C23},   {0x1C4D, 0x1C4F},   {0x1C5A, 0x1C7D},
+    {0x1C80, 0x1C88},   {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},   {0x1CE9, 0x1CEC},   {0x1CEE, 0x1CF3},
+    {0x1CF5, 0x1CF6},   {0x1CFA, 0x1CFA},   {0x1D00, 0x1DBF},   {0x1E00, 0x1F15},   {0x1F18, 0x1F1D},
+    {0x1F20, 0x1F45},   {0x1F48, 0x1F4D},   {0x1F50, 0x1F57},   {0x1F59, 0x1F59},   {0x1F5B, 0x1F5B},
+    {0x1F5D, 0x1F5D},   {0x1F5F, 0x1F7D},   {0x1F80, 0x1FB4},   {0x1FB6, 0x1FBC},   {0x1FBE, 0x1FBE},
+    {0x1FC2, 0x1FC4},   {0x1FC6, 0x1FCC},   {0x1FD0, 0x1FD3},   {0x1FD6, 0x1FDB},   {0x1FE0, 0x1FEC},
+    {0x1FF2, 0x1FF4},   {0x1FF6, 0x1FFC},   {0x2071, 0x2071},   {0x207F, 0x207F},   {0x2090, 0x209C},
+    {0x2102, 0x2102},   {0x2107, 0x2107},   {0x210A, 0x2113},   {0x2115, 0x2115},   {0x2118, 0x211D},
+    {0x2124, 0x2124},   {0x2126, 0x2126},   {0x2128, 0x2128},   {0x212A, 0x2139},   {0x213C, 0x213F},
+    {0x2145, 0x2149},   {0x214E, 0x214E},   {0x2160, 0x2188},   {0x2C00, 0x2CE4},   {0x2CEB, 0x2CEE},
+    {0x2CF2, 0x2CF3},   {0x2D00, 0x2D25},   {0x2D27, 0x2D27},   {0x2D2D, 0x2D2D},   {0x2D30, 0x2D67},
+    {0x2D6F, 0x2D6F},   {0x2D80, 0x2D96},   {0x2DA0, 0x2DA6},   {0x2DA8, 0x2DAE},   {0x2DB0, 0x2DB6},
+    {0x2DB8, 0x2DBE},   {0x2DC0, 0x2DC6},   {0x2DC8, 0x2DCE},   {0x2DD0, 0x2DD6},   {0x2DD8, 0x2DDE},
+    {0x3005, 0x3007},   {0x3021, 0x3029},   {0x3031, 0x3035},   {0x3038, 0x303C},   {0x3041, 0x3096},
+    {0x309D, 0x309F},   {0x30A1, 0x30FA},   {0x30FC, 0x30FF},   {0x3105, 0x312F},   {0x3131, 0x318E},
+    {0x31A0, 0x31BF},   {0x31F0, 0x31FF},   {0x3400, 0x4DBF},   {0x4E00, 0xA48C},   {0xA4D0, 0xA4FD},
+    {0xA500, 0xA60C},   {0xA610, 0xA61F},   {0xA62A, 0xA62B},   {0xA640, 0xA66E},   {0xA67F, 0xA69D},
+    {0xA6A0, 0xA6EF},   {0xA717, 0xA71F},   {0xA722, 0xA788},   {0xA78B, 0xA7CA},   {0xA7D0, 0xA7D1},
+    {0xA7D3, 0xA7D3},   {0xA7D5, 0xA7D9},   {0xA7F2, 0xA801},   {0xA803, 0xA805},   {0xA807, 0xA80A},
+    {0xA80C, 0xA822},   {0xA840, 0xA873},   {0xA882, 0xA8B3},   {0xA8F2, 0xA8F7},   {0xA8FB, 0xA8FB},
+    {0xA8FD, 0xA8FE},   {0xA90A, 0xA925},   {0xA930, 0xA946},   {0xA960, 0xA97C},   {0xA984, 0xA9B2},
+    {0xA9CF, 0xA9CF},   {0xA9E0, 0xA9E4},   {0xA9E6, 0xA9EF},   {0xA9FA, 0xA9FE},   {0xAA00, 0xAA28},
+    {0xAA40, 0xAA42},   {0xAA44, 0xAA4B},   {0xAA60, 0xAA76},   {0xAA7A, 0xAA7A},   {0xAA7E, 0xAAAF},
+    {0xAAB1, 0xAAB1},   {0xAAB5, 0xAAB6},   {0xAAB9, 0xAABD},   {0xAAC0, 0xAAC0},   {0xAAC2, 0xAAC2},
+    {0xAADB, 0xAADD},   {0xAAE0, 0xAAEA},   {0xAAF2, 0xAAF4},   {0xAB01, 0xAB06},   {0xAB09, 0xAB0E},
+    {0xAB11, 0xAB16},   {0xAB20, 0xAB26},   {0xAB28, 0xAB2E},   {0xAB30, 0xAB5A},   {0xAB5C, 0xAB69},
+    {0xAB70, 0xABE2},   {0xAC00, 0xD7A3},   {0xD7B0, 0xD7C6},   {0xD7CB, 0xD7FB},   {0xF900, 0xFA6D},
+    {0xFA70, 0xFAD9},   {0xFB00, 0xFB06},   {0xFB13, 0xFB17},   {0xFB1D, 0xFB1D},   {0xFB1F, 0xFB28},
+    {0xFB2A, 0xFB36},   {0xFB38, 0xFB3C},   {0xFB3E, 0xFB3E},   {0xFB40, 0xFB41},   {0xFB43, 0xFB44},
+    {0xFB46, 0xFBB1},   {0xFBD3, 0xFC5D},   {0xFC64, 0xFD3D},   {0xFD50, 0xFD8F},   {0xFD92, 0xFDC7},
+    {0xFDF0, 0xFDF9},   {0xFE71, 0xFE71},   {0xFE73, 0xFE73},   {0xFE77, 0xFE77},   {0xFE79, 0xFE79},
+    {0xFE7B, 0xFE7B},   {0xFE7D, 0xFE7D},   {0xFE7F, 0xFEFC},   {0xFF21, 0xFF3A},   {0xFF41, 0xFF5A},
+    {0xFF66, 0xFF9D},   {0xFFA0, 0xFFBE},   {0xFFC2, 0xFFC7},   {0xFFCA, 0xFFCF},   {0xFFD2, 0xFFD7},
+    {0xFFDA, 0xFFDC},   {0x10000, 0x1000B}, {0x1000D, 0x10026}, {0x10028, 0x1003A}, {0x1003C, 0x1003D},
+    {0x1003F, 0x1004D}, {0x10050, 0x1005D}, {0x10080, 0x100FA}, {0x10140, 0x10174}, {0x10280, 0x1029C},
+    {0x102A0, 0x102D0}, {0x10300, 0x1031F}, {0x1032D, 0x1034A}, {0x10350, 0x10375}, {0x10380, 0x1039D},
+    {0x103A0, 0x103C3}, {0x103C8, 0x103CF}, {0x103D1, 0x103D5}, {0x10400, 0x1049D}, {0x104B0, 0x104D3},
+    {0x104D8, 0x104FB}, {0x10500, 0x10527}, {0x10530, 0x10563}, {0x10570, 0x1057A}, {0x1057C, 0x1058A},
+    {0x1058C, 0x10592}, {0x10594, 0x10595}, {0x10597, 0x105A1}, {0x105A3, 0x105B1}, {0x105B3, 0x105B9},
+    {0x105BB, 0x105BC}, {0x10600, 0x10736}, {0x10740, 0x10755}, {0x10760, 0x10767}, {0x10780, 0x10785},
+    {0x10787, 0x107B0}, {0x107B2, 0x107BA}, {0x10800, 0x10805}, {0x10808, 0x10808}, {0x1080A, 0x10835},
+    {0x10837, 0x10838}, {0x1083C, 0x1083C}, {0x1083F, 0x10855}, {0x10860, 0x10876}, {0x10880, 0x1089E},
+    {0x108E0, 0x108F2}, {0x108F4, 0x108F5}, {0x10900, 0x10915}, {0x10920, 0x10939}, {0x10980, 0x109B7},
+    {0x109BE, 0x109BF}, {0x10A00, 0x10A00}, {0x10A10, 0x10A13}, {0x10A15, 0x10A17}, {0x10A19, 0x10A35},
+    {0x10A60, 0x10A7C}, {0x10A80, 0x10A9C}, {0x10AC0, 0x10AC7}, {0x10AC9, 0x10AE4}, {0x10B00, 0x10B35},
+    {0x10B40, 0x10B55}, {0x10B60, 0x10B72}, {0x10B80, 0x10B91}, {0x10C00, 0x10C48}, {0x10C80, 0x10CB2},
+    {0x10CC0, 0x10CF2}, {0x10D00, 0x10D23}, {0x10E80, 0x10EA9}, {0x10EB0, 0x10EB1}, {0x10F00, 0x10F1C},
+    {0x10F27, 0x10F27}, {0x10F30, 0x10F45}, {0x10F70, 0x10F81}, {0x10FB0, 0x10FC4}, {0x10FE0, 0x10FF6},
+    {0x11003, 0x11037}, {0x11071, 0x11072}, {0x11075, 0x11075}, {0x11083, 0x110AF}, {0x110D0, 0x110E8},
+    {0x11103, 0x11126}, {0x11144, 0x11144}, {0x11147, 0x11147}, {0x11150, 0x11172}, {0x11176, 0x11176},
+    {0x11183, 0x111B2}, {0x111C1, 0x111C4}, {0x111DA, 0x111DA}, {0x111DC, 0x111DC}, {0x11200, 0x11211},
+    {0x11213, 0x1122B}, {0x1123F, 0x11240}, {0x11280, 0x11286}, {0x11288, 0x11288}, {0x1128A, 0x1128D},
+    {0x1128F, 0x1129D}, {0x1129F, 0x112A8}, {0x112B0, 0x112DE}, {0x11305, 0x1130C}, {0x1130F, 0x11310},
+    {0x11313, 0x11328}, {0x1132A, 0x11330}, {0x11332, 0x11333}, {0x11335, 0x11339}, {0x1133D, 0x1133D},
+    {0x11350, 0x11350}, {0x1135D, 0x11361}, {0x11400, 0x11434}, {0x11447, 0x1144A}, {0x1145F, 0x11461},
+    {0x11480, 0x114AF}, {0x114C4, 0x114C5}, {0x114C7, 0x114C7}, {0x11580, 0x115AE}, {0x115D8, 0x115DB},
+    {0x11600, 0x1162F}, {0x11644, 0x11644}, {0x11680, 0x116AA}, {0x116B8, 0x116B8}, {0x11700, 0x1171A},
+    {0x11740, 0x11746}, {0x11800, 0x1182B}, {0x118A0, 0x118DF}, {0x118FF, 0x11906}, {0x11909, 0x11909},
+    {0x1190C, 0x11913}, {0x11915, 0x11916}, {0x11918, 0x1192F}, {0x1193F, 0x1193F}, {0x11941, 0x11941},
+    {0x119A0, 0x119A7}, {0x119AA, 0x119D0}, {0x119E1, 0x119E1}, {0x119E3, 0x119E3}, {0x11A00, 0x11A00},
+    {0x11A0B, 0x11A32}, {0x11A3A, 0x11A3A}, {0x11A50, 0x11A50}, {0x11A5C, 0x11A89}, {0x11A9D, 0x11A9D},
+    {0x11AB0, 0x11AF8}, {0x11C00, 0x11C08}, {0x11C0A, 0x11C2E}, {0x11C40, 0x11C40}, {0x11C72, 0x11C8F},
+    {0x11D00, 0x11D06}, {0x11D08, 0x11D09}, {0x11D0B, 0x11D30}, {0x11D46, 0x11D46}, {0x11D60, 0x11D65},
+    {0x11D67, 0x11D68}, {0x11D6A, 0x11D89}, {0x11D98, 0x11D98}, {0x11EE0, 0x11EF2}, {0x11F02, 0x11F02},
+    {0x11F04, 0x11F10}, {0x11F12, 0x11F33}, {0x11FB0, 0x11FB0}, {0x12000, 0x12399}, {0x12400, 0x1246E},
+    {0x12480, 0x12543}, {0x12F90, 0x12FF0}, {0x13000, 0x1342F}, {0x13441, 0x13446}, {0x14400, 0x14646},
+    {0x16800, 0x16A38}, {0x16A40, 0x16A5E}, {0x16A70, 0x16ABE}, {0x16AD0, 0x16AED}, {0x16B00, 0x16B2F},
+    {0x16B40, 0x16B43}, {0x16B63, 0x16B77}, {0x16B7D, 0x16B8F}, {0x16E40, 0x16E7F}, {0x16F00, 0x16F4A},
+    {0x16F50, 0x16F50}, {0x16F93, 0x16F9F}, {0x16FE0, 0x16FE1}, {0x16FE3, 0x16FE3}, {0x17000, 0x187F7},
+    {0x18800, 0x18CD5}, {0x18D00, 0x18D08}, {0x1AFF0, 0x1AFF3}, {0x1AFF5, 0x1AFFB}, {0x1AFFD, 0x1AFFE},
+    {0x1B000, 0x1B122}, {0x1B132, 0x1B132}, {0x1B150, 0x1B152}, {0x1B155, 0x1B155}, {0x1B164, 0x1B167},
+    {0x1B170, 0x1B2FB}, {0x1BC00, 0x1BC6A}, {0x1BC70, 0x1BC7C}, {0x1BC80, 0x1BC88}, {0x1BC90, 0x1BC99},
+    {0x1D400, 0x1D454}, {0x1D456, 0x1D49C}, {0x1D49E, 0x1D49F}, {0x1D4A2, 0x1D4A2}, {0x1D4A5, 0x1D4A6},
+    {0x1D4A9, 0x1D4AC}, {0x1D4AE, 0x1D4B9}, {0x1D4BB, 0x1D4BB}, {0x1D4BD, 0x1D4C3}, {0x1D4C5, 0x1D505},
+    {0x1D507, 0x1D50A}, {0x1D50D, 0x1D514}, {0x1D516, 0x1D51C}, {0x1D51E, 0x1D539}, {0x1D53B, 0x1D53E},
+    {0x1D540, 0x1D544}, {0x1D546, 0x1D546}, {0x1D54A, 0x1D550}, {0x1D552, 0x1D6A5}, {0x1D6A8, 0x1D6C0},
+    {0x1D6C2, 0x1D6DA}, {0x1D6DC, 0x1D6FA}, {0x1D6FC, 0x1D714}, {0x1D716, 0x1D734}, {0x1D736, 0x1D74E},
+    {0x1D750, 0x1D76E}, {0x1D770, 0x1D788}, {0x1D78A, 0x1D7A8}, {0x1D7AA, 0x1D7C2}, {0x1D7C4, 0x1D7CB},
+    {0x1DF00, 0x1DF1E}, {0x1DF25, 0x1DF2A}, {0x1E030, 0x1E06D}, {0x1E100, 0x1E12C}, {0x1E137, 0x1E13D},
+    {0x1E14E, 0x1E14E}, {0x1E290, 0x1E2AD}, {0x1E2C0, 0x1E2EB}, {0x1E4D0, 0x1E4EB}, {0x1E7E0, 0x1E7E6},
+    {0x1E7E8, 0x1E7EB}, {0x1E7ED, 0x1E7EE}, {0x1E7F0, 0x1E7FE}, {0x1E800, 0x1E8C4}, {0x1E900, 0x1E943},
+    {0x1E94B, 0x1E94B}, {0x1EE00, 0x1EE03}, {0x1EE05, 0x1EE1F}, {0x1EE21, 0x1EE22}, {0x1EE24, 0x1EE24},
+    {0x1EE27, 0x1EE27}, {0x1EE29, 0x1EE32}, {0x1EE34, 0x1EE37}, {0x1EE39, 0x1EE39}, {0x1EE3B, 0x1EE3B},
+    {0x1EE42, 0x1EE42}, {0x1EE47, 0x1EE47}, {0x1EE49, 0x1EE49}, {0x1EE4B, 0x1EE4B}, {0x1EE4D, 0x1EE4F},
+    {0x1EE51, 0x1EE52}, {0x1EE54, 0x1EE54}, {0x1EE57, 0x1EE57}, {0x1EE59, 0x1EE59}, {0x1EE5B, 0x1EE5B},
+    {0x1EE5D, 0x1EE5D}, {0x1EE5F, 0x1EE5F}, {0x1EE61, 0x1EE62}, {0x1EE64, 0x1EE64}, {0x1EE67, 0x1EE6A},
+    {0x1EE6C, 0x1EE72}, {0x1EE74, 0x1EE77}, {0x1EE79, 0x1EE7C}, {0x1EE7E, 0x1EE7E}, {0x1EE80, 0x1EE89},
+    {0x1EE8B, 0x1EE9B}, {0x1EEA1, 0x1EEA3}, {0x1EEA5, 0x1EEA9}, {0x1EEAB, 0x1EEBB}, {0x20000, 0x2A6DF},
+    {0x2A700, 0x2B739}, {0x2B740, 0x2B81D}, {0x2B820, 0x2CEA1}, {0x2CEB0, 0x2EBE0}, {0x2F800, 0x2FA1D},
+    {0x30000, 0x3134A}, {0x31350, 0x323AF},
+};
+constexpr uint32_t kXidContinue[][2] = {
+    {0x30, 0x39},       {0x41, 0x5A},       {0x5F, 0x5F},       {0x61, 0x7A},       {0xAA, 0xAA},
+    {0xB5, 0xB5},       {0xB7, 0xB7},       {0xBA, 0xBA},       {0xC0, 0xD6},       {0xD8, 0xF6},
+    {0xF8, 0x2C1},      {0x2C6, 0x2D1},     {0x2E0, 0x2E4},     {0x2EC, 0x2EC},     {0x2EE, 0x2EE},
+    {0x300, 0x374},     {0x376, 0x377},     {0x37B, 0x37D},     {0x37F, 0x37F},     {0x386, 0x38A},
+    {0x38C, 0x38C},     {0x38E, 0x3A1},     {0x3A3, 0x3F5},     {0x3F7, 0x481},     {0x483, 0x487},
+    {0x48A, 0x52F},     {0x531, 0x556},     {0x559, 0x559},     {0x560, 0x588},     {0x591, 0x5BD},
+    {0x5BF, 0x5BF},     {0x5C1, 0x5C2},     {0x5C4, 0x5C5},     {0x5C7, 0x5C7},     {0x5D0, 0x5EA},
+    {0x5EF, 0x5F2},     {0x610, 0x61A},     {0x620, 0x669},     {0x66E, 0x6D3},     {0x6D5, 0x6DC},
+    {0x6DF, 0x6E8},     {0x6EA, 0x6FC},     {0x6FF, 0x6FF},     {0x710, 0x74A},     {0x74D, 0x7B1},
+    {0x7C0, 0x7F5},     {0x7FA, 0x7FA},     {0x7FD, 0x7FD},     {0x800, 0x82D},     {0x840, 0x85B},
+    {0x860, 0x86A},     {0x870, 0x887},     {0x889, 0x88E},     {0x898, 0x8E1},     {0x8E3, 0x963},
+    {0x966, 0x96F},     {0x971, 0x983},     {0x985, 0x98C},     {0x98F, 0x990},     {0x993, 0x9A8},
+    {0x9AA, 0x9B0},     {0x9B2, 0x9B2},     {0x9B6, 0x9B9},     {0x9BC, 0x9C4},     {0x9C7, 0x9C8},
+    {0x9CB, 0x9CE},     {0x9D7, 0x9D7},     {0x9DC, 0x9DD},     {0x9DF, 0x9E3},     {0x9E6, 0x9F1},
+    {0x9FC, 0x9FC},     {0x9FE, 0x9FE},     {0xA01, 0xA03},     {0xA05, 0xA0A},     {0xA0F, 0xA10},
+    {0xA13, 0xA28},     {0xA2A, 0xA30},     {0xA32, 0xA33},     {0xA35, 0xA36},     {0xA38, 0xA39},
+    {0xA3C, 0xA3C},     {0xA3E, 0xA42},     {0xA47, 0xA48},     {0xA4B, 0xA4D},     {0xA51, 0xA51},
+    {0xA59, 0xA5C},     {0xA5E, 0xA5E},     {0xA66, 0xA75},     {0xA81, 0xA83},     {0xA85, 0xA8D},
+    {0xA8F, 0xA91},     {0xA93, 0xAA8},     {0xAAA, 0xAB0},     {0xAB2, 0xAB3},     {0xAB5, 0xAB9},
+    {0xABC, 0xAC5},     {0xAC7, 0xAC9},     {0xACB, 0xACD},     {0xAD0, 0xAD0},     {0xAE0, 0xAE3},
+    {0xAE6, 0xAEF},     {0xAF9, 0xAFF},     {0xB01, 0xB03},     {0xB05, 0xB0C},     {0xB0F, 0xB10},
+    {0xB13, 0xB28},     {0xB2A, 0xB30},     {0xB32, 0xB33},     {0xB35, 0xB39},     {0xB3C, 0xB44},
+    {0xB47, 0xB48},     {0xB4B, 0xB4D},     {0xB55, 0xB57},     {0xB5C, 0xB5D},     {0xB5F, 0xB63},
+    {0xB66, 0xB6F},     {0xB71, 0xB71},     {0xB82, 0xB83},     {0xB85, 0xB8A},     {0xB8E, 0xB90},
+    {0xB92, 0xB95},     {0xB99, 0xB9A},     {0xB9C, 0xB9C},     {0xB9E, 0xB9F},     {0xBA3, 0xBA4},
+    {0xBA8, 0xBAA},     {0xBAE, 0xBB9},     {0xBBE, 0xBC2},     {0xBC6, 0xBC8},     {0xBCA, 0xBCD},
+    {0xBD0, 0xBD0},     {0xBD7, 0xBD7},     {0xBE6, 0xBEF},     {0xC00, 0xC0C},     {0xC0E, 0xC10},
+    {0xC12, 0xC28},     {0xC2A, 0xC39},     {0xC3C, 0xC44},     {0xC46, 0xC48},     {0xC4A, 0xC4D},
+    {0xC55, 0xC56},     {0xC58, 0xC5A},     {0xC5D, 0xC5D},     {0xC60, 0xC63},     {0xC66, 0xC6F},
+    {0xC80, 0xC83},     {0xC85, 0xC8C},     {0xC8E, 0xC90},     {0xC92, 0xCA8},     {0xCAA, 0xCB3},
+    {0xCB5, 0xCB9},     {0xCBC, 0xCC4},     {0xCC6, 0xCC8},     {0xCCA, 0xCCD},     {0xCD5, 0xCD6},
+    {0xCDD, 0xCDE},     {0xCE0, 0xCE3},     {0xCE6, 0xCEF},     {0xCF1, 0xCF3},     {0xD00, 0xD0C},
+    {0xD0E, 0xD10},     {0xD12, 0xD44},     {0xD46, 0xD48},     {0xD4A, 0xD4E},     {0xD54, 0xD57},
+    {0xD5F, 0xD63},     {0xD66, 0xD6F},     {0xD7A, 0xD7F},     {0xD81, 0xD83},     {0xD85, 0xD96},
+    {0xD9A, 0xDB1},     {0xDB3, 0xDBB},     {0xDBD, 0xDBD},     {0xDC0, 0xDC6},     {0xDCA, 0xDCA},
+    {0xDCF, 0xDD4},     {0xDD6, 0xDD6},     {0xDD8, 0xDDF},     {0xDE6, 0xDEF},     {0xDF2, 0xDF3},
+    {0xE01, 0xE3A},     {0xE40, 0xE4E},     {0xE50, 0xE59},     {0xE81, 0xE82},     {0xE84, 0xE84},
+    {0xE86, 0xE8A},     {0xE8C, 0xEA3},     {0xEA5, 0xEA5},     {0xEA7, 0xEBD},     {0xEC0, 0xEC4},
+    {0xEC6, 0xEC6},     {0xEC8, 0xECE},     {0xED0, 0xED9},     {0xEDC, 0xEDF},     {0xF00, 0xF00},
+    {0xF18, 0xF19},     {0xF20, 0xF29},     {0xF35, 0xF35},     {0xF37, 0xF37},     {0xF39, 0xF39},
+    {0xF3E, 0xF47},     {0xF49, 0xF6C},     {0xF71, 0xF84},     {0xF86, 0xF97},     {0xF99, 0xFBC},
+    {0xFC6, 0xFC6},     {0x1000, 0x1049},   {0x1050, 0x109D},   {0x10A0, 0x10C5},   {0x10C7, 0x10C7},
+    {0x10CD, 0x10CD},   {0x10D0, 0x10FA},   {0x10FC, 0x1248},   {0x124A, 0x124D},   {0x1250, 0x1256},
+    {0x1258, 0x1258},   {0x125A, 0x125D},   {0x1260, 0x1288},   {0x128A, 0x128D},   {0x1290, 0x12B0},
+    {0x12B2, 0x12B5},   {0x12B8, 0x12BE},   {0x12C0, 0x12C0},   {0x12C2, 0x12C5},   {0x12C8, 0x12D6},
+    {0x12D8, 0x1310},   {0x1312, 0x1315},   {0x1318, 0x135A},   {0x135D, 0x135F},   {0x1369, 0x1371},
+    {0x1380, 0x138F},   {0x13A0, 0x13F5},   {0x13F8, 0x13FD},   {0x1401, 0x166C},   {0x166F, 0x167F},
+    {0x1681, 0x169A},   {0x16A0, 0x16EA},   {0x16EE, 0x16F8},   {0x1700, 0x1715},   {0x171F, 0x1734},
+    {0x1740, 0x1753},   {0x1760, 0x176C},   {0x176E, 0x1770},   {0x1772, 0x1773},   {0x1780, 0x17D3},
+    {0x17D7, 0x17D7},   {0x17DC, 0x17DD},   {0x17E0, 0x17E9},   {0x180B, 0x180D},   {0x180F, 0x1819},
+    {0x1820, 0x1878},   {0x1880, 0x18AA},   {0x18B0, 0x18F5},   {0x1900, 0x191E},   {0x1920, 0x192B},
+    {0x1930, 0x193B},   {0x1946, 0x196D},   {0x1970, 0x1974},   {0x1980, 0x19AB},   {0x19B0, 0x19C9},
+    {0x19D0, 0x19DA},   {0x1A00, 0x1A1B},   {0x1A20, 0x1A5E},   {0x1A60, 0x1A7C},   {0x1A7F, 0x1A89},
+    {0x1A90, 0x1A99},   {0x1AA7, 0x1AA7},   {0x1AB0, 0x1ABD},   {0x1ABF, 0x1ACE},   {0x1B00, 0x1B4C},
+    {0x1B50, 0x1B59},   {0x1B6B, 0x1B73},   {0x1B80, 0x1BF3},   {0x1C00, 0x1C37},   {0x1C40, 0x1C49},
+    {0x1C4D, 0x1C7D},   {0x1C80, 0x1C88},   {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},   {0x1CD0, 0x1CD2},
+    {0x1CD4, 0x1CFA},   {0x1D00, 0x1F15},   {0x1F18, 0x1F1D},   {0x1F20, 0x1F45},   {0x1F48, 0x1F4D},
+    {0x1F50, 0x1F57},   {0x1F59, 0x1F59},   {0x1F5B, 0x1F5B},   {0x1F5D, 0x1F5D},   {0x1F5F, 0x1F7D},
+    {0x1F80, 0x1FB4},   {0x1FB6, 0x1FBC},   {0x1FBE, 0x1FBE},   {0x1FC2, 0x1FC4},   {0x1FC6, 0x1FCC},
+    {0x1FD0, 0x1FD3},   {0x1FD6, 0x1FDB},   {0x1FE0, 0x1FEC},   {0x1FF2, 0x1FF4},   {0x1FF6, 0x1FFC},
+    {0x203F, 0x2040},   {0x2054, 0x2054},   {0x2071, 0x2071},   {0x207F, 0x207F},   {0x2090, 0x209C},
+    {0x20D0, 0x20DC},   {0x20E1, 0x20E1},   {0x20E5, 0x20F0},   {0x2102, 0x2102},   {0x2107, 0x2107},
+    {0x210A, 0x2113},   {0x2115, 0x2115},   {0x2118, 0x211D},   {0x2124, 0x2124},   {0x2126, 0x2126},
+    {0x2128, 0x2128},   {0x212A, 0x2139},   {0x213C, 0x213F},   {0x2145, 0x2149},   {0x214E, 0x214E},
+    {0x2160, 0x2188},   {0x2C00, 0x2CE4},   {0x2CEB, 0x2CF3},   {0x2D00, 0x2D25},   {0x2D27, 0x2D27},
+    {0x2D2D, 0x2D2D},   {0x2D30, 0x2D67},   {0x2D6F, 0x2D6F},   {0x2D7F, 0x2D96},   {0x2DA0, 0x2DA6},
+    {0x2DA8, 0x2DAE},   {0x2DB0, 0x2DB6},   {0x2DB8, 0x2DBE},   {0x2DC0, 0x2DC6},   {0x2DC8, 0x2DCE},
+    {0x2DD0, 0x2DD6},   {0x2DD8, 0x2DDE},   {0x2DE0, 0x2DFF},   {0x3005, 0x3007},   {0x3021, 0x302F},
+    {0x3031, 0x3035},   {0x3038, 0x303C},   {0x3041, 0x3096},   {0x3099, 0x309A},   {0x309D, 0x309F},
+    {0x30A1, 0x30FA},   {0x30FC, 0x30FF},   {0x3105, 0x312F},   {0x3131, 0x318E},   {0x31A0, 0x31BF},
+    {0x31F0, 0x31FF},   {0x3400, 0x4DBF},   {0x4E00, 0xA48C},   {0xA4D0, 0xA4FD},   {0xA500, 0xA60C},
+    {0xA610, 0xA62B},   {0xA640, 0xA66F},   {0xA674, 0xA67D},   {0xA67F, 0xA6F1},   {0xA717, 0xA71F},
+    {0xA722, 0xA788},   {0xA78B, 0xA7CA},   {0xA7D0, 0xA7D1},   {0xA7D3, 0xA7D3},   {0xA7D5, 0xA7D9},
+    {0xA7F2, 0xA827},   {0xA82C, 0xA82C},   {0xA840, 0xA873},   {0xA880, 0xA8C5},   {0xA8D0, 0xA8D9},
+    {0xA8E0, 0xA8F7},   {0xA8FB, 0xA8FB},   {0xA8FD, 0xA92D},   {0xA930, 0xA953},   {0xA960, 0xA97C},
+    {0xA980, 0xA9C0},   {0xA9CF, 0xA9D9},   {0xA9E0, 0xA9FE},   {0xAA00, 0xAA36},   {0xAA40, 0xAA4D},
+    {0xAA50, 0xAA59},   {0xAA60, 0xAA76},   {0xAA7A, 0xAAC2},   {0xAADB, 0xAADD},   {0xAAE0, 0xAAEF},
+    {0xAAF2, 0xAAF6},   {0xAB01, 0xAB06},   {0xAB09, 0xAB0E},   {0xAB11, 0xAB16},   {0xAB20, 0xAB26},
+    {0xAB28, 0xAB2E},   {0xAB30, 0xAB5A},   {0xAB5C, 0xAB69},   {0xAB70, 0xABEA},   {0xABEC, 0xABED},
+    {0xABF0, 0xABF9},   {0xAC00, 0xD7A3},   {0xD7B0, 0xD7C6},   {0xD7CB, 0xD7FB},   {0xF900, 0xFA6D},
+    {0xFA70, 0xFAD9},   {0xFB00, 0xFB06},   {0xFB13, 0xFB17},   {0xFB1D, 0xFB28},   {0xFB2A, 0xFB36},
+    {0xFB38, 0xFB3C},   {0xFB3E, 0xFB3E},   {0xFB40, 0xFB41},   {0xFB43, 0xFB44},   {0xFB46, 0xFBB1},
+    {0xFBD3, 0xFC5D},   {0xFC64, 0xFD3D},   {0xFD50, 0xFD8F},   {0xFD92, 0xFDC7},   {0xFDF0, 0xFDF9},
+    {0xFE00, 0xFE0F},   {0xFE20, 0xFE2F},   {0xFE33, 0xFE34},   {0xFE4D, 0xFE4F},   {0xFE71, 0xFE71},
+    {0xFE73, 0xFE73},   {0xFE77, 0xFE77},   {0xFE79, 0xFE79},   {0xFE7B, 0xFE7B},   {0xFE7D, 0xFE7D},
+    {0xFE7F, 0xFEFC},   {0xFF10, 0xFF19},   {0xFF21, 0xFF3A},   {0xFF3F, 0xFF3F},   {0xFF41, 0xFF5A},
+    {0xFF66, 0xFFBE},   {0xFFC2, 0xFFC7},   {0xFFCA, 0xFFCF},   {0xFFD2, 0xFFD7},   {0xFFDA, 0xFFDC},
+    {0x10000, 0x1000B}, {0x1000D, 0x10026}, {0x10028, 0x1003A}, {0x1003C, 0x1003D}, {0x1003F, 0x1004D},
+    {0x10050, 0x1005D}, {0x10080, 0x100FA}, {0x10140, 0x10174}, {0x101FD, 0x101FD}, {0x10280, 0x1029C},
+    {0x102A0, 0x102D0}, {0x102E0, 0x102E0}, {0x10300, 0x1031F}, {0x1032D, 0x1034A}, {0x10350, 0x1037A},
     {0x10380, 0x1039D}, {0x103A0, 0x103C3}, {0x103C8, 0x103CF}, {0x103D1, 0x103D5}, {0x10400, 0x1049D},
-    {0x104B0, 0x104D3}, {0x104D8, 0x104FB}, {0x10500, 0x10527}, {0x10530, 0x10563}, {0x10570, 0x1057A},
-    {0x1057C, 0x1058A}, {0x1058C, 0x10592}, {0x10594, 0x10595}, {0x10597, 0x105A1}, {0x105A3, 0x105B1},
-    {0x105B3, 0x105B9}, {0x105BB, 0x105BC}, {0x10600, 0x10736}, {0x10740, 0x10755}, {0x10760, 0x10767},
-    {0x10780, 0x10785}, {0x10787, 0x107B0}, {0x107B2, 0x107BA}, {0x10800, 0x10805}, {0x10808, 0x10808},
-    {0x1080A, 0x10835}, {0x10837, 0x10838}, {0x1083C, 0x1083C}, {0x1083F, 0x10855}, {0x10860, 0x10876},
-    {0x10880, 0x1089E}, {0x108E0, 0x108F2}, {0x108F4, 0x108F5}, {0x10900, 0x10915}, {0x10920, 0x10939},
-    {0x10980, 0x109B7}, {0x109BE, 0x109BF}, {0x10A00, 0x10A00}, {0x10A10, 0x10A13}, {0x10A15, 0x10A17},
-    {0x10A19, 0x10A35}, {0x10A60, 0x10A7C}, {0x10A80, 0x10A9C}, {0x10AC0, 0x10AC7}, {0x10AC9, 0x10AE4},
-    {0x10B00, 0x10B35}, {0x10B40, 0x10B55}, {0x10B60, 0x10B72}, {0x10B80, 0x10B91}, {0x10C00, 0x10C48},
-    {0x10C80, 0x10CB2}, {0x10CC0, 0x10CF2}, {0x10D00, 0x10D23}, {0x10E80, 0x10EA9}, {0x10EB0, 0x10EB1},
-    {0x10F00, 0x10F1C}, {0x10F27, 0x10F27}, {0x10F30, 0x10F45}, {0x10F70, 0x10F81}, {0x10FB0, 0x10FC4},
-    {0x10FE0, 0x10FF6}, {0x11003, 0x11037}, {0x11071, 0x11072}, {0x11075, 0x11075}, {0x11083, 0x110AF},
-    {0x110D0, 0x110E8}, {0x11103, 0x11126}, {0x11144, 0x11144}, {0x11147, 0x11147}, {0x11150, 0x11172},
-    {0x11176, 0x11176}, {0x11183, 0x111B2}, {0x111C1, 0x111C4}, {0x111DA, 0x111DA}, {0x111DC, 0x111DC},
-    {0x11200, 0x11211}, {0x11213, 0x1122B}, {0x1123F, 0x11240}, {0x11280, 0x11286}, {0x11288, 0x11288},
-    {0x1128A, 0x1128D}, {0x1128F, 0x1129D}, {0x1129F, 0x112A8}, {0x112B0, 0x112DE}, {0x11305, 0x1130C},
-    {0x1130F, 0x11310}, {0x11313, 0x11328}, {0x1132A, 0x11330}, {0x11332, 0x11333}, {0x11335, 0x11339},
-    {0x1133D, 0x1133D}, {0x11350, 0x11350}, {0x1135D, 0x11361}, {0x11400, 0x11434}, {0x11447, 0x1144A},
-    {0x1145F, 0x11461}, {0x11480, 0x114AF}, {0x114C4, 0x114C5}, {0x114C7, 0x114C7}, {0x11580, 0x115AE},
-    {0x115D8, 0x115DB}, {0x11600, 0x1162F}, {0x11644, 0x11644}, {0x11680, 0x116AA}, {0x116B8, 0x116B8},
-    {0x11700, 0x1171A}, {0x11740, 0x11746}, {0x11800, 0x1182B}, {0x118A0, 0x118DF}, {0x118FF, 0x11906},
-    {0x11909, 0x11909}, {0x1190C, 0x11913}, {0x11915, 0x11916}, {0x11918, 0x1192F}, {0x1193F, 0x1193F},
-    {0x11941, 0x11941}, {0x119A0, 0x119A7}, {0x119AA, 0x119D0}, {0x119E1, 0x119E1}, {0x119E3, 0x119E3},
-    {0x11A00, 0x11A00}, {0x11A0B, 0x11A32}, {0x11A3A, 0x11A3A}, {0x11A50, 0x11A50}, {0x11A5C, 0x11A89},
-    {0x11A9D, 0x11A9D}, {0x11AB0, 0x11AF8}, {0x11C00, 0x11C08}, {0x11C0A, 0x11C2E}, {0x11C40, 0x11C40},
-    {0x11C72, 0x11C8F}, {0x11D00, 0x11D06}, {0x11D08, 0x11D09}, {0x11D0B, 0x11D30}, {0x11D46, 0x11D46},
-    {0x11D60, 0x11D65}, {0x11D67, 0x11D68}, {0x11D6A, 0x11D89}, {0x11D98, 0x11D98}, {0x11EE0, 0x11EF2},
-    {0x11F02, 0x11F02}, {0x11F04, 0x11F10}, {0x11F12, 0x11F33}, {0x11FB0, 0x11FB0}, {0x12000, 0x12399},
-    {0x12400, 0x1246E}, {0x12480, 0x12543}, {0x12F90, 0x12FF0}, {0x13000, 0x1342F}, {0x13441, 0x13446},
-    {0x14400, 0x14646}, {0x16800, 0x16A38}, {0x16A40, 0x16A5E}, {0x16A70, 0x16ABE}, {0x16AD0, 0x16AED},
-    {0x16B00, 0x16B2F}, {0x16B40, 0x16B43}, {0x16B63, 0x16B77}, {0x16B7D, 0x16B8F}, {0x16E40, 0x16E7F},
-    {0x16F00, 0x16F4A}, {0x16F50, 0x16F50}, {0x16F93, 0x16F9F}, {0x16FE0, 0x16FE1}, {0x16FE3, 0x16FE3},
-    {0x17000, 0x187F7}, {0x18800, 0x18CD5}, {0x18D00, 0x18D08}, {0x1AFF0, 0x1AFF3}, {0x1AFF5, 0x1AFFB},
-    {0x1AFFD, 0x1AFFE}, {0x1B000, 0x1B122}, {0x1B132, 0x1B132}, {0x1B150, 0x1B152}, {0x1B155, 0x1B155},
-    {0x1B164, 0x1B167}, {0x1B170, 0x1B2FB}, {0x1BC00, 0x1BC6A}, {0x1BC70, 0x1BC7C}, {0x1BC80, 0x1BC88},
-    {0x1BC90, 0x1BC99}, {0x1D400, 0x1D454}, {0x1D456, 0x1D49C}, {0x1D49E, 0x1D49F}, {0x1D4A2, 0x1D4A2},
+    {0x104A0, 0x104A9}, {0x104B0, 0x104D3}, {0x104D8, 0x104FB}, {0x10500, 0x10527}, {0x10530, 0x10563},
+    {0x10570, 0x1057A}, {0x1057C, 0x1058A}, {0x1058C, 0x10592}, {0x10594, 0x10595}, {0x10597, 0x105A1},
+    {0x105A3, 0x105B1}, {0x105B3, 0x105B9}, {0x105BB, 0x105BC}, {0x10600, 0x10736}, {0x10740, 0x10755},
+    {0x10760, 0x10767}, {0x10780, 0x10785}, {0x10787, 0x107B0}, {0x107B2, 0x107BA}, {0x10800, 0x10805},
+    {0x10808, 0x10808}, {0x1080A, 0x10835}, {0x10837, 0x10838}, {0x1083C, 0x1083C}, {0x1083F, 0x10855},
+    {0x10860, 0x10876}, {0x10880, 0x1089E}, {0x108E0, 0x108F2}, {0x108F4, 0x108F5}, {0x10900, 0x10915},
+    {0x10920, 0x10939}, {0x10980, 0x109B7}, {0x109BE, 0x109BF}, {0x10A00, 0x10A03}, {0x10A05, 0x10A06},
+    {0x10A0C, 0x10A13}, {0x10A15, 0x10A17}, {0x10A19, 0x10A35}, {0x10A38, 0x10A3A}, {0x10A3F, 0x10A3F},
+    {0x10A60, 0x10A7C}, {0x10A80, 0x10A9C}, {0x10AC0, 0x10AC7}, {0x10AC9, 0x10AE6}, {0x10B00, 0x10B35},
+    {0x10B40, 0x10B55}, {0x10B60, 0x10B72}, {0x10B80, 0x10B91}, {0x10C00, 0x10C48}, {0x10C80, 0x10CB2},
+    {0x10CC0, 0x10CF2}, {0x10D00, 0x10D27}, {0x10D30, 0x10D39}, {0x10E80, 0x10EA9}, {0x10EAB, 0x10EAC},
+    {0x10EB0, 0x10EB1}, {0x10EFD, 0x10F1C}, {0x10F27, 0x10F27}, {0x10F30, 0x10F50}, {0x10F70, 0x10F85},
+    {0x10FB0, 0x10FC4}, {0x10FE0, 0x10FF6}, {0x11000, 0x11046}, {0x11066, 0x11075}, {0x1107F, 0x110BA},
+    {0x110C2, 0x110C2}, {0x110D0, 0x110E8}, {0x110F0, 0x110F9}, {0x11100, 0x11134}, {0x11136, 0x1113F},
+    {0x11144, 0x11147}, {0x11150, 0x11173}, {0x11176, 0x11176}, {0x11180, 0x111C4}, {0x111C9, 0x111CC},
+    {0x111CE, 0x111DA}, {0x111DC, 0x111DC}, {0x11200, 0x11211}, {0x11213, 0x11237}, {0x1123E, 0x11241},
+    {0x11280, 0x11286}, {0x11288, 0x11288}, {0x1128A, 0x1128D}, {0x1128F, 0x1129D}, {0x1129F, 0x112A8},
+    {0x112B0, 0x112EA}, {0x112F0, 0x112F9}, {0x11300, 0x11303}, {0x11305, 0x1130C}, {0x1130F, 0x11310},
+    {0x11313, 0x11328}, {0x1132A, 0x11330}, {0x11332, 0x11333}, {0x11335, 0x11339}, {0x1133B, 0x11344},
+    {0x11347, 0x11348}, {0x1134B, 0x1134D}, {0x11350, 0x11350}, {0x11357, 0x11357}, {0x1135D, 0x11363},
+    {0x11366, 0x1136C}, {0x11370, 0x11374}, {0x11400, 0x1144A}, {0x11450, 0x11459}, {0x1145E, 0x11461},
+    {0x11480, 0x114C5}, {0x114C7, 0x114C7}, {0x114D0, 0x114D9}, {0x11580, 0x115B5}, {0x115B8, 0x115C0},
+    {0x115D8, 0x115DD}, {0x11600, 0x11640}, {0x11644, 0x11644}, {0x11650, 0x11659}, {0x11680, 0x116B8},
+    {0x116C0, 0x116C9}, {0x11700, 0x1171A}, {0x1171D, 0x1172B}, {0x11730, 0x11739}, {0x11740, 0x11746},
+    {0x11800, 0x1183A}, {0x118A0, 0x118E9}, {0x118FF, 0x11906}, {0x11909, 0x11909}, {0x1190C, 0x11913},
+    {0x11915, 0x11916}, {0x11918, 0x11935}, {0x11937, 0x11938}, {0x1193B, 0x11943}, {0x11950, 0x11959},
+    {0x119A0, 0x119A7}, {0x119AA, 0x119D7}, {0x119DA, 0x119E1}, {0x119E3, 0x119E4}, {0x11A00, 0x11A3E},
+    {0x11A47, 0x11A47}, {0x11A50, 0x11A99}, {0x11A9D, 0x11A9D}, {0x11AB0, 0x11AF8}, {0x11C00, 0x11C08},
+    {0x11C0A, 0x11C36}, {0x11C38, 0x11C40}, {0x11C50, 0x11C59}, {0x11C72, 0x11C8F}, {0x11C92, 0x11CA7},
+    {0x11CA9, 0x11CB6}, {0x11D00, 0x11D06}, {0x11D08, 0x11D09}, {0x11D0B, 0x11D36}, {0x11D3A, 0x11D3A},
+    {0x11D3C, 0x11D3D}, {0x11D3F, 0x11D47}, {0x11D50, 0x11D59}, {0x11D60, 0x11D65}, {0x11D67, 0x11D68},
+    {0x11D6A, 0x11D8E}, {0x11D90, 0x11D91}, {0x11D93, 0x11D98}, {0x11DA0, 0x11DA9}, {0x11EE0, 0x11EF6},
+    {0x11F00, 0x11F10}, {0x11F12, 0x11F3A}, {0x11F3E, 0x11F42}, {0x11F50, 0x11F59}, {0x11FB0, 0x11FB0},
+    {0x12000, 0x12399}, {0x12400, 0x1246E}, {0x12480, 0x12543}, {0x12F90, 0x12FF0}, {0x13000, 0x1342F},
+    {0x13440, 0x13455}, {0x14400, 0x14646}, {0x16800, 0x16A38}, {0x16A40, 0x16A5E}, {0x16A60, 0x16A69},
+    {0x16A70, 0x16ABE}, {0x16AC0, 0x16AC9}, {0x16AD0, 0x16AED}, {0x16AF0, 0x16AF4}, {0x16B00, 0x16B36},
+    {0x16B40, 0x16B43}, {0x16B50, 0x16B59}, {0x16B63, 0x16B77}, {0x16B7D, 0x16B8F}, {0x16E40, 0x16E7F},
+    {0x16F00, 0x16F4A}, {0x16F4F, 0x16F87}, {0x16F8F, 0x16F9F}, {0x16FE0, 0x16FE1}, {0x16FE3, 0x16FE4},
+    {0x16FF0, 0x16FF1}, {0x17000, 0x187F7}, {0x18800, 0x18CD5}, {0x18D00, 0x18D08}, {0x1AFF0, 0x1AFF3},
+    {0x1AFF5, 0x1AFFB}, {0x1AFFD, 0x1AFFE}, {0x1B000, 0x1B122}, {0x1B132, 0x1B132}, {0x1B150, 0x1B152},
+    {0x1B155, 0x1B155}, {0x1B164, 0x1B167}, {0x1B170, 0x1B2FB}, {0x1BC00, 0x1BC6A}, {0x1BC70, 0x1BC7C},
+    {0x1BC80, 0x1BC88}, {0x1BC90, 0x1BC99}, {0x1BC9D, 0x1BC9E}, {0x1CF00, 0x1CF2D}, {0x1CF30, 0x1CF46},
+    {0x1D165, 0x1D169}, {0x1D16D, 0x1D172}, {0x1D17B, 0x1D182}, {0x1D185, 0x1D18B}, {0x1D1AA, 0x1D1AD},
+    {0x1D242, 0x1D244}, {0x1D400, 0x1D454}, {0x1D456, 0x1D49C}, {0x1D49E, 0x1D49F}, {0x1D4A2, 0x1D4A2},
     {0x1D4A5, 0x1D4A6}, {0x1D4A9, 0x1D4AC}, {0x1D4AE, 0x1D4B9}, {0x1D4BB, 0x1D4BB}, {0x1D4BD, 0x1D4C3},
     {0x1D4C5, 0x1D505}, {0x1D507, 0x1D50A}, {0x1D50D, 0x1D514}, {0x1D516, 0x1D51C}, {0x1D51E, 0x1D539},
     {0x1D53B, 0x1D53E}, {0x1D540, 0x1D544}, {0x1D546, 0x1D546}, {0x1D54A, 0x1D550}, {0x1D552, 0x1D6A5},
     {0x1D6A8, 0x1D6C0}, {0x1D6C2, 0x1D6DA}, {0x1D6DC, 0x1D6FA}, {0x1D6FC, 0x1D714}, {0x1D716, 0x1D734},
     {0x1D736, 0x1D74E}, {0x1D750, 0x1D76E}, {0x1D770, 0x1D788}, {0x1D78A, 0x1D7A8}, {0x1D7AA, 0x1D7C2},
-    {0x1D7C4, 0x1D7CB}, {0x1DF00, 0x1DF1E}, {0x1DF25, 0x1DF2A}, {0x1E030, 0x1E06D}, {0x1E100, 0x1E12C},
-    {0x1E137, 0x1E13D}, {0x1E14E, 0x1E14E}, {0x1E290, 0x1E2AD}, {0x1E2C0, 0x1E2EB}, {0x1E4D0, 0x1E4EB},
-    {0x1E7E0, 0x1E7E6}, {0x1E7E8, 0x1E7EB}, {0x1E7ED, 0x1E7EE}, {0x1E7F0, 0x1E7FE}, {0x1E800, 0x1E8C4},
-    {0x1E900, 0x1E943}, {0x1E94B, 0x1E94B}, {0x1EE00, 0x1EE03}, {0x1EE05, 0x1EE1F}, {0x1EE21, 0x1EE22},
+    {0x1D7C4, 0x1D7CB}, {0x1D7CE, 0x1D7FF}, {0x1DA00, 0x1DA36}, {0x1DA3B, 0x1DA6C}, {0x1DA75, 0x1DA75},
+    {0x1DA84, 0x1DA84}, {0x1DA9B, 0x1DA9F}, {0x1DAA1, 0x1DAAF}, {0x1DF00, 0x1DF1E}, {0x1DF25, 0x1DF2A},
+    {0x1E000, 0x1E006}, {0x1E008, 0x1E018}, {0x1E01B, 0x1E021}, {0x1E023, 0x1E024}, {0x1E026, 0x1E02A},
+    {0x1E030, 0x1E06D}, {0x1E08F, 0x1E08F}, {0x1E100, 0x1E12C}, {0x1E130, 0x1E13D}, {0x1E140, 0x1E149},
+    {0x1E14E, 0x1E14E}, {0x1E290, 0x1E2AE}, {0x1E2C0, 0x1E2F9}, {0x1E4D0, 0x1E4F9}, {0x1E7E0, 0x1E7E6},
+    {0x1E7E8, 0x1E7EB}, {0x1E7ED, 0x1E7EE}, {0x1E7F0, 0x1E7FE}, {0x1E800, 0x1E8C4}, {0x1E8D0, 0x1E8D6},
+    {0x1E900, 0x1E94B}, {0x1E950, 0x1E959}, {0x1EE00, 0x1EE03}, {0x1EE05, 0x1EE1F}, {0x1EE21, 0x1EE22},
     {0x1EE24, 0x1EE24}, {0x1EE27, 0x1EE27}, {0x1EE29, 0x1EE32}, {0x1EE34, 0x1EE37}, {0x1EE39, 0x1EE39},
     {0x1EE3B, 0x1EE3B}, {0x1EE42, 0x1EE42}, {0x1EE47, 0x1EE47}, {0x1EE49, 0x1EE49}, {0x1EE4B, 0x1EE4B},
     {0x1EE4D, 0x1EE4F}, {0x1EE51, 0x1EE52}, {0x1EE54, 0x1EE54}, {0x1EE57, 0x1EE57}, {0x1EE59, 0x1EE59},
     {0x1EE5B, 0x1EE5B}, {0x1EE5D, 0x1EE5D}, {0x1EE5F, 0x1EE5F}, {0x1EE61, 0x1EE62}, {0x1EE64, 0x1EE64},
     {0x1EE67, 0x1EE6A}, {0x1EE6C, 0x1EE72}, {0x1EE74, 0x1EE77}, {0x1EE79, 0x1EE7C}, {0x1EE7E, 0x1EE7E},
     {0x1EE80, 0x1EE89}, {0x1EE8B, 0x1EE9B}, {0x1EEA1, 0x1EEA3}, {0x1EEA5, 0x1EEA9}, {0x1EEAB, 0x1EEBB},
-    {0x20000, 0x2A6DF}, {0x2A700, 0x2B739}, {0x2B740, 0x2B81D}, {0x2B820, 0x2CEA1}, {0x2CEB0, 0x2EBE0},
-    {0x2F800, 0x2FA1D}, {0x30000, 0x3134A}, {0x31350, 0x323AF},
-};
-constexpr uint32_t kXidContinue[][2] = {
-    {0x30, 0x39}, {0x41, 0x5A}, {0x5F, 0x5F}, {0x61, 0x7A}, {0xAA, 0xAA}, {0xB5, 0xB5}, {0xB7, 0xB7}, {0xBA, 0xBA},
-    {0xC0, 0xD6}, {0xD8, 0xF6}, {0xF8, 0x2C1}, {0x2C6, 0x2D1}, {0x2E0, 0x2E4}, {0x2EC, 0x2EC}, {0x2EE, 0x2EE},
-    {0x300, 0x374}, {0x376, 0x377}, {0x37B, 0x37D}, {0x37F, 0x37F}, {0x386, 0x38A}, {0x38C, 0x38C}, {0x38E, 0x3A1},
-    {0x3A3, 0x3F5}, {0x3F7, 0x481}, {0x483, 0x487}, {0x48A, 0x52F}, {0x531, 0x556}, {0x559, 0x559}, {0x560, 0x588},
-    {0x591, 0x5BD}, {0x5BF, 0x5BF}, {0x5C1, 0x5C2}, {0x5C4, 0x5C5}, {0x5C7, 0x5C7}, {0x5D0, 0x5EA}, {0x5EF, 0x5F2},
-    {0x610, 0x61A}, {0x620, 0x669}, {0x66E, 0x6D3}, {0x6D5, 0x6DC}, {0x6DF, 0x6E8}, {0x6EA, 0x6FC}, {0x6FF, 0x6FF},
-    {0x710, 0x74A}, {0x74D, 0x7B1}, {0x7C0, 0x7F5}, {0x7FA, 0x7FA}, {0x7FD, 0x7FD}, {0x800, 0x82D}, {0x840, 0x85B},
-    {0x860, 0x86A}, {0x870, 0x887}, {0x889, 0x88E}, {0x898, 0x8E1}, {0x8E3, 0x963}, {0x966, 0x96F}, {0x971, 0x983},
-    {0x985, 0x98C}, {0x98F, 0x990}, {0x993, 0x9A8}, {0x9AA, 0x9B0}, {0x9B2, 0x9B2}, {0x9B6, 0x9B9}, {0x9BC, 0x9C4},
-    {0x9C7, 0x9C8}, {0x9CB, 0x9CE}, {0x9D7, 0x9D7}, {0x9DC, 0x9DD}, {0x9DF, 0x9E3}, {0x9E6, 0x9F1}, {0x9FC, 0x9FC},
-    {0x9FE, 0x9FE}, {0xA01, 0xA03}, {0xA05, 0xA0A}, {0xA0F, 0xA10}, {0xA13, 0xA28}, {0xA2A, 0xA30}, {0xA32, 0xA33},
-    {0xA35, 0xA36}, {0xA38, 0xA39}, {0xA3C, 0xA3C}, {0xA3E, 0xA42}, {0xA47, 0xA48}, {0xA4B, 0xA4D}, {0xA51, 0xA51},
-    {0xA59, 0xA5C}, {0xA5E, 0xA5E}, {0xA66, 0xA75}, {0xA81, 0xA83}, {0xA85, 0xA8D}, {0xA8F, 0xA91}, {0xA93, 0xAA8},
-    {0xAAA, 0xAB0}, {0xAB2, 0xAB3}, {0xAB5, 0xAB9}, {0xABC, 0xAC5}, {0xAC7, 0xAC9}, {0xACB, 0xACD}, {0xAD0, 0xAD0},
-    {0xAE0, 0xAE3}, {0xAE6, 0xAEF}, {0xAF9, 0xAFF}, {0xB01, 0xB03}, {0xB05, 0xB0C}, {0xB0F, 0xB10}, {0xB13, 0xB28},
-    {0xB2A, 0xB30}, {0xB32, 0xB33}, {0xB35, 0xB39}, {0xB3C, 0xB44}, {0xB47, 0xB48}, {0xB4B, 0xB4D}, {0xB55, 0xB57},
-    {0xB5C, 0xB5D}, {0xB5F, 0xB63}, {0xB66, 0xB6F}, {0xB71, 0xB71}, {0xB82, 0xB83}, {0xB85, 0xB8A}, {0xB8E, 0xB90},
-    {0xB92, 0xB95}, {0xB99, 0xB9A}, {0xB9C, 0xB9C}, {0xB9E, 0xB9F}, {0xBA3, 0xBA4}, {0xBA8, 0xBAA}, {0xBAE, 0xBB9},
-    {0xBBE, 0xBC2}, {0xBC6, 0xBC8}, {0xBCA, 0xBCD}, {0xBD0, 0xBD0}, {0xBD7, 0xBD7}, {0xBE6, 0xBEF}, {0xC00, 0xC0C},
-    {0xC0E, 0xC10}, {0xC12, 0xC28}, {0xC2A, 0xC39}, {0xC3C, 0xC44}, {0xC46, 0xC48}, {0xC4A, 0xC4D}, {0xC55, 0xC56},
-    {0xC58, 0xC5A}, {0xC5D, 0xC5D}, {0xC60, 0xC63}, {0xC66, 0xC6F}, {0xC80, 0xC83}, {0xC85, 0xC8C}, {0xC8E, 0xC90},
-    {0xC92, 0xCA8}, {0xCAA, 0xCB3}, {0xCB5, 0xCB9}, {0xCBC, 0xCC4}, {0xCC6, 0xCC8}, {0xCCA, 0xCCD}, {0xCD5, 0xCD6},
-    {0xCDD, 0xCDE}, {0xCE0, 0xCE3}, {0xCE6, 0xCEF}, {0xCF1, 0xCF3}, {0xD00, 0xD0C}, {0xD0E, 0xD10}, {0xD12, 0xD44},
-    {0xD46, 0xD48}, {0xD4A, 0xD4E}, {0xD54, 0xD57}, {0xD5F, 0xD63}, {0xD66, 0xD6F}, {0xD7A, 0xD7F}, {0xD81, 0xD83},
-    {0xD85, 0xD96}, {0xD9A, 0xDB1}, {0xDB3, 0xDBB}, {0xDBD, 0xDBD}, {0xDC0, 0xDC6}, {0xDCA, 0xDCA}, {0xDCF, 0xDD4},
-    {0xDD6, 0xDD6}, {0xDD8, 0xDDF}, {0xDE6, 0xDEF}, {0xDF2, 0xDF3}, {0xE01, 0xE3A}, {0xE40, 0xE4E}, {0xE50, 0xE59},
-    {0xE81, 0xE82}, {0xE84, 0xE84}, {0xE86, 0xE8A}, {0xE8C, 0xEA3}, {0xEA5, 0xEA5}, {0xEA7, 0xEBD}, {0xEC0, 0xEC4},
-    {0xEC6, 0xEC6}, {0xEC8, 0xECE}, {0xED0, 0xED9}, {0xEDC, 0xEDF}, {0xF00, 0xF00}, {0xF18, 0xF19}, {0xF20, 0xF29},
-    {0xF35, 0xF35}, {0xF37, 0xF37}, {0xF39, 0xF39}, {0xF3E, 0xF47}, {0xF49, 0xF6C}, {0xF71, 0xF84}, {0xF86, 0xF97},
-    {0xF99, 0xFBC}, {0xFC6, 0xFC6}, {0x1000, 0x1049}, {0x1050, 0x109D}, {0x10A0, 0x10C5}, {0x10C7, 0x10C7},
-    {0x10CD, 0x10CD}, {0x10D0, 0x10FA}, {0x10FC, 0x1248}, {0x124A, 0x124D}, {0x1250, 0x1256}, {0x1258, 0x1258},
-    {0x125A, 0x125D}, {0x1260, 0x1288}, {0x128A, 0x128D}, {0x1290, 0x12B0}, {0x12B2, 0x12B5}, {0x12B8, 0x12BE},
-    {0x12C0, 0x12C0}, {0x12C2, 0x12C5}, {0x12C8, 0x12D6}, {0x12D8, 0x1310}, {0x1312, 0x1315}, {0x1318, 0x135A},
-    {0x135D, 0x135F}, {0x1369, 0x1371}, {0x1380, 0x138F}, {0x13A0, 0x13F5}, {0x13F8, 0x13FD}, {0x1401, 0x166C},
-    {0x166F, 0x167F}, {0x1681, 0x169A}, {0x16A0, 0x16EA}, {0x16EE, 0x16F8}, {0x1700, 0x1715}, {0x171F, 0x1734},
-    {0x1740, 0x1753}, {0x1760, 0x176C}, {0x176E, 0x1770}, {0x1772, 0x1773}, {0x1780, 0x17D3}, {0x17D7, 0x17D7},
-    {0x17DC, 0x17DD}, {0x17E0, 0x17E9}, {0x180B, 0x180D}, {0x180F, 0x1819}, {0x1820, 0x1878}, {0x1880, 0x18AA},
-    {0x18B0, 0x18F5}, {0x1900, 0x191E}, {0x1920, 0x192B}, {0x1930, 0x193B}, {0x1946, 0x196D}, {0x1970, 0x1974},
-    {0x1980, 0x19AB}, {0x19B0, 0x19C9}, {0x19D0, 0x19DA}, {0x1A00, 0x1A1B}, {0x1A20, 0x1A5E}, {0x1A60, 0x1A7C},
-    {0x1A7F, 0x1A89}, {0x1A90, 0x1A99}, {0x1AA7, 0x1AA7}, {0x1AB0, 0x1ABD}, {0x1ABF, 0x1ACE}, {0x1B00, 0x1B4C},
-    {0x1B50, 0x1B59}, {0x1B6B, 0x1B73}, {0x1B80, 0x1BF3}, {0x1C00, 0x1C37}, {0x1C40, 0x1C49}, {0x1C4D, 0x1C7D},
-    {0x1C80, 0x1C88}, {0x1C90, 0x1CBA}, {0x1CBD, 0x1CBF}, {0x1CD0, 0x1CD2}, {0x1CD4, 0x1CFA}, {0x1D00, 0x1F15},
-    {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, {0x1F48, 0x1F4D}, {0x1F50, 0x1F57}, {0x1F59, 0x1F59}, {0x1F5B, 0x1F5B},
-    {0x1F5D, 0x1F5D}, {0x1F5F, 0x1F7D}, {0x1F80, 0x1FB4}, {0x1FB6, 0x1FBC}, {0x1FBE, 0x1FBE}, {0x1FC2, 0x1FC4},
-    {0x1FC6, 0x1FCC}, {0x1FD0, 0x1FD3}, {0x1FD6, 0x1FDB}, {0x1FE0, 0x1FEC}, {0x1FF2, 0x1FF4}, {0x1FF6, 0x1FFC},
-    {0x203F, 0x2040}, {0x2054, 0x2054}, {0x2071, 0x2071}, {0x207F, 0x207F}, {0x2090, 0x209C}, {0x20D0, 0x20DC},
-    {0x20E1, 0x20E1}, {0x20E5, 0x20F0}, {0x2102, 0x2102}, {0x2107, 0x2107}, {0x210A, 0x2113}, {0x2115, 0x2115},
-    {0x2118, 0x211D}, {0x2124, 0x2124}, {0x2126, 0x2126}, {0x2128, 0x2128}, {0x212A, 0x2139}, {0x213C, 0x213F},
-    {0x2145, 0x2149}, {0x214E, 0x214E}, {0x2160, 0x2188}, {0x2C00, 0x2CE4}, {0x2CEB, 0x2CF3}, {0x2D00, 0x2D25},
-    {0x2D27, 0x2D27}, {0x2D2D, 0x2D2D}, {0x2D30, 0x2D67}, {0x2D6F, 0x2D6F}, {0x2D7F, 0x2D96}, {0x2DA0, 0x2DA6},
-    {0x2DA8, 0x2DAE}, {0x2DB0, 0x2DB6}, {0x2DB8, 0x2DBE}, {0x2DC0, 0x2DC6}, {0x2DC8, 0x2DCE}, {0x2DD0, 0x2DD6},
-    {0x2DD8, 0x2DDE}, {0x2DE0, 0x2DFF}, {0x3005, 0x3007}, {0x3021, 0x302F}, {0x3031, 0x3035}, {0x3038, 0x303C},
-    {0x3041, 0x3096}, {0x3099, 0x309A}, {0x309D, 0x309F}, {0x30A1, 0x30FA}, {0x30FC, 0x30FF}, {0x3105, 0x312F},
-    {0x3131, 0x318E}, {0x31A0, 0x31BF}, {0x31F0, 0x31FF}, {0x3400, 0x4DBF}, {0x4E00, 0xA48C}, {0xA4D0, 0xA4FD},
-    {0xA500, 0xA60C}, {0xA610, 0xA62B}, {0xA640, 0xA66F}, {0xA674, 0xA67D}, {0xA67F, 0xA6F1}, {0xA717, 0xA71F},
-    {0xA722, 0xA788}, {0xA78B, 0xA7CA}, {0xA7D0, 0xA7D1}, {0xA7D3, 0xA7D3}, {0xA7D5, 0xA7D9}, {0xA7F2, 0xA827},
-    {0xA82C, 0xA82C}, {0xA840, 0xA873}, {0xA880, 0xA8C5}, {0xA8D0, 0xA8D9}, {0xA8E0, 0xA8F7}, {0xA8FB, 0xA8FB},
-    {0xA8FD, 0xA92D}, {0xA930, 0xA953}, {0xA960, 0xA97C}, {0xA980, 0xA9C0}, {0xA9CF, 0xA9D9}, {0xA9E0, 0xA9FE},
-    {0xAA00, 0xAA36}, {0xAA40, 0xAA4D}, {0xAA50, 0xAA59}, {0xAA60, 0xAA76}, {0xAA7A, 0xAAC2}, {0xAADB, 0xAADD},
-    {0xAAE0, 0xAAEF}, {0xAAF2, 0xAAF6}, {0xAB01, 0xAB06}, {0xAB09, 0xAB0E}, {0xAB11, 0xAB16}, {0xAB20, 0xAB26},
-    {0xAB28, 0xAB2E}, {0xAB30, 0xAB5A}, {0xAB5C, 0xAB69}, {0xAB70, 0xABEA}, {0xABEC, 0xABED}, {0xABF0, 0xABF9},
-    {0xAC00, 0xD7A3}, {0xD7B0, 0xD7C6}, {0xD7CB, 0xD7FB}, {0xF900, 0xFA6D}, {0xFA70, 0xFAD9}, {0xFB00, 0xFB06},
-    {0xFB13, 0xFB17}, {0xFB1D, 0xFB28}, {0xFB2A, 0xFB36}, {0xFB38, 0xFB3C}, {0xFB3E, 0xFB3E}, {0xFB40, 0xFB41},
-    {0xFB43, 0xFB44}, {0xFB46, 0xFBB1}, {0xFBD3, 0xFC5D}, {0xFC64, 0xFD3D}, {0xFD50, 0xFD8F}, {0xFD92, 0xFDC7},
-    {0xFDF0, 0xFDF9}, {0xFE00, 0xFE0F}, {0xFE20, 0xFE2F}, {0xFE33, 0xFE34}, {0xFE4D, 0xFE4F}, {0xFE71, 0xFE71},
-    {0xFE73, 0xFE73}, {0xFE77, 0xFE77}, {0xFE79, 0xFE79}, {0xFE7B, 0xFE7B}, {0xFE7D, 0xFE7D}, {0xFE7F, 0xFEFC},
-    {0xFF10, 0xFF19}, {0xFF21, 0xFF3A}, {0xFF3F, 0xFF3F}, {0xFF41, 0xFF5A}, {0xFF66, 0xFFBE}, {0xFFC2, 0xFFC7},
-    {0xFFCA, 0xFFCF}, {0xFFD2, 0xFFD7}, {0xFFDA, 0xFFDC}, {0x10000, 0x1000B}, {0x1000D, 0x10026}, {0x10028, 0x1003A},
-    {0x1003C, 0x1003D}, {0x1003F, 0x1004D}, {0x10050, 0x1005D}, {0x10080, 0x100FA}, {0x10140, 0x10174},
-    {0x101FD, 0x101FD}, {0x10280, 0x1029C}, {0x102A0, 0x102D0}, {0x102E0, 0x102E0}, {0x10300, 0x1031F},
-    {0x1032D, 0x1034A}, {0x10350, 0x1037A}, {0x10380, 0x1039D}, {0x103A0, 0x103C3}, {0x103C8, 0x103CF},
-    {0x103D1, 0x103D5}, {0x10400, 0x1049D}, {0x104A0, 0x104A9}, {0x104B0, 0x104D3}, {0x104D8, 0x104FB},
-    {0x10500, 0x10527}, {0x10530, 0x10563}, {0x10570, 0x1057A}, {0x1057C, 0x1058A}, {0x1058C, 0x10592},
-    {0x10594, 0x10595}, {0x10597, 0x105A1}, {0x105A3, 0x105B1}, {0x105B3, 0x105B9}, {0x105BB, 0x105BC},
-    {0x10600, 0x10736}, {0x10740, 0x10755}, {0x10760, 0x10767}, {0x10780, 0x10785}, {0x10787, 0x107B0},
-    {0x107B2, 0x107BA}, {0x10800, 0x10805}, {0x10808, 0x10808}, {0x1080A, 0x10835}, {0x10837, 0x10838},
-    {0x1083C, 0x1083C}, {0x1083F, 0x10855}, {0x10860, 0x10876}, {0x10880, 0x1089E}, {0x108E0, 0x108F2},
-    {0x108F4, 0x108F5}, {0x10900, 0x10915}, {0x10920, 0x10939}, {0x10980, 0x109B7}, {0x109BE, 0x109BF},
-    {0x10A00, 0x10A03}, {0x10A05, 0x10A06}, {0x10A0C, 0x10A13}, {0x10A15, 0x10A17}, {0x10A19, 0x10A35},
-    {0x10A38, 0x10A3A}, {0x10A3F, 0x10A3F}, {0x10A60, 0x10A7C}, {0x10A80, 0x10A9C}, {0x10AC0, 0x10AC7},
-    {0x10AC9, 0x10AE6}, {0x10B00, 0x10B35}, {0x10B40, 0x10B55}, {0x10B60, 0x10B72}, {0x10B80, 0x10B91},
-    {0x10C00, 0x10C48}, {0x10C80, 0x10CB2}, {0x10CC0, 0x10CF2}, {0x10D00, 0x10D27}, {0x10D30, 0x10D39},
-    {0x10E80, 0x10EA9}, {0x10EAB, 0x10EAC}, {0x10EB0, 0x10EB1}, {0x10EFD, 0x10F1C}, {0x10F27, 0x10F27},
-    {0x10F30, 0x10F50}, {0x10F70, 0x10F85}, {0x10FB0, 0x10FC4}, {0x10FE0, 0x10FF6}, {0x11000, 0x11046},
-    {0x11066, 0x11075}, {0x1107F, 0x110BA}, {0x110C2, 0x110C2}, {0x110D0, 0x110E8}, {0x110F0, 0x110F9},
-    {0x11100, 0x11134}, {0x11136, 0x1113F}, {0x11144, 0x11147}, {0x11150, 0x11173}, {0x11176, 0x11176},
-    {0x11180, 0x111C4}, {0x111C9, 0x111CC}, {0x111CE, 0x111DA}, {0x111DC, 0x111DC}, {0x11200, 0x11211},
-    {0x11213, 0x11237}, {0x1123E, 0x11241}, {0x11280, 0x11286}, {0x11288, 0x11288}, {0x1128A, 0x1128D},
-    {0x1128F, 0x1129D}, {0x1129F, 0x112A8}, {0x112B0, 0x112EA}, {0x112F0, 0x112F9}, {0x11300, 0x11303},
-    {0x11305, 0x1130C}, {0x1130F, 0x11310}, {0x11313, 0x11328}, {0x1132A, 0x11330}, {0x11332, 0x11333},
-    {0x11335, 0x11339}, {0x1133B, 0x11344}, {0x11347, 0x11348}, {0x1134B, 0x1134D}, {0x11350, 0x11350},
-    {0x11357, 0x11357}, {0x1135D, 0x11363}, {0x11366, 0x1136C}, {0x11370, 0x11374}, {0x11400, 0x1144A},
-    {0x11450, 0x11459}, {0x1145E, 0x11461}, {0x11480, 0x114C5}, {0x114C7, 0x114C7}, {0x114D0, 0x114D9},
-    {0x11580, 0x115B5}, {0x115B8, 0x115C0}, {0x115D8, 0x115DD}, {0x11600, 0x11640}, {0x11644, 0x11644},
-    {0x11650, 0x11659}, {0x11680, 0x116B8}, {0x116C0, 0x116C9}, {0x11700, 0x1171A}, {0x1171D, 0x1172B},
-    {0x11730, 0x11739}, {0x11740, 0x11746}, {0x11800, 0x1183A}, {0x118A0, 0x118E9}, {0x118FF, 0x11906},
-    {0x11909, 0x11909}, {0x1190C, 0x11913}, {0x11915, 0x11916}, {0x11918, 0x11935}, {0x11937, 0x11938},
-    {0x1193B, 0x11943}, {0x11950, 0x11959}, {0x119A0, 0x119A7}, {0x119AA, 0x119D7}, {0x119DA, 0x119E1},
-    {0x119E3, 0x119E4}, {0x11A00, 0x11A3E}, {0x11A47, 0x11A47}, {0x11A50, 0x11A99}, {0x11A9D, 0x11A9D},
-    {0x11AB0, 0x11AF8}, {0x11C00, 0x11C08}, {0x11C0A, 0x11C36}, {0x11C38, 0x11C40}, {0x11C50, 0x11C59},
-    {0x11C72, 0x11C8F}, {0x11C92, 0x11CA7}, {0x11CA9, 0x11CB6}, {0x11D00, 0x11D06}, {0x11D08, 0x11D09},
-    {0x11D0B, 0x11D36}, {0x11D3A, 0x11D3A}, {0x11D3C, 0x11D3D}, {0x11D3F, 0x11D47}, {0x11D50, 0x11D59},
-    {0x11D60, 0x11D65}, {0x11D67, 0x11D68}, {0x11D6A, 0x11D8E}, {0x11D90, 0x11D91}, {0x11D93, 0x11D98},
-    {0x11DA0, 0x11DA9}, {0x11EE0, 0x11EF6}, {0x11F00, 0x11F10}, {0x11F12, 0x11F3A}, {0x11F3E, 0x11F42},
-    {0x11F50, 0x11F59}, {0x11FB0, 0x11FB0}, {0x12000, 0x12399}, {0x12400, 0x1246E}, {0x12480, 0x12543},
-    {0x12F90, 0x12FF0}, {0x13000, 0x1342F}, {0x13440, 0x13455}, {0x14400, 0x14646}, {0x16800, 0x16A38},
-    {0x16A40, 0x16A5E}, {0x16A60, 0x16A69}, {0x16A70, 0x16ABE}, {0x16AC0, 0x16AC9}, {0x16AD0, 0x16AED},
-    {0x16AF0, 0x16AF4}, {0x16B00, 0x16B36}, {0x16B40, 0x16B43}, {0x16B50, 0x16B59}, {0x16B63, 0x16B77},
-    {0x16B7D, 0x16B8F}, {0x16E40, 0x16E7F}, {0x16F00, 0x16F4A}, {0x16F4F, 0x16F87}, {0x16F8F, 0x16F9F},
-    {0x16FE0, 0x16FE1}, {0x16FE3, 0x16FE4}, {0x16FF0, 0x16FF1}, {0x17000, 0x187F7}, {0x18800, 0x18CD5},
-    {0x18D00, 0x18D08}, {0x1AFF0, 0x1AFF3}, {0x1AFF5, 0x1AFFB}, {0x1AFFD, 0x1AFFE}, {0x1B000, 0x1B122},
-    {0x1B132, 0x1B132}, {0x1B150, 0x1B152}, {0x1B155, 0x1B155}, {0x1B164, 0x1B167}, {0x1B170, 0x1B2FB},
-    {0x1BC00, 0x1BC6A}, {0x1BC70, 0x1BC7C}, {0x1BC80, 0x1BC88}, {0x1BC90, 0x1BC99}, {0x1BC9D, 0x1BC9E},
-    {0x1CF00, 0x1CF2D}, {0x1CF30, 0x1CF46}, {0x1D165, 0x1D169}, {0x1D16D, 0x1D172}, {0x1D17B, 0x1D182},
-    {0x1D185, 0x1D18B}, {0x1D1AA, 0x1D1AD}, {0x1D242, 0x1D244}, {0x1D400, 0x1D454}, {0x1D456, 0x1D49C},
-    {0x1D49E, 0x1D49F}, {0x1D4A2, 0x1D4A2}, {0x1D4A5, 0x1D4A6}, {0x1D4A9, 0x1D4AC}, {0x1D4AE, 0x1D4B9},
-    {0x1D4BB, 0x1D4BB}, {0x1D4BD, 0x1D4C3}, {0x1D4C5, 0x1D505}, {0x1D507, 0x1D50A}, {0x1D50D, 0x1D514},
-    {0x1D516, 0x1D51C}, {0x1D51E, 0x1D539}, {0x1D53B, 0x1D53E}, {0x1D540, 0x1D544}, {0x1D546, 0x1D546},
-    {0x1D54A, 0x1D550}, {0x1D552, 0x1D6A5}, {0x1D6A8, 0x1D6C0}, {0x1D6C2, 0x1D6DA}, {0x1D6DC, 0x1D6FA},
-    {0x1D6FC, 0x1D714}, {0x1D716, 0x1D734}, {0x1D736, 0x1D74E}, {0x1D750, 0x1D76E}, {0x1D770, 0x1D788},
-    {0x1D78A, 0x1D7A8}, {0x1D7AA, 0x1D7C2}, {0x1D7C4, 0x1D7CB}, {0x1D7CE, 0x1D7FF}, {0x1DA00, 0x1DA36},
-    {0x1DA3B, 0x1DA6C}, {0x1DA75, 0x1DA75}, {0x1DA84, 0x1DA84}, {0x1DA9B, 0x1DA9F}, {0x1DAA1, 0x1DAAF},
-    {0x1DF00, 0x1DF1E}, {0x1DF25, 0x1DF2A}, {0x1E000, 0x1E006}, {0x1E008, 0x1E018}, {0x1E01B, 0x1E021},
-    {0x1E023, 0x1E024}, {0x1E026, 0x1E02A}, {0x1E030, 0x1E06D}, {0x1E08F, 0x1E08F}, {0x1E100, 0x1E12C},
-    {0x1E130, 0x1E13D}, {0x1E140, 0x1E149}, {0x1E14E, 0x1E14E}, {0x1E290, 0x1E2AE}, {0x1E2C0, 0x1E2F9},
-    {0x1E4D0, 0x1E4F9}, {0x1E7E0, 0x1E7E6}, {0x1E7E8, 0x1E7EB}, {0x1E7ED, 0x1E7EE}, {0x1E7F0, 0x1E7FE},
-    {0x1E800, 0x1E8C4}, {0x1E8D0, 0x1E8D6}, {0x1E900, 0x1E94B}, {0x1E950, 0x1E959}, {0x1EE00, 0x1EE03},
-    {0x1EE05, 0x1EE1F}, {0x1EE21, 0x1EE22}, {0x1EE24, 0x1EE24}, {0x1EE27, 0x1EE27}, {0x1EE29, 0x1EE32},
-    {0x1EE34, 0x1EE37}, {0x1EE39, 0x1EE39}, {0x1EE3B, 0x1EE3B}, {0x1EE42, 0x1EE42}, {0x1EE47, 0x1EE47},
-    {0x1EE49, 0x1EE49}, {0x1EE4B, 0x1EE4B}, {0x1EE4D, 0x1EE4F}, {0x1EE51, 0x1EE52}, {0x1EE54, 0x1EE54},
-    {0x1EE57, 0x1EE57}, {0x1EE59, 0x1EE59}, {0x1EE5B, 0x1EE5B}, {0x1EE5D, 0x1EE5D}, {0x1EE5F, 0x1EE5F},
-    {0x1EE61, 0x1EE62}, {0x1EE64, 0x1EE64}, {0x1EE67, 0x1EE6A}, {0x1EE6C, 0x1EE72}, {0x1EE74, 0x1EE77},
-    {0x1EE79, 0x1EE7C}, {0x1EE7E, 0x1EE7E}, {0x1EE80, 0x1EE89}, {0x1EE8B, 0x1EE9B}, {0x1EEA1, 0x1EEA3},
-    {0x1EEA5, 0x1EEA9}, {0x1EEAB, 0x1EEBB}, {0x1FBF0, 0x1FBF9}, {0x20000, 0x2A6DF}, {0x2A700, 0x2B739},
-    {0x2B740, 0x2B81D}, {0x2B820, 0x2CEA1}, {0x2CEB0, 0x2EBE0}, {0x2F800, 0x2FA1D}, {0x30000, 0x3134A},
-    {0x31350, 0x323AF}, {0xE0100, 0xE01EF},
+    {0x1FBF0, 0x1FBF9}, {0x20000, 0x2A6DF}, {0x2A700, 0x2B739}, {0x2B740, 0x2B81D}, {0x2B820, 0x2CEA1},
+    {0x2CEB0, 0x2EBE0}, {0x2F800, 0x2FA1D}, {0x30000, 0x3134A}, {0x31350, 0x323AF}, {0xE0100, 0xE01EF},
 };
 
-template <size_t N>
-bool in_ranges(const uint32_t (&t)[N][2], uint32_t c) {
+template <size_t N> bool in_ranges(const uint32_t (&t)[N][2], uint32_t c) {
     size_t lo = 0, hi = N;
     while (lo < hi) {
         const size_t mid = (lo + hi) / 2;
@@ -1717,7 +1782,8 @@ private:
     }
     [[noreturn]] void fail(std::string msg, size_t offset = 0) const { error(pat_, std::move(msg), tell() - offset); }
     void checkgroupname(const std::u32string& name, size_t offset) const {
-        if (!py_isidentifier(name)) fail("bad character in group name " + py_repr_str(utf8_of(name)), name.size() + offset);
+        if (!py_isidentifier(name))
+            fail("bad character in group name " + py_repr_str(utf8_of(name)), name.size() + offset);
     }
     void checklookbehind(int64_t gid) const {
         if (!state.lookbehind) return;
@@ -2060,7 +2126,8 @@ SeqP Parser::parse_seq(bool verbose, int nested, bool first) {
                         const std::u32string ref = getuntil(')', "group name");
                         checkgroupname(ref, 1);
                         const auto it = state.groupdict.find(ref);
-                        if (it == state.groupdict.end()) fail("unknown group name " + py_repr_str(utf8_of(ref)), ref.size() + 1);
+                        if (it == state.groupdict.end())
+                            fail("unknown group name " + py_repr_str(utf8_of(ref)), ref.size() + 1);
                         if (!state.checkgroup(it->second)) fail("cannot refer to an open group", ref.size() + 1);
                         checklookbehind(it->second);
                         items.push_back(node(Op::GroupRef, (uint32_t) it->second));
@@ -2197,7 +2264,7 @@ struct CharSet {
     uint8_t fold = 0;   ///< what is tested: 0 the character, 1 its lower case, 2 its ASCII lower case
     std::vector<std::pair<uint32_t, uint32_t>> ranges;
     std::vector<std::pair<uint32_t, uint32_t>> uni_ranges;   ///< RANGE_UNI_IGNORE: the character or its upper case
-    std::vector<std::pair<uint32_t, bool>> cats;              ///< a category, Unicode or ASCII
+    std::vector<std::pair<uint32_t, bool>> cats;             ///< a category, Unicode or ASCII
     bool match(uint32_t ch) const;
 };
 
@@ -2244,8 +2311,24 @@ void merge(std::vector<std::pair<uint32_t, uint32_t>>& r) {
 }
 
 enum class I : uint8_t {
-    Char, NotChar, Set, Any, AnyAll, At, Split, Jmp, Mark, Rep1, RepInit, Until, Poss, Atomic, Assert, GroupRef,
-    GroupExists, Match
+    Char,
+    NotChar,
+    Set,
+    Any,
+    AnyAll,
+    At,
+    Split,
+    Jmp,
+    Mark,
+    Rep1,
+    RepInit,
+    Until,
+    Poss,
+    Atomic,
+    Assert,
+    GroupRef,
+    GroupExists,
+    Match
 };
 struct Inst {
     I op = I::Match;
@@ -2253,7 +2336,7 @@ struct Inst {
                              ///< Assert: 1 negative
     uint32_t x = 0, y = 0;   ///< a character, set, code, slot, repeat or group; jump targets
     uint32_t min = 0, max = 0;
-    uint64_t back = 0;       ///< a lookbehind's width
+    uint64_t back = 0;   ///< a lookbehind's width
 };
 struct Prog {
     std::vector<Inst> code;
@@ -2367,7 +2450,8 @@ uint32_t Compiler::charset(const std::vector<Node>& set, int flags) {
                     (uni ? cs.uni_ranges : cs.ranges).push_back({n.a, n.b});
                     hascased = true;
                 } else {
-                    for (uint32_t c = n.a; c <= n.b && !hascased; ++c) hascased = uni ? sre_iscased(c) : ascii_iscased(c);
+                    for (uint32_t c = n.a; c <= n.b && !hascased; ++c)
+                        hascased = uni ? sre_iscased(c) : ascii_iscased(c);
                 }
                 break;
             case Op::Category: cs.cats.push_back({n.a, uni}); break;
@@ -2451,8 +2535,9 @@ void Compiler::item(const Node& n, int flags) {
         case Op::PossRepeat: {
             if (flags & kTemplate)
                 raise("re.error", std::string("internal: unsupported template operator ") +
-                                      (n.op == Op::MaxRepeat ? "MAX_REPEAT"
-                                                             : n.op == Op::MinRepeat ? "MIN_REPEAT" : "POSSESSIVE_REPEAT"));
+                                      (n.op == Op::MaxRepeat   ? "MAX_REPEAT"
+                                       : n.op == Op::MinRepeat ? "MIN_REPEAT"
+                                                               : "POSSESSIVE_REPEAT"));
             Inst rep;
             rep.min = n.a;
             rep.max = n.b;
@@ -2627,12 +2712,13 @@ bool Machine::backtrack(size_t base, uint32_t& pc, int64_t& sp) {
                 sp = c.sp;
                 return true;
             case kGreedy: {   // one character fewer
-                if (c.a > (int64_t) p_.code[c.inst].min) stack_.push_back({c.pc, kGreedy, c.sp, c.undo, c.a - 1, c.inst});
+                if (c.a > (int64_t) p_.code[c.inst].min)
+                    stack_.push_back({c.pc, kGreedy, c.sp, c.undo, c.a - 1, c.inst});
                 pc = c.pc;
                 sp = c.sp + c.a;
                 return true;
             }
-            case kLazy: {     // one character more
+            case kLazy: {   // one character more
                 const Inst& r = p_.code[c.inst];
                 if (r.max != kMaxRepeat && c.a >= (int64_t) r.max) continue;
                 const int64_t k = c.sp + c.a;
@@ -2642,7 +2728,7 @@ bool Machine::backtrack(size_t base, uint32_t& pc, int64_t& sp) {
                 sp = k + 1;
                 return true;
             }
-            default: {        // a lazy repeat's next iteration
+            default: {   // a lazy repeat's next iteration
                 const Inst& u = p_.code[c.inst];
                 set(count_[u.x], c.a);
                 set(last_[u.x], c.sp);
@@ -2780,7 +2866,8 @@ bool Machine::run(uint32_t pc, int64_t sp, int64_t& end) {
                 const int64_t a = marks_[2 * (size_t) in.x], b = marks_[2 * (size_t) in.x + 1];
                 if (a < 0 || b < 0 || b < a || sp + (b - a) > n_) break;
                 bool same = true;
-                for (int64_t k = 0; same && k < b - a; ++k) same = fold(ch(sp + k), in.mode) == fold(ch(a + k), in.mode);
+                for (int64_t k = 0; same && k < b - a; ++k)
+                    same = fold(ch(sp + k), in.mode) == fold(ch(a + k), in.mode);
                 if (!same) break;
                 sp += b - a;
                 ++pc;
@@ -2830,24 +2917,22 @@ bool search(const Prog& prog, std::string_view subject, uint64_t& steps) {
     return m.search();
 }
 
-}  // namespace re
+}   // namespace re
 
 // ============================================================================================ urllib.parse
 namespace url {
 
-constexpr std::string_view kUsesRelative[] = {"",     "ftp",  "http",     "gopher", "nntp",  "imap",  "wais",
-                                              "file", "https", "shttp",   "mms",    "prospero", "rtsp", "rtsps",
-                                              "rtspu", "sftp", "svn",     "svn+ssh", "ws",   "wss"};
-constexpr std::string_view kUsesNetloc[] = {"",      "ftp",     "http",  "gopher", "nntp",  "telnet",
-                                            "imap",  "wais",    "file",  "mms",    "https", "shttp",
-                                            "snews", "prospero", "rtsp", "rtsps",  "rtspu", "rsync",
-                                            "svn",   "svn+ssh", "sftp",  "nfs",    "git",   "git+ssh",
-                                            "ws",    "wss",     "itms-services"};
-constexpr std::string_view kUsesParams[] = {"",      "ftp",  "hdl", "prospero", "http", "imap", "https", "shttp",
-                                            "rtsp",  "rtsps", "rtspu", "sip",   "sips", "mms",  "sftp",  "tel"};
+constexpr std::string_view kUsesRelative[] = {"",      "ftp",   "http",  "gopher",  "nntp",     "imap", "wais",
+                                              "file",  "https", "shttp", "mms",     "prospero", "rtsp", "rtsps",
+                                              "rtspu", "sftp",  "svn",   "svn+ssh", "ws",       "wss"};
+constexpr std::string_view kUsesNetloc[] = {"",     "ftp",   "http",    "gopher", "nntp",  "telnet",       "imap",
+                                            "wais", "file",  "mms",     "https",  "shttp", "snews",        "prospero",
+                                            "rtsp", "rtsps", "rtspu",   "rsync",  "svn",   "svn+ssh",      "sftp",
+                                            "nfs",  "git",   "git+ssh", "ws",     "wss",   "itms-services"};
+constexpr std::string_view kUsesParams[] = {"",     "ftp",   "hdl",   "prospero", "http", "imap", "https", "shttp",
+                                            "rtsp", "rtsps", "rtspu", "sip",      "sips", "mms",  "sftp",  "tel"};
 
-template <size_t N>
-bool in(std::string_view s, const std::string_view (&list)[N]) {
+template <size_t N> bool in(std::string_view s, const std::string_view (&list)[N]) {
     return std::find(std::begin(list), std::end(list), s) != std::end(list);
 }
 
@@ -3100,7 +3185,7 @@ std::string unquote(const std::string& s) {
     return sanitized(unquote_to_bytes(s));
 }
 
-}  // namespace url
+}   // namespace url
 
 // ============================================================================================ referencing
 enum class Draft : uint8_t { D3, D4, D6, D7, D2019, D2020 };
@@ -3193,25 +3278,32 @@ struct SpecSets {
 
 const SpecSets& spec_sets(Draft d) {
     static const SpecSets kSets[6] = {
-        {{}, {"extends"}, {"definitions", "patternProperties", "properties"},
-         {"additionalItems", "additionalProperties"}, {"extends", "definitions", "patternProperties", "properties"}},
-        {{"not"}, {"allOf", "anyOf", "oneOf"}, {"definitions", "patternProperties", "properties"},
+        {{},
+         {"extends"},
+         {"definitions", "patternProperties", "properties"},
+         {"additionalItems", "additionalProperties"},
+         {"extends", "definitions", "patternProperties", "properties"}},
+        {{"not"},
+         {"allOf", "anyOf", "oneOf"},
+         {"definitions", "patternProperties", "properties"},
          {"additionalItems", "additionalProperties", "not"},
          {"allOf", "anyOf", "oneOf", "definitions", "patternProperties", "properties"}},
         {{"additionalItems", "additionalProperties", "contains", "not", "propertyNames"},
-         {"allOf", "anyOf", "oneOf"}, {"definitions", "patternProperties", "properties"},
+         {"allOf", "anyOf", "oneOf"},
+         {"definitions", "patternProperties", "properties"},
          {"additionalItems", "additionalProperties", "contains", "not", "propertyNames"},
          {"allOf", "anyOf", "oneOf", "definitions", "patternProperties", "properties"}},
         {{"additionalItems", "additionalProperties", "contains", "else", "if", "not", "propertyNames", "then"},
-         {"allOf", "anyOf", "oneOf"}, {"definitions", "patternProperties", "properties"},
+         {"allOf", "anyOf", "oneOf"},
+         {"definitions", "patternProperties", "properties"},
          {"additionalItems", "additionalProperties", "contains", "else", "if", "not", "propertyNames", "then"},
          {"allOf", "anyOf", "oneOf", "definitions", "patternProperties", "properties"}},
-        {{"additionalItems", "additionalProperties", "contains", "contentSchema", "else", "if", "not",
-          "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties"},
+        {{"additionalItems", "additionalProperties", "contains", "contentSchema", "else", "if", "not", "propertyNames",
+          "then", "unevaluatedItems", "unevaluatedProperties"},
          {"allOf", "anyOf", "oneOf"},
          {"$defs", "definitions", "dependentSchemas", "patternProperties", "properties"},
-         {"additionalItems", "additionalProperties", "contains", "contentSchema", "else", "if", "not",
-          "propertyNames", "then", "unevaluatedItems", "unevaluatedProperties"},
+         {"additionalItems", "additionalProperties", "contains", "contentSchema", "else", "if", "not", "propertyNames",
+          "then", "unevaluatedItems", "unevaluatedProperties"},
          {"allOf", "anyOf", "oneOf", "$defs", "definitions", "dependentSchemas", "patternProperties", "properties"}},
         {{"additionalProperties", "contains", "contentSchema", "else", "if", "items", "not", "propertyNames", "then",
           "unevaluatedItems", "unevaluatedProperties"},
@@ -3262,7 +3354,7 @@ std::vector<const Val*> subresources_of(const Val& c, Draft d) {
             else out.push_back(items);
         }
     }
-    if (d <= Draft::D7) {      // dependencies, when the first is a schema
+    if (d <= Draft::D7) {   // dependencies, when the first is a schema
         if (const Val* deps = c.get("dependencies"); deps != nullptr && deps->k != K::None) {
             if (deps->k != K::Dict) no_attribute(*deps, "values");
             if (!deps->dict.empty() && deps->dict[0].val.k == K::Dict)
@@ -3295,7 +3387,8 @@ void crawl(std::vector<std::pair<std::string, Resource>>& todo, Resources& resou
             uri = url::urljoin(uri, *id);
             resources[uri] = res;
         }
-        for (const auto& [name, dynamic] : anchors_in(*res.contents, res.spec)) anchors[{uri, name}] = Anchor{res, dynamic};
+        for (const auto& [name, dynamic] : anchors_in(*res.contents, res.spec))
+            anchors[{uri, name}] = Anchor{res, dynamic};
         for (const Val* sub : subresources_of(*res.contents, res.spec))
             todo.push_back({uri, Resource{sub, spec_of(*sub, res.spec)}});
     }
@@ -3348,9 +3441,10 @@ public:
         if (const std::optional<std::string> canonical = resource_id(*r->contents, r->spec))
             if (const Anchor* a = find_anchor(*canonical, name)) return *a;
         if (name.find('/') != npos)
-            raise("InvalidAnchor", "'#" + name + "' is not a valid anchor, neither as a plain name anchor nor as a "
-                                   "JSON Pointer. You may have intended to use '#/" + name +
-                                   "', as the slash is required *before each segment* of a JSON pointer.");
+            raise("InvalidAnchor", "'#" + name +
+                                       "' is not a valid anchor, neither as a plain name anchor nor as a "
+                                       "JSON Pointer. You may have intended to use '#/" +
+                                       name + "', as the slash is required *before each segment* of a JSON pointer.");
         raise("NoSuchAnchor", py_repr_str(name) + " does not exist within " + repr(*r->contents));
     }
     /// anchor() for DynamicAnchor.resolve, where NoSuchAnchor is no anchor
@@ -3424,8 +3518,7 @@ struct Patterns {
         auto add = [this](const std::string& p) {
             try {
                 get(p);
-            } catch (const PyError&) {
-            }
+            } catch (const PyError&) {}
         };
         while (!todo.empty()) {
             const Val* v = todo.back();
@@ -3452,14 +3545,14 @@ struct Run {
     Run(Registry& r, Patterns& p) : reg(r), patterns(p) {}
     Registry& reg;
     Patterns& patterns;
-    bool formats = false;            ///< check_schema's format checker
+    bool formats = false;   ///< check_schema's format checker
     int frames = 0;
     uint64_t frames_all = 0;         ///< the run's frames so far (kMaxRunFrames)
     uint64_t re_steps = 0;           ///< its searches' steps so far (kMaxSteps)
     std::vector<std::string> path;   ///< where in the instance
     std::deque<std::string> uris;
     std::deque<Scope> scopes;
-    std::deque<Val> temps;           ///< characters of a str a pointer went into
+    std::deque<Val> temps;   ///< characters of a str a pointer went into
     const std::string* intern(std::string s) {
         uris.push_back(std::move(s));
         return &uris.back();
@@ -3657,8 +3750,7 @@ struct Sink {
 };
 
 /// an error yielded; false when the consumer stops
-template <class F>
-bool emit(Run& r, Sink& s, F&& message) {
+template <class F> bool emit(Run& r, Sink& s, F&& message) {
     if (s.count++ == 0 && s.messages) {
         s.message = message();
         s.path = r.path;
@@ -3705,7 +3797,8 @@ const Dialect* dialect_for(const Val& schema, const Dialect* dflt) {
             return dflt;
         case K::List:
             for (const Val& e : schema.list)
-                if (e.k == K::Str && e.s == "$schema") raise("TypeError", "list indices must be integers or slices, not str");
+                if (e.k == K::Str && e.s == "$schema")
+                    raise("TypeError", "list indices must be integers or slices, not str");
             return dflt;
         default: raise("TypeError", std::string("argument of type '") + type_name(schema) + "' is not iterable");
     }
@@ -3777,8 +3870,7 @@ bool descend_valid(Run& r, const Ctx& c, const Val& inst, const Val& schema) {
 
 // ---- helpers of the keywords
 /// `for x in v`: a list's items, a dict's keys, a str's characters; fn returns false to stop
-template <class F>
-bool each_item(const Val& v, F&& fn) {
+template <class F> bool each_item(const Val& v, F&& fn) {
     switch (v.k) {
         case K::List:
             for (const Val& e : v.list)
@@ -3808,10 +3900,12 @@ bool py_in(const Val& needle, const Val& container) {
                 raise("TypeError", std::string("unhashable type: '") + type_name(needle) + "'");
             return needle.k == K::Str && container.has(needle.s);
         case K::List:
-            return std::any_of(container.list.begin(), container.list.end(), [&](const Val& e) { return py_eq(e, needle); });
+            return std::any_of(container.list.begin(), container.list.end(),
+                               [&](const Val& e) { return py_eq(e, needle); });
         case K::Str:
             if (needle.k != K::Str)
-                raise("TypeError", std::string("'in <string>' requires string as left operand, not ") + type_name(needle));
+                raise("TypeError",
+                      std::string("'in <string>' requires string as left operand, not ") + type_name(needle));
             return container.s.find(needle.s) != npos;
         default: raise("TypeError", std::string("argument of type '") + type_name(container) + "' is not iterable");
     }
@@ -3846,11 +3940,13 @@ std::string pformat(const Val& v) { return repr(v); }
 
 /// validator.is_type(instance, type) for a schema's type name: UnknownType when the checker has no such type
 bool type_is(const Ctx& c, const Val& inst, const Val& type, const Val& schema) {
-    if (type.k == K::List || type.k == K::Dict) raise("TypeError", std::string("unhashable type: '") + type_name(type) + "'");
+    if (type.k == K::List || type.k == K::Dict)
+        raise("TypeError", std::string("unhashable type: '") + type_name(type) + "'");
     static constexpr std::string_view kTypes[] = {"array", "boolean", "integer", "null", "number", "object", "string"};
     if (type.k == K::Str) {
         if (type.s == "any" && c.d->draft == Draft::D3) return true;
-        if (std::find(std::begin(kTypes), std::end(kTypes), type.s) != std::end(kTypes)) return is_kind(inst, type.s, c.d->draft);
+        if (std::find(std::begin(kTypes), std::end(kTypes), type.s) != std::end(kTypes))
+            return is_kind(inst, type.s, c.d->draft);
     }
     raise("UnknownType", "Unknown type " + repr(type) + " for validator with schema:\n    " + pformat(schema) +
                              "\n\nWhile checking instance:\n    " + pformat(inst));
@@ -3878,8 +3974,8 @@ std::string items_repr(const std::vector<Val>& items, size_t from) {
 }
 
 // ---- the keywords (jsonschema/_keywords.py and _legacy_keywords.py)
-#define KEYWORD(name)                                                                                    \
-    bool name([[maybe_unused]] Run& r, [[maybe_unused]] const Ctx& c, [[maybe_unused]] const Val& v,     \
+#define KEYWORD(name)                                                                                                  \
+    bool name([[maybe_unused]] Run& r, [[maybe_unused]] const Ctx& c, [[maybe_unused]] const Val& v,                   \
               [[maybe_unused]] const Val& inst, [[maybe_unused]] const Val& schema, [[maybe_unused]] Sink& s)
 
 /// _validate_reference: unresolvable references wrapped as jsonschema wraps them
@@ -3957,7 +4053,8 @@ KEYWORD(kw_additional_properties) {
             std::sort(pats.begin(), pats.end());
             std::vector<std::string> preprs;
             for (const std::string& p : pats) preprs.push_back(py_repr_str(p));
-            return joined(reprs) + (extras.size() == 1 ? " does" : " do") + " not match any of the regexes: " + joined(preprs);
+            return joined(reprs) + (extras.size() == 1 ? " does" : " do") +
+                   " not match any of the regexes: " + joined(preprs);
         }
         return "Additional properties are not allowed (" + extras_msg(reprs) + " unexpected)";
     });
@@ -3970,7 +4067,8 @@ KEYWORD(kw_items) {
     if (extra <= 0) return true;
     if (v.k == K::Bool && !v.b) {
         return emit(r, s, [&] {
-            const std::string rest = extra != 1 ? items_repr(inst.list, (size_t) prefix) : repr(inst.list[(size_t) prefix]);
+            const std::string rest =
+                extra != 1 ? items_repr(inst.list, (size_t) prefix) : repr(inst.list[(size_t) prefix]);
             return "Expected at most " + std::to_string(prefix) + (prefix != 1 ? " items" : " item") + " but found " +
                    std::to_string(extra) + " extra: " + rest;
         });
@@ -4003,7 +4101,8 @@ KEYWORD(kw_contains) {
             });
     }
     if (order(Val::integer(matches), min_contains, "<") >= 0) return true;
-    if (matches == 0) return emit(r, s, [&] { return repr(inst) + " does not contain items matching the given schema"; });
+    if (matches == 0)
+        return emit(r, s, [&] { return repr(inst) + " does not contain items matching the given schema"; });
     return emit(r, s, [&] {
         return "Too few items match the given schema (expected at least " + py_str(min_contains) + " but only " +
                std::to_string(matches) + " matched)";
@@ -4040,8 +4139,8 @@ KEYWORD(kw_multiple_of) {
     } else if (numeric(v)) {
         failed = !remainder_zero(inst, v);
     } else {
-        raise("TypeError", std::string("unsupported operand type(s) for %: '") + type_name(inst) + "' and '" +
-                               type_name(v) + "'");
+        raise("TypeError",
+              std::string("unsupported operand type(s) for %: '") + type_name(inst) + "' and '" + type_name(v) + "'");
     }
     if (!failed) return true;
     return emit(r, s, [&] { return repr(inst) + " is not a multiple of " + py_str(v); });
@@ -4049,12 +4148,14 @@ KEYWORD(kw_multiple_of) {
 
 KEYWORD(kw_min_items) {
     if (inst.k != K::List || order(Val::integer((int64_t) inst.list.size()), v, "<") >= 0) return true;
-    return emit(r, s, [&] { return repr(inst) + (py_eq(v, Val::integer(1)) ? " should be non-empty" : " is too short"); });
+    return emit(r, s,
+                [&] { return repr(inst) + (py_eq(v, Val::integer(1)) ? " should be non-empty" : " is too short"); });
 }
 
 KEYWORD(kw_max_items) {
     if (inst.k != K::List || order(Val::integer((int64_t) inst.list.size()), v, ">") <= 0) return true;
-    return emit(r, s, [&] { return repr(inst) + (py_eq(v, Val::integer(0)) ? " is expected to be empty" : " is too long"); });
+    return emit(r, s,
+                [&] { return repr(inst) + (py_eq(v, Val::integer(0)) ? " is expected to be empty" : " is too long"); });
 }
 
 KEYWORD(kw_unique_items) {
@@ -4084,12 +4185,14 @@ KEYWORD(kw_format) {
 
 KEYWORD(kw_min_length) {
     if (inst.k != K::Str || order(Val::integer((int64_t) utf8_len(inst.s)), v, "<") >= 0) return true;
-    return emit(r, s, [&] { return repr(inst) + (py_eq(v, Val::integer(1)) ? " should be non-empty" : " is too short"); });
+    return emit(r, s,
+                [&] { return repr(inst) + (py_eq(v, Val::integer(1)) ? " should be non-empty" : " is too short"); });
 }
 
 KEYWORD(kw_max_length) {
     if (inst.k != K::Str || order(Val::integer((int64_t) utf8_len(inst.s)), v, ">") <= 0) return true;
-    return emit(r, s, [&] { return repr(inst) + (py_eq(v, Val::integer(0)) ? " is expected to be empty" : " is too long"); });
+    return emit(r, s,
+                [&] { return repr(inst) + (py_eq(v, Val::integer(0)) ? " is expected to be empty" : " is too long"); });
 }
 
 /// the dependency of a present property: each name in it must be present too
@@ -4139,10 +4242,11 @@ KEYWORD(kw_type) {
     return emit(r, s, [&] {
         std::vector<std::string> reprs;
         if (v.k == K::Str) reprs.push_back(repr(v));
-        else each_item(v, [&](const Val& t) {
-            reprs.push_back(repr(t));
-            return true;
-        });
+        else
+            each_item(v, [&](const Val& t) {
+                reprs.push_back(repr(t));
+                return true;
+            });
         return repr(inst) + " is not of type " + joined(reprs);
     });
 }
@@ -4288,7 +4392,8 @@ KEYWORD(kw_dependencies_d3) {
         if (dep.k == K::Dict) {
             if (!descend(r, c, inst, dep, s)) return false;
         } else if (dep.k == K::Str) {
-            if (!inst.has(dep.s) && !emit(r, s, [&] { return repr(dep) + " is a dependency of " + py_repr_str(m.key); }))
+            if (!inst.has(dep.s) &&
+                !emit(r, s, [&] { return repr(dep) + " is a dependency of " + py_repr_str(m.key); }))
                 return false;
         } else if (!required_names(r, dep, m.key, inst, s)) {
             return false;
@@ -4302,7 +4407,8 @@ KEYWORD(kw_dependencies_d4) {
     if (v.k != K::Dict) no_attribute(v, "items");
     for (const Member& m : v.dict) {
         if (!inst.has(m.key)) continue;
-        if (m.val.k == K::List ? !required_names(r, m.val, m.key, inst, s) : !descend(r, c, inst, m.val, s)) return false;
+        if (m.val.k == K::List ? !required_names(r, m.val, m.key, inst, s) : !descend(r, c, inst, m.val, s))
+            return false;
     }
     return true;
 }
@@ -4357,8 +4463,8 @@ bool bound_d34(Run& r, const Val& v, const Val& inst, const Val& schema, Sink& s
     const bool failed = lower ? (exclusive ? cmp <= 0 : cmp < 0) : (exclusive ? cmp >= 0 : cmp > 0);
     if (!failed) return true;
     return emit(r, s, [&] {
-        return repr(inst) + " is " + (lower ? "less than" : "greater than") + (exclusive ? " or equal to" : "") + " the " +
-               (lower ? "minimum" : "maximum") + " of " + repr(v);
+        return repr(inst) + " is " + (lower ? "less than" : "greater than") + (exclusive ? " or equal to" : "") +
+               " the " + (lower ? "minimum" : "maximum") + " of " + repr(v);
     });
 }
 
@@ -4557,7 +4663,8 @@ bool unevaluated_items(Run& r, const Ctx& c, const Val& inst, const Val& schema,
     });
 }
 
-bool unevaluated_properties(Run& r, const Ctx& c, const Val& v, const Val& inst, const Val& schema, Sink& s, bool d2019) {
+bool unevaluated_properties(Run& r, const Ctx& c, const Val& v, const Val& inst, const Val& schema, Sink& s,
+                            bool d2019) {
     if (inst.k != K::Dict) return true;
     std::vector<char> ev(inst.dict.size(), 0);
     evaluated_keys(r, c, inst, schema, ev, d2019);
@@ -4590,58 +4697,80 @@ KEYWORD(kw_unevaluated_properties_2019) { return unevaluated_properties(r, c, v,
 
 // ---- the validator classes and the metaschemas
 // The metaschemas and vocabularies jsonschema checks schemas against (jsonschema-specifications 2025.9.1), compact.
-const char* const kMetaDocs[] = {
-    R"j({"$schema":"http://json-schema.org/draft-03/schema#","id":"http://json-schema.org/draft-03/schema#","type":"object","properties":{"type":{"type":["string","array"],"items":{"type":["string",{"$ref":"#"}]},"uniqueItems":true,"default":"any"},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"additionalProperties":{"type":[{"$ref":"#"},"boolean"],"default":{}},"items":{"type":[{"$ref":"#"},"array"],"items":{"$ref":"#"},"default":{}},"additionalItems":{"type":[{"$ref":"#"},"boolean"],"default":{}},"required":{"type":"boolean","default":false},"dependencies":{"type":"object","additionalProperties":{"type":["string","array",{"$ref":"#"}],"items":{"type":"string"}},"default":{}},"minimum":{"type":"number"},"maximum":{"type":"number"},"exclusiveMinimum":{"type":"boolean","default":false},"exclusiveMaximum":{"type":"boolean","default":false},"minItems":{"type":"integer","minimum":0,"default":0},"maxItems":{"type":"integer","minimum":0},"uniqueItems":{"type":"boolean","default":false},"pattern":{"type":"string","format":"regex"},"minLength":{"type":"integer","minimum":0,"default":0},"maxLength":{"type":"integer"},"enum":{"type":"array","minItems":1,"uniqueItems":true},"default":{"type":"any"},"title":{"type":"string"},"description":{"type":"string"},"format":{"type":"string"},"divisibleBy":{"type":"number","minimum":0,"exclusiveMinimum":true,"default":1},"disallow":{"type":["string","array"],"items":{"type":["string",{"$ref":"#"}]},"uniqueItems":true},"extends":{"type":[{"$ref":"#"},"array"],"items":{"$ref":"#"},"default":{}},"id":{"type":"string"},"$ref":{"type":"string"},"$schema":{"type":"string","format":"uri"}},"dependencies":{"exclusiveMinimum":"minimum","exclusiveMaximum":"maximum"},"default":{}})j",
-    R"j({"id":"http://json-schema.org/draft-04/schema#","$schema":"http://json-schema.org/draft-04/schema#","description":"Core schema meta-schema","definitions":{"schemaArray":{"type":"array","minItems":1,"items":{"$ref":"#"}},"positiveInteger":{"type":"integer","minimum":0},"positiveIntegerDefault0":{"allOf":[{"$ref":"#/definitions/positiveInteger"},{"default":0}]},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"minItems":1,"uniqueItems":true}},"type":"object","properties":{"id":{"type":"string"},"$schema":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"default":{},"multipleOf":{"type":"number","minimum":0,"exclusiveMinimum":true},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"boolean","default":false},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"boolean","default":false},"maxLength":{"$ref":"#/definitions/positiveInteger"},"minLength":{"$ref":"#/definitions/positiveIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"additionalItems":{"anyOf":[{"type":"boolean"},{"$ref":"#"}],"default":{}},"items":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/schemaArray"}],"default":{}},"maxItems":{"$ref":"#/definitions/positiveInteger"},"minItems":{"$ref":"#/definitions/positiveIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"maxProperties":{"$ref":"#/definitions/positiveInteger"},"minProperties":{"$ref":"#/definitions/positiveIntegerDefault0"},"required":{"$ref":"#/definitions/stringArray"},"additionalProperties":{"anyOf":[{"type":"boolean"},{"$ref":"#"}],"default":{}},"definitions":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"dependencies":{"type":"object","additionalProperties":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/stringArray"}]}},"enum":{"type":"array","minItems":1,"uniqueItems":true},"type":{"anyOf":[{"$ref":"#/definitions/simpleTypes"},{"type":"array","items":{"$ref":"#/definitions/simpleTypes"},"minItems":1,"uniqueItems":true}]},"format":{"type":"string"},"allOf":{"$ref":"#/definitions/schemaArray"},"anyOf":{"$ref":"#/definitions/schemaArray"},"oneOf":{"$ref":"#/definitions/schemaArray"},"not":{"$ref":"#"}},"dependencies":{"exclusiveMaximum":["maximum"],"exclusiveMinimum":["minimum"]},"default":{}})j",
-    R"j({"$schema":"http://json-schema.org/draft-06/schema#","$id":"http://json-schema.org/draft-06/schema#","title":"Core schema meta-schema","definitions":{"schemaArray":{"type":"array","minItems":1,"items":{"$ref":"#"}},"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"allOf":[{"$ref":"#/definitions/nonNegativeInteger"},{"default":0}]},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}},"type":["object","boolean"],"properties":{"$id":{"type":"string","format":"uri-reference"},"$schema":{"type":"string","format":"uri"},"$ref":{"type":"string","format":"uri-reference"},"title":{"type":"string"},"description":{"type":"string"},"default":{},"examples":{"type":"array","items":{}},"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/definitions/nonNegativeInteger"},"minLength":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"additionalItems":{"$ref":"#"},"items":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/schemaArray"}],"default":{}},"maxItems":{"$ref":"#/definitions/nonNegativeInteger"},"minItems":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"contains":{"$ref":"#"},"maxProperties":{"$ref":"#/definitions/nonNegativeInteger"},"minProperties":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"required":{"$ref":"#/definitions/stringArray"},"additionalProperties":{"$ref":"#"},"definitions":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"propertyNames":{"format":"regex"},"default":{}},"dependencies":{"type":"object","additionalProperties":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/stringArray"}]}},"propertyNames":{"$ref":"#"},"const":{},"enum":{"type":"array"},"type":{"anyOf":[{"$ref":"#/definitions/simpleTypes"},{"type":"array","items":{"$ref":"#/definitions/simpleTypes"},"minItems":1,"uniqueItems":true}]},"format":{"type":"string"},"allOf":{"$ref":"#/definitions/schemaArray"},"anyOf":{"$ref":"#/definitions/schemaArray"},"oneOf":{"$ref":"#/definitions/schemaArray"},"not":{"$ref":"#"}},"default":{}})j",
-    R"j({"$schema":"http://json-schema.org/draft-07/schema#","$id":"http://json-schema.org/draft-07/schema#","title":"Core schema meta-schema","definitions":{"schemaArray":{"type":"array","minItems":1,"items":{"$ref":"#"}},"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"allOf":[{"$ref":"#/definitions/nonNegativeInteger"},{"default":0}]},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}},"type":["object","boolean"],"properties":{"$id":{"type":"string","format":"uri-reference"},"$schema":{"type":"string","format":"uri"},"$ref":{"type":"string","format":"uri-reference"},"$comment":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"default":true,"readOnly":{"type":"boolean","default":false},"examples":{"type":"array","items":true},"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/definitions/nonNegativeInteger"},"minLength":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"additionalItems":{"$ref":"#"},"items":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/schemaArray"}],"default":true},"maxItems":{"$ref":"#/definitions/nonNegativeInteger"},"minItems":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"contains":{"$ref":"#"},"maxProperties":{"$ref":"#/definitions/nonNegativeInteger"},"minProperties":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"required":{"$ref":"#/definitions/stringArray"},"additionalProperties":{"$ref":"#"},"definitions":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"propertyNames":{"format":"regex"},"default":{}},"dependencies":{"type":"object","additionalProperties":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/stringArray"}]}},"propertyNames":{"$ref":"#"},"const":true,"enum":{"type":"array","items":true},"type":{"anyOf":[{"$ref":"#/definitions/simpleTypes"},{"type":"array","items":{"$ref":"#/definitions/simpleTypes"},"minItems":1,"uniqueItems":true}]},"format":{"type":"string"},"contentMediaType":{"type":"string"},"contentEncoding":{"type":"string"},"if":{"$ref":"#"},"then":{"$ref":"#"},"else":{"$ref":"#"},"allOf":{"$ref":"#/definitions/schemaArray"},"anyOf":{"$ref":"#/definitions/schemaArray"},"oneOf":{"$ref":"#/definitions/schemaArray"},"not":{"$ref":"#"}},"default":true})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/schema","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/core":true,"https://json-schema.org/draft/2019-09/vocab/applicator":true,"https://json-schema.org/draft/2019-09/vocab/validation":true,"https://json-schema.org/draft/2019-09/vocab/meta-data":true,"https://json-schema.org/draft/2019-09/vocab/format":false,"https://json-schema.org/draft/2019-09/vocab/content":true},"$recursiveAnchor":true,"title":"Core and Validation specifications meta-schema","allOf":[{"$ref":"meta/core"},{"$ref":"meta/applicator"},{"$ref":"meta/validation"},{"$ref":"meta/meta-data"},{"$ref":"meta/format"},{"$ref":"meta/content"}],"type":["object","boolean"],"properties":{"definitions":{"$comment":"While no longer an official keyword as it is replaced by $defs, this keyword is retained in the meta-schema to prevent incompatible extensions as it remains in common use.","type":"object","additionalProperties":{"$recursiveRef":"#"},"default":{}},"dependencies":{"$comment":"\"dependencies\" is no longer a keyword, but schema authors should avoid redefining it to facilitate a smooth transition to \"dependentSchemas\" and \"dependentRequired\"","type":"object","additionalProperties":{"anyOf":[{"$recursiveRef":"#"},{"$ref":"meta/validation#/$defs/stringArray"}]}}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/applicator","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/applicator":true},"$recursiveAnchor":true,"title":"Applicator vocabulary meta-schema","type":["object","boolean"],"properties":{"additionalItems":{"$recursiveRef":"#"},"unevaluatedItems":{"$recursiveRef":"#"},"items":{"anyOf":[{"$recursiveRef":"#"},{"$ref":"#/$defs/schemaArray"}]},"contains":{"$recursiveRef":"#"},"additionalProperties":{"$recursiveRef":"#"},"unevaluatedProperties":{"$recursiveRef":"#"},"properties":{"type":"object","additionalProperties":{"$recursiveRef":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$recursiveRef":"#"},"propertyNames":{"format":"regex"},"default":{}},"dependentSchemas":{"type":"object","additionalProperties":{"$recursiveRef":"#"}},"propertyNames":{"$recursiveRef":"#"},"if":{"$recursiveRef":"#"},"then":{"$recursiveRef":"#"},"else":{"$recursiveRef":"#"},"allOf":{"$ref":"#/$defs/schemaArray"},"anyOf":{"$ref":"#/$defs/schemaArray"},"oneOf":{"$ref":"#/$defs/schemaArray"},"not":{"$recursiveRef":"#"}},"$defs":{"schemaArray":{"type":"array","minItems":1,"items":{"$recursiveRef":"#"}}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/content","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/content":true},"$recursiveAnchor":true,"title":"Content vocabulary meta-schema","type":["object","boolean"],"properties":{"contentMediaType":{"type":"string"},"contentEncoding":{"type":"string"},"contentSchema":{"$recursiveRef":"#"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/core","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/core":true},"$recursiveAnchor":true,"title":"Core vocabulary meta-schema","type":["object","boolean"],"properties":{"$id":{"type":"string","format":"uri-reference","$comment":"Non-empty fragments not allowed.","pattern":"^[^#]*#?$"},"$schema":{"type":"string","format":"uri"},"$anchor":{"type":"string","pattern":"^[A-Za-z][-A-Za-z0-9.:_]*$"},"$ref":{"type":"string","format":"uri-reference"},"$recursiveRef":{"type":"string","format":"uri-reference"},"$recursiveAnchor":{"type":"boolean","default":false},"$vocabulary":{"type":"object","propertyNames":{"type":"string","format":"uri"},"additionalProperties":{"type":"boolean"}},"$comment":{"type":"string"},"$defs":{"type":"object","additionalProperties":{"$recursiveRef":"#"},"default":{}}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/format","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/format":true},"$recursiveAnchor":true,"title":"Format vocabulary meta-schema","type":["object","boolean"],"properties":{"format":{"type":"string"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/meta-data","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/meta-data":true},"$recursiveAnchor":true,"title":"Meta-data vocabulary meta-schema","type":["object","boolean"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"default":true,"deprecated":{"type":"boolean","default":false},"readOnly":{"type":"boolean","default":false},"writeOnly":{"type":"boolean","default":false},"examples":{"type":"array","items":true}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/validation","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/validation":true},"$recursiveAnchor":true,"title":"Validation vocabulary meta-schema","type":["object","boolean"],"properties":{"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/$defs/nonNegativeInteger"},"minLength":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"maxItems":{"$ref":"#/$defs/nonNegativeInteger"},"minItems":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"maxContains":{"$ref":"#/$defs/nonNegativeInteger"},"minContains":{"$ref":"#/$defs/nonNegativeInteger","default":1},"maxProperties":{"$ref":"#/$defs/nonNegativeInteger"},"minProperties":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"required":{"$ref":"#/$defs/stringArray"},"dependentRequired":{"type":"object","additionalProperties":{"$ref":"#/$defs/stringArray"}},"const":true,"enum":{"type":"array","items":true},"type":{"anyOf":[{"$ref":"#/$defs/simpleTypes"},{"type":"array","items":{"$ref":"#/$defs/simpleTypes"},"minItems":1,"uniqueItems":true}]}},"$defs":{"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"$ref":"#/$defs/nonNegativeInteger","default":0},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/schema","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/core":true,"https://json-schema.org/draft/2020-12/vocab/applicator":true,"https://json-schema.org/draft/2020-12/vocab/unevaluated":true,"https://json-schema.org/draft/2020-12/vocab/validation":true,"https://json-schema.org/draft/2020-12/vocab/meta-data":true,"https://json-schema.org/draft/2020-12/vocab/format-annotation":true,"https://json-schema.org/draft/2020-12/vocab/content":true},"$dynamicAnchor":"meta","title":"Core and Validation specifications meta-schema","allOf":[{"$ref":"meta/core"},{"$ref":"meta/applicator"},{"$ref":"meta/unevaluated"},{"$ref":"meta/validation"},{"$ref":"meta/meta-data"},{"$ref":"meta/format-annotation"},{"$ref":"meta/content"}],"type":["object","boolean"],"$comment":"This meta-schema also defines keywords that have appeared in previous drafts in order to prevent incompatible extensions as they remain in common use.","properties":{"definitions":{"$comment":"\"definitions\" has been replaced by \"$defs\".","type":"object","additionalProperties":{"$dynamicRef":"#meta"},"deprecated":true,"default":{}},"dependencies":{"$comment":"\"dependencies\" has been split and replaced by \"dependentSchemas\" and \"dependentRequired\" in order to serve their differing semantics.","type":"object","additionalProperties":{"anyOf":[{"$dynamicRef":"#meta"},{"$ref":"meta/validation#/$defs/stringArray"}]},"deprecated":true,"default":{}},"$recursiveAnchor":{"$comment":"\"$recursiveAnchor\" has been replaced by \"$dynamicAnchor\".","$ref":"meta/core#/$defs/anchorString","deprecated":true},"$recursiveRef":{"$comment":"\"$recursiveRef\" has been replaced by \"$dynamicRef\".","$ref":"meta/core#/$defs/uriReferenceString","deprecated":true}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/applicator","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/applicator":true},"$dynamicAnchor":"meta","title":"Applicator vocabulary meta-schema","type":["object","boolean"],"properties":{"prefixItems":{"$ref":"#/$defs/schemaArray"},"items":{"$dynamicRef":"#meta"},"contains":{"$dynamicRef":"#meta"},"additionalProperties":{"$dynamicRef":"#meta"},"properties":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"},"propertyNames":{"format":"regex"},"default":{}},"dependentSchemas":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"},"default":{}},"propertyNames":{"$dynamicRef":"#meta"},"if":{"$dynamicRef":"#meta"},"then":{"$dynamicRef":"#meta"},"else":{"$dynamicRef":"#meta"},"allOf":{"$ref":"#/$defs/schemaArray"},"anyOf":{"$ref":"#/$defs/schemaArray"},"oneOf":{"$ref":"#/$defs/schemaArray"},"not":{"$dynamicRef":"#meta"}},"$defs":{"schemaArray":{"type":"array","minItems":1,"items":{"$dynamicRef":"#meta"}}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/content","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/content":true},"$dynamicAnchor":"meta","title":"Content vocabulary meta-schema","type":["object","boolean"],"properties":{"contentEncoding":{"type":"string"},"contentMediaType":{"type":"string"},"contentSchema":{"$dynamicRef":"#meta"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/core","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/core":true},"$dynamicAnchor":"meta","title":"Core vocabulary meta-schema","type":["object","boolean"],"properties":{"$id":{"$ref":"#/$defs/uriReferenceString","$comment":"Non-empty fragments not allowed.","pattern":"^[^#]*#?$"},"$schema":{"$ref":"#/$defs/uriString"},"$ref":{"$ref":"#/$defs/uriReferenceString"},"$anchor":{"$ref":"#/$defs/anchorString"},"$dynamicRef":{"$ref":"#/$defs/uriReferenceString"},"$dynamicAnchor":{"$ref":"#/$defs/anchorString"},"$vocabulary":{"type":"object","propertyNames":{"$ref":"#/$defs/uriString"},"additionalProperties":{"type":"boolean"}},"$comment":{"type":"string"},"$defs":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"}}},"$defs":{"anchorString":{"type":"string","pattern":"^[A-Za-z_][-A-Za-z0-9._]*$"},"uriString":{"type":"string","format":"uri"},"uriReferenceString":{"type":"string","format":"uri-reference"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/format-annotation","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/format-annotation":true},"$dynamicAnchor":"meta","title":"Format vocabulary meta-schema for annotation results","type":["object","boolean"],"properties":{"format":{"type":"string"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/format-assertion","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/format-assertion":true},"$dynamicAnchor":"meta","title":"Format vocabulary meta-schema for assertion results","type":["object","boolean"],"properties":{"format":{"type":"string"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/meta-data","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/meta-data":true},"$dynamicAnchor":"meta","title":"Meta-data vocabulary meta-schema","type":["object","boolean"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"default":true,"deprecated":{"type":"boolean","default":false},"readOnly":{"type":"boolean","default":false},"writeOnly":{"type":"boolean","default":false},"examples":{"type":"array","items":true}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/unevaluated","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/unevaluated":true},"$dynamicAnchor":"meta","title":"Unevaluated applicator vocabulary meta-schema","type":["object","boolean"],"properties":{"unevaluatedItems":{"$dynamicRef":"#meta"},"unevaluatedProperties":{"$dynamicRef":"#meta"}}})j",
-    R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/validation","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/validation":true},"$dynamicAnchor":"meta","title":"Validation vocabulary meta-schema","type":["object","boolean"],"properties":{"type":{"anyOf":[{"$ref":"#/$defs/simpleTypes"},{"type":"array","items":{"$ref":"#/$defs/simpleTypes"},"minItems":1,"uniqueItems":true}]},"const":true,"enum":{"type":"array","items":true},"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/$defs/nonNegativeInteger"},"minLength":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"maxItems":{"$ref":"#/$defs/nonNegativeInteger"},"minItems":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"maxContains":{"$ref":"#/$defs/nonNegativeInteger"},"minContains":{"$ref":"#/$defs/nonNegativeInteger","default":1},"maxProperties":{"$ref":"#/$defs/nonNegativeInteger"},"minProperties":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"required":{"$ref":"#/$defs/stringArray"},"dependentRequired":{"type":"object","additionalProperties":{"$ref":"#/$defs/stringArray"}}},"$defs":{"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"$ref":"#/$defs/nonNegativeInteger","default":0},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}}})j",
+const char* const kMetaDocs[] =
+    {
+        R"j({"$schema":"http://json-schema.org/draft-03/schema#","id":"http://json-schema.org/draft-03/schema#","type":"object","properties":{"type":{"type":["string","array"],"items":{"type":["string",{"$ref":"#"}]},"uniqueItems":true,"default":"any"},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"additionalProperties":{"type":[{"$ref":"#"},"boolean"],"default":{}},"items":{"type":[{"$ref":"#"},"array"],"items":{"$ref":"#"},"default":{}},"additionalItems":{"type":[{"$ref":"#"},"boolean"],"default":{}},"required":{"type":"boolean","default":false},"dependencies":{"type":"object","additionalProperties":{"type":["string","array",{"$ref":"#"}],"items":{"type":"string"}},"default":{}},"minimum":{"type":"number"},"maximum":{"type":"number"},"exclusiveMinimum":{"type":"boolean","default":false},"exclusiveMaximum":{"type":"boolean","default":false},"minItems":{"type":"integer","minimum":0,"default":0},"maxItems":{"type":"integer","minimum":0},"uniqueItems":{"type":"boolean","default":false},"pattern":{"type":"string","format":"regex"},"minLength":{"type":"integer","minimum":0,"default":0},"maxLength":{"type":"integer"},"enum":{"type":"array","minItems":1,"uniqueItems":true},"default":{"type":"any"},"title":{"type":"string"},"description":{"type":"string"},"format":{"type":"string"},"divisibleBy":{"type":"number","minimum":0,"exclusiveMinimum":true,"default":1},"disallow":{"type":["string","array"],"items":{"type":["string",{"$ref":"#"}]},"uniqueItems":true},"extends":{"type":[{"$ref":"#"},"array"],"items":{"$ref":"#"},"default":{}},"id":{"type":"string"},"$ref":{"type":"string"},"$schema":{"type":"string","format":"uri"}},"dependencies":{"exclusiveMinimum":"minimum","exclusiveMaximum":"maximum"},"default":{}})j",
+        R"j({"id":"http://json-schema.org/draft-04/schema#","$schema":"http://json-schema.org/draft-04/schema#","description":"Core schema meta-schema","definitions":{"schemaArray":{"type":"array","minItems":1,"items":{"$ref":"#"}},"positiveInteger":{"type":"integer","minimum":0},"positiveIntegerDefault0":{"allOf":[{"$ref":"#/definitions/positiveInteger"},{"default":0}]},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"minItems":1,"uniqueItems":true}},"type":"object","properties":{"id":{"type":"string"},"$schema":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"default":{},"multipleOf":{"type":"number","minimum":0,"exclusiveMinimum":true},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"boolean","default":false},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"boolean","default":false},"maxLength":{"$ref":"#/definitions/positiveInteger"},"minLength":{"$ref":"#/definitions/positiveIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"additionalItems":{"anyOf":[{"type":"boolean"},{"$ref":"#"}],"default":{}},"items":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/schemaArray"}],"default":{}},"maxItems":{"$ref":"#/definitions/positiveInteger"},"minItems":{"$ref":"#/definitions/positiveIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"maxProperties":{"$ref":"#/definitions/positiveInteger"},"minProperties":{"$ref":"#/definitions/positiveIntegerDefault0"},"required":{"$ref":"#/definitions/stringArray"},"additionalProperties":{"anyOf":[{"type":"boolean"},{"$ref":"#"}],"default":{}},"definitions":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"dependencies":{"type":"object","additionalProperties":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/stringArray"}]}},"enum":{"type":"array","minItems":1,"uniqueItems":true},"type":{"anyOf":[{"$ref":"#/definitions/simpleTypes"},{"type":"array","items":{"$ref":"#/definitions/simpleTypes"},"minItems":1,"uniqueItems":true}]},"format":{"type":"string"},"allOf":{"$ref":"#/definitions/schemaArray"},"anyOf":{"$ref":"#/definitions/schemaArray"},"oneOf":{"$ref":"#/definitions/schemaArray"},"not":{"$ref":"#"}},"dependencies":{"exclusiveMaximum":["maximum"],"exclusiveMinimum":["minimum"]},"default":{}})j",
+        R"j({"$schema":"http://json-schema.org/draft-06/schema#","$id":"http://json-schema.org/draft-06/schema#","title":"Core schema meta-schema","definitions":{"schemaArray":{"type":"array","minItems":1,"items":{"$ref":"#"}},"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"allOf":[{"$ref":"#/definitions/nonNegativeInteger"},{"default":0}]},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}},"type":["object","boolean"],"properties":{"$id":{"type":"string","format":"uri-reference"},"$schema":{"type":"string","format":"uri"},"$ref":{"type":"string","format":"uri-reference"},"title":{"type":"string"},"description":{"type":"string"},"default":{},"examples":{"type":"array","items":{}},"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/definitions/nonNegativeInteger"},"minLength":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"additionalItems":{"$ref":"#"},"items":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/schemaArray"}],"default":{}},"maxItems":{"$ref":"#/definitions/nonNegativeInteger"},"minItems":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"contains":{"$ref":"#"},"maxProperties":{"$ref":"#/definitions/nonNegativeInteger"},"minProperties":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"required":{"$ref":"#/definitions/stringArray"},"additionalProperties":{"$ref":"#"},"definitions":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"propertyNames":{"format":"regex"},"default":{}},"dependencies":{"type":"object","additionalProperties":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/stringArray"}]}},"propertyNames":{"$ref":"#"},"const":{},"enum":{"type":"array"},"type":{"anyOf":[{"$ref":"#/definitions/simpleTypes"},{"type":"array","items":{"$ref":"#/definitions/simpleTypes"},"minItems":1,"uniqueItems":true}]},"format":{"type":"string"},"allOf":{"$ref":"#/definitions/schemaArray"},"anyOf":{"$ref":"#/definitions/schemaArray"},"oneOf":{"$ref":"#/definitions/schemaArray"},"not":{"$ref":"#"}},"default":{}})j",
+        R"j({"$schema":"http://json-schema.org/draft-07/schema#","$id":"http://json-schema.org/draft-07/schema#","title":"Core schema meta-schema","definitions":{"schemaArray":{"type":"array","minItems":1,"items":{"$ref":"#"}},"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"allOf":[{"$ref":"#/definitions/nonNegativeInteger"},{"default":0}]},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}},"type":["object","boolean"],"properties":{"$id":{"type":"string","format":"uri-reference"},"$schema":{"type":"string","format":"uri"},"$ref":{"type":"string","format":"uri-reference"},"$comment":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"default":true,"readOnly":{"type":"boolean","default":false},"examples":{"type":"array","items":true},"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/definitions/nonNegativeInteger"},"minLength":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"additionalItems":{"$ref":"#"},"items":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/schemaArray"}],"default":true},"maxItems":{"$ref":"#/definitions/nonNegativeInteger"},"minItems":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"contains":{"$ref":"#"},"maxProperties":{"$ref":"#/definitions/nonNegativeInteger"},"minProperties":{"$ref":"#/definitions/nonNegativeIntegerDefault0"},"required":{"$ref":"#/definitions/stringArray"},"additionalProperties":{"$ref":"#"},"definitions":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"properties":{"type":"object","additionalProperties":{"$ref":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$ref":"#"},"propertyNames":{"format":"regex"},"default":{}},"dependencies":{"type":"object","additionalProperties":{"anyOf":[{"$ref":"#"},{"$ref":"#/definitions/stringArray"}]}},"propertyNames":{"$ref":"#"},"const":true,"enum":{"type":"array","items":true},"type":{"anyOf":[{"$ref":"#/definitions/simpleTypes"},{"type":"array","items":{"$ref":"#/definitions/simpleTypes"},"minItems":1,"uniqueItems":true}]},"format":{"type":"string"},"contentMediaType":{"type":"string"},"contentEncoding":{"type":"string"},"if":{"$ref":"#"},"then":{"$ref":"#"},"else":{"$ref":"#"},"allOf":{"$ref":"#/definitions/schemaArray"},"anyOf":{"$ref":"#/definitions/schemaArray"},"oneOf":{"$ref":"#/definitions/schemaArray"},"not":{"$ref":"#"}},"default":true})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/schema","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/core":true,"https://json-schema.org/draft/2019-09/vocab/applicator":true,"https://json-schema.org/draft/2019-09/vocab/validation":true,"https://json-schema.org/draft/2019-09/vocab/meta-data":true,"https://json-schema.org/draft/2019-09/vocab/format":false,"https://json-schema.org/draft/2019-09/vocab/content":true},"$recursiveAnchor":true,"title":"Core and Validation specifications meta-schema","allOf":[{"$ref":"meta/core"},{"$ref":"meta/applicator"},{"$ref":"meta/validation"},{"$ref":"meta/meta-data"},{"$ref":"meta/format"},{"$ref":"meta/content"}],"type":["object","boolean"],"properties":{"definitions":{"$comment":"While no longer an official keyword as it is replaced by $defs, this keyword is retained in the meta-schema to prevent incompatible extensions as it remains in common use.","type":"object","additionalProperties":{"$recursiveRef":"#"},"default":{}},"dependencies":{"$comment":"\"dependencies\" is no longer a keyword, but schema authors should avoid redefining it to facilitate a smooth transition to \"dependentSchemas\" and \"dependentRequired\"","type":"object","additionalProperties":{"anyOf":[{"$recursiveRef":"#"},{"$ref":"meta/validation#/$defs/stringArray"}]}}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/applicator","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/applicator":true},"$recursiveAnchor":true,"title":"Applicator vocabulary meta-schema","type":["object","boolean"],"properties":{"additionalItems":{"$recursiveRef":"#"},"unevaluatedItems":{"$recursiveRef":"#"},"items":{"anyOf":[{"$recursiveRef":"#"},{"$ref":"#/$defs/schemaArray"}]},"contains":{"$recursiveRef":"#"},"additionalProperties":{"$recursiveRef":"#"},"unevaluatedProperties":{"$recursiveRef":"#"},"properties":{"type":"object","additionalProperties":{"$recursiveRef":"#"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$recursiveRef":"#"},"propertyNames":{"format":"regex"},"default":{}},"dependentSchemas":{"type":"object","additionalProperties":{"$recursiveRef":"#"}},"propertyNames":{"$recursiveRef":"#"},"if":{"$recursiveRef":"#"},"then":{"$recursiveRef":"#"},"else":{"$recursiveRef":"#"},"allOf":{"$ref":"#/$defs/schemaArray"},"anyOf":{"$ref":"#/$defs/schemaArray"},"oneOf":{"$ref":"#/$defs/schemaArray"},"not":{"$recursiveRef":"#"}},"$defs":{"schemaArray":{"type":"array","minItems":1,"items":{"$recursiveRef":"#"}}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/content","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/content":true},"$recursiveAnchor":true,"title":"Content vocabulary meta-schema","type":["object","boolean"],"properties":{"contentMediaType":{"type":"string"},"contentEncoding":{"type":"string"},"contentSchema":{"$recursiveRef":"#"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/core","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/core":true},"$recursiveAnchor":true,"title":"Core vocabulary meta-schema","type":["object","boolean"],"properties":{"$id":{"type":"string","format":"uri-reference","$comment":"Non-empty fragments not allowed.","pattern":"^[^#]*#?$"},"$schema":{"type":"string","format":"uri"},"$anchor":{"type":"string","pattern":"^[A-Za-z][-A-Za-z0-9.:_]*$"},"$ref":{"type":"string","format":"uri-reference"},"$recursiveRef":{"type":"string","format":"uri-reference"},"$recursiveAnchor":{"type":"boolean","default":false},"$vocabulary":{"type":"object","propertyNames":{"type":"string","format":"uri"},"additionalProperties":{"type":"boolean"}},"$comment":{"type":"string"},"$defs":{"type":"object","additionalProperties":{"$recursiveRef":"#"},"default":{}}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/format","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/format":true},"$recursiveAnchor":true,"title":"Format vocabulary meta-schema","type":["object","boolean"],"properties":{"format":{"type":"string"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/meta-data","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/meta-data":true},"$recursiveAnchor":true,"title":"Meta-data vocabulary meta-schema","type":["object","boolean"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"default":true,"deprecated":{"type":"boolean","default":false},"readOnly":{"type":"boolean","default":false},"writeOnly":{"type":"boolean","default":false},"examples":{"type":"array","items":true}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2019-09/schema","$id":"https://json-schema.org/draft/2019-09/meta/validation","$vocabulary":{"https://json-schema.org/draft/2019-09/vocab/validation":true},"$recursiveAnchor":true,"title":"Validation vocabulary meta-schema","type":["object","boolean"],"properties":{"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/$defs/nonNegativeInteger"},"minLength":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"maxItems":{"$ref":"#/$defs/nonNegativeInteger"},"minItems":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"maxContains":{"$ref":"#/$defs/nonNegativeInteger"},"minContains":{"$ref":"#/$defs/nonNegativeInteger","default":1},"maxProperties":{"$ref":"#/$defs/nonNegativeInteger"},"minProperties":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"required":{"$ref":"#/$defs/stringArray"},"dependentRequired":{"type":"object","additionalProperties":{"$ref":"#/$defs/stringArray"}},"const":true,"enum":{"type":"array","items":true},"type":{"anyOf":[{"$ref":"#/$defs/simpleTypes"},{"type":"array","items":{"$ref":"#/$defs/simpleTypes"},"minItems":1,"uniqueItems":true}]}},"$defs":{"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"$ref":"#/$defs/nonNegativeInteger","default":0},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/schema","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/core":true,"https://json-schema.org/draft/2020-12/vocab/applicator":true,"https://json-schema.org/draft/2020-12/vocab/unevaluated":true,"https://json-schema.org/draft/2020-12/vocab/validation":true,"https://json-schema.org/draft/2020-12/vocab/meta-data":true,"https://json-schema.org/draft/2020-12/vocab/format-annotation":true,"https://json-schema.org/draft/2020-12/vocab/content":true},"$dynamicAnchor":"meta","title":"Core and Validation specifications meta-schema","allOf":[{"$ref":"meta/core"},{"$ref":"meta/applicator"},{"$ref":"meta/unevaluated"},{"$ref":"meta/validation"},{"$ref":"meta/meta-data"},{"$ref":"meta/format-annotation"},{"$ref":"meta/content"}],"type":["object","boolean"],"$comment":"This meta-schema also defines keywords that have appeared in previous drafts in order to prevent incompatible extensions as they remain in common use.","properties":{"definitions":{"$comment":"\"definitions\" has been replaced by \"$defs\".","type":"object","additionalProperties":{"$dynamicRef":"#meta"},"deprecated":true,"default":{}},"dependencies":{"$comment":"\"dependencies\" has been split and replaced by \"dependentSchemas\" and \"dependentRequired\" in order to serve their differing semantics.","type":"object","additionalProperties":{"anyOf":[{"$dynamicRef":"#meta"},{"$ref":"meta/validation#/$defs/stringArray"}]},"deprecated":true,"default":{}},"$recursiveAnchor":{"$comment":"\"$recursiveAnchor\" has been replaced by \"$dynamicAnchor\".","$ref":"meta/core#/$defs/anchorString","deprecated":true},"$recursiveRef":{"$comment":"\"$recursiveRef\" has been replaced by \"$dynamicRef\".","$ref":"meta/core#/$defs/uriReferenceString","deprecated":true}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/applicator","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/applicator":true},"$dynamicAnchor":"meta","title":"Applicator vocabulary meta-schema","type":["object","boolean"],"properties":{"prefixItems":{"$ref":"#/$defs/schemaArray"},"items":{"$dynamicRef":"#meta"},"contains":{"$dynamicRef":"#meta"},"additionalProperties":{"$dynamicRef":"#meta"},"properties":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"},"default":{}},"patternProperties":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"},"propertyNames":{"format":"regex"},"default":{}},"dependentSchemas":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"},"default":{}},"propertyNames":{"$dynamicRef":"#meta"},"if":{"$dynamicRef":"#meta"},"then":{"$dynamicRef":"#meta"},"else":{"$dynamicRef":"#meta"},"allOf":{"$ref":"#/$defs/schemaArray"},"anyOf":{"$ref":"#/$defs/schemaArray"},"oneOf":{"$ref":"#/$defs/schemaArray"},"not":{"$dynamicRef":"#meta"}},"$defs":{"schemaArray":{"type":"array","minItems":1,"items":{"$dynamicRef":"#meta"}}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/content","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/content":true},"$dynamicAnchor":"meta","title":"Content vocabulary meta-schema","type":["object","boolean"],"properties":{"contentEncoding":{"type":"string"},"contentMediaType":{"type":"string"},"contentSchema":{"$dynamicRef":"#meta"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/core","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/core":true},"$dynamicAnchor":"meta","title":"Core vocabulary meta-schema","type":["object","boolean"],"properties":{"$id":{"$ref":"#/$defs/uriReferenceString","$comment":"Non-empty fragments not allowed.","pattern":"^[^#]*#?$"},"$schema":{"$ref":"#/$defs/uriString"},"$ref":{"$ref":"#/$defs/uriReferenceString"},"$anchor":{"$ref":"#/$defs/anchorString"},"$dynamicRef":{"$ref":"#/$defs/uriReferenceString"},"$dynamicAnchor":{"$ref":"#/$defs/anchorString"},"$vocabulary":{"type":"object","propertyNames":{"$ref":"#/$defs/uriString"},"additionalProperties":{"type":"boolean"}},"$comment":{"type":"string"},"$defs":{"type":"object","additionalProperties":{"$dynamicRef":"#meta"}}},"$defs":{"anchorString":{"type":"string","pattern":"^[A-Za-z_][-A-Za-z0-9._]*$"},"uriString":{"type":"string","format":"uri"},"uriReferenceString":{"type":"string","format":"uri-reference"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/format-annotation","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/format-annotation":true},"$dynamicAnchor":"meta","title":"Format vocabulary meta-schema for annotation results","type":["object","boolean"],"properties":{"format":{"type":"string"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/format-assertion","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/format-assertion":true},"$dynamicAnchor":"meta","title":"Format vocabulary meta-schema for assertion results","type":["object","boolean"],"properties":{"format":{"type":"string"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/meta-data","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/meta-data":true},"$dynamicAnchor":"meta","title":"Meta-data vocabulary meta-schema","type":["object","boolean"],"properties":{"title":{"type":"string"},"description":{"type":"string"},"default":true,"deprecated":{"type":"boolean","default":false},"readOnly":{"type":"boolean","default":false},"writeOnly":{"type":"boolean","default":false},"examples":{"type":"array","items":true}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/unevaluated","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/unevaluated":true},"$dynamicAnchor":"meta","title":"Unevaluated applicator vocabulary meta-schema","type":["object","boolean"],"properties":{"unevaluatedItems":{"$dynamicRef":"#meta"},"unevaluatedProperties":{"$dynamicRef":"#meta"}}})j",
+        R"j({"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://json-schema.org/draft/2020-12/meta/validation","$vocabulary":{"https://json-schema.org/draft/2020-12/vocab/validation":true},"$dynamicAnchor":"meta","title":"Validation vocabulary meta-schema","type":["object","boolean"],"properties":{"type":{"anyOf":[{"$ref":"#/$defs/simpleTypes"},{"type":"array","items":{"$ref":"#/$defs/simpleTypes"},"minItems":1,"uniqueItems":true}]},"const":true,"enum":{"type":"array","items":true},"multipleOf":{"type":"number","exclusiveMinimum":0},"maximum":{"type":"number"},"exclusiveMaximum":{"type":"number"},"minimum":{"type":"number"},"exclusiveMinimum":{"type":"number"},"maxLength":{"$ref":"#/$defs/nonNegativeInteger"},"minLength":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"pattern":{"type":"string","format":"regex"},"maxItems":{"$ref":"#/$defs/nonNegativeInteger"},"minItems":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"uniqueItems":{"type":"boolean","default":false},"maxContains":{"$ref":"#/$defs/nonNegativeInteger"},"minContains":{"$ref":"#/$defs/nonNegativeInteger","default":1},"maxProperties":{"$ref":"#/$defs/nonNegativeInteger"},"minProperties":{"$ref":"#/$defs/nonNegativeIntegerDefault0"},"required":{"$ref":"#/$defs/stringArray"},"dependentRequired":{"type":"object","additionalProperties":{"$ref":"#/$defs/stringArray"}}},"$defs":{"nonNegativeInteger":{"type":"integer","minimum":0},"nonNegativeIntegerDefault0":{"$ref":"#/$defs/nonNegativeInteger","default":0},"simpleTypes":{"enum":["array","boolean","integer","null","number","object","string"]},"stringArray":{"type":"array","items":{"type":"string"},"uniqueItems":true,"default":[]}}})j",
 };
 
 Meta make_meta() {
     Meta m;
     using Map = std::map<std::string, Keyword, std::less<>>;
-    const Map common = {
-        {"$ref", kw_ref}, {"additionalProperties", kw_additional_properties}, {"enum", kw_enum},
-        {"format", kw_format}, {"maxItems", kw_max_items}, {"maxLength", kw_max_length}, {"minItems", kw_min_items},
-        {"minLength", kw_min_length}, {"pattern", kw_pattern}, {"patternProperties", kw_pattern_properties},
-        {"uniqueItems", kw_unique_items}};
+    const Map common = {{"$ref", kw_ref},
+                        {"additionalProperties", kw_additional_properties},
+                        {"enum", kw_enum},
+                        {"format", kw_format},
+                        {"maxItems", kw_max_items},
+                        {"maxLength", kw_max_length},
+                        {"minItems", kw_min_items},
+                        {"minLength", kw_min_length},
+                        {"pattern", kw_pattern},
+                        {"patternProperties", kw_pattern_properties},
+                        {"uniqueItems", kw_unique_items}};
     auto with = [&](Map extra) {
         Map out = common;
         for (auto& [k, fn] : extra) out[k] = fn;
         return out;
     };
-    const Map d4 = with({{"additionalItems", kw_additional_items}, {"allOf", kw_all_of}, {"anyOf", kw_any_of},
-                         {"dependencies", kw_dependencies_d4}, {"items", kw_items_d3}, {"maxProperties", kw_max_properties},
-                         {"maximum", kw_maximum_d34}, {"minProperties", kw_min_properties}, {"minimum", kw_minimum_d34},
-                         {"multipleOf", kw_multiple_of}, {"not", kw_not}, {"oneOf", kw_one_of},
-                         {"properties", kw_properties}, {"required", kw_required}, {"type", kw_type}});
+    const Map d4 = with({{"additionalItems", kw_additional_items},
+                         {"allOf", kw_all_of},
+                         {"anyOf", kw_any_of},
+                         {"dependencies", kw_dependencies_d4},
+                         {"items", kw_items_d3},
+                         {"maxProperties", kw_max_properties},
+                         {"maximum", kw_maximum_d34},
+                         {"minProperties", kw_min_properties},
+                         {"minimum", kw_minimum_d34},
+                         {"multipleOf", kw_multiple_of},
+                         {"not", kw_not},
+                         {"oneOf", kw_one_of},
+                         {"properties", kw_properties},
+                         {"required", kw_required},
+                         {"type", kw_type}});
     Map d6 = d4;
-    for (const auto& [k, fn] : Map{{"const", kw_const}, {"contains", kw_contains_d6},
-                                   {"exclusiveMaximum", kw_exclusive_maximum}, {"exclusiveMinimum", kw_exclusive_minimum},
-                                   {"items", kw_items_d6}, {"maximum", kw_maximum}, {"minimum", kw_minimum},
+    for (const auto& [k, fn] : Map{{"const", kw_const},
+                                   {"contains", kw_contains_d6},
+                                   {"exclusiveMaximum", kw_exclusive_maximum},
+                                   {"exclusiveMinimum", kw_exclusive_minimum},
+                                   {"items", kw_items_d6},
+                                   {"maximum", kw_maximum},
+                                   {"minimum", kw_minimum},
                                    {"propertyNames", kw_property_names}})
         d6[k] = fn;
     Map d7 = d6;
     d7["if"] = kw_if;
     Map d2019 = d7;
     d2019.erase("dependencies");
-    for (const auto& [k, fn] : Map{{"$recursiveRef", kw_recursive_ref}, {"contains", kw_contains},
+    for (const auto& [k, fn] : Map{{"$recursiveRef", kw_recursive_ref},
+                                   {"contains", kw_contains},
                                    {"dependentRequired", kw_dependent_required},
                                    {"dependentSchemas", kw_dependent_schemas},
                                    {"unevaluatedItems", kw_unevaluated_items_2019},
@@ -4649,14 +4778,22 @@ Meta make_meta() {
         d2019[k] = fn;
     Map d2020 = d2019;
     for (const char* k : {"$recursiveRef", "additionalItems"}) d2020.erase(k);
-    for (const auto& [k, fn] : Map{{"$dynamicRef", kw_ref}, {"items", kw_items}, {"prefixItems", kw_prefix_items},
+    for (const auto& [k, fn] : Map{{"$dynamicRef", kw_ref},
+                                   {"items", kw_items},
+                                   {"prefixItems", kw_prefix_items},
                                    {"unevaluatedItems", kw_unevaluated_items},
                                    {"unevaluatedProperties", kw_unevaluated_properties}})
         d2020[k] = fn;
-    const Map d3 = with({{"additionalItems", kw_additional_items}, {"dependencies", kw_dependencies_d3},
-                         {"disallow", kw_disallow_d3}, {"divisibleBy", kw_multiple_of}, {"extends", kw_extends_d3},
-                         {"items", kw_items_d3}, {"maximum", kw_maximum_d34}, {"minimum", kw_minimum_d34},
-                         {"properties", kw_properties_d3}, {"type", kw_type_d3}});
+    const Map d3 = with({{"additionalItems", kw_additional_items},
+                         {"dependencies", kw_dependencies_d3},
+                         {"disallow", kw_disallow_d3},
+                         {"divisibleBy", kw_multiple_of},
+                         {"extends", kw_extends_d3},
+                         {"items", kw_items_d3},
+                         {"maximum", kw_maximum_d34},
+                         {"minimum", kw_minimum_d34},
+                         {"properties", kw_properties_d3},
+                         {"type", kw_type_d3}});
     const Map* tables[6] = {&d3, &d4, &d6, &d7, &d2019, &d2020};
     for (int d = 0; d < 6; ++d) {
         m.dialects[d].draft = (Draft) d;
@@ -4818,16 +4955,16 @@ const char* json_type_name(const json& v) {
     }
 }
 
-}  // namespace
+}   // namespace
 
 /// how answers are checked
 class Validator {
 public:
-    bool object_only = true;           ///< json_object: one JSON object
-    Val schema;                        ///< json_schema: the schema as Python decoded the request
-    const Dialect* dialect = nullptr;  ///< validator_for(schema)
-    std::string root;                  ///< the schema's id ("" without one)
-    Patterns patterns;                 ///< the schema's patterns, compiled
+    bool object_only = true;            ///< json_object: one JSON object
+    Val schema;                         ///< json_schema: the schema as Python decoded the request
+    const Dialect* dialect = nullptr;   ///< validator_for(schema)
+    std::string root;                   ///< the schema's id ("" without one)
+    Patterns patterns;                  ///< the schema's patterns, compiled
 };
 
 namespace {
@@ -4897,7 +5034,7 @@ bool has_big(const Val& root) {
     return false;
 }
 
-}  // namespace
+}   // namespace
 
 std::pair<json, std::shared_ptr<const Validator>> prepare_format(const json& response_format, const json& messages,
                                                                  bool with_tools, std::string_view request,
@@ -4948,12 +5085,11 @@ std::pair<json, std::shared_ptr<const Validator>> prepare_format(const json& res
         }
     }
     finite_floats(schema);
-    std::string directive =
-        "OUTPUT FORMAT REQUIREMENT: Return exactly one JSON object matching the JSON Schema below. "
-        "No Markdown, headings, code fences, commentary, or text outside the JSON. "
-        "Use every required field, correct types, and only allowed fields. "
-        "Put all requested writing inside the appropriate JSON string fields.\nJSON Schema:\n" +
-        (exact && has_big(*exact) ? dumps(*exact) : py_dumps(schema, false, true));
+    std::string directive = "OUTPUT FORMAT REQUIREMENT: Return exactly one JSON object matching the JSON Schema below. "
+                            "No Markdown, headings, code fences, commentary, or text outside the JSON. "
+                            "Use every required field, correct types, and only allowed fields. "
+                            "Put all requested writing inside the appropriate JSON string fields.\nJSON Schema:\n" +
+                            (exact && has_big(*exact) ? dumps(*exact) : py_dumps(schema, false, true));
     if (with_tools)   // /v1/responses (#782): the schema is for the final answer; a turn that calls a tool is not one
         directive += "\nThis applies only to your final answer. To use a tool, call it as usual; the JSON object is "
                      "what you write once you are done with the tools.";
@@ -5002,8 +5138,9 @@ std::string validated_json(const std::string& text, const Validator* validator, 
     } catch (const PyError& e) {
         throw StructuredOutputError("could not validate structured output: " + e.msg);
     }
-    if (error) throw StructuredOutputError("model output failed the JSON Schema at " + error->first + ": " + error->second);
+    if (error)
+        throw StructuredOutputError("model output failed the JSON Schema at " + error->first + ": " + error->second);
     return canonical;
 }
 
-}  // namespace lamina
+}   // namespace lamina

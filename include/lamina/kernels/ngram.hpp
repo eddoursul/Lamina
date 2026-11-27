@@ -30,33 +30,36 @@
 namespace lamina::kernels {
 
 // ---- geometry, every value confirmed against the artifact (docs/gguf-metadata.txt) ----
-inline constexpr int NG_N_EMBD = 2560;          // n_embd
-inline constexpr int PLE_HEAD_DIM = 160;        // qwen4exp.embedding_length_per_layer_input
-inline constexpr int NGRAM_SIZE = 3;            // qwen4exp.ple.ngram_size
-inline constexpr int HEADS_PER_NGRAM = 8;       // qwen4exp.ple.heads_per_ngram
+inline constexpr int NG_N_EMBD = 2560;                                   // n_embd
+inline constexpr int PLE_HEAD_DIM = 160;                                 // qwen4exp.embedding_length_per_layer_input
+inline constexpr int NGRAM_SIZE = 3;                                     // qwen4exp.ple.ngram_size
+inline constexpr int HEADS_PER_NGRAM = 8;                                // qwen4exp.ple.heads_per_ngram
 inline constexpr int PLE_N_HEADS = (NGRAM_SIZE - 1) * HEADS_PER_NGRAM;   // 16
-inline constexpr int PLE_CONV_KERNEL = 4;       // qwen4exp.ple.conv_kernel
+inline constexpr int PLE_CONV_KERNEL = 4;                                // qwen4exp.ple.conv_kernel
 inline constexpr int32_t PLE_EOS_TOKEN_ID = 248044;
-inline constexpr int NG_HC = 4;                 // hyper_connection.count
-inline constexpr int NG_HC_DIM = NG_HC * NG_N_EMBD;                      // 10240
-inline constexpr int NG_HIST = (PLE_CONV_KERNEL - 1) * NGRAM_SIZE;       // 9
-inline constexpr int32_t TOKEN_NULL = -1;       // LLAMA_TOKEN_NULL
+inline constexpr int NG_HC = 4;                                      // hyper_connection.count
+inline constexpr int NG_HC_DIM = NG_HC * NG_N_EMBD;                  // 10240
+inline constexpr int NG_HIST = (PLE_CONV_KERNEL - 1) * NGRAM_SIZE;   // 9
+inline constexpr int32_t TOKEN_NULL = -1;                            // LLAMA_TOKEN_NULL
 inline constexpr float NG_RMS_EPS = 1e-6f;
 
 // The table: [160, 320001536].  ne0 = 160 is the FAST axis, so one row is 160 contiguous elements: 5 blocks of 32
 // (IQ4_NL 18 bytes a block, Q5_1 24, Q8_0 34) or 160 BF16 values.  The head-slowest flatten then makes 16 rows
 // exactly n_embd = 2560.
 inline constexpr uint64_t PLE_TABLE_ROWS = 320001536ull;
-inline constexpr int PLE_ROW_BYTES_IQ4_NL = (PLE_HEAD_DIM / 32) * 18;    // 90
-inline constexpr int PLE_ROW_BYTES_Q5_1 = (PLE_HEAD_DIM / 32) * 24;      // 120
-inline constexpr int PLE_ROW_BYTES_Q8_0 = (PLE_HEAD_DIM / 32) * 34;      // 170
-inline constexpr int PLE_ROW_BYTES_BF16 = PLE_HEAD_DIM * 2;              // 320
+inline constexpr int PLE_ROW_BYTES_IQ4_NL = (PLE_HEAD_DIM / 32) * 18;   // 90
+inline constexpr int PLE_ROW_BYTES_Q5_1 = (PLE_HEAD_DIM / 32) * 24;     // 120
+inline constexpr int PLE_ROW_BYTES_Q8_0 = (PLE_HEAD_DIM / 32) * 34;     // 170
+inline constexpr int PLE_ROW_BYTES_BF16 = PLE_HEAD_DIM * 2;             // 320
 inline constexpr int PLE_ROW_BYTES_MAX = PLE_ROW_BYTES_BF16;
 
 /// The bytes of one row of a table of GGML type `type`: IQ4_NL (20), Q5_1 (7), Q8_0 (8) or BF16 (30); 0 for another.
 inline constexpr int ple_row_bytes(int type) {
-    return type == 20 ? PLE_ROW_BYTES_IQ4_NL : type == 7 ? PLE_ROW_BYTES_Q5_1 : type == 8 ? PLE_ROW_BYTES_Q8_0
-         : type == 30 ? PLE_ROW_BYTES_BF16 : 0;
+    return type == 20   ? PLE_ROW_BYTES_IQ4_NL
+           : type == 7  ? PLE_ROW_BYTES_Q5_1
+           : type == 8  ? PLE_ROW_BYTES_Q8_0
+           : type == 30 ? PLE_ROW_BYTES_BF16
+                        : 0;
 }
 
 /// The artifact's own hash constants, transcribed from `docs/gguf-dump-shard1.txt`:
@@ -92,7 +95,6 @@ uint64_t ngram_mixed(const int64_t* ctx, const uint64_t* mult, int n);
 /// heads (0..7) and the trigram heads (8..15) agree about the recent history.
 void ngram_rows(const int32_t* tokens, const int32_t* prev, int n_tokens, const PleConsts& c, uint32_t* out);
 
-
 /// One row of a table of GGML type `type` (one `ple_row_bytes` takes) -> 160 floats, the values ggml's `to_float`
 /// gives (`lamina/artifact/dequant.hpp`'s blocks).
 ///
@@ -111,8 +113,8 @@ void ple_dequant_row(int type, const uint8_t* row, float* out160);
 /// row reads take ~0.6 s from the SSD.
 ///
 /// NEVER KEEP THE SHARD MAPPED WHILE READING IT DIRECT: a live section on the same file serializes the unbuffered
-/// reads (311 -> 1,575 us per token, upstream Strata's bench/results/2026-09-23-p2-ssd-direct). Direct mode drops its own mapping
-/// after the header parse; nothing else in the process may hold one.
+/// reads (311 -> 1,575 us per token, upstream Strata's bench/results/2026-09-23-p2-ssd-direct). Direct mode drops its
+/// own mapping after the header parse; nothing else in the process may hold one.
 enum class PleIo { Direct, Mmap, Ram };
 
 struct PleIoOptions {
@@ -120,8 +122,9 @@ struct PleIoOptions {
     /// outstanding SSD reads: a window needs 16 a token, a prompt chunk 16 a token for all of its tokens (on this
     /// PC's NVMe SSD 256 read a chunk's rows ~20% sooner than 64; 512 no sooner)
     uint32_t max_inflight = 256;
-    uint64_t cache_rows = 1u << 20;  ///< bounded row cache: 1,048,576 rows (~95 MB of IQ4_NL, ~335 MB of BF16); 0 disables
-    bool io_thread = true;           ///< reads submitted by a worker thread, not the caller
+    uint64_t cache_rows = 1u << 20;   ///< bounded row cache: 1,048,576 rows (~95 MB
+                                      ///< of IQ4_NL, ~335 MB of BF16); 0 disables
+    bool io_thread = true;            ///< reads submitted by a worker thread, not the caller
 };
 
 /// The shard among `shards` that holds `per_layer_token_embd.weight`, or "" (headers only).
@@ -216,4 +219,4 @@ private:
 // belongs in `GgufFile::open`, which this module does not own.
 // ------------------------------------------------------------------------------------------------------
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

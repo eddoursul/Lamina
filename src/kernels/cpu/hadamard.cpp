@@ -35,4 +35,4 @@ void hadamard_rotate(float* x, int n, int block, const float* signs) {
     }
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

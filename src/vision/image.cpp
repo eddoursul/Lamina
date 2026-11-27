@@ -278,8 +278,7 @@ Rgb resample(const Rgb& img, int target_width, int target_height, Filter filter)
     if (img.w <= 0 || img.h <= 0 || target_width <= 0 || target_height <= 0 || target_width > 65536 ||
         target_height > 65536)
         throw std::runtime_error("a picture of " + std::to_string(img.w) + "x" + std::to_string(img.h) + " to " +
-                                 std::to_string(target_width) + "x" + std::to_string(target_height) +
-                                 ": out of range");
+                                 std::to_string(target_width) + "x" + std::to_string(target_height) + ": out of range");
 
     const int src_width = img.w;
     const int src_height = img.h;
@@ -302,14 +301,16 @@ Rgb resample(const Rgb& img, int target_width, int target_height, Filter filter)
     Rgb dst;
     const uint8_t* src = img.px.data();
     if (need_horizontal && need_vertical) {
-        auto temp = resample_horizontal(src, src_width, src_height, target_width, ksize_horiz, bounds_horiz, weights_horiz);
+        auto temp =
+            resample_horizontal(src, src_width, src_height, target_width, ksize_horiz, bounds_horiz, weights_horiz);
         dst.w = target_width;
         dst.h = target_height;
         dst.px = resample_vertical(temp.data(), target_width, target_height, ksize_vert, bounds_vert, weights_vert);
     } else if (need_horizontal) {
         dst.w = target_width;
         dst.h = src_height;
-        dst.px = resample_horizontal(src, src_width, src_height, target_width, ksize_horiz, bounds_horiz, weights_horiz);
+        dst.px =
+            resample_horizontal(src, src_width, src_height, target_width, ksize_horiz, bounds_horiz, weights_horiz);
     } else if (need_vertical) {
         dst.w = src_width;
         dst.h = target_height;
@@ -329,8 +330,12 @@ void target_size(int width, int height, const SizeRule& rule, int& tw, int& th) 
         const float q = x / static_cast<float>(f);
         return static_cast<int>(even ? std::nearbyint(q) : std::round(q)) * f;
     };
-    auto ceil_by_factor = [f = rule.align](float x) { return static_cast<int>(std::ceil(x / static_cast<float>(f))) * f; };
-    auto floor_by_factor = [f = rule.align](float x) { return static_cast<int>(std::floor(x / static_cast<float>(f))) * f; };
+    auto ceil_by_factor = [f = rule.align](float x) {
+        return static_cast<int>(std::ceil(x / static_cast<float>(f))) * f;
+    };
+    auto floor_by_factor = [f = rule.align](float x) {
+        return static_cast<int>(std::floor(x / static_cast<float>(f))) * f;
+    };
 
     int w_bar = std::max(rule.align, round_by_factor(static_cast<float>(width)));
     int h_bar = std::max(rule.align, round_by_factor(static_cast<float>(height)));
@@ -418,11 +423,12 @@ std::vector<float> planes_padded(const Rgb& src, const SizeRule& rule, Filter fi
         float* plane = out.data() + (size_t) c * n;
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
-                const float v = x < sw && y < sh ? (float) img.px[((size_t) y * (size_t) sw + (size_t) x) * 3 + (size_t) c] : -1.0f;
+                const float v =
+                    x < sw && y < sh ? (float) img.px[((size_t) y * (size_t) sw + (size_t) x) * 3 + (size_t) c] : -1.0f;
                 plane[(size_t) y * (size_t) w + (size_t) x] = (v - m) / s;
             }
     }
     return out;
 }
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

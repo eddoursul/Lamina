@@ -29,13 +29,16 @@ int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: rope_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: rope_parity [--selftest]\n");
+            return 2;
+        }
     }
 
-    const int n_rot = 64;          // the artifact's rope.dimension_count
-    const double theta = 1.0e7;    // rope.freq_base
+    const int n_rot = 64;         // the artifact's rope.dimension_count
+    const double theta = 1.0e7;   // rope.freq_base
     const int head_dim = 256;
-    const int rows = 24 * 8;       // 24 heads over 8 positions, so several positions exercise the table
+    const int rows = 24 * 8;   // 24 heads over 8 positions, so several positions exercise the table
     const int max_pos = 32;
     const int half = n_rot / 2;
     int bad = 0;
@@ -52,8 +55,7 @@ int main(int argc, char** argv) {
             const float rc = (float) std::cos(ang), rs = (float) std::sin(ang);
             if (std::memcmp(&rc, &hcos[(size_t) p * half + i], 4) != 0) ++table_bad;
             if (std::memcmp(&rs, &hsin[(size_t) p * half + i], 4) != 0) ++table_bad;
-            table_worst = std::max(table_worst,
-                                   std::fabs((double) rc - (double) hcos[(size_t) p * half + i]));
+            table_worst = std::max(table_worst, std::fabs((double) rc - (double) hcos[(size_t) p * half + i]));
         }
     }
     std::printf("  rope table vs float64 reference   %s (%lld of %d entries differ, worst %.1e)\n",
@@ -72,7 +74,7 @@ int main(int argc, char** argv) {
     for (int r = 0; r < rows; ++r) {
         const float* xr = &x[(size_t) r * head_dim];
         float* orow = &ref[(size_t) r * head_dim];
-        for (int d = 0; d < head_dim; ++d) orow[d] = xr[d];          // the tail passes through
+        for (int d = 0; d < head_dim; ++d) orow[d] = xr[d];   // the tail passes through
         for (int i = 0; i < half; ++i) {
             const float c = hcos[(size_t) pos[(size_t) r] * half + i];
             const float s = hsin[(size_t) pos[(size_t) r] * half + i];
@@ -120,7 +122,10 @@ int main(int argc, char** argv) {
         const double a = ref[i], b = got[i];
         const double rel = std::fabs(a - b) / row_scale[i / (size_t) head_dim];
         if (!(rel <= worst)) worst = rel;
-        if (!(rel <= 1e-6)) { if (first_bad < 0) first_bad = (long long) i; ++rot_bad; }
+        if (!(rel <= 1e-6)) {
+            if (first_bad < 0) first_bad = (long long) i;
+            ++rot_bad;
+        }
     }
     std::printf("  rope rotation vs host reference   %s (%lld of %zu over 1e-6, worst rel %.3e)\n",
                 rot_bad ? "*** WRONG ***" : "agrees", rot_bad, ref.size(), worst);
@@ -147,7 +152,8 @@ int main(int argc, char** argv) {
         const bool adjacent_moved = (o[1] != 0.0f);
         const bool neox_moved = (o[half] != 0.0f);
         std::printf("  pairing: dim 0 set -> NEOX moves dim %d (o[half]=%.6f), adjacent would move dim 1 "
-                    "(o[1]=%.6f)   %s\n", half, (double) o[half], (double) o[1],
+                    "(o[1]=%.6f)   %s\n",
+                    half, (double) o[half], (double) o[1],
                     (neox_moved && !adjacent_moved) ? "NEOX confirmed" : "*** WRONG CONVENTION ***");
         if (!(neox_moved && !adjacent_moved)) ++bad;
     }

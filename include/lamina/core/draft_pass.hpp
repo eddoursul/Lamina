@@ -33,10 +33,10 @@
 namespace lamina::core {
 
 struct DraftPassStep {
-    float c, d;        ///< the same token: sigmoid(c + d logit(q))
-    float a0, a1;      ///< the interval's edge in log-odds: a0 + a1 / T + (b0 + b1 / T) logit(q)
+    float c, d;     ///< the same token: sigmoid(c + d logit(q))
+    float a0, a1;   ///< the interval's edge in log-odds: a0 + a1 / T + (b0 + b1 / T) logit(q)
     float b0, b1;
-    float w0, w1;      ///< its spread: exp(w0 + w1 log T)
+    float w0, w1;   ///< its spread: exp(w0 + w1 log T)
 };
 
 /// Chain steps 1-3; a later step takes the third's.
@@ -63,7 +63,7 @@ inline void terms(int step, float q, float temperature, float& same, float& edge
     edge = k.a0 + k.a1 * it + (k.b0 + k.b1 * it) * lq;
     spread = std::exp(k.w0 - k.w1 * std::log(it));
 }
-}  // namespace draft_pass_detail
+}   // namespace draft_pass_detail
 
 /// The chance that chain step `step`'s draft (0-based), of probability `q` under the draft layer, is the token a
 /// request sampling at `temperature` draws with the number `u` in [0, 1).
@@ -87,4 +87,4 @@ inline float draft_pass_floor(int step, float min_p, float temperature) {
     return same * sum / kPoints;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

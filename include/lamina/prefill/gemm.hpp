@@ -32,8 +32,8 @@ public:
     /// Y_i[rows[i], N] = X_i[rows[i], K] . W_i[N, K]^T (FP16 in, FP32 out) for n problems of one shape but their
     /// own row counts, in one launch; the pointer arrays are DEVICE memory, `rows` host memory.  K a multiple of 8,
     /// every row 16-byte aligned.
-    void f16_grouped(const uint16_t* const* X, const uint16_t* const* W, float* const* Y, const int* rows, int n, int64_t N,
-                     int64_t K);
+    void f16_grouped(const uint16_t* const* X, const uint16_t* const* W, float* const* Y, const int* rows, int n,
+                     int64_t N, int64_t K);
 
     /// W given as native GGUF blocks of `ggml_type`, dequantized to FP16 in the scratch, X in FP16.
     void native(const uint16_t* X, int ggml_type, const void* W_blocks, float* Y, int64_t T, int64_t N, int64_t K,
@@ -51,4 +51,4 @@ private:
     size_t ws_bytes_ = 0;
 };
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

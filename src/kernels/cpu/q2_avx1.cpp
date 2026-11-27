@@ -39,7 +39,10 @@ inline float h2f(uint16_t h) {
             f = sign << 31;
         } else {
             exp = 127 - 15 + 1;
-            while (!(man & 0x400u)) { man <<= 1; --exp; }
+            while (!(man & 0x400u)) {
+                man <<= 1;
+                --exp;
+            }
             man &= 0x3FFu;
             f = (sign << 31) | (exp << 23) | (man << 13);
         }
@@ -64,10 +67,10 @@ inline void unpack64(const uint8_t* codes, __m128i& v0, __m128i& v1, __m128i& v2
     const __m128i c3 = _mm_and_si128(_mm_srli_epi16(b, 6), m3);
     const __m128i a0 = _mm_unpacklo_epi8(c0, c1), a1 = _mm_unpacklo_epi8(c2, c3);   // bytes 0..7
     const __m128i b0 = _mm_unpackhi_epi8(c0, c1), b1 = _mm_unpackhi_epi8(c2, c3);   // bytes 8..15
-    v0 = _mm_unpacklo_epi16(a0, a1);   // values 0..15
-    v1 = _mm_unpackhi_epi16(a0, a1);   // values 16..31
-    v2 = _mm_unpacklo_epi16(b0, b1);   // values 32..47
-    v3 = _mm_unpackhi_epi16(b0, b1);   // values 48..63
+    v0 = _mm_unpacklo_epi16(a0, a1);                                                // values 0..15
+    v1 = _mm_unpackhi_epi16(a0, a1);                                                // values 16..31
+    v2 = _mm_unpacklo_epi16(b0, b1);                                                // values 32..47
+    v3 = _mm_unpackhi_epi16(b0, b1);                                                // values 48..63
 }
 
 // 16 codes against 16 activations, four products per int32 lane (q2_avx2_rows.inl's dot4 at 128-bit;
@@ -80,11 +83,13 @@ inline __m128i dot4(__m128i codes, __m128i act) {
 // the s0 contribution (values 0..31) and the s1 contribution (values 32..63) into the SAME lanes, block by
 // block, and the reduction tree is the same one ((L0+L4)+(L2+L6)) + ((L1+L5)+(L3+L7)) - the only difference
 // from an AVX2 CPU is that kernel's FMA being a mul+add here (last bits).
-template <int NT>
-inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, float* res) {
+template <int NT> inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, float* res) {
     __m256 acc[NT];
     float corr[NT];
-    for (int t = 0; t < NT; ++t) { acc[t] = _mm256_setzero_ps(); corr[t] = 0.f; }
+    for (int t = 0; t < NT; ++t) {
+        acc[t] = _mm256_setzero_ps();
+        corr[t] = 0.f;
+    }
     for (int b = 0; b < nblocks; ++b) {
         const uint8_t* blk = row + (size_t) b * 18;
         const float d = h2f((uint16_t) (blk[0] | (blk[1] << 8)));
@@ -93,12 +98,14 @@ inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, flo
         for (int t = 0; t < NT; ++t) {
             const int8_t* q = a[t]->q + b * 64;
             // s0 = values 0..31: lanes 0..3 of accA's 128-bit halves; s1 = values 32..63 into the SAME lanes
-            const __m128i s0a = dot4(v0, _mm_loadu_si128((const __m128i*) q));        // values 0..15
-            const __m128i s0b = dot4(v1, _mm_loadu_si128((const __m128i*) (q + 16))); // values 16..31
-            const __m128i s1a = dot4(v2, _mm_loadu_si128((const __m128i*) (q + 32))); // values 32..47
-            const __m128i s1b = dot4(v3, _mm_loadu_si128((const __m128i*) (q + 48))); // values 48..63
-            const __m256 s0 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_cvtepi32_ps(s0a)), _mm_cvtepi32_ps(s0b), 1);
-            const __m256 s1 = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_cvtepi32_ps(s1a)), _mm_cvtepi32_ps(s1b), 1);
+            const __m128i s0a = dot4(v0, _mm_loadu_si128((const __m128i*) q));          // values 0..15
+            const __m128i s0b = dot4(v1, _mm_loadu_si128((const __m128i*) (q + 16)));   // values 16..31
+            const __m128i s1a = dot4(v2, _mm_loadu_si128((const __m128i*) (q + 32)));   // values 32..47
+            const __m128i s1b = dot4(v3, _mm_loadu_si128((const __m128i*) (q + 48)));   // values 48..63
+            const __m256 s0 =
+                _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_cvtepi32_ps(s0a)), _mm_cvtepi32_ps(s0b), 1);
+            const __m256 s1 =
+                _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_cvtepi32_ps(s1a)), _mm_cvtepi32_ps(s1b), 1);
             // exactly the AVX-2 kernel's two fmadds: the whole s0 (values 0..31) by scale[2b], the whole s1
             // (values 32..63) by scale[2b+1], into the same lanes - lane pairing and reduce tree follow suit
             acc[t] = _mm256_add_ps(acc[t], _mm256_mul_ps(_mm256_set1_ps(d * a[t]->scale[2 * b]), s0));
@@ -125,16 +132,18 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
 // ---- the bit-plane row kernel (LAMINA_Q2_BITPLANE=1), 128-bit lanes: one 64-value block at a time instead of
 // a pair per 256-bit register.  The integer part is exact; the float summation order is this kernel's own (the
 // same statement as for the AVX-2 one), and every row reduces with the same tree alone or in a group (#152).
-template <int NT>
-inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m128* acc) {
-    for (int t = 0; t < NT; ++t) { acc[2 * t] = _mm_setzero_ps(); acc[2 * t + 1] = _mm_setzero_ps(); }
+template <int NT> inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m128* acc) {
+    for (int t = 0; t < NT; ++t) {
+        acc[2 * t] = _mm_setzero_ps();
+        acc[2 * t + 1] = _mm_setzero_ps();
+    }
     const __m128i m3 = _mm_set1_epi8(3);
     const __m128i ones = _mm_set1_epi16(1);
     for (int p = 0; p < npairs; ++p) {
         const uint8_t* blk = row + (size_t) p * 36;
         for (int h = 0; h < 2; ++h) {
             uint16_t dh;
-            std::memcpy(&dh, blk + h * 18, 2);          // the block's fp16 scale: bytes 0..1 (block 1 at +18)
+            std::memcpy(&dh, blk + h * 18, 2);   // the block's fp16 scale: bytes 0..1 (block 1 at +18)
             const __m128 d = _mm_set1_ps(h2f(dh));
             const __m128i c = _mm_loadu_si128((const __m128i*) (blk + 2 + h * 18));   // its 16 code bytes
             const __m128i c0 = _mm_and_si128(c, m3);
@@ -149,8 +158,7 @@ inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m
                 s = _mm_add_epi16(s, _mm_maddubs_epi16(c3, _mm_load_si128((const __m128i*) (q + 96))));
                 const __m128i i32 = _mm_sub_epi32(_mm_madd_epi16(s, ones),
                                                   _mm_load_si128((const __m128i*) (a[t]->psum + p * 8 + h * 4)));
-                const __m128 v = _mm_mul_ps(_mm_cvtepi32_ps(i32),
-                                            _mm_load_ps(a[t]->pscale + p * 8 + h * 4));
+                const __m128 v = _mm_mul_ps(_mm_cvtepi32_ps(i32), _mm_load_ps(a[t]->pscale + p * 8 + h * 4));
                 __m128& x = acc[2 * t + h];
                 x = _mm_add_ps(x, _mm_mul_ps(d, v));
             }
@@ -158,11 +166,11 @@ inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m
     }
 }
 
-inline float reduce1(__m128 a, __m128 b) {   // ((v0+v1)+(v2+v3)) + ((v4+v5)+(v6+v7)), the AVX-2 kernel's tree
-    __m128 ha = _mm_hadd_ps(a, a);                        // [a0+a1, a2+a3, a0+a1, a2+a3]
-    ha = _mm_add_ss(ha, _mm_movehdup_ps(ha));             // (v0+v1)+(v2+v3)
+inline float reduce1(__m128 a, __m128 b) {      // ((v0+v1)+(v2+v3)) + ((v4+v5)+(v6+v7)), the AVX-2 kernel's tree
+    __m128 ha = _mm_hadd_ps(a, a);              // [a0+a1, a2+a3, a0+a1, a2+a3]
+    ha = _mm_add_ss(ha, _mm_movehdup_ps(ha));   // (v0+v1)+(v2+v3)
     __m128 hb = _mm_hadd_ps(b, b);
-    hb = _mm_add_ss(hb, _mm_movehdup_ps(hb));             // (v4+v5)+(v6+v7)
+    hb = _mm_add_ss(hb, _mm_movehdup_ps(hb));   // (v4+v5)+(v6+v7)
     return _mm_cvtss_f32(_mm_add_ss(ha, hb));
 }
 
@@ -182,7 +190,7 @@ const bool kBitplane = [] {
 
 #include "q2_bitplane.inc"
 
-}  // namespace
+}   // namespace
 
 void q2_0_gguf_rows_multi_avx1_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                                       float* const* out, int r0, int r1) {
@@ -261,4 +269,4 @@ void act_quant_q8_1_avx1(const float* x, int n, ActQ& a) {
     else a.bp_pairs = 0;
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

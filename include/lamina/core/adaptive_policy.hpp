@@ -25,4 +25,4 @@ inline bool adaptive_move_less(const AdaptiveMoveOrder& a, const AdaptiveMoveOrd
     return a.slot < b.slot;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

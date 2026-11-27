@@ -14,8 +14,9 @@
 //            g = softplus(a + dt_bias) * ssm_a;  per V head h (K head h % 16):  S = S * exp(g_h);
 //            d = (v - S k) * b_h;  S += d k^T;  o = S q / sqrt(128);  o = rms(o) * ssm_norm * silu(z_h)
 //            y = W_ssm_out o
-//       attention (l % 4 == 3): attn_q -> per head [q 256 | gate 256]; q, k = rms(.) * q_norm/k_norm; NEOX RoPE over the
-//            first 64 dims (base 1e7; text positions: the M-RoPE sections all carry the same position); GQA 16 / 2;
+//       attention (l % 4 == 3): attn_q -> per head [q 256 | gate 256]; q, k = rms(.) * q_norm/k_norm; NEOX RoPE
+//            over the first 64 dims (base 1e7; text positions: the M-RoPE sections all carry the same position);
+//            GQA 16 / 2;
 //            y = W_o (softmax(q k^T / 16) v * sigmoid(gate))
 //       x += y;  h2 = rms(x) * post_attention_norm
 //       MoE: p = softmax(W_router h2) over 256, top-8, renormalised; sum_e p_e W_down_e (silu(W_gate_e h2) * W_up_e h2)
@@ -54,7 +55,7 @@ namespace {
     do {                                                                                                               \
         cudaError_t e_ = (x);                                                                                          \
         if (e_ != cudaSuccess) {                                                                                       \
-            std::fprintf(stderr, "q36ref: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
+            std::fprintf(stderr, "q36ref: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__);   \
             std::exit(1);                                                                                              \
         }                                                                                                              \
     } while (0)
@@ -158,8 +159,8 @@ constexpr int kThreads = 128;
 /// y[sel][o] = W_e[o] . x[sel] for row o (grid.x), selection `sel` (grid.y): expert ids[sel] (or 0 without ids),
 /// x of selection sel at x + sel * x_stride.  `beta` != 0 adds into y.
 template <int T>
-__global__ void k_gemv(const uint8_t* W, size_t row_bytes, size_t expert_bytes, const int* ids, int n_in, const float* x,
-                       size_t x_stride, float* y, int n_out) {
+__global__ void k_gemv(const uint8_t* W, size_t row_bytes, size_t expert_bytes, const int* ids, int n_in,
+                       const float* x, size_t x_stride, float* y, int n_out) {
     __shared__ float sh[kThreads];
     const int o = blockIdx.x, sel = blockIdx.y;
     const int e = ids ? ids[sel] : 0;
@@ -177,7 +178,8 @@ __global__ void k_gemv(const uint8_t* W, size_t row_bytes, size_t expert_bytes, 
 
 template <int T> __global__ void k_row(const uint8_t* W, size_t row_bytes, int row, int n, float* out) {
     const uint8_t* r = W + (size_t) row * row_bytes;
-    for (int c = blockIdx.x * blockDim.x + threadIdx.x; c < n / 32; c += gridDim.x * blockDim.x) deq32<T>(r, c, out + 32 * c);
+    for (int c = blockIdx.x * blockDim.x + threadIdx.x; c < n / 32; c += gridDim.x * blockDim.x)
+        deq32<T>(r, c, out + 32 * c);
 }
 
 /// y = x / sqrt(mean(x^2) + eps) * w, per group of n (grid = groups); w (length n) may be null.
@@ -238,7 +240,8 @@ __global__ void k_gdn(const float* conv, const float* alpha, const float* dt_bia
     out[h * D + i] = o;
 }
 
-/// The fused path's gate and beta, in place: alpha -> softplus(alpha + dt) * ssm_a (exp'd by the step), beta -> sigmoid.
+/// The fused path's gate and beta, in place:
+/// alpha -> softplus(alpha + dt) * ssm_a (exp'd by the step), beta -> sigmoid.
 __global__ void k_gdn_gb(float* alpha, const float* dt_bias, const float* ssm_a, float* beta, int HV) {
     const int h = threadIdx.x;
     if (h >= HV) return;
@@ -258,8 +261,8 @@ __global__ void k_gated_norm(float* o, const float* w, const float* z, int D, fl
 /// The attention layer's per-token preparation: q (from the [q | gate] pairs) and k RMS-normed per head with their
 /// weights, NEOX RoPE over the first n_rot dims, k and v appended to the cache at `pos`, the gate kept.
 __global__ void k_attn_prep(const float* qg, const float* kx, const float* vx, const float* qw, const float* kw,
-                            float* q, float* gate, float* kc, float* vc, int H, int /*HKV: the grid*/, int D, int n_rot, int pos,
-                            int ctx, float base, float eps) {
+                            float* q, float* gate, float* kc, float* vc, int H, int /*HKV: the grid*/, int D, int n_rot,
+                            int pos, int ctx, float base, float eps) {
     __shared__ float sh[kThreads];
     __shared__ float buf[512];
     const int head = blockIdx.x;   // 0..H-1: query heads, H..H+HKV-1: key heads
@@ -284,7 +287,8 @@ __global__ void k_attn_prep(const float* qg, const float* kx, const float* vx, c
         dst[i] = v;
     }
     if (isq)
-        for (int i = threadIdx.x; i < D; i += blockDim.x) gate[(size_t) head * D + i] = qg[(size_t) head * 2 * D + D + i];
+        for (int i = threadIdx.x; i < D; i += blockDim.x)
+            gate[(size_t) head * D + i] = qg[(size_t) head * 2 * D + D + i];
     else
         for (int i = threadIdx.x; i < D; i += blockDim.x)
             vc[((size_t) (head - H) * ctx + pos) * D + i] = vx[(size_t) (head - H) * D + i];
@@ -359,7 +363,8 @@ size_t row_bytes_of(int type, int64_t n) {
 }
 
 template <int T>
-void gemv_t(const Tensor& w, size_t expert_bytes, const int* ids, int n_sel, const float* x, size_t x_stride, float* y) {
+void gemv_t(const Tensor& w, size_t expert_bytes, const int* ids, int n_sel, const float* x, size_t x_stride,
+            float* y) {
     const int n_in = (int) w.shape[0], n_out = (int) w.shape[1];
     k_gemv<T><<<dim3(n_out, n_sel), kThreads>>>(w.d, w.row_bytes, expert_bytes, ids, n_in, x, x_stride, y, n_out);
 }
@@ -426,16 +431,17 @@ void gemv(const Tensor& w, const float* x, float* y, const int* ids = nullptr, i
         x_stride = x_stride ? (size_t) n : 0;
     }
     switch (w.type) {
-    case T_F32: gemv_t<T_F32>(w, eb, ids, n_sel, x, x_stride, y); break;
-    case T_F16: gemv_t<T_F16>(w, eb, ids, n_sel, x, x_stride, y); break;
-    case T_BF16: gemv_t<T_BF16>(w, eb, ids, n_sel, x, x_stride, y); break;
-    case T_Q8_0: gemv_t<T_Q8_0>(w, eb, ids, n_sel, x, x_stride, y); break;
-    case T_Q4_K: gemv_t<T_Q4_K>(w, eb, ids, n_sel, x, x_stride, y); break;
-    case T_Q5_K: gemv_t<T_Q5_K>(w, eb, ids, n_sel, x, x_stride, y); break;
-    case T_Q6_K: gemv_t<T_Q6_K>(w, eb, ids, n_sel, x, x_stride, y); break;
-    default:
-        std::fprintf(stderr, "q36ref: no kernel for ggml type %d (%s)\n", w.type, lamina::ggml_type_name((uint32_t) w.type));
-        std::exit(1);
+        case T_F32: gemv_t<T_F32>(w, eb, ids, n_sel, x, x_stride, y); break;
+        case T_F16: gemv_t<T_F16>(w, eb, ids, n_sel, x, x_stride, y); break;
+        case T_BF16: gemv_t<T_BF16>(w, eb, ids, n_sel, x, x_stride, y); break;
+        case T_Q8_0: gemv_t<T_Q8_0>(w, eb, ids, n_sel, x, x_stride, y); break;
+        case T_Q4_K: gemv_t<T_Q4_K>(w, eb, ids, n_sel, x, x_stride, y); break;
+        case T_Q5_K: gemv_t<T_Q5_K>(w, eb, ids, n_sel, x, x_stride, y); break;
+        case T_Q6_K: gemv_t<T_Q6_K>(w, eb, ids, n_sel, x, x_stride, y); break;
+        default:
+            std::fprintf(stderr, "q36ref: no kernel for ggml type %d (%s)\n", w.type,
+                         lamina::ggml_type_name((uint32_t) w.type));
+            std::exit(1);
     }
     CK(cudaGetLastError());
 }
@@ -509,7 +515,8 @@ bool load(const std::string& path, Model& m, std::string& err) {
                         std::memcpy(&h[i], &u, 4);
                     }
                 else if (ti.type == T_F16)
-                    for (size_t i = 0; i < h.size(); ++i) h[i] = h2f_host((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
+                    for (size_t i = 0; i < h.size(); ++i)
+                        h[i] = h2f_host((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
                 else {
                     err = ti.name + ": a 1-D tensor of type " + ti.type_name();
                     return false;
@@ -542,8 +549,8 @@ bool load(const std::string& path, Model& m, std::string& err) {
 struct State {
     int ctx = 4096, pos = 0;
     // scratch
-    float *x, *h, *y, *qkv, *z, *alpha, *beta, *conv_out, *gdn_out, *qg, *k, *v, *q, *gate, *att, *router, *eg, *eu, *eh,
-        *ey, *sg, *su, *sh, *sy, *sgate, *wts, *logits;
+    float *x, *h, *y, *qkv, *z, *alpha, *beta, *conv_out, *gdn_out, *qg, *k, *v, *q, *gate, *att, *router, *eg, *eu,
+        *eh, *ey, *sg, *su, *sh, *sy, *sgate, *wts, *logits;
     int* ids;
     std::vector<float*> conv_state, S, kc, vc;   // per layer (GDN: conv + S; attention: K/V cache)
 };
@@ -558,14 +565,31 @@ float* dalloc(size_t n) {
 void init_state(const Model& m, State& s) {
     const auto& g = m.g;
     const int N = (int) g.n_embd, FF = (int) g.n_ff, K = (int) m.top_k;
-    s.x = dalloc(N); s.h = dalloc(N); s.y = dalloc(N);
-    s.qkv = dalloc(g.ssm_conv_channels); s.z = dalloc(g.ssm_value_dim); s.alpha = dalloc(g.ssm_v_heads);
-    s.beta = dalloc(g.ssm_v_heads); s.conv_out = dalloc(g.ssm_conv_channels); s.gdn_out = dalloc(g.ssm_value_dim);
-    s.qg = dalloc(2 * g.n_head * g.head_dim); s.k = dalloc(g.n_head_kv * g.head_dim); s.v = dalloc(g.n_head_kv * g.head_dim);
-    s.q = dalloc(g.n_head * g.head_dim); s.gate = dalloc(g.n_head * g.head_dim); s.att = dalloc(g.n_head * g.head_dim);
+    s.x = dalloc(N);
+    s.h = dalloc(N);
+    s.y = dalloc(N);
+    s.qkv = dalloc(g.ssm_conv_channels);
+    s.z = dalloc(g.ssm_value_dim);
+    s.alpha = dalloc(g.ssm_v_heads);
+    s.beta = dalloc(g.ssm_v_heads);
+    s.conv_out = dalloc(g.ssm_conv_channels);
+    s.gdn_out = dalloc(g.ssm_value_dim);
+    s.qg = dalloc(2 * g.n_head * g.head_dim);
+    s.k = dalloc(g.n_head_kv * g.head_dim);
+    s.v = dalloc(g.n_head_kv * g.head_dim);
+    s.q = dalloc(g.n_head * g.head_dim);
+    s.gate = dalloc(g.n_head * g.head_dim);
+    s.att = dalloc(g.n_head * g.head_dim);
     s.router = dalloc(g.n_expert);
-    s.eg = dalloc((size_t) K * FF); s.eu = dalloc((size_t) K * FF); s.eh = dalloc((size_t) K * FF); s.ey = dalloc((size_t) K * N);
-    s.sg = dalloc(g.n_ff_shexp); s.su = dalloc(g.n_ff_shexp); s.sh = dalloc(g.n_ff_shexp); s.sy = dalloc(N); s.sgate = dalloc(1);
+    s.eg = dalloc((size_t) K * FF);
+    s.eu = dalloc((size_t) K * FF);
+    s.eh = dalloc((size_t) K * FF);
+    s.ey = dalloc((size_t) K * N);
+    s.sg = dalloc(g.n_ff_shexp);
+    s.su = dalloc(g.n_ff_shexp);
+    s.sh = dalloc(g.n_ff_shexp);
+    s.sy = dalloc(N);
+    s.sgate = dalloc(1);
     s.wts = dalloc(K);
     s.logits = dalloc(g.n_vocab);
     CK(cudaMalloc(&s.ids, K * sizeof(int)));
@@ -593,14 +617,12 @@ void embed(const Model& m, State& s, int tok) {
     const Tensor& e = m.W("token_embd.weight");
     const int N = (int) m.g.n_embd;
     switch (e.type) {
-    case T_Q8_0: k_row<T_Q8_0><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
-    case T_Q4_K: k_row<T_Q4_K><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
-    case T_Q6_K: k_row<T_Q6_K><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
-    case T_BF16: k_row<T_BF16><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
-    case T_F16: k_row<T_F16><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
-    default:
-        std::fprintf(stderr, "q36ref: token_embd type %d has no row reader\n", e.type);
-        std::exit(1);
+        case T_Q8_0: k_row<T_Q8_0><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
+        case T_Q4_K: k_row<T_Q4_K><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
+        case T_Q6_K: k_row<T_Q6_K><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
+        case T_BF16: k_row<T_BF16><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
+        case T_F16: k_row<T_F16><<<4, 128>>>(e.d, e.row_bytes, tok, N, s.x); break;
+        default: std::fprintf(stderr, "q36ref: token_embd type %d has no row reader\n", e.type); std::exit(1);
     }
     CK(cudaGetLastError());
 }
@@ -632,8 +654,8 @@ void forward(const Model& m, State& s, int tok, float* layers) {
                 k_conv<<<(C + B - 1) / B, B>>>(s.qkv, s.conv_state[l], m.F(L(l, "ssm_conv1d.weight")), s.conv_out, C,
                                                (int) g.ssm_d_conv);
                 k_gdn<<<HV, D, (2 * D + D) * sizeof(float)>>>(s.conv_out, s.alpha, m.F(L(l, "ssm_dt.bias")),
-                                                               m.F(L(l, "ssm_a")), s.beta, s.S[l], s.gdn_out, HK, HV, D,
-                                                               m.eps);
+                                                              m.F(L(l, "ssm_a")), s.beta, s.S[l], s.gdn_out, HK, HV, D,
+                                                              m.eps);
                 k_gated_norm<<<HV, D>>>(s.gdn_out, m.F(L(l, "ssm_norm.weight")), s.z, D, m.eps);
             }
             gemv(m.W(L(l, "ssm_out.weight")), s.gdn_out, s.y);
@@ -643,10 +665,10 @@ void forward(const Model& m, State& s, int tok, float* layers) {
             gemv(m.W(L(l, "attn_k.weight")), s.h, s.k);
             gemv(m.W(L(l, "attn_v.weight")), s.h, s.v);
             k_attn_prep<<<H + HKV, kThreads>>>(s.qg, s.k, s.v, m.F(L(l, "attn_q_norm.weight")),
-                                               m.F(L(l, "attn_k_norm.weight")), s.q, s.gate, s.kc[l], s.vc[l], H, HKV, D,
-                                               m.n_rot, s.pos, s.ctx, m.rope_base, m.eps);
-            k_attn<<<H, kThreads, (size_t) (s.pos + 1) * sizeof(float)>>>(s.q, s.kc[l], s.vc[l], s.gate, s.att, H, HKV, D,
-                                                                          s.pos + 1, s.ctx, 1.0f / sqrtf((float) D));
+                                               m.F(L(l, "attn_k_norm.weight")), s.q, s.gate, s.kc[l], s.vc[l], H, HKV,
+                                               D, m.n_rot, s.pos, s.ctx, m.rope_base, m.eps);
+            k_attn<<<H, kThreads, (size_t) (s.pos + 1) * sizeof(float)>>>(s.q, s.kc[l], s.vc[l], s.gate, s.att, H, HKV,
+                                                                          D, s.pos + 1, s.ctx, 1.0f / sqrtf((float) D));
             gemv(m.W(L(l, "attn_output.weight")), s.att, s.y);
         }
         CK(cudaGetLastError());
@@ -655,7 +677,8 @@ void forward(const Model& m, State& s, int tok, float* layers) {
         // router: softmax over every expert, top-k, renormalised (host side: exact and simple)
         gemv(m.W(L(l, "ffn_gate_inp.weight")), s.h, s.router);
         if (g_lamina && lamina::kernels::native_router_topk_supported((int) g.n_expert, K)) {
-            // Lamina's router (llama.cpp's topk-moe contract) for 256 / 8; the ids come back for the per-expert launches
+            // Lamina's router (llama.cpp's topk-moe contract) for
+            // 256 / 8; the ids come back for the per-expert launches
             lamina::kernels::native_router_topk(s.router, s.ids, s.wts, (int) g.n_expert, K, 1, g_st);
             g_ids_host.resize((size_t) K);
             CK(cudaMemcpy(g_ids_host.data(), s.ids, K * sizeof(int), cudaMemcpyDeviceToHost));
@@ -717,7 +740,7 @@ std::vector<int> parse_ids(const std::string& s) {
     return v;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     std::string model, tokens, dump_layers, dump_logits, force, dump_full;
@@ -735,7 +758,10 @@ int main(int argc, char** argv) {
         else if (a == "--tokens") tokens = next();
         else if (a == "--tokens-file") {
             FILE* f = std::fopen(next().c_str(), "rb");
-            if (!f) { std::fprintf(stderr, "q36ref: cannot read the tokens file\n"); return 2; }
+            if (!f) {
+                std::fprintf(stderr, "q36ref: cannot read the tokens file\n");
+                return 2;
+            }
             char buf[4096];
             size_t n;
             while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) tokens.append(buf, n);
@@ -747,19 +773,24 @@ int main(int argc, char** argv) {
         else if (a == "--force") force = next();
         else if (a == "--kernels") {
             const std::string v = next();
-            if (v != "lamina" && v != "plain") { std::fprintf(stderr, "q36ref: --kernels lamina or plain\n"); return 2; }
+            if (v != "lamina" && v != "plain") {
+                std::fprintf(stderr, "q36ref: --kernels lamina or plain\n");
+                return 2;
+            }
             g_lamina = v == "lamina";
-        }
-        else if (a == "--dump-full-logits") dump_full = next();
+        } else if (a == "--dump-full-logits") dump_full = next();
         else if (a == "--act") {
             const std::string v = next();
-            if (v != "q8" && v != "f32") { std::fprintf(stderr, "q36ref: --act q8 or f32\n"); return 2; }
+            if (v != "q8" && v != "f32") {
+                std::fprintf(stderr, "q36ref: --act q8 or f32\n");
+                return 2;
+            }
             g_act_q8 = v == "q8";
-        }
-        else {
-            std::fprintf(stderr, "usage: lamina-q36ref --model GGUF --tokens ID,ID,... | --tokens-file F [--n 64] [--ctx 4096] "
-                                 "[--dump-layers FILE] [--dump-logits FILE] [--act q8|f32] [--kernels lamina|plain] "
-                                 "[--force ID,ID,...] [--dump-full-logits FILE]\n");
+        } else {
+            std::fprintf(stderr,
+                         "usage: lamina-q36ref --model GGUF --tokens ID,ID,... | --tokens-file F [--n 64] [--ctx 4096] "
+                         "[--dump-layers FILE] [--dump-logits FILE] [--act q8|f32] [--kernels lamina|plain] "
+                         "[--force ID,ID,...] [--dump-full-logits FILE]\n");
             return 2;
         }
     }

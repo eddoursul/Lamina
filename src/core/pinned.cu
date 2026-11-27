@@ -4,14 +4,15 @@
 
 #include <cuda_runtime.h>
 
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sys/mman.h>
+// the kernel's MAP_HUGE_* after glibc's own header
 #include <linux/mman.h>
 #ifndef MAP_HUGE_2MB
 #define MAP_HUGE_2MB (21 << 26)
@@ -47,8 +48,8 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
     got = PageBacking::NormalPages;
     return p;
 #else
-    void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
+    void* p =
+        mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
     if (p != MAP_FAILED) {
         got = PageBacking::LargePages;
         note = "hugetlb 2 MB pages";
@@ -73,11 +74,14 @@ void release(void* p, uint64_t bytes, PageBacking got) {
 #endif
 }
 
-}  // namespace
+}   // namespace
 
 namespace {
-bool clear_error() { (void) cudaGetLastError(); return true; }
-}  // namespace
+bool clear_error() {
+    (void) cudaGetLastError();
+    return true;
+}
+}   // namespace
 
 namespace {
 std::vector<uint64_t> uniform_bounds(uint64_t bytes, uint64_t slice) {
@@ -87,7 +91,7 @@ std::vector<uint64_t> uniform_bounds(uint64_t bytes, uint64_t slice) {
     if (!b.empty()) b.push_back(b.back() + slice);
     return b;
 }
-}  // namespace
+}   // namespace
 
 PinnedArena::PinnedArena(uint64_t bytes, uint64_t slice) : PinnedArena(bytes, uniform_bounds(bytes, slice)) {
     if (slice_bytes) slice_bytes = slice;   // sliced registration: record the uniform size
@@ -111,7 +115,8 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : 
             slice_bytes = 1;   // sliced; the uniform constructor records the size
             for (size_t i = 0; i + 1 < bounds.size(); ++i) {
                 const uint64_t off = bounds[i], n = bounds[i + 1] - bounds[i];
-                if (cudaHostRegister((uint8_t*) base + off, (size_t) n, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
+                if (cudaHostRegister((uint8_t*) base + off, (size_t) n,
+                                     cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
                     (void) cudaGetLastError();
                     break;
                 }
@@ -163,7 +168,8 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : 
 
 PinnedArena::~PinnedArena() {
     if (base) {
-        if (locked_bytes) lamina::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
+        if (locked_bytes)
+            lamina::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
         if (slice_bytes) {
             for (uint64_t off : slice_starts) cudaHostUnregister((uint8_t*) base + off);
         } else {
@@ -174,4 +180,4 @@ PinnedArena::~PinnedArena() {
     }
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

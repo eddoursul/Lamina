@@ -11,8 +11,8 @@
 //     d16 = fp16(d32)                           (stored, and used to DEQUANTIZE)
 //     q   = clip(rint(x / (double)d32), -128, 127)
 //     round trip = q * d16
-#include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/quantize_act.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
@@ -82,7 +82,8 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
         std::vector<float> rt((size_t) n);
         check(cudaMemcpy(rt.data(), d_x, (size_t) n * sizeof(float), cudaMemcpyDeviceToHost), "probe copy back");
         long long diff = 0;
-        for (long long i = 0; i < n; ++i) if (std::memcmp(&rt[(size_t) i], &x[(size_t) i], 4) != 0) ++diff;
+        for (long long i = 0; i < n; ++i)
+            if (std::memcmp(&rt[(size_t) i], &x[(size_t) i], 4) != 0) ++diff;
         if (diff) std::printf("    PROBE: device x differs from host x in %lld of %lld elements\n", diff, n);
     }
     lamina::kernels::quantize_q8_0(d_x, d_b, n, nullptr);
@@ -92,7 +93,8 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
 
     long long byte_bad = 0, val_bad = 0;
     if (check_bytes) {
-        for (size_t i = 0; i < g_blocks.size(); ++i) if (g_blocks[i] != r_blocks[i]) ++byte_bad;
+        for (size_t i = 0; i < g_blocks.size(); ++i)
+            if (g_blocks[i] != r_blocks[i]) ++byte_bad;
     }
     for (long long i = 0; i < n; ++i) {
         const float a = r_back[(size_t) i], b = g_back[(size_t) i];
@@ -103,14 +105,26 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
         for (size_t i = 0; i < g_blocks.size(); ++i) {
             if (g_blocks[i] != r_blocks[i]) {
                 const size_t blk = i / 34;
-                const float amax = [&] { float m = 0; for (int k = 0; k < 32; ++k) m = std::fmax(m, std::fabs(x[(size_t)(blk*32+k)])); return m; }();
-                std::printf("    first bad byte: block %zu offset %zu  amax %.9g  d32 %.9g\n", blk, i % 34, amax, amax/127.0f);
-                std::printf("      ref scale bytes %02x %02x   got %02x %02x\n", r_blocks[blk*34], r_blocks[blk*34+1], g_blocks[blk*34], g_blocks[blk*34+1]);
-                std::printf("      ref[0..9]:"); for (int k = 0; k < 10; ++k) std::printf(" %02x", r_blocks[blk*34+k]);
-                std::printf("\n      got[0..9]:"); for (int k = 0; k < 10; ++k) std::printf(" %02x", g_blocks[blk*34+k]);
-                std::printf("\n      ref[10..17]:"); for (int k = 10; k < 18; ++k) std::printf(" %02x", r_blocks[blk*34+k]);
-                std::printf("\n      got[10..17]:"); for (int k = 10; k < 18; ++k) std::printf(" %02x", g_blocks[blk*34+k]);
-                std::printf("\n      x[0..3] = %.9g %.9g %.9g %.9g\n", (double)x[(size_t)(blk*32)], (double)x[(size_t)(blk*32+1)], (double)x[(size_t)(blk*32+2)], (double)x[(size_t)(blk*32+3)]);
+                const float amax = [&] {
+                    float m = 0;
+                    for (int k = 0; k < 32; ++k) m = std::fmax(m, std::fabs(x[(size_t) (blk * 32 + k)]));
+                    return m;
+                }();
+                std::printf("    first bad byte: block %zu offset %zu  amax %.9g  d32 %.9g\n", blk, i % 34, amax,
+                            amax / 127.0f);
+                std::printf("      ref scale bytes %02x %02x   got %02x %02x\n", r_blocks[blk * 34],
+                            r_blocks[blk * 34 + 1], g_blocks[blk * 34], g_blocks[blk * 34 + 1]);
+                std::printf("      ref[0..9]:");
+                for (int k = 0; k < 10; ++k) std::printf(" %02x", r_blocks[blk * 34 + k]);
+                std::printf("\n      got[0..9]:");
+                for (int k = 0; k < 10; ++k) std::printf(" %02x", g_blocks[blk * 34 + k]);
+                std::printf("\n      ref[10..17]:");
+                for (int k = 10; k < 18; ++k) std::printf(" %02x", r_blocks[blk * 34 + k]);
+                std::printf("\n      got[10..17]:");
+                for (int k = 10; k < 18; ++k) std::printf(" %02x", g_blocks[blk * 34 + k]);
+                std::printf("\n      x[0..3] = %.9g %.9g %.9g %.9g\n", (double) x[(size_t) (blk * 32)],
+                            (double) x[(size_t) (blk * 32 + 1)], (double) x[(size_t) (blk * 32 + 2)],
+                            (double) x[(size_t) (blk * 32 + 3)]);
                 break;
             }
         }
@@ -148,10 +162,13 @@ void reference_q8_K(const float* x, long long n, std::vector<uint8_t>& blocks, s
         float max = 0.0f, amax = 0.0f;
         for (int j = 0; j < QK; ++j) {
             const float ax = std::fabs(xb[j]);
-            if (ax > amax) { amax = ax; max = xb[j]; }     // STRICTLY greater: ties keep the FIRST maximum
+            if (ax > amax) {
+                amax = ax;
+                max = xb[j];
+            }   // STRICTLY greater: ties keep the FIRST maximum
         }
-        if (amax == 0.0f) continue;                        // d = 0, qs = 0, bsums = 0 (see the kernel note)
-        const float iscale = scale_num / max;              // -127 by default; -128 is the rival reading
+        if (amax == 0.0f) continue;             // d = 0, qs = 0, bsums = 0 (see the kernel note)
+        const float iscale = scale_num / max;   // -127 by default; -128 is the rival reading
         int8_t* qs = (int8_t*) (out + 4);
         for (int j = 0; j < QK; ++j) {
             const int v = nearest_int_host(iscale * xb[j]);
@@ -190,7 +207,10 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
     long long byte_bad = 0, val_bad = 0, first_bad = -1;
     if (check_bytes)
         for (size_t i = 0; i < g_blocks.size(); ++i)
-            if (g_blocks[i] != r_blocks[i]) { if (first_bad < 0) first_bad = (long long) i; ++byte_bad; }
+            if (g_blocks[i] != r_blocks[i]) {
+                if (first_bad < 0) first_bad = (long long) i;
+                ++byte_bad;
+            }
     for (long long i = 0; i < n; ++i)
         if (std::memcmp(&r_back[(size_t) i], &g_back[(size_t) i], 4) != 0) ++val_bad;
     std::printf("  %-26s blocks %s (%lld bad bytes)   round trip %s (%lld differ)\n", name,
@@ -201,17 +221,20 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
         // of a wrong formula - and the two need completely different responses.
         const size_t blk = (size_t) first_bad / 292, off = (size_t) first_bad % 292;
         const char* where = off < 4 ? "d (the f32 scale)" : (off < 260 ? "qs (the quants)" : "bsums");
-        std::printf("      first bad byte: block %zu offset %zu = %s   ref %02x  got %02x\n", blk, off,
-                    where, r_blocks[(size_t) first_bad], g_blocks[(size_t) first_bad]);
+        std::printf("      first bad byte: block %zu offset %zu = %s   ref %02x  got %02x\n", blk, off, where,
+                    r_blocks[(size_t) first_bad], g_blocks[(size_t) first_bad]);
         if (off >= 4 && off < 260) {
             const int j = (int) off - 4;
             const float xv = x[(size_t) (blk * 256 + j)];
             float mx = 0.0f;
-            for (int k = 0; k < 256; ++k) { const float ax = std::fabs(x[(size_t) (blk * 256 + k)]); if (ax > std::fabs(mx)) mx = x[(size_t) (blk * 256 + k)]; }
+            for (int k = 0; k < 256; ++k) {
+                const float ax = std::fabs(x[(size_t) (blk * 256 + k)]);
+                if (ax > std::fabs(mx)) mx = x[(size_t) (blk * 256 + k)];
+            }
             const float isc = -127.0f / mx;
             const float prod = isc * xv;
-            std::printf("      element %d: x %.9g  max %.9g  iscale %.9g  iscale*x %.9g (frac %.6f)\n",
-                        j, (double) xv, (double) mx, (double) isc, (double) prod, (double) (prod - std::floor(prod)));
+            std::printf("      element %d: x %.9g  max %.9g  iscale %.9g  iscale*x %.9g (frac %.6f)\n", j, (double) xv,
+                        (double) mx, (double) isc, (double) prod, (double) (prod - std::floor(prod)));
         } else if (off < 4) {
             float rd, gd;
             std::memcpy(&rd, &r_blocks[(size_t) (blk * 292)], 4);
@@ -225,13 +248,16 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
     return (int) (byte_bad + val_bad);
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: quantize_act_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: quantize_act_parity [--selftest]\n");
+            return 2;
+        }
     }
     std::mt19937 rng(7);
     std::normal_distribution<float> gauss(0.0f, 1.0f);
@@ -291,7 +317,11 @@ int main(int argc, char** argv) {
     // only in `qsa_parity` because this is the file that OWNS the Q8_0/Q8_K scales, and a scale that is NaN
     // poisons a whole block silently.
     {
-        struct F16Case { float in; uint16_t want; const char* what; };
+        struct F16Case {
+            float in;
+            uint16_t want;
+            const char* what;
+        };
         const F16Case cases[] = {
             {1e30f, 0x7C00u, "1e30 -> +inf (finite overflow)"},
             {-1e30f, 0xFC00u, "-1e30 -> -inf"},
@@ -339,7 +369,7 @@ int main(int argc, char** argv) {
     bad_k += run_case_k("random normal", ka, true);
 
     std::vector<float> kb((size_t) NK);
-    for (auto& v : kb) v = gauss(rng) * 1e-7f;      // tiny: the scale is far from fp16-representable
+    for (auto& v : kb) v = gauss(rng) * 1e-7f;   // tiny: the scale is far from fp16-representable
     bad_k += run_case_k("small magnitude (1e-7)", kb, true);
 
     std::vector<float> kc((size_t) NK, 0.0f);
@@ -369,9 +399,12 @@ int main(int argc, char** argv) {
                 if (even != away) ++differ;
             }
         }
-        std::printf("  %-26s %lld ties, %lld where half-to-even != half-away (%.1f%%)\n",
-                    "  tie fixture discriminates", ties, differ, ties ? 100.0 * (double) differ / ties : 0.0);
-        if (differ < ties / 3) { std::printf("    *** the tie fixture cannot see the rounding rule ***\n"); ++bad_k; }
+        std::printf("  %-26s %lld ties, %lld where half-to-even != half-away (%.1f%%)\n", "  tie fixture discriminates",
+                    ties, differ, ties ? 100.0 * (double) differ / ties : 0.0);
+        if (differ < ties / 3) {
+            std::printf("    *** the tie fixture cannot see the rounding rule ***\n");
+            ++bad_k;
+        }
     }
 
     // THE -127 TRAP.  ggml uses `-127/max`; the `-128` version sits COMMENTED OUT in the source, and using it
@@ -384,8 +417,12 @@ int main(int argc, char** argv) {
         reference_q8_K(ka.data(), NK, r128, b128, -128.0f);
         double diff = 0, m = 0;
         long long qdiffer = 0;
-        for (long long i = 0; i < NK; ++i) { diff += std::fabs(b127[(size_t) i] - b128[(size_t) i]); m += std::fabs(b127[(size_t) i]); }
-        for (size_t i = 4; i < r127.size(); ++i) if (r127[i] != r128[i]) ++qdiffer;
+        for (long long i = 0; i < NK; ++i) {
+            diff += std::fabs(b127[(size_t) i] - b128[(size_t) i]);
+            m += std::fabs(b127[(size_t) i]);
+        }
+        for (size_t i = 4; i < r127.size(); ++i)
+            if (r127[i] != r128[i]) ++qdiffer;
         // The expected size of the effect is exactly (1 - 127/128) = 0.78% of the magnitude, so the floor is
         // 0.5% - below what the rival constant must produce and far above any noise.  The byte count is the
         // blunter evidence and is reported alongside it: 172,017 bytes differ, i.e. a third of the quants.

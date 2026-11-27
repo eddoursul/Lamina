@@ -69,4 +69,4 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
 void debug_request(const std::string& api, const json& req, const json& messages, const json& tools, int64_t max_new,
                    bool thinking, size_t prompt_tokens);
 
-}  // namespace lamina
+}   // namespace lamina

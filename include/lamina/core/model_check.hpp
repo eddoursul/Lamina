@@ -13,7 +13,7 @@
 namespace lamina {
 class GgufFile;
 class GgufModel;
-}
+}   // namespace lamina
 
 namespace lamina::core {
 
@@ -23,7 +23,8 @@ struct FileCheckOptions {
     bool hc_q8 = true;           ///< --hc-q8 (the default) / --no-hc-q8 (Qwen3.8-Flash-Next)
     bool expert_exact = false;   ///< --expert-math exact (Qwen3.8-Flash-Next)
     bool mtp = true;             ///< the MTP block loaded: not --no-mtp, no drafter file named (Hy4-flash)
-    bool vision = false;         ///< --vision: the vocabulary's token for a picture's rows needed (Hy4-flash, Inkling 2)
+    bool vision = false;         ///< --vision: the vocabulary's token for a
+                                 ///< picture's rows needed (Hy4-flash, Inkling 2)
 };
 /// Those of an engine command line (the options after its program's name, as the server passes them)
 FileCheckOptions file_check_options(const std::vector<std::string>& args);
@@ -54,4 +55,4 @@ std::string lora_file_problem(const GgufFile& adapter, const GgufModel* model = 
 /// (PleTable::open, nothing of the table read); "" where it takes it
 std::string ple_table_problem(const std::string& path);
 
-}  // namespace lamina::core
+}   // namespace lamina::core

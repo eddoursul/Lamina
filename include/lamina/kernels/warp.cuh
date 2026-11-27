@@ -71,4 +71,4 @@ __device__ __forceinline__ unsigned h2(float a, float b) {
     return *reinterpret_cast<const unsigned*>(&v);
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

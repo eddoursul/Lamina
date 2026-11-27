@@ -20,8 +20,9 @@
 namespace lamina::prometheus {
 
 /// vLLM's buckets for the request latencies (seconds)
-inline constexpr std::array<double, 22> kBuckets = {0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75,
-                                                    1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0, 2560.0};
+inline constexpr std::array<double, 22> kBuckets = {0.001, 0.005, 0.01, 0.02,  0.04,  0.06,  0.08, 0.1,
+                                                    0.25,  0.5,   0.75, 1.0,   2.5,   5.0,   7.5,  10.0,
+                                                    20.0,  40.0,  80.0, 160.0, 640.0, 2560.0};
 extern const char* const kContentType;
 
 /// Prometheus asks with Accept: text/plain or application/openmetrics-text; a person can add ?format=prometheus.
@@ -53,4 +54,4 @@ private:
 /// the text for one scrape: `m` is Service::metrics(), `lat` Latencies::snapshot()
 std::string render(const json& m, const json& lat);
 
-}  // namespace lamina::prometheus
+}   // namespace lamina::prometheus

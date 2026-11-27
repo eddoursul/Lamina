@@ -12,25 +12,26 @@
 #include <exception>
 
 namespace lamina::core {
-namespace {
-
-}  // namespace
+namespace {}   // namespace
 
 SplitHead::~SplitHead() {
     if (dev_ < 0) return;
     DeviceScope scope(dev_, main_);
     if (s_) cudaStreamSynchronize(s_);
     for (auto& e : exec_)
-        for (auto& x : e) if (x) cudaGraphExecDestroy(x);
+        for (auto& x : e)
+            if (x) cudaGraphExecDestroy(x);
     void* dev[] = {w_, mixed_, out_, xq_, xil_, scratch_};
-    for (void* p : dev) if (p) cudaFree(p);
+    for (void* p : dev)
+        if (p) cudaFree(p);
     void* host[] = {h_in_, h_hand_, h_done_, h_idx_, h_val_, h_logits_, h_bad_};
-    for (void* p : host) if (p) cudaFreeHost(p);
+    for (void* p : host)
+        if (p) cudaFreeHost(p);
     if (s_) cudaStreamDestroy(s_);
 }
 
-bool SplitHead::init(int device, int main_device, const std::vector<std::string>& shards, int64_t n_in,
-                     int64_t n_vocab, int64_t split, int max_t, std::string& err) {
+bool SplitHead::init(int device, int main_device, const std::vector<std::string>& shards, int64_t n_in, int64_t n_vocab,
+                     int64_t split, int max_t, std::string& err) {
     if (split <= 0 || split >= n_vocab || max_t < 1 || max_t > lamina::kernels::kVerifyMaxT) {
         err = "split head: bad arguments";
         return false;
@@ -58,13 +59,16 @@ bool SplitHead::init(int device, int main_device, const std::vector<std::string>
         cudaError_t e = cudaSuccess;
         const char* step = nullptr;
         auto run = [&](const char* what, cudaError_t r) {
-            if (e == cudaSuccess && r != cudaSuccess) { e = r; step = what; }
+            if (e == cudaSuccess && r != cudaSuccess) {
+                e = r;
+                step = what;
+            }
         };
         run("context", cudaFree(nullptr));
         run("stream", cudaStreamCreateWithFlags(&s_, cudaStreamNonBlocking));
         run("its rows", cudaMalloc(&w_, bytes_));
-        run("its rows", cudaMemcpy(w_, model.shard(at).tensor_data(*t) + (uint64_t) split * row, bytes_,
-                                   cudaMemcpyHostToDevice));
+        run("its rows",
+            cudaMemcpy(w_, model.shard(at).tensor_data(*t) + (uint64_t) split * row, bytes_, cudaMemcpyHostToDevice));
         run("buffers", cudaMalloc((void**) &mixed_, T * (size_t) n_in * 4));
         run("buffers", cudaMalloc((void**) &out_, T * (size_t) rows_ * 4));
         run("buffers", cudaMalloc((void**) &xq_, lamina::kernels::native_q8_1_bytes((int) n_in, max_t)));
@@ -132,7 +136,10 @@ bool SplitHead::capture(int T, bool logits, std::string& err) {
 }
 
 bool SplitHead::submit(int T, bool logits, std::string& err) {
-    if (T < 1 || T > max_t_) { err = "split head: window size out of range"; return false; }
+    if (T < 1 || T > max_t_) {
+        err = "split head: window size out of range";
+        return false;
+    }
     DeviceScope scope(dev_, main_);
     if (!capture(T, logits, err)) return false;
     if (cudaGraphLaunch(exec_[T][logits], s_) != cudaSuccess) {
@@ -156,4 +163,4 @@ bool SplitHead::wait(uint32_t n, std::string& err) {
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

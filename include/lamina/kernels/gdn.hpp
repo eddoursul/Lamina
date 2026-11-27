@@ -36,9 +36,9 @@ namespace lamina::kernels {
 
 /// Geometry of one GDN layer.  The real artifact: S = 128, h_k = 16, h_v = 48.
 struct GdnShapes {
-    int64_t S = 0;    ///< head dim, and the state's contracted axis
-    int64_t h_k = 0;  ///< key/query heads (q and k are (h_k, S))
-    int64_t h_v = 0;  ///< value heads (v, z, o are (h_v, S)); h_v must be a multiple of h_k
+    int64_t S = 0;     ///< head dim, and the state's contracted axis
+    int64_t h_k = 0;   ///< key/query heads (q and k are (h_k, S))
+    int64_t h_v = 0;   ///< value heads (v, z, o are (h_v, S)); h_v must be a multiple of h_k
 };
 
 /// One step of the delta-rule recurrence, IN PLACE on `state`.
@@ -53,8 +53,8 @@ struct GdnShapes {
 ///
 /// The head pairing is `h % h_k` (MODULO), not `h / (h_v/h_k)` (INTERLEAVE).  `ref/gdn.py` PROPERTY 8 and 11
 /// pin this and the test re-pins it, because both conventions produce well-formed output.
-void gdn_step(float* state, const float* q, const float* k, const float* v, const float* gate,
-              const float* beta, float* o, const GdnShapes& s, void* stream);
+void gdn_step(float* state, const float* q, const float* k, const float* v, const float* gate, const float* beta,
+              float* o, const GdnShapes& s, void* stream);
 
 /// `ggml_ssm_conv` with the carried state prepended.  Updates `conv_state` in place.
 ///
@@ -69,8 +69,8 @@ void gdn_step(float* state, const float* q, const float* k, const float* v, cons
 ///   out[c] = sum_{i<d_conv} inp[i][c] * kW[c*d_conv + i],  inp = [conv_state | x]
 ///
 /// `kernel[0]` reads the OLDEST state row and the new input lands in the LAST state row.
-void gdn_conv_step(float* conv_state, const float* x, const float* kW, float* out, int64_t channels,
-                   int64_t d_conv, void* stream);
+void gdn_conv_step(float* conv_state, const float* x, const float* kW, float* out, int64_t channels, int64_t d_conv,
+                   void* stream);
 
 /// `build_gdn_l2_norm`: `x / sqrt(sum(x^2) + eps)`, over the LAST axis.
 ///
@@ -91,7 +91,7 @@ void gdn_beta_gate(float* beta, int64_t h_v, void* stream);
 ///
 /// Note SIGMOID, not SiLU - qwen3.5 used SiLU and this artifact does not, and `ref/gdn.py` says so outright.
 /// The norm is over the LAST axis: one RMS per head, so it is per-ROW here and not over the whole (h_v, S).
-void gdn_out_norm(const float* o, const float* z, const float* ssm_norm, float* y, int64_t h_v, int64_t S,
-                  float eps, void* stream);
+void gdn_out_norm(const float* o, const float* z, const float* ssm_norm, float* y, int64_t h_v, int64_t S, float eps,
+                  void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

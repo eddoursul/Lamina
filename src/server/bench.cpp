@@ -98,7 +98,7 @@ public:
         init_genrand(19650218U);
         const uint32_t key = seed;
         size_t i = 1;
-        for (size_t k = kN; k; --k) {   // max(N, the key's length 1)
+        for (size_t k = kN; k; --k) {                                                   // max(N, the key's length 1)
             mt_[i] = (mt_[i] ^ ((mt_[i - 1] ^ (mt_[i - 1] >> 30)) * 1664525U)) + key;   // + key[j] + j, j always 0
             if (++i >= kN) {
                 mt_[0] = mt_[kN - 1];
@@ -232,10 +232,10 @@ bool is_lamina(const Target& t) {
 struct Reply {
     std::optional<double> first;   ///< seconds to the first content or reasoning piece
     double total = 0;
-    std::string text;              ///< the content (not the reasoning)
+    std::string text;   ///< the content (not the reasoning)
     json usage, timings;
-    std::string err;               ///< "" when it went through
-    int64_t pieces = 0;            ///< the chunks that carried a piece
+    std::string err;      ///< "" when it went through
+    int64_t pieces = 0;   ///< the chunks that carried a piece
 };
 
 Reply stream_chat(const Target& t, const json& body, double timeout_s, const std::function<bool()>& stopped) {
@@ -301,7 +301,8 @@ Reply stream_chat(const Target& t, const json& body, double timeout_s, const std
         const httplib::Result res = cli.send(req);
         if (!done && !buf.empty() && status >= 200 && status < 300) line_in(buf);   // a last line without its end
         if (halted) r.err = "stopped";
-        else if (status != 0 && (status < 200 || status >= 300)) r.err = "HTTP " + std::to_string(status) + ": " + err_body;
+        else if (status != 0 && (status < 200 || status >= 300))
+            r.err = "HTTP " + std::to_string(status) + ": " + err_body;
         else if (!res && !done) r.err = "the request failed: " + httplib::to_string(res.error());
     } catch (const std::exception& e) {
         r.err = e.what();
@@ -311,7 +312,8 @@ Reply stream_chat(const Target& t, const json& body, double timeout_s, const std
 }
 
 json chat_body(const json& messages, int max_tokens, bool think, const json* tools) {
-    json body = {{"model", "lamina"}, {"stream", true}, {"max_tokens", max_tokens}, {"temperature", 0}, {"messages", messages}};
+    json body = {
+        {"model", "lamina"}, {"stream", true}, {"max_tokens", max_tokens}, {"temperature", 0}, {"messages", messages}};
     if (tools != nullptr) body["tools"] = *tools;
     if (!think) {
         body["reasoning_effort"] = "none";
@@ -382,7 +384,7 @@ public:
           nonce_(std::to_string((long long) std::time(nullptr))) {
         if (o_.runs < 1) o_.runs = 1;
         py_loads(kTools, tools_);
-        out_ = {{"chat", json::object()}, {"prompts", json::object()}, {"agent", json::object()},
+        out_ = {{"chat", json::object()},    {"prompts", json::object()}, {"agent", json::object()},
                 {"clients", json::object()}, {"skipped", json::object()}, {"failures", json::array()}};
     }
 
@@ -434,7 +436,8 @@ private:
         std::vector<json> pts;
         for (const int words : {200, 800})
             pts.push_back(jget(digest(chat(json::array({user_msg("[" + tag({"cal", std::to_string(words)}) + "]\n" +
-                                                                 long_prompt(words))}), 1)),
+                                                                 long_prompt(words))}),
+                                           1)),
                                "prompt_tokens"));
         std::optional<double> slope;
         if (truthy(pts[0]) && truthy(pts[1]) && num(pts[1]) > num(pts[0])) slope = (num(pts[1]) - num(pts[0])) / 600;
@@ -444,8 +447,8 @@ private:
     }
     json prompt_for(int tokens, int run) const {
         const int words = std::max(50, (int) std::trunc(((double) tokens - overhead_) / tokens_per_word_));
-        return json::array(
-            {user_msg("[bench " + tag({std::to_string(run), std::to_string(tokens), "p"}) + "]\n" + long_prompt(words))});
+        return json::array({user_msg("[bench " + tag({std::to_string(run), std::to_string(tokens), "p"}) + "]\n" +
+                                     long_prompt(words))});
     }
     void warm_up() {
         log_("warming up (not measured) ...");
@@ -482,8 +485,11 @@ private:
                 gen.push_back(r["generated_tokens"]);
                 pt.push_back(r["prompt_tokens"]);
             }
-        out_["chat"] = {{"requests", rows}, {"decode_tps", stat(dec)}, {"ttft_s", stat(ttft)},
-                        {"generated_tokens", stat(gen)}, {"prompt_tokens", stat(pt)}};
+        out_["chat"] = {{"requests", rows},
+                        {"decode_tps", stat(dec)},
+                        {"ttft_s", stat(ttft)},
+                        {"generated_tokens", stat(gen)},
+                        {"prompt_tokens", stat(pt)}};
     }
 
     void run_prompt(int tokens, const std::string& label) {
@@ -513,14 +519,16 @@ private:
                 pt.push_back(r["prompt_tokens"]);
                 reused.push_back(r["reused_tokens"].is_number() ? r["reused_tokens"] : json(0));
             }
-        out_["prompts"][label] = {{"target_tokens", tokens}, {"requests", rows}, {"prompt_tps", stat(pp)},
-                                  {"ttft_s", stat(ttft)}, {"prompt_tokens", stat(pt)}, {"reused_tokens", stat(reused)}};
+        out_["prompts"][label] = {{"target_tokens", tokens},   {"requests", rows},
+                                  {"prompt_tps", stat(pp)},    {"ttft_s", stat(ttft)},
+                                  {"prompt_tokens", stat(pt)}, {"reused_tokens", stat(reused)}};
     }
 
     json agent_session(int run) {
         const auto files = agent_files();
         json msgs = json::array(
-            {{{"role", "system"}, {"content", std::string(kSystem) + "\n(session " + tag({std::to_string(run), "a"}) + ")"}},
+            {{{"role", "system"},
+              {"content", std::string(kSystem) + "\n(session " + tag({std::to_string(run), "a"}) + ")"}},
              user_msg("I will show you files from a project one at a time. After each file, answer in one or two "
                       "sentences what it is for. Do not call tools.")});
         json turns = json::array();
@@ -599,9 +607,10 @@ private:
             fresh.push_back(read - again);
             if (!all.empty() && all[0]["ok"] == true) first.push_back(all[0]["ttft_s"]);
         }
-        out_["agent"] = {{"sessions", sessions}, {"hit_pct", stat(hit)}, {"reread_tokens", stat(reread)},
-                         {"new_tokens", stat(fresh)}, {"turn_ttft_s", stat(ttft)}, {"last_turn_prompt_tokens", stat(last)},
-                         {"turn_decode_tps", stat(dec)}, {"first_turn_ttft_s", stat(first)}};
+        out_["agent"] = {{"sessions", sessions},          {"hit_pct", stat(hit)},
+                         {"reread_tokens", stat(reread)}, {"new_tokens", stat(fresh)},
+                         {"turn_ttft_s", stat(ttft)},     {"last_turn_prompt_tokens", stat(last)},
+                         {"turn_decode_tps", stat(dec)},  {"first_turn_ttft_s", stat(first)}};
     }
 
     void run_clients(int n) {
@@ -618,13 +627,15 @@ private:
             const auto t0 = std::chrono::steady_clock::now();
             for (int i = 0; i < n; ++i)
                 th.emplace_back([&, i] {
-                    const std::string prompt = "[request " + std::to_string(i) + nonce + "] Write a clear, well organised "
-                                               "essay of about " + std::to_string(kBurstWords) + " words on " +
+                    const std::string prompt = "[request " + std::to_string(i) + nonce +
+                                               "] Write a clear, well organised "
+                                               "essay of about " +
+                                               std::to_string(kBurstWords) + " words on " +
                                                kTopics[(size_t) i % (sizeof kTopics / sizeof kTopics[0])] +
                                                ". Use plain prose, no lists.";
-                    res[(size_t) i] = stream_chat(t_, chat_body(json::array({user_msg(prompt)}), kBurstMaxTokens, o_.think,
-                                                                nullptr),
-                                                  900, stopped_);
+                    res[(size_t) i] =
+                        stream_chat(t_, chat_body(json::array({user_msg(prompt)}), kBurstMaxTokens, o_.think, nullptr),
+                                    900, stopped_);
                 });
             for (auto& x : th) x.join();
             const double wall = seconds_since(t0);
@@ -647,13 +658,21 @@ private:
             errors += error_count;
             const double rate = (double) toks / wall;
             tps.push_back(py_round(rate, 2));
-            rows.push_back({{"round", rd}, {"wall_s", py_round(wall, 2)}, {"tokens", toks}, {"total_tps", py_round(rate, 2)},
-                            {"first_s", first_s}, {"latency_s", latency_s}, {"errors", errs}, {"error_count", error_count}});
+            rows.push_back({{"round", rd},
+                            {"wall_s", py_round(wall, 2)},
+                            {"tokens", toks},
+                            {"total_tps", py_round(rate, 2)},
+                            {"first_s", first_s},
+                            {"latency_s", latency_s},
+                            {"errors", errs},
+                            {"error_count", error_count}});
             log_("  round " + std::to_string(rd + 1) + ": " + std::to_string(toks) + " tokens in " + fixed(wall, 1) +
                  " s = " + fixed(rate, 1) + " tok/s total" +
                  (errs.empty() ? "" : "  ERRORS " + py_repr_value(json::array({errs[0]}))));
         }
-        auto q = [](const std::vector<double>& v, double p) { return v.empty() ? json(nullptr) : json(py_round(pct(v, p), 3)); };
+        auto q = [](const std::vector<double>& v, double p) {
+            return v.empty() ? json(nullptr) : json(py_round(pct(v, p), 3));
+        };
         out_["clients"] = {{"clients", n},
                            {"rounds", rows},
                            {"total_tps", stat(tps)},
@@ -696,13 +715,15 @@ std::string os_text() {
     RTL_OSVERSIONINFOW v{};
     v.dwOSVersionInfoSize = sizeof v;
     if (HMODULE nt = GetModuleHandleW(L"ntdll.dll"))
-        if (auto f = reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(nt, "RtlGetVersion")))) f(&v);
+        if (auto f = reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(nt, "RtlGetVersion"))))
+            f(&v);
     // Python's platform.system(), release() and version(): "Windows 11 (10.0.26100)"
-    const std::string release = v.dwMajorVersion == 10 && v.dwBuildNumber >= 22000 ? "11" : std::to_string(v.dwMajorVersion);
-    return "Windows " + release + " (" + std::to_string(v.dwMajorVersion) + "." + std::to_string(v.dwMinorVersion) + "." +
-           std::to_string(v.dwBuildNumber) + ")";
+    const std::string release =
+        v.dwMajorVersion == 10 && v.dwBuildNumber >= 22000 ? "11" : std::to_string(v.dwMajorVersion);
+    return "Windows " + release + " (" + std::to_string(v.dwMajorVersion) + "." + std::to_string(v.dwMinorVersion) +
+           "." + std::to_string(v.dwBuildNumber) + ")";
 #else
-    struct utsname u {};
+    struct utsname u{};
     if (uname(&u) != 0) return "Linux";
     return std::string(u.sysname) + " " + u.release;
 #endif
@@ -733,13 +754,15 @@ std::vector<std::string> host_names() {
     return out;
 }
 
-std::string home_dir() { return env_of(
+std::string home_dir() {
+    return env_of(
 #ifdef _WIN32
-    "USERPROFILE"
+        "USERPROFILE"
 #else
-    "HOME"
+        "HOME"
 #endif
-); }
+    );
+}
 
 /// the commit of the Lamina clone the program was built in (its build folder inside it), else null
 json git_commit() {
@@ -818,7 +841,8 @@ std::string model_label(const json& machine) {
 /// "median (min-max)" of a stat, or "not measured"
 std::string fmt(const json& s, int digits = 1, const std::string& unit = "") {
     if (!s.is_object()) return "not measured";
-    return fixed(num(s["median"]), digits) + unit + " (" + fixed(num(s["min"]), digits) + "-" + fixed(num(s["max"]), digits) + ")";
+    return fixed(num(s["median"]), digits) + unit + " (" + fixed(num(s["min"]), digits) + "-" +
+           fixed(num(s["max"]), digits) + ")";
 }
 
 std::string row(const std::vector<std::string>& cells) { return "| " + join(cells, " | ") + " |"; }
@@ -831,22 +855,24 @@ std::vector<std::string> results_table(const json& out) {
     const json& c = out["chat"];
     if (truthy(c))
         lines.push_back(row({"short chat", fmt(jget(c, "prompt_tokens"), 0), "0", fmt(jget(c, "generated_tokens"), 0),
-                             std::to_string(inum(jget(jget(c, "ttft_s"), "n"))), "not measured", fmt(jget(c, "decode_tps")),
-                             fmt(jget(c, "ttft_s"), 2)}));
+                             std::to_string(inum(jget(jget(c, "ttft_s"), "n"))), "not measured",
+                             fmt(jget(c, "decode_tps")), fmt(jget(c, "ttft_s"), 2)}));
     for (auto it = out["prompts"].begin(); it != out["prompts"].end(); ++it) {
         const json& v = it.value();
-        lines.push_back(row({it.key() + " prompt, fresh", fmt(jget(v, "prompt_tokens"), 0), fmt(jget(v, "reused_tokens"), 0),
-                             std::to_string(kLongMaxTokens) + " cap", std::to_string(inum(jget(jget(v, "ttft_s"), "n"))),
-                             fmt(jget(v, "prompt_tps")), "not measured", fmt(jget(v, "ttft_s"), 2)}));
+        lines.push_back(
+            row({it.key() + " prompt, fresh", fmt(jget(v, "prompt_tokens"), 0), fmt(jget(v, "reused_tokens"), 0),
+                 std::to_string(kLongMaxTokens) + " cap", std::to_string(inum(jget(jget(v, "ttft_s"), "n"))),
+                 fmt(jget(v, "prompt_tps")), "not measured", fmt(jget(v, "ttft_s"), 2)}));
     }
     const json& a = out["agent"];
     if (truthy(a)) {
         int64_t n = 0;
         for (const json& s : jget(a, "sessions"))
             if (s.size() > 1) ++n;
-        lines.push_back(row({"agent session, follow-up turns", fmt(jget(a, "last_turn_prompt_tokens"), 0) + " at the last turn",
-                             "see below", "up to " + std::to_string(kAgentMaxTokens), std::to_string(n), "see below",
-                             fmt(jget(a, "turn_decode_tps")), fmt(jget(a, "turn_ttft_s"), 2)}));
+        lines.push_back(
+            row({"agent session, follow-up turns", fmt(jget(a, "last_turn_prompt_tokens"), 0) + " at the last turn",
+                 "see below", "up to " + std::to_string(kAgentMaxTokens), std::to_string(n), "see below",
+                 fmt(jget(a, "turn_decode_tps")), fmt(jget(a, "turn_ttft_s"), 2)}));
     }
     return lines;
 }
@@ -935,8 +961,9 @@ std::vector<std::string> log_excerpt(const std::string& path, uint64_t from, siz
     if (!f) return out;
     f.seekg((std::streamoff) from);
     const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    static const char* const keep[] = {"expert cache", "slots", "vram", "ready", "resident", "kv ", "context", "backend",
-                                       "gpu", "prefill", "mtp", "drafter", "dfly", "spec", "batch", "version", "hit"};
+    static const char* const keep[] = {"expert cache", "slots",   "vram",  "ready",   "resident", "kv ",
+                                       "context",      "backend", "gpu",   "prefill", "mtp",      "drafter",
+                                       "dfly",         "spec",    "batch", "version", "hit"};
     for (const std::string_view line : splitlines(text)) {
         if (out.size() >= limit) break;
         const std::string l = lower(line);
@@ -952,23 +979,24 @@ std::vector<std::string> log_excerpt(const std::string& path, uint64_t from, siz
 
 fs::path default_parent() { return u8_path(self_dir()) / "bench-results"; }
 
-}  // namespace
+}   // namespace
 
 // ---- the pieces
 
 bool lamina_answers(const std::string& base) { return is_lamina({base, ""}); }
 
 std::string long_prompt(int words) {
-    static const char* const vocab[] = {"river",  "stone", "market", "lantern", "copper", "winter", "garden",
-                                        "signal", "harbor", "needle", "orbit",  "velvet", "canyon", "ember",
-                                        "ledger", "quartz", "meadow", "anchor", "violet", "thunder"};
+    static const char* const vocab[] = {"river",  "stone",  "market", "lantern", "copper", "winter", "garden",
+                                        "signal", "harbor", "needle", "orbit",   "velvet", "canyon", "ember",
+                                        "ledger", "quartz", "meadow", "anchor",  "violet", "thunder"};
     PyRandom rng(7);
     std::string body;
     for (int i = 0; i < words; ++i) {
         if (i) body += ' ';
         body += vocab[rng.below(sizeof vocab / sizeof vocab[0])];
     }
-    return "Here is a list of words:\n" + body + "\n\nSummarize what kinds of words appear in the list, in five sentences.";
+    return "Here is a list of words:\n" + body +
+           "\n\nSummarize what kinds of words appear in the list, in five sentences.";
 }
 
 json stat(const std::vector<json>& values) {
@@ -1016,7 +1044,8 @@ Redactor redactor(const std::vector<std::string>& extra, const std::string& key)
     for (const std::string& h : host_names()) add(h, "<host>", true);
     for (const std::string& x : extra) add(x, "<private>", true);
     add(key, "<key>");
-    std::stable_sort(subs->begin(), subs->end(), [](const Sub& a, const Sub& b) { return a.what.size() > b.what.size(); });
+    std::stable_sort(subs->begin(), subs->end(),
+                     [](const Sub& a, const Sub& b) { return a.what.size() > b.what.size(); });
     return [subs](const std::string& text) {
         auto word_char = [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '-' || c >= 0x80; };
         auto same = [](const std::string& s, size_t at, const std::string& w) {
@@ -1024,9 +1053,11 @@ Redactor redactor(const std::vector<std::string>& extra, const std::string& key)
                 if (std::tolower((unsigned char) s[at + i]) != std::tolower((unsigned char) w[i])) return false;
             return true;
         };
-        static const std::regex path_user(R"(([A-Za-z]:)?([\\/])(Users|home)([\\/])(?!<)[^\\/\s"':;,]+)", std::regex::icase);
+        static const std::regex path_user(R"(([A-Za-z]:)?([\\/])(Users|home)([\\/])(?!<)[^\\/\s"':;,]+)",
+                                          std::regex::icase);
         static const std::regex bearer(R"((bearer\s+)[A-Za-z0-9._~+/=-]{8,})", std::regex::icase);
-        static const std::regex ip4(R"(\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.\d{1,3}\.\d{1,3}\b)");
+        static const std::regex ip4(
+            R"(\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|169\.254)\.\d{1,3}\.\d{1,3}\b)");
         std::string out;
         const std::vector<std::string> lines = split(text, "\n");   // a line at a time: short inputs for std::regex
         for (size_t li = 0; li < lines.size(); ++li) {
@@ -1112,8 +1143,7 @@ std::vector<int> gpu_selection(const json& cfg) {
     std::vector<int> sel;
     try {
         sel = gpu_list(cfg);
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
     const json& args = jget(cfg, "args");
     for (size_t i = 0; sel.empty() && args.is_array() && i + 1 < args.size(); ++i)
         if (py_str(args[i]) == "--gpu") {
@@ -1159,7 +1189,8 @@ json collect_machine(const Target& t, const json& cfg, const LocalGpus& local) {
     } else if (used.size() > 1 && !jstr(hw, "gpu_name").empty()) {
         std::vector<LocalGpus::Gpu> pool = used, named;
         for (const std::string& n : served) {
-            const auto it = std::find_if(pool.begin(), pool.end(), [&](const LocalGpus::Gpu& g) { return g.name == n; });
+            const auto it =
+                std::find_if(pool.begin(), pool.end(), [&](const LocalGpus::Gpu& g) { return g.name == n; });
             if (it != pool.end()) {
                 named.push_back(*it);
                 pool.erase(it);
@@ -1175,7 +1206,8 @@ json collect_machine(const Target& t, const json& cfg, const LocalGpus& local) {
     json cuda = local.cuda.empty() ? json(nullptr) : json(local.cuda);
     bool all_local = true;
     for (const std::string& n : served)
-        all_local = all_local && std::any_of(local.gpus.begin(), local.gpus.end(), [&](const LocalGpus::Gpu& g) { return g.name == n; });
+        all_local = all_local && std::any_of(local.gpus.begin(), local.gpus.end(),
+                                             [&](const LocalGpus::Gpu& g) { return g.name == n; });
     if (!served.empty() && !all_local) {   // a card nvidia-smi does not list: the server's names are the right ones
         gpu_names = json::array();
         for (const std::string& n : served) gpu_names.push_back(n);
@@ -1204,7 +1236,8 @@ json collect_machine(const Target& t, const json& cfg, const LocalGpus& local) {
     for (auto it = eng.begin(); it != eng.end(); ++it)
         if (it.key() != "model_path" && (it.value().is_primitive() || it.value().is_object()) && !it.value().is_null())
             engine_info[it.key()] = it.value();
-    const json threads = truthy(jget(hw, "threads")) ? hw["threads"] : json((int64_t) std::thread::hardware_concurrency());
+    const json threads =
+        truthy(jget(hw, "threads")) ? hw["threads"] : json((int64_t) std::thread::hardware_concurrency());
     return {{"gpu", gpu_names},
             {"gpu_vram_mib", vram},
             {"gpu_driver", used.empty() ? json(nullptr) : json(used.front().driver)},
@@ -1276,32 +1309,39 @@ std::string render_readme(const json& res) {
     std::vector<std::string> names;
     for (const json& g : jget(mc, "gpu")) names.push_back(py_str(g));
     const std::string gpu = names.empty() ? "CPU only" : join(names, " + ");
-    const std::string vram = truthy(jget(mc, "gpu_vram_mib")) ? fixed(num(mc["gpu_vram_mib"]) / 1024, 0) + " GiB VRAM"
-                                                               : "VRAM not read";
+    const std::string vram =
+        truthy(jget(mc, "gpu_vram_mib")) ? fixed(num(mc["gpu_vram_mib"]) / 1024, 0) + " GiB VRAM" : "VRAM not read";
     std::string model = truthy(jget(mc, "model")) ? model_label(mc) : jstr(mc, "quant");
     if (model.empty()) model = "model not read";
     auto or_ = [](const json& v, const std::string& dflt) { return truthy(v) ? py_str(v) : dflt; };
     const int64_t runs = inum(jget(p, "runs"));
     const bool think = jget(p, "think") == true;
     std::vector<std::string> L = {
-        "# Community benchmark on " + gpu, "",
+        "# Community benchmark on " + gpu,
+        "",
         "Measured on " + jstr(res, "date") + " with `lamina bench` (suite " + std::to_string(kSchema) + ", " +
-            std::to_string(runs) + " runs per test, medians with ranges). Speeds are the engine's own timings; first-token "
+            std::to_string(runs) +
+            " runs per test, medians with ranges). Speeds are the engine's own timings; first-token "
             "times are measured by the client over HTTP. Speed only: no correctness check was run.",
         "",
-        "## Hardware and software", "",
+        "## Hardware and software",
+        "",
         "- GPU and VRAM: " + gpu + ", " + vram,
         "- CPU: " + or_(jget(mc, "cpu"), "not read") + " (" + or_(jget(mc, "cpu_cores"), "?") + " cores, " +
             or_(jget(mc, "cpu_threads"), "?") + " threads); installed RAM: " + or_(jget(mc, "ram_gib"), "?") +
             " GiB; storage: not measured",
-        "- OS: " + py_str(jget(mc, "os")) + "; GPU driver: " + or_(jget(mc, "gpu_driver"), "not read") + "; CUDA: " +
-            or_(jget(mc, "cuda"), "not read"),
+        "- OS: " + py_str(jget(mc, "os")) + "; GPU driver: " + or_(jget(mc, "gpu_driver"), "not read") +
+            "; CUDA: " + or_(jget(mc, "cuda"), "not read"),
         "- Lamina: project " + or_(jget(mc, "lamina_version"), "?") + ", commit " +
-            or_(jget(mc, "lamina_commit"), "not a git checkout") + "; engine " + or_(jget(mc, "engine_version"), "not read"),
-        "- Background workloads and power limits: not recorded", "",
-        "## Model and configuration", "",
+            or_(jget(mc, "lamina_commit"), "not a git checkout") + "; engine " +
+            or_(jget(mc, "engine_version"), "not read"),
+        "- Background workloads and power limits: not recorded",
+        "",
+        "## Model and configuration",
+        "",
         "- Model and quantization: " + model,
-        "- Context: " + or_(jget(mc, "context"), "not read") + " tokens; parallel slots: " + or_(jget(mc, "parallel_slots"), "1"),
+        "- Context: " + or_(jget(mc, "context"), "not read") +
+            " tokens; parallel slots: " + or_(jget(mc, "parallel_slots"), "1"),
         std::string("- Settings: the install's own configuration, unchanged; thinking ") + (think ? "on" : "off") +
             " for the suite; temperature 0",
         ""};
@@ -1309,58 +1349,68 @@ std::string render_readme(const json& res) {
     const json& env = jget(jget(mc, "config"), "env");
     if (truthy(env)) {
         std::vector<std::string> kv;
-        for (auto it = env.begin(); it != env.end(); ++it) kv.push_back("`" + it.key() + "=" + py_str(it.value()) + "`");
+        for (auto it = env.begin(); it != env.end(); ++it)
+            kv.push_back("`" + it.key() + "=" + py_str(it.value()) + "`");
         L.insert(L.end(), {"Environment of the config: " + join(kv, ", "), ""});
     }
     const bool long32 = jget(jget(out, "prompts"), "32K").is_object();
-    L.insert(L.end(), {
-        "## Method", "",
-        "Run by `" + jstr(p, "command") + "` against the HTTP API of a Lamina server (" +
-            (jget(p, "started_server") == true ? "started by the benchmark with the configuration above" : "already running") +
-            "); model loading is not timed. One warm-up chat and a 1K prompt are discarded first. Every prompt starts with "
-            "a unique tag, so the conversation cache cannot help the fresh-prompt tests.",
-        "",
-        "- short chat: three short questions, up to " + std::to_string(kChatMaxTokens) + " new tokens, " +
-            std::to_string(runs) + " runs",
-        std::string("- 4K / 16K") + (long32 ? " / 32K" : "") + " prompts: generated word lists sized by a calibration "
-            "request, " + std::to_string(kLongMaxTokens) + " new tokens, " + std::to_string(runs) + " fresh prompts each",
-        "- agent session: system prompt and four tools, then " + std::to_string(kAgentTurns) + " turns that each add about " +
-            std::to_string(kAgentWords) + " words of a project file and continue from the model's own earlier answers (the "
-            "way agent clients resend a conversation), " + std::to_string(kAgentMaxTokens) + " new tokens per turn, " +
-            std::to_string(runs) + " sessions; the cache numbers come from the answer's usage (`cached_tokens`) and timings "
-            "(`prompt_n`)",
-        "- concurrency (when run): N requests sent at the same moment, total tokens over the wall time of the burst, "
-        "latency over all requests",
-        "",
-        "## Results", ""});
+    L.insert(
+        L.end(),
+        {"## Method", "",
+         "Run by `" + jstr(p, "command") + "` against the HTTP API of a Lamina server (" +
+             (jget(p, "started_server") == true ? "started by the benchmark with the configuration above"
+                                                : "already running") +
+             "); model loading is not timed. One warm-up chat and a 1K prompt are discarded first. Every prompt starts with "
+             "a unique tag, so the conversation cache cannot help the fresh-prompt tests.",
+         "",
+         "- short chat: three short questions, up to " + std::to_string(kChatMaxTokens) + " new tokens, " +
+             std::to_string(runs) + " runs",
+         std::string("- 4K / 16K") + (long32 ? " / 32K" : "") +
+             " prompts: generated word lists sized by a calibration "
+             "request, " +
+             std::to_string(kLongMaxTokens) + " new tokens, " + std::to_string(runs) + " fresh prompts each",
+         "- agent session: system prompt and four tools, then " + std::to_string(kAgentTurns) +
+             " turns that each add about " + std::to_string(kAgentWords) +
+             " words of a project file and continue from the model's own earlier answers (the "
+             "way agent clients resend a conversation), " +
+             std::to_string(kAgentMaxTokens) + " new tokens per turn, " + std::to_string(runs) +
+             " sessions; the cache numbers come from the answer's usage (`cached_tokens`) and timings "
+             "(`prompt_n`)",
+         "- concurrency (when run): N requests sent at the same moment, total tokens over the wall time of the burst, "
+         "latency over all requests",
+         "", "## Results", ""});
     const std::vector<std::string> table = results_table(out);
     L.insert(L.end(), table.begin(), table.end());
-    L.insert(L.end(), {"", "Ranges are the lowest and highest of the runs; `Runs` counts requests that returned a token."});
+    L.insert(L.end(),
+             {"", "Ranges are the lowest and highest of the runs; `Runs` counts requests that returned a token."});
     const json& ag = jget(out, "agent");
     if (truthy(ag) && truthy(jget(ag, "sessions"))) {
-        L.insert(L.end(), {"", "### Agent session (conversation cache)", "",
-                           "Cache hit over the follow-up turns: " + fmt(jget(ag, "hit_pct"), 1, " %") +
-                               "; earlier-turn tokens read again per session: " + fmt(jget(ag, "reread_tokens"), 0) +
-                               " (earlier turns that the cache did not hold; the " + fmt(jget(ag, "new_tokens"), 0) +
-                               " new tokens of the files are read once); first turn (nothing cached) first token: " +
-                               fmt(jget(ag, "first_turn_ttft_s"), 2, " s") + ".",
-                           "",
-                           "| Turn (run 1) | Prompt tokens | Reused | Read | Prompt tok/s | First token (s) | Decode tok/s |",
-                           "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |"});
+        L.insert(L.end(),
+                 {"", "### Agent session (conversation cache)", "",
+                  "Cache hit over the follow-up turns: " + fmt(jget(ag, "hit_pct"), 1, " %") +
+                      "; earlier-turn tokens read again per session: " + fmt(jget(ag, "reread_tokens"), 0) +
+                      " (earlier turns that the cache did not hold; the " + fmt(jget(ag, "new_tokens"), 0) +
+                      " new tokens of the files are read once); first turn (nothing cached) first token: " +
+                      fmt(jget(ag, "first_turn_ttft_s"), 2, " s") + ".",
+                  "",
+                  "| Turn (run 1) | Prompt tokens | Reused | Read | Prompt tok/s | First token (s) | Decode tok/s |",
+                  "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |"});
         for (const json& d : ag["sessions"][0])
             if (d["ok"] == true)
-                L.push_back("| " + py_str(d["turn"]) + " | " + py_str(d["prompt_tokens"]) + " | " + py_str(d["reused_tokens"]) +
-                            " | " + py_str(d["read_tokens"]) + " | " + or_(d["prompt_tps"], "-") + " | " + py_str(d["ttft_s"]) +
-                            " | " + or_(d["decode_tps"], "-") + " |");
+                L.push_back("| " + py_str(d["turn"]) + " | " + py_str(d["prompt_tokens"]) + " | " +
+                            py_str(d["reused_tokens"]) + " | " + py_str(d["read_tokens"]) + " | " +
+                            or_(d["prompt_tps"], "-") + " | " + py_str(d["ttft_s"]) + " | " +
+                            or_(d["decode_tps"], "-") + " |");
     }
     const json& cl = jget(out, "clients");
     if (truthy(cl))
         L.insert(L.end(), {"", "### Concurrency: " + py_str(cl["clients"]) + " clients", "",
-                           "Total " + fmt(jget(cl, "total_tps"), 1, " tok/s") + "; first token p50 " + py_str(jget(cl, "ttft_p50_s")) +
-                               " s, p95 " + py_str(jget(cl, "ttft_p95_s")) + " s; request latency p50 " +
-                               py_str(jget(cl, "latency_p50_s")) + " s, p95 " + py_str(jget(cl, "latency_p95_s")) +
-                               " s; errors " + py_str(jget(cl, "errors")) + ". Server parallel slots: " +
-                               or_(jget(mc, "parallel_slots"), "1") + " (requests beyond that wait their turn)."});
+                           "Total " + fmt(jget(cl, "total_tps"), 1, " tok/s") + "; first token p50 " +
+                               py_str(jget(cl, "ttft_p50_s")) + " s, p95 " + py_str(jget(cl, "ttft_p95_s")) +
+                               " s; request latency p50 " + py_str(jget(cl, "latency_p50_s")) + " s, p95 " +
+                               py_str(jget(cl, "latency_p95_s")) + " s; errors " + py_str(jget(cl, "errors")) +
+                               ". Server parallel slots: " + or_(jget(mc, "parallel_slots"), "1") +
+                               " (requests beyond that wait their turn)."});
     const json& skipped = jget(out, "skipped");
     const json& failures = jget(out, "failures");
     if (truthy(skipped) || truthy(failures)) {
@@ -1369,14 +1419,16 @@ std::string render_readme(const json& res) {
             L.push_back("- skipped " + it.key() + ": " + py_str(it.value()));
         for (const json& f : failures) L.push_back("- failed " + jstr(f, "where") + ": " + jstr(f, "error"));
     }
-    L.insert(L.end(), {"", "Per-request data: `results.json`. Engine log lines from the start: `engine-log-excerpt.txt` "
-                           "(when this run started the server).",
-                       "", "## Correctness and limitations", "",
-                       "Not measured: this is a speed suite. The conversation uses the model's own replies, so token counts "
-                       "differ a little between runs. Machine details come from the server, `nvidia-smi` and the OS; "
-                       "background load and power limits are not recorded. Total time of the suite: " +
-                           fixed(num(jget(res, "elapsed_s")), 0) + " s.",
-                       ""});
+    L.insert(L.end(),
+             {"",
+              "Per-request data: `results.json`. Engine log lines from the start: `engine-log-excerpt.txt` "
+              "(when this run started the server).",
+              "", "## Correctness and limitations", "",
+              "Not measured: this is a speed suite. The conversation uses the model's own replies, so token counts "
+              "differ a little between runs. Machine details come from the server, `nvidia-smi` and the OS; "
+              "background load and power limits are not recorded. Total time of the suite: " +
+                  fixed(num(jget(res, "elapsed_s")), 0) + " s.",
+              ""});
     return join(L, "\n");
 }
 
@@ -1405,8 +1457,11 @@ std::string compare_table(const json& older, const json& newer) {
     const json& ho = jget(older, "machine");
     const json& hn = jget(newer, "machine");
     std::vector<std::string> notes;
-    for (const auto& [name, field] : std::vector<std::pair<std::string, std::string>>{
-             {"GPU", "gpu"}, {"engine", "engine_version"}, {"model", "model"}, {"quant", "quant"}, {"context", "context"}})
+    for (const auto& [name, field] : std::vector<std::pair<std::string, std::string>>{{"GPU", "gpu"},
+                                                                                      {"engine", "engine_version"},
+                                                                                      {"model", "model"},
+                                                                                      {"quant", "quant"},
+                                                                                      {"context", "context"}})
         if (jget(ho, field) != jget(hn, field))
             notes.push_back("  " + name + ": " + py_str(jget(ho, field)) + " -> " + py_str(jget(hn, field)));
     if (!notes.empty()) {
@@ -1436,9 +1491,11 @@ json without_profile_save(const json& cfg, const std::string& scratch) {
     auto copy_from = [&](const std::string& src) {
         if (src.empty()) return;
         fs::path from = u8_path(src);
-        if (!from.is_absolute() && !jstr(cfg, "cwd").empty()) from = u8_path(jstr(cfg, "cwd")) / from;   // the engine's cwd
+        if (!from.is_absolute() && !jstr(cfg, "cwd").empty())
+            from = u8_path(jstr(cfg, "cwd")) / from;   // the engine's cwd
         std::error_code ec;
-        if (fs::is_regular_file(from, ec)) fs::copy_file(from, u8_path(scratch), fs::copy_options::overwrite_existing, ec);
+        if (fs::is_regular_file(from, ec))
+            fs::copy_file(from, u8_path(scratch), fs::copy_options::overwrite_existing, ec);
     };
     json& args = out["args"];
     if (!args.is_array()) {
@@ -1456,7 +1513,8 @@ json without_profile_save(const json& cfg, const std::string& scratch) {
             }
         }
     }
-    if (const json& save = jget(cfg, "expert_profile_save"); save.is_string() && !strip(save.get<std::string>()).empty()) {
+    if (const json& save = jget(cfg, "expert_profile_save");
+        save.is_string() && !strip(save.get<std::string>()).empty()) {
         copy_from(save.get<std::string>());
         out["expert_profile_save"] = scratch;
     }
@@ -1491,8 +1549,8 @@ int run(const Target& t, const json& cfg, const Options& o, const std::string& l
             std::to_string(opts.clients) + " clients will partly wait their turn.");
     say("Running the suite (about 3-10 minutes) ...");
     bool interrupted = false;
-    const json out = run_suite(t, inum(jget(pre, "context")), opts, [](const std::string& line) { say(line); }, stopped,
-                               &interrupted);
+    const json out = run_suite(
+        t, inum(jget(pre, "context")), opts, [](const std::string& line) { say(line); }, stopped, &interrupted);
     if (interrupted) {
         say("\nThe benchmark was stopped: no report.");
         return 130;
@@ -1502,8 +1560,13 @@ int run(const Target& t, const json& cfg, const Options& o, const std::string& l
     const json res = {{"schema", kSchema},
                       {"tool", "lamina bench"},
                       {"date", today()},
-                      {"params", {{"runs", opts.runs}, {"think", opts.think}, {"clients", opts.clients},
-                                  {"long", opts.long_prompt}, {"started_server", started}, {"command", opts.command}}},
+                      {"params",
+                       {{"runs", opts.runs},
+                        {"think", opts.think},
+                        {"clients", opts.clients},
+                        {"long", opts.long_prompt},
+                        {"started_server", started},
+                        {"command", opts.command}}},
                       {"elapsed_s", seconds_since(t0)},
                       {"machine", machine},
                       {"results", out}};
@@ -1550,4 +1613,4 @@ int compare_only(const std::string& older, const std::string& newer) {
     }
 }
 
-}  // namespace lamina::bench
+}   // namespace lamina::bench

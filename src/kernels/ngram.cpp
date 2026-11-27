@@ -14,8 +14,8 @@
 
 #include <cstdio>
 #include <cstring>
-#include <vector>
 #include <stdexcept>
+#include <vector>
 
 #if defined(_WIN32)
 // `PrefetchVirtualMemory` (memoryapi.h, Windows 8+) is the whole point of the change in `gather` below.
@@ -36,12 +36,12 @@ PleConsts ple_artifact_consts() {
     c.mult[0] = 23703573157769ull;
     c.mult[1] = 20109073645365ull;
     c.mult[2] = 8052911324071ull;
-    const uint64_t vocab[PLE_N_HEADS] = {
-        20000003, 20000023, 20000033, 20000047, 20000059, 20000063, 20000069, 20000077,
-        20000081, 20000093, 20000107, 20000147, 20000153, 20000159, 20000161, 20000171};
-    const uint64_t offset[PLE_N_HEADS] = {
-        0,        20000003, 40000026, 60000059, 80000106, 100000165, 120000228, 140000297,
-        160000374, 180000455, 200000548, 220000655, 240000802, 260000955, 280001114, 300001275};
+    const uint64_t vocab[PLE_N_HEADS] = {20000003, 20000023, 20000033, 20000047, 20000059, 20000063,
+                                         20000069, 20000077, 20000081, 20000093, 20000107, 20000147,
+                                         20000153, 20000159, 20000161, 20000171};
+    const uint64_t offset[PLE_N_HEADS] = {0,         20000003,  40000026,  60000059,  80000106,  100000165,
+                                          120000228, 140000297, 160000374, 180000455, 200000548, 220000655,
+                                          240000802, 260000955, 280001114, 300001275};
     for (int i = 0; i < PLE_N_HEADS; ++i) {
         c.vocab[i] = vocab[i];
         c.offset[i] = offset[i];
@@ -105,8 +105,7 @@ std::string ple_table_shard(const std::vector<std::string>& shards) {
     for (const auto& path : shards) {
         try {
             if (GgufFile(path).find("per_layer_token_embd.weight") != nullptr) return path;
-        } catch (const std::exception&) {
-        }
+        } catch (const std::exception&) {}
     }
     return {};
 }
@@ -116,7 +115,7 @@ struct PleTable::Impl {
     GgufFile* file = nullptr;
     const uint8_t* data = nullptr;
     uint64_t n_rows = 0;
-    int type = 20;                        // a type ple_row_bytes takes
+    int type = 20;   // a type ple_row_bytes takes
     uint32_t row_bytes = PLE_ROW_BYTES_IQ4_NL;
     mutable uint64_t bytes_read = 0;
     // Direct mode (plan v0.3 P2): the mapping above is released after the header parse and every row comes
@@ -160,7 +159,11 @@ void PleTable::Impl::load() {
     const uint64_t need = table_offset + n_rows * (uint64_t) row_bytes - a0;
     DirectFile f;
     std::string err;
-    if (!f.open(path, err)) { ram_note = "PLE table in RAM: " + err; std::fprintf(stderr, "lamina: %s\n", ram_note.c_str()); return; }
+    if (!f.open(path, err)) {
+        ram_note = "PLE table in RAM: " + err;
+        std::fprintf(stderr, "lamina: %s\n", ram_note.c_str());
+        return;
+    }
     constexpr uint32_t kChunk = 8u << 20;
     constexpr int kDepth = 4;
     uint64_t next = 0, got = 0;
@@ -185,11 +188,13 @@ void PleTable::Impl::load() {
     while (inflight > 0) {   // a failed or cancelled load still collects what it queued
         lamina::platform::Completion c[kDepth];
         const int k = f.wait(c, kDepth, -1);
-        for (int i = 0; i < k; ++i) if (c[i].tag != DirectFile::WAKE_TAG) --inflight;
+        for (int i = 0; i < k; ++i)
+            if (c[i].tag != DirectFile::WAKE_TAG) --inflight;
     }
     if (cancel.load()) return;
     if (!ok || got < need) {
-        ram_note = "PLE table in RAM: the load failed" + (err.empty() ? std::string() : ": " + err) + "; rows stay on the SSD";
+        ram_note =
+            "PLE table in RAM: the load failed" + (err.empty() ? std::string() : ": " + err) + "; rows stay on the SSD";
         std::fprintf(stderr, "lamina: %s\n", ram_note.c_str());
         return;
     }
@@ -203,11 +208,12 @@ void PleTable::Impl::load() {
 }
 
 PleTable::PleTable() : impl_(new Impl) {}
-PleTable::~PleTable() { close(); delete impl_; }
-
-bool PleTable::open(const std::string& gguf_path, std::string& err) {
-    return open(gguf_path, err, PleIoOptions{});
+PleTable::~PleTable() {
+    close();
+    delete impl_;
 }
+
+bool PleTable::open(const std::string& gguf_path, std::string& err) { return open(gguf_path, err, PleIoOptions{}); }
 
 bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoOptions& io) {
     close();
@@ -364,7 +370,7 @@ void PleTable::read_row(uint32_t row, float* out160) const {
 bool PleTable::issue(const uint32_t* rows16) {
     std::memcpy(impl_->rows, rows16, sizeof impl_->rows);
     if (impl_->mode != PleIo::Mmap) {
-        if (impl_->pending) return false;              // one token in flight per table
+        if (impl_->pending) return false;   // one token in flight per table
         impl_->pending_ram = impl_->from_ram();
         if (!impl_->pending_ram) impl_->ticket = impl_->reader.issue(impl_->rows, PLE_N_HEADS, impl_->raw);
         impl_->pending = true;
@@ -388,7 +394,10 @@ bool PleTable::issue(const uint32_t* rows16) {
 }
 
 bool PleTable::collect(float* out2560, std::string& err) {
-    if (!impl_->pending) { err = "PleTable::collect without issue"; return false; }
+    if (!impl_->pending) {
+        err = "PleTable::collect without issue";
+        return false;
+    }
     impl_->pending = false;
     if (impl_->pending_ram) {
         for (int h = 0; h < PLE_N_HEADS; ++h) read_row(impl_->rows[h], out2560 + (size_t) h * PLE_HEAD_DIM);
@@ -397,7 +406,8 @@ bool PleTable::collect(float* out2560, std::string& err) {
     if (impl_->mode != PleIo::Mmap) {
         if (!impl_->reader.collect(impl_->ticket, err)) return false;
         for (int h = 0; h < PLE_N_HEADS; ++h)
-            ple_dequant_row(impl_->type, impl_->raw + (size_t) h * impl_->row_bytes, out2560 + (size_t) h * PLE_HEAD_DIM);
+            ple_dequant_row(impl_->type, impl_->raw + (size_t) h * impl_->row_bytes,
+                            out2560 + (size_t) h * PLE_HEAD_DIM);
         impl_->bytes_read += (uint64_t) PLE_N_HEADS * impl_->row_bytes;
         return true;
     }
@@ -406,7 +416,10 @@ bool PleTable::collect(float* out2560, std::string& err) {
 }
 
 bool PleTable::gather_batch(const uint32_t* rows, size_t n_tokens, float* out, std::string& err) {
-    if (impl_->pending) { err = "PleTable::gather_batch while a token is in flight"; return false; }
+    if (impl_->pending) {
+        err = "PleTable::gather_batch while a token is in flight";
+        return false;
+    }
     const size_t n = n_tokens * (size_t) PLE_N_HEADS;
     if (impl_->direct()) {
         std::vector<uint8_t> raw(n * impl_->row_bytes);
@@ -499,9 +512,10 @@ std::string PleTable::io_report() const {
     std::snprintf(buf, sizeof buf,
                   "ple io: %llu rows, %.1f%% row-cache hits, %llu SSD reads (%.1f MB), read p50 %.0f us p99 %.0f us, "
                   "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu rows",
-                  (unsigned long long) s.requests, s.requests ? 100.0 * (double) s.cache_hits / (double) s.requests : 0.0,
-                  (unsigned long long) s.reads, (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99),
-                  s.wait_us / 1000.0, s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),
+                  (unsigned long long) s.requests,
+                  s.requests ? 100.0 * (double) s.cache_hits / (double) s.requests : 0.0, (unsigned long long) s.reads,
+                  (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99), s.wait_us / 1000.0,
+                  s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),
                   (unsigned long long) impl_->reader.cache_capacity());
     return buf;
 }
@@ -554,4 +568,4 @@ void PleTable::gather(const uint32_t* rows16, float* out2560) const {
     for (int h = 0; h < PLE_N_HEADS; ++h) read_row(rows16[h], out2560 + (size_t) h * PLE_HEAD_DIM);
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

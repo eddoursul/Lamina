@@ -8,13 +8,13 @@
 #include <dxgi1_4.h>
 #include <cstring>
 #else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
 #endif
 #include <cstdio>
 #include <cstdlib>
@@ -26,11 +26,14 @@ namespace {
 // Locked pages count against the minimum working set: a lock raises it by the region plus this headroom for the
 // rest of the process, and its unlock lowers it by as much (each in-process engine start locks again)
 constexpr SIZE_T kLockMargin = (SIZE_T) 512 << 20;
-}  // namespace
+}   // namespace
 
 LockResult lock_resident(void* p, uint64_t bytes) {
     LockResult r;
-    if (p == nullptr || bytes == 0) { r.note = "nothing to lock"; return r; }
+    if (p == nullptr || bytes == 0) {
+        r.note = "nothing to lock";
+        return r;
+    }
     HANDLE self = GetCurrentProcess();
     SIZE_T min_ws = 0, max_ws = 0;
     DWORD flags = 0;
@@ -60,14 +63,14 @@ LockResult lock_resident(void* p, uint64_t bytes) {
             if (off > 0)
                 SetProcessWorkingSetSizeEx(self, min_ws + (SIZE_T) off + kLockMargin, new_max,
                                            QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE);
-            else
-                SetProcessWorkingSetSizeEx(self, min_ws, max_ws, flags);
+            else SetProcessWorkingSetSizeEx(self, min_ws, max_ws, flags);
             return r;
         }
         r.locked_bytes = off + n;
     }
     r.ok = true;
-    r.note = "locked " + std::to_string((unsigned long long) (bytes >> 20)) + " MiB via working-set minimum + VirtualLock";
+    r.note =
+        "locked " + std::to_string((unsigned long long) (bytes >> 20)) + " MiB via working-set minimum + VirtualLock";
     return r;
 }
 
@@ -90,7 +93,10 @@ bool gpu_shared_memory_budget(const void* luid, uint64_t& budget, uint64_t& usag
     budget = usage = 0;
     // dxgi.dll is loaded when asked, not linked: a start that never needs this keeps the imports it had
     HMODULE dxgi = LoadLibraryA("dxgi.dll");
-    if (dxgi == nullptr) { why = "dxgi.dll not found"; return false; }
+    if (dxgi == nullptr) {
+        why = "dxgi.dll not found";
+        return false;
+    }
     using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
     const auto create = (CreateFactory) (void*) GetProcAddress(dxgi, "CreateDXGIFactory1");
     IDXGIFactory1* factory = nullptr;
@@ -148,8 +154,14 @@ void advise_willneed(int, uint64_t, uint64_t) {}
 #else
 LockResult lock_resident(void* p, uint64_t bytes) {
     LockResult r;
-    if (p == nullptr || bytes == 0) { r.note = "nothing to lock"; return r; }
-    if (mlock(p, bytes) != 0) { r.note = "mlock failed (raise ulimit -l)"; return r; }
+    if (p == nullptr || bytes == 0) {
+        r.note = "nothing to lock";
+        return r;
+    }
+    if (mlock(p, bytes) != 0) {
+        r.note = "mlock failed (raise ulimit -l)";
+        return r;
+    }
     r.ok = true;
     r.locked_bytes = bytes;
     r.note = "mlock";
@@ -186,7 +198,7 @@ bool meminfo(const char* key, uint64_t& bytes) {
     bytes = found ? (uint64_t) kb << 10 : 0;
     return found;
 }
-}  // namespace
+}   // namespace
 
 bool available_ram(uint64_t& bytes) { return meminfo("MemAvailable:", bytes); }
 
@@ -228,7 +240,7 @@ std::string gib(uint64_t bytes) {
     std::snprintf(s, sizeof s, "%.1f GiB", (double) bytes / 1073741824.0);
     return s;
 }
-}  // namespace
+}   // namespace
 
 bool RamFit::too_much() const { return total > 0 && need + kSystemRam > total; }
 
@@ -270,4 +282,4 @@ RamFit ram_fit(uint64_t need) {
     return f;
 }
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

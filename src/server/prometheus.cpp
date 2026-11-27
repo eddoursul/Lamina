@@ -19,10 +19,7 @@ namespace {
 
 const json kNull;
 
-template <typename... T>
-void put(std::string& out, const T&... parts) {
-    (out.append(parts), ...);
-}
+template <typename... T> void put(std::string& out, const T&... parts) { (out.append(parts), ...); }
 
 /// round(v, nd) on a JSON number: an int stays itself
 json round_json(const json& v, int nd) { return v.is_number_float() ? json(py_round(v.get<double>(), nd)) : v; }
@@ -65,8 +62,8 @@ void lamina_metrics(const json& m, std::string& out, const std::string& lab) {
     std::set<std::string_view> typed;
     auto metric = [&](std::string_view name, std::string_view kind, std::string_view help, const json& value,
                       const std::string& labels = "") {
-        if (!is_num(value)) return;          // unknown here (no GPU telemetry, an older engine): no sample
-        if (typed.insert(name).second)       // one HELP / TYPE per family, before its first sample
+        if (!is_num(value)) return;      // unknown here (no GPU telemetry, an older engine): no sample
+        if (typed.insert(name).second)   // one HELP / TYPE per family, before its first sample
             put(out, "# HELP lamina:", name, " ", help, "\n# TYPE lamina:", name, " ", kind, "\n");
         put(out, "lamina:", name, "{", lab, labels, "} ", py_str(value), "\n");
     };
@@ -103,8 +100,11 @@ void lamina_metrics(const json& m, std::string& out, const std::string& lab) {
     if (!truthy(gpus)) {   // an older telemetry: one card's figures at the top level
         gpus = json::array();
         if (!jget(hw, "gpu_util").is_null())
-            gpus.push_back(json{{"index", 0}, {"util", jget(hw, "gpu_util")}, {"mem_used", jget(hw, "gpu_mem_used")},
-                                {"mem_total", jget(hw, "gpu_mem_total")}, {"temp", jget(hw, "gpu_temp")},
+            gpus.push_back(json{{"index", 0},
+                                {"util", jget(hw, "gpu_util")},
+                                {"mem_used", jget(hw, "gpu_mem_used")},
+                                {"mem_total", jget(hw, "gpu_mem_total")},
+                                {"temp", jget(hw, "gpu_temp")},
                                 {"power", jget(hw, "gpu_power")}});
     }
     static constexpr std::array<std::array<std::string_view, 3>, 5> families = {{
@@ -123,7 +123,7 @@ void lamina_metrics(const json& m, std::string& out, const std::string& lab) {
     metric("ram_total_bytes", "gauge", "RAM (hardware.ram_total).", jget(hw, "ram_total"));
 }
 
-}  // namespace
+}   // namespace
 
 bool wants_prometheus(std::string_view accept, std::string_view query) {
     return query.find("format=prometheus") != std::string_view::npos ||
@@ -212,4 +212,4 @@ std::string render(const json& m, const json& lat) {
     return out;
 }
 
-}  // namespace lamina::prometheus
+}   // namespace lamina::prometheus

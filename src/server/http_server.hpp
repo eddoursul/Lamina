@@ -41,4 +41,4 @@ private:
 /// the most a request body may hold: 256 MiB, or LAMINA_MAX_BODY_MIB
 size_t body_limit();
 
-}  // namespace lamina
+}   // namespace lamina

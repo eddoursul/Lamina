@@ -50,8 +50,7 @@ void build_rope_table(int n_rot, double theta, int max_pos, float* cos_tab, floa
 /// this IS the five-argument builder above - the parity test holds the two to be bit-identical - and
 /// for linear/YaRN the scaled angles (YaRN's mscale included) replace them.  The math is ggml's,
 /// transcribed; see the header of `rope_scaling.hpp` for what arrives from where.
-void build_rope_table(int n_rot, const RopeScaling& scaling, int max_pos, float* cos_tab, float* sin_tab,
-                      int p0 = 0);
+void build_rope_table(int n_rot, const RopeScaling& scaling, int max_pos, float* cos_tab, float* sin_tab, int p0 = 0);
 
 // `x` and `out` are (rows, head_dim) and `pos` is (rows,) - one position per row, so a batch of heads at
 // different sequence positions is one call.  `cos_tab`/`sin_tab` are (max_pos, n_rot/2).  `out` may equal `x`.
@@ -62,4 +61,4 @@ void build_rope_table(int n_rot, const RopeScaling& scaling, int max_pos, float*
 void rope_neox_apply(const float* x, float* out, int64_t rows, int head_dim, int n_rot, const float* cos_tab,
                      const float* sin_tab, const int* pos, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

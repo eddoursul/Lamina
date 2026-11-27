@@ -6,23 +6,23 @@
 
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/native_head.hpp"
-#include "lamina/kernels/iq_kernels.hpp"
-#include "lamina/kernels/cpu/expert_layout.hpp"
-#include "lamina/kernels/cpu/hadamard.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/hadamard.hpp"
 #include "lamina/kernels/cvec.hpp"
 #include "lamina/kernels/elementwise.hpp"
 #include "lamina/kernels/fused_gr.hpp"
 #include "lamina/kernels/gr.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/kv_q8.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/native_moe.hpp"
 #include "lamina/kernels/native_ple_postops.hpp"
 #include "lamina/kernels/native_qsa.hpp"
 #include "lamina/kernels/native_qsa_indexer.hpp"
-#include "lamina/kernels/native_router.hpp"
 #include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/native_router.hpp"
 #include "lamina/kernels/ngram.hpp"
 #include "lamina/kernels/ple.hpp"
 #include "lamina/kernels/qsa.hpp"
@@ -37,13 +37,13 @@
 
 #include <algorithm>
 #include <atomic>
-#include <tuple>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <tuple>
 
 namespace lamina::core {
 namespace {
@@ -51,7 +51,13 @@ namespace {
 constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
 const bool g_dbg = std::getenv("LAMINA_VERIFY_DEBUG") != nullptr;
-#define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
+#define VDBG(...)                                                                                                      \
+    do {                                                                                                               \
+        if (g_dbg) {                                                                                                   \
+            std::fprintf(stderr, "verify dbg: " __VA_ARGS__);                                                          \
+            std::fflush(stderr);                                                                                       \
+        }                                                                                                              \
+    } while (0)
 
 const WeightRef* need(const LayerView& v, const char* suffix, std::string& err) {
     const WeightRef* r = v.get(suffix);
@@ -68,7 +74,7 @@ bool native_of(const WeightRef* w, const std::string& name, std::string& err) {
     return true;
 }
 
-}  // namespace
+}   // namespace
 
 Verifier::Verifier() = default;
 
@@ -78,7 +84,10 @@ Verifier::~Verifier() {
         if (e) cudaGraphExecDestroy(e);
     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
     if (cs_) cudaStreamDestroy(cs_);
-    if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
+    if (copy_) {
+        cudaStreamSynchronize(copy_);
+        cudaStreamDestroy(copy_);
+    }
     if (side_) cudaStreamDestroy(side_);
     if (shs_) cudaStreamDestroy(shs_);
     if (ples_) cudaStreamDestroy(ples_);
@@ -90,18 +99,16 @@ Verifier::~Verifier() {
     if (cps_) cudaStreamDestroy(cps_);
     if (kst_) cudaStreamDestroy(kst_);
     if (sgs_) cudaStreamDestroy(sgs_);
-    for (cudaEvent_t e : {join_, bfork_, bjoin_, pfork_, pjoin_, shfork_, shjoin_, res_ready_, done_, g2fork_, plefork_,
-                          plejoin_,
-                          cpfork_, cpjoin_[0], cpjoin_[1], efork_, rdone_, kjoin_, iproj_,
-                          sgjoin_})
+    for (cudaEvent_t e :
+         {join_,    bfork_,   bjoin_,  pfork_,     pjoin_,     shfork_, shjoin_, res_ready_, done_,  g2fork_,
+          plefork_, plejoin_, cpfork_, cpjoin_[0], cpjoin_[1], efork_,  rdone_,  kjoin_,     iproj_, sgjoin_})
         if (e) cudaEventDestroy(e);
     if (arena_) cudaFree(arena_);
     if (xk_dev_) cudaFree(xk_dev_);
     if (stamps_) cudaFree(stamps_);
-    void* hosts[] = {h_tok_, h_val_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_,
-                     h_ymiss_, h_bad_,
-                     h_flagA_, h_plan_, h_flagB_, h_pids_, h_pw_, h_pseq_, h_pleflag_, h_rows_, h_res_, h_flag2_,
-                     h_list2_, h_xk_, h_xq1_};
+    void* hosts[] = {h_tok_, h_val_,  h_step_,    h_pos_,   h_commit_, h_ple_,   h_out_,   h_x_,     h_ids_,
+                     h_w_,   h_seq_,  h_flag_,    h_ymiss_, h_bad_,    h_flagA_, h_plan_,  h_flagB_, h_pids_,
+                     h_pw_,  h_pseq_, h_pleflag_, h_rows_,  h_res_,    h_flag2_, h_list2_, h_xk_,    h_xq1_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
 }
@@ -152,7 +159,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return false;
     }
     const WeightRef* wo = wt.find("output.weight");
-    if (wo == nullptr) { err = "verify: output.weight is missing"; return false; }
+    if (wo == nullptr) {
+        err = "verify: output.weight is missing";
+        return false;
+    }
     n_vocab_ = wo->ne1;
 
     const lamina::kernels::QsaShapes s = lamina::kernels::qsa_shapes(g);
@@ -185,32 +195,31 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         x1_layer_[(size_t) l] = pool_takes_q8_1(lay.fmt[(size_t) l]);
     }
     xk_stride_ = ((int64_t) (N / 256) * 292 + 15) & ~15ll;
-    bool ok = mapped(T * 4, (void**) &h_tok_, (void**) &m_tok_) &&
-              mapped(T * lamina::kernels::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) &&
-              mapped(T * NH * 4, (void**) &h_pos_, (void**) &m_pos_) &&
-              mapped((2 + T) * 4 + 16, (void**) &h_commit_, (void**) &m_commit_) &&
-              mapped(T * N * 4, (void**) &h_ple_, (void**) &m_ple_) &&
-              mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_) &&
-              mapped(T * 4 + 16, (void**) &h_val_, (void**) &m_val_) &&
-              mapped(T * 4 + 16, (void**) &h_bad_, (void**) &m_bad_) &&
-              mapped(T * N * 4, (void**) &h_x_, (void**) &m_x_) &&
-              mapped(T * K * 4, (void**) &h_ids_, (void**) &m_ids_) &&
-              mapped(T * K * 4, (void**) &h_w_, (void**) &m_w_) &&
-              mapped(64, (void**) &h_seq_, (void**) &m_seq_) &&
-              mapped(64, (void**) &h_flag_, (void**) &m_flag_) &&
-              mapped(64, (void**) &h_flagA_, (void**) &m_flagA_) &&
-              mapped(64, (void**) &h_flagB_, (void**) &m_flagB_) &&
-              mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_, portable) &&
-              mapped(2 * kMaxGpuTiers * 64, (void**) &h_flag2_, (void**) &m_flag2_, portable) &&
-              mapped((size_t) (2 * list2_stride_) * 4, (void**) &h_list2_, (void**) &m_list2_) &&
-              mapped(T * (uint64_t) xk_stride_, (void**) &h_xk_, (void**) &m_xk_) &&
-              mapped(T * (N / 32) * 36, (void**) &h_xq1_, (void**) &m_xq1_) &&
-              mapped(2 * T * K * 4, (void**) &h_pids_, (void**) &m_pids_) &&
-              mapped(2 * T * K * 4, (void**) &h_pw_, (void**) &m_pw_) &&
-              mapped(64, (void**) &h_pseq_, (void**) &m_pseq_) &&
-              mapped(64, (void**) &h_pleflag_, (void**) &m_pleflag_) &&
-              mapped(T * HC * N * 4, (void**) &h_rows_, (void**) &m_rows_);
-    if (!ok) { err = "verify: mapped staging allocation failed"; return false; }
+    bool ok =
+        mapped(T * 4, (void**) &h_tok_, (void**) &m_tok_) &&
+        mapped(T * lamina::kernels::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) &&
+        mapped(T * NH * 4, (void**) &h_pos_, (void**) &m_pos_) &&
+        mapped((2 + T) * 4 + 16, (void**) &h_commit_, (void**) &m_commit_) &&
+        mapped(T * N * 4, (void**) &h_ple_, (void**) &m_ple_) &&
+        mapped(T * 4 + 16, (void**) &h_out_, (void**) &m_out_) &&
+        mapped(T * 4 + 16, (void**) &h_val_, (void**) &m_val_) &&
+        mapped(T * 4 + 16, (void**) &h_bad_, (void**) &m_bad_) && mapped(T * N * 4, (void**) &h_x_, (void**) &m_x_) &&
+        mapped(T * K * 4, (void**) &h_ids_, (void**) &m_ids_) && mapped(T * K * 4, (void**) &h_w_, (void**) &m_w_) &&
+        mapped(64, (void**) &h_seq_, (void**) &m_seq_) && mapped(64, (void**) &h_flag_, (void**) &m_flag_) &&
+        mapped(64, (void**) &h_flagA_, (void**) &m_flagA_) && mapped(64, (void**) &h_flagB_, (void**) &m_flagB_) &&
+        mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_, portable) &&
+        mapped(2 * kMaxGpuTiers * 64, (void**) &h_flag2_, (void**) &m_flag2_, portable) &&
+        mapped((size_t) (2 * list2_stride_) * 4, (void**) &h_list2_, (void**) &m_list2_) &&
+        mapped(T * (uint64_t) xk_stride_, (void**) &h_xk_, (void**) &m_xk_) &&
+        mapped(T * (N / 32) * 36, (void**) &h_xq1_, (void**) &m_xq1_) &&
+        mapped(2 * T * K * 4, (void**) &h_pids_, (void**) &m_pids_) &&
+        mapped(2 * T * K * 4, (void**) &h_pw_, (void**) &m_pw_) && mapped(64, (void**) &h_pseq_, (void**) &m_pseq_) &&
+        mapped(64, (void**) &h_pleflag_, (void**) &m_pleflag_) &&
+        mapped(T * HC * N * 4, (void**) &h_rows_, (void**) &m_rows_);
+    if (!ok) {
+        err = "verify: mapped staging allocation failed";
+        return false;
+    }
     // A plan block, one per token group: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) |
     // ptr2(cap u64) | start2(cap+1).  The main GPU's hits (`verify_hit_plan`, device) fill counts [groups, entries],
     // start, dst, tok and ptr; the pool's PCIe share (mapped, `sink_`) counts [-, entries, groups], dst, tok, ptr2 and
@@ -231,7 +240,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.start2 = h_plan_ + plan_ptr_off_ + 4 * cap;
         sink_.cap = cap;
         sink_.publish = &Verifier::publish_plan;
-        sink_.host_rows_only = true;                      // the gather-combine (post) reads the GPUs' from VRAM
+        sink_.host_rows_only = true;   // the gather-combine (post) reads the GPUs' from VRAM
         sink_.fetch = &Verifier::fetch_dma;
         sink_.ctx = this;
     }
@@ -245,56 +254,87 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
 
     // ---- the device arena: the same sequence counted, then carved
     auto carve = [&](Bump& b) {
-        tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(T * lamina::kernels::kStepCount);
-        pos_ = b.take<int32_t>(T * NH); commit_ = b.take<int32_t>(2 + T);
-        ple_ = b.take<float>(T * N); emb_ = b.take<float>(T * N); R_ = b.take<float>(T * HC * N);
-        mixed_ = b.take<float>(T * N); bo_ = b.take<float>(T * N);
-        inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
-        lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC);
+        tok_ = b.take<int32_t>(T);
+        step_ = b.take<int32_t>(T * lamina::kernels::kStepCount);
+        pos_ = b.take<int32_t>(T * NH);
+        commit_ = b.take<int32_t>(2 + T);
+        ple_ = b.take<float>(T * N);
+        emb_ = b.take<float>(T * N);
+        R_ = b.take<float>(T * HC * N);
+        mixed_ = b.take<float>(T * N);
+        bo_ = b.take<float>(T * N);
+        inj_ = b.take<float>(T * HC);
+        inj2_ = b.take<float>(T * HC);
+        lo_ = b.take<float>(T * (uint64_t) g.hc_lr);
+        rs_ = b.take<float>(T * HC);
         grs_ = (float*) b.take<uint8_t>(lamina::kernels::fused_gr_scratch_bytes());
         xq_ = b.take<uint8_t>(lamina::kernels::native_q8_1_bytes(max_in, (int) T));
         xil_ = b.take<uint8_t>(lamina::kernels::native_q8_1_il_bytes(max_in, (int) T));
-        qkv_L_ = b.take<float>(nG * T * C); h_L_ = b.take<float>(nG * T * C);
-        gate_L_ = b.take<float>(nG * T * HV); beta_L_ = b.take<float>(nG * T * HV);
-        z_ = b.take<float>(T * ZV); y_ = b.take<float>(T * ZV);
-        qfull_ = b.take<float>(T * NH * 2 * HD); qcur_ = b.take<float>(T * NH * HD);
-        kcur_ = b.take<float>(T * NKV * HD); vcur_ = b.take<float>(T * NKV * HD);
-        idx_raw_L_ = b.take<float>(nQ * T * ID); qidx_ = b.take<float>(T * IQ * ID);
-        scores_ = b.take<float>(T * (uint64_t) max_blocks_); sel_ = b.take<int32_t>(T * (uint64_t) cap_);
+        qkv_L_ = b.take<float>(nG * T * C);
+        h_L_ = b.take<float>(nG * T * C);
+        gate_L_ = b.take<float>(nG * T * HV);
+        beta_L_ = b.take<float>(nG * T * HV);
+        z_ = b.take<float>(T * ZV);
+        y_ = b.take<float>(T * ZV);
+        qfull_ = b.take<float>(T * NH * 2 * HD);
+        qcur_ = b.take<float>(T * NH * HD);
+        kcur_ = b.take<float>(T * NKV * HD);
+        vcur_ = b.take<float>(T * NKV * HD);
+        idx_raw_L_ = b.take<float>(nQ * T * ID);
+        qidx_ = b.take<float>(T * IQ * ID);
+        scores_ = b.take<float>(T * (uint64_t) max_blocks_);
+        sel_ = b.take<int32_t>(T * (uint64_t) cap_);
         attn32_ = b.take<float>(T * NH * HD);
         attn_scratch_ = b.take<float>(T * (uint64_t) attn_scratch_floats_);
         tail_snap_ = b.take<float>(nQ * TS);
-        logits_ = b.take<float>(T * (uint64_t) g.n_expert); w_ = b.take<float>(T * K); ids_ = b.take<int32_t>(T * K);
-        plogits_ = b.take<float>(2 * T * (uint64_t) g.n_expert); pw_ = b.take<float>(T * K);
+        logits_ = b.take<float>(T * (uint64_t) g.n_expert);
+        w_ = b.take<float>(T * K);
+        ids_ = b.take<int32_t>(T * K);
+        plogits_ = b.take<float>(2 * T * (uint64_t) g.n_expert);
+        pw_ = b.take<float>(T * K);
         pids_ = b.take<int32_t>(T * K);
-        pmixed_ = b.take<float>(T * N); gate_ema_ = b.take<float>((uint64_t) g.n_layers * HC * N);
+        pmixed_ = b.take<float>(T * N);
+        gate_ema_ = b.take<float>((uint64_t) g.n_layers * HC * N);
         pbias_ = b.take<float>((uint64_t) (g.n_layers * g.n_expert));
-        shared_ = b.take<float>(T * N); hit_out_ = b.take<float>(T * K * N);
-        hit_slot_ = b.take<int32_t>(T * K); hit_dst_ = b.take<int32_t>(T * K); hit_count_ = b.take<int32_t>(4);
+        shared_ = b.take<float>(T * N);
+        hit_out_ = b.take<float>(T * K * N);
+        hit_slot_ = b.take<int32_t>(T * K);
+        hit_dst_ = b.take<int32_t>(T * K);
+        hit_count_ = b.take<int32_t>(4);
         list2_ = b.take<int32_t>(2 * (uint64_t) list2_stride_);
         ring_count_ = b.take<unsigned>(2);
-        plan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_); dplan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_);
-        res_ = b.take<int32_t>((uint64_t) res_words_); slot_ptr_ = b.take<unsigned long long>((uint64_t) hits.slots);
+        plan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_);
+        dplan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_);
+        res_ = b.take<int32_t>((uint64_t) res_words_);
+        slot_ptr_ = b.take<unsigned long long>((uint64_t) hits.slots);
         staging_ = b.take<uint8_t>((uint64_t) kStagingBlobs * lamina::kernels::cpu::expert_layout().max_blob);
         nat_xq_ = b.take<uint8_t>(T * (N / 32) * 36);
         const bool rotated = lamina::kernels::cpu::hadamard_spec().any();
-        hit_scratch_ = b.take<uint8_t>(lamina::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff, rotated));
+        hit_scratch_ =
+            b.take<uint8_t>(lamina::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff, rotated));
         if (rotated) {
             xr_ = b.take<float>(T * N);
             had_sx_ = lamina::kernels::hadamard_device_signs(lamina::kernels::cpu::hadamard_signs((int) N), (int) N);
-            had_sh_ = lamina::kernels::hadamard_device_signs(lamina::kernels::cpu::hadamard_signs((int) g.n_ff), (int) g.n_ff);
+            had_sh_ = lamina::kernels::hadamard_device_signs(lamina::kernels::cpu::hadamard_signs((int) g.n_ff),
+                                                             (int) g.n_ff);
         }
-        head_mixed_ = b.take<float>(T * N); head_inj_ = b.take<float>(HC);
+        head_mixed_ = b.take<float>(T * N);
+        head_inj_ = b.take<float>(HC);
         sh_gate_ = b.take<float>(T * (uint64_t) g.n_ff);
-        sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
+        sh_up_ = b.take<float>(T * (uint64_t) g.n_ff);
+        sh_g_ = b.take<float>(T + 4);
         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
         arg_scratch_ = b.take<uint8_t>(lamina::kernels::argmax_rows_scratch_bytes((int) T));
         if (shead_ != nullptr) head_full_ = b.take<float>(T * (uint64_t) n_vocab_);
         one_ = b.take<int32_t>(4);
         hist_snap_ = b.take<float>(T * HS);
         const uint64_t PD = (uint64_t) lamina::kernels::NG_HC_DIM;
-        ple_key_ = b.take<float>(T * PD); ple_val_ = b.take<float>(T * N); ple_nkey_ = b.take<float>(T * PD);
-        ple_norm_ = b.take<float>(T * PD); ple_gated_ = b.take<float>(T * PD); ple_gate_ = b.take<float>(T * HC);
+        ple_key_ = b.take<float>(T * PD);
+        ple_val_ = b.take<float>(T * N);
+        ple_nkey_ = b.take<float>(T * PD);
+        ple_norm_ = b.take<float>(T * PD);
+        ple_gated_ = b.take<float>(T * PD);
+        ple_gate_ = b.take<float>(T * HC);
     };
     Bump count;
     carve(count);
@@ -331,9 +371,11 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     {
         std::vector<unsigned long long> sp((size_t) hits.slots);
         for (int64_t i = 0; i < hits.slots; ++i)
-            sp[(size_t) i] = (unsigned long long) (hits.cache_base + (hits.slot_off != nullptr ? hits.slot_off[i]
-                                                                                              : (uint64_t) i * (uint64_t) hits.blob));
-        if (cudaMemcpy(slot_ptr_, sp.data(), sp.size() * sizeof(unsigned long long), cudaMemcpyHostToDevice) != cudaSuccess) {
+            sp[(size_t) i] = (unsigned long long) (hits.cache_base + (hits.slot_off != nullptr
+                                                                          ? hits.slot_off[i]
+                                                                          : (uint64_t) i * (uint64_t) hits.blob));
+        if (cudaMemcpy(slot_ptr_, sp.data(), sp.size() * sizeof(unsigned long long), cudaMemcpyHostToDevice) !=
+            cudaSuccess) {
             err = "verify: the slot table could not be uploaded";
             return false;
         }
@@ -477,7 +519,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     }
 
     // ---- the embeddings, broadcast to the hc streams
-    if (const NativeEmbed* ne = native_embed()) {       // plan v0.3 P6: the GGUF-form table
+    if (const NativeEmbed* ne = native_embed()) {   // plan v0.3 P6: the GGUF-form table
         ne->gather_dev(tok_, T, emb_, cs);
         broadcast_streams(emb_, R_, N, (int) HC, T, cs);
     } else {
@@ -500,9 +542,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // its gates their running average over the windows), and on a side branch forked after the read the next layer's
     // router runs on it with that layer's logit bias.  When learning, the FFN read of a layer the previous one
     // predicts keeps its gates' average, and the layer corrects its bias by its own logits on that branch.
-    auto predicts = [&](int64_t l) {
-        return predict_ != nullptr && G == 1 && l + 1 < g.n_layers;
-    };
+    auto predicts = [&](int64_t l) { return predict_ != nullptr && G == 1 && l + 1 < g.n_layers; };
     auto corrects = [&](int64_t l) { return learn_ && l > 0 && predicts(l - 1); };
     auto branches = [&](int64_t l) { return predicts(l) || corrects(l); };
 
@@ -526,14 +566,18 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         const WeightRef *wgi = need(v, "ffn_gate_inp_shexp.weight", err), *wsg = need(v, "ffn_gate_shexp.weight", err),
                         *wsu = need(v, "ffn_up_shexp.weight", err), *wsd = need(v, "ffn_down_shexp.weight", err);
         if (!wgi || !wsg || !wsu || !wsd) return false;
-        if (!native_of(wsg, v.name("ffn_gate_shexp.weight"), err) || !native_of(wsu, v.name("ffn_up_shexp.weight"), err) ||
+        if (!native_of(wsg, v.name("ffn_gate_shexp.weight"), err) ||
+            !native_of(wsu, v.name("ffn_up_shexp.weight"), err) ||
             !native_of(wsd, v.name("ffn_down_shexp.weight"), err))
             return false;
         NativeSharedWeights nsw;
-        nsw.gate_type = wsg->native_type; nsw.gate_data = wsg->native_data;
-        nsw.up_type = wsu->native_type; nsw.up_data = wsu->native_data;
-        nsw.down_type = wsd->native_type; nsw.down_data = wsd->native_data;
-        nsw.q8_1 = xq_;                                   // the main stream's next use is the next layer's mixer
+        nsw.gate_type = wsg->native_type;
+        nsw.gate_data = wsg->native_data;
+        nsw.up_type = wsu->native_type;
+        nsw.up_data = wsu->native_data;
+        nsw.down_type = wsd->native_type;
+        nsw.down_data = wsd->native_data;
+        nsw.q8_1 = xq_;   // the main stream's next use is the next layer's mixer
         nsw.q8_1_il = xil_;
         cudaStream_t ws = cs, gs = cs;
         if (beside) {
@@ -593,7 +637,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (l == 1 && ple_on) {
             if (grp == 0 && ple_beside) {
                 if (!wait(plejoin_)) return false;
-            } else if (grp == 0) {                         // the host reads the rows while layer 0 runs
+            } else if (grp == 0) {   // the host reads the rows while layer 0 runs
                 wait_flag_ge(m_pleflag_, 1, cs);
                 copy_from_mapped(ple_, m_ple_, (int64_t) T * N, cs);
             }
@@ -611,7 +655,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     mm(pw.key_native_type, pw.key_native_data, key, N, NG_HC_DIM, cs);
                     bf16_gemv_fp32_mmvf_multi(emb, pw.value_bf16, ple_val_ + tb * N, N, N, n, cs);
                 }
-                const NativePleTokensBuffers pb{ple_nkey_ + (size_t) tb * NG_HC_DIM, norm, ple_gate_ + tb * HC,
+                const NativePleTokensBuffers pb{ple_nkey_ + (size_t) tb * NG_HC_DIM,  norm, ple_gate_ + tb * HC,
                                                 ple_gated_ + (size_t) tb * NG_HC_DIM, norm, Rt(tb)};
                 native_ple_postops_tokens(key, Rt(tb), ple_val_ + tb * N, ss.ple.hist, pw, pb, n, cs,
                                           hist_snap_ + (size_t) tb * HS);
@@ -626,15 +670,28 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             FusedGrArgs fa[kFusedGrMaxT];
             for (int t = tb; t < te; ++t) {
                 FusedGrArgs& a = fa[t - tb];
-                a.R = Rt(t); a.R_out = Rt(t); a.apply = apply;
-                a.bo_prev = bo_ + t * N; a.inj_prev = inj_prev + t * HC;
-                a.w_norm = (const float*) wn[half]->data; a.w_down = (const uint16_t*) wd[half]->data;
-                a.w_up = (const uint16_t*) wu[half]->data; a.w_inject = (const uint16_t*) wi[half]->data;
-                a.q_down = wd[half]->hc_codes; a.s_down = wd[half]->hc_scales;
-                a.q_up = wu[half]->hc_codes; a.s_up = wu[half]->hc_scales;
-                a.eps = EPS; a.lo = lo_ + t * g.hc_lr; a.rs = rs_ + t * HC;
-                a.inject_out = inj_out + t * HC; a.mixed = mixed_ + t * N; a.gate_ema = gate_ema;
-                a.est_norm = est_norm; a.est_gates = est_gates; a.est = pmixed_ + t * N;
+                a.R = Rt(t);
+                a.R_out = Rt(t);
+                a.apply = apply;
+                a.bo_prev = bo_ + t * N;
+                a.inj_prev = inj_prev + t * HC;
+                a.w_norm = (const float*) wn[half]->data;
+                a.w_down = (const uint16_t*) wd[half]->data;
+                a.w_up = (const uint16_t*) wu[half]->data;
+                a.w_inject = (const uint16_t*) wi[half]->data;
+                a.q_down = wd[half]->hc_codes;
+                a.s_down = wd[half]->hc_scales;
+                a.q_up = wu[half]->hc_codes;
+                a.s_up = wu[half]->hc_scales;
+                a.eps = EPS;
+                a.lo = lo_ + t * g.hc_lr;
+                a.rs = rs_ + t * HC;
+                a.inject_out = inj_out + t * HC;
+                a.mixed = mixed_ + t * N;
+                a.gate_ema = gate_ema;
+                a.est_norm = est_norm;
+                a.est_gates = est_gates;
+                a.est = pmixed_ + t * N;
             }
             fused_gr_read_multi(fa, n, grs_, cs);
         };
@@ -650,8 +707,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                 *wnm = need(v, "ssm_norm.weight", err), *wdt = need(v, "ssm_dt.bias", err),
                                 *wsa = need(v, "ssm_a", err);
                 if (!wqkv || !wg || !wout || !wa || !wb || !wc || !wnm || !wdt || !wsa) return false;
-                if (!native_of(wqkv, v.name("attn_qkv.weight"), err) || !native_of(wg, v.name("attn_gate.weight"), err) ||
-                    !native_of(wout, v.name("ssm_out.weight"), err))
+                if (!native_of(wqkv, v.name("attn_qkv.weight"), err) ||
+                    !native_of(wg, v.name("attn_gate.weight"), err) || !native_of(wout, v.name("ssm_out.weight"), err))
                     return false;
                 const int64_t gi = gdn_idx[(size_t) l];
                 float* state = ss.gdn_state + (size_t) gi * gdn_floats;
@@ -665,8 +722,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 // beside the gate projection's last blocks.
                 if (!fork(side_, bfork_)) return false;
                 gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
-                             (const float*) wsa->data, gate + (size_t) tb * HV, beta + (size_t) tb * HV, (int) N, (int) HV,
-                             n, side_);
+                             (const float*) wsa->data, gate + (size_t) tb * HV, beta + (size_t) tb * HV, (int) N,
+                             (int) HV, n, side_);
                 if (!mark(side_, bjoin_)) return false;
                 quant(xm, N);
                 if (!fork(shs_, pfork_)) return false;
@@ -690,7 +747,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                 *wk = need(v, "attn_k.weight", err), *wv = need(v, "attn_v.weight", err),
                                 *wo = need(v, "attn_output.weight", err), *wiq = need(v, "indexer.q_proj.weight", err),
                                 *wqn = need(v, "attn_q_norm.weight", err), *wkn = need(v, "attn_k_norm.weight", err),
-                                *wiqn = need(v, "indexer.q_norm.weight", err), *wikn = need(v, "indexer.k_norm.weight", err);
+                                *wiqn = need(v, "indexer.q_norm.weight", err),
+                                *wikn = need(v, "indexer.k_norm.weight", err);
                 if (!wik || !wq || !wk || !wv || !wo || !wiq || !wqn || !wkn || !wiqn || !wikn) return false;
                 if (!native_of(wq, v.name("attn_q.weight"), err) || !native_of(wk, v.name("attn_k.weight"), err) ||
                     !native_of(wv, v.name("attn_v.weight"), err) || !native_of(wo, v.name("attn_output.weight"), err))
@@ -700,8 +758,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 auto norm_rope = [&](const float* in, int stride, float* out, const WeightRef* norm, int heads,
                                      int cols, cudaStream_t ns) {
                     native_qsa_norm_rope_tokens(in, stride, (const float*) norm->data, out, cols, n * heads, EPS,
-                                                (int) s.n_rot, rope_scaling(), pos_ + tb * NH, heads, (int) NH,
-                                                ns);
+                                                (int) s.n_rot, rope_scaling(), pos_ + tb * NH, heads, (int) NH, ns);
                 };
                 // three branches beside the values, joined before the attention: the indexer (its key and query
                 // projections in one launch, the keys appended, the queries' block scores and top-k), the keys and the
@@ -714,13 +771,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           (const uint16_t*) wiq->data, qidx_ + tb * IQ * ID, IQ * ID);
                 if (!mark(side_, iproj_)) return false;
                 const QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
-                native_qsa_indexer_append_multi(idx_raw + tb * ID, step_ + tb * kStepCount + kStepPos, (int) kStepCount, n,
-                                                0, (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                native_qsa_indexer_append_multi(idx_raw + tb * ID, step_ + tb * kStepCount + kStepPos, (int) kStepCount,
+                                                n, 0, (const float*) wikn->data, EPS, ib, s, st.max_cells,
                                                 rope_scaling(), side_,
                                                 grp == 0 ? tail_snap_ + (size_t) qi * TS : nullptr);
                 norm_rope(qidx_ + tb * IQ * ID, (int) ID, qidx_ + tb * IQ * ID, wiqn, (int) IQ, (int) ID, side_);
-                qsa_block_scores(st.idx_pooled, st.idx_dead, qidx_ + tb * IQ * ID, step_ + tb * kStepCount, n, max_blocks_,
-                                 s, scores_ + (size_t) tb * max_blocks_, side_, qsa_score_grid_blocks);
+                qsa_block_scores(st.idx_pooled, st.idx_dead, qidx_ + tb * IQ * ID, step_ + tb * kStepCount, n,
+                                 max_blocks_, s, scores_ + (size_t) tb * max_blocks_, side_, qsa_score_grid_blocks);
                 qsa_block_topk(scores_ + (size_t) tb * max_blocks_, step_ + tb * kStepCount, n, max_blocks_, cap_, s,
                                sel_ + (size_t) tb * cap_, side_);
                 if (!mark(side_, bjoin_)) return false;
@@ -744,9 +801,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                     vcur_ + tb * NKV * HD, n, cs);
                 if (!wait(bjoin_) || !wait(pjoin_)) return false;
                 const QsaAttnPools pools = qsa_attn_pools(st);
-                qsa_decode_attn_batch(qcur_ + tb * NH * HD, pools, sel_ + (size_t) tb * cap_, step_ + tb * kStepCount, cap_,
-                                      s, attn_scratch_ + (size_t) tb * attn_scratch_floats_, attn32_ + tb * NH * HD,
-                                      n, cs, qfull_ + tb * NH * 2 * HD);
+                qsa_decode_attn_batch(qcur_ + tb * NH * HD, pools, sel_ + (size_t) tb * cap_, step_ + tb * kStepCount,
+                                      cap_, s, attn_scratch_ + (size_t) tb * attn_scratch_floats_,
+                                      attn32_ + tb * NH * HD, n, cs, qfull_ + tb * NH * 2 * HD);
                 quant(attn32_ + tb * NH * HD, NH * HD);
                 proj(wo, bo_ + tb * N, NH * HD, N, cs);
             }
@@ -779,23 +836,34 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         const WeightRef* wr = need(v, "ffn_gate_inp.weight", err);
         if (!wr) return false;
         VerifyRouterArgs ra;
-        ra.x = xm; ra.w = (const uint16_t*) wr->data; ra.logits = logits_ + tb * NE;
-        ra.ids = ids_ + tb * K; ra.weights = w_ + tb * K;
+        ra.x = xm;
+        ra.w = (const uint16_t*) wr->data;
+        ra.logits = logits_ + tb * NE;
+        ra.ids = ids_ + tb * K;
+        ra.weights = w_ + tb * K;
         ra.x_out = xk_layer_[(size_t) l] || x1_layer_[(size_t) l] ? nullptr : m_x_ + tb * N;
         if (x1_layer_[(size_t) l]) {   // the rows the experts take, from the rotated input
             hadamard_rows(xm, xr_ + tb * N, n, N, had_sx_, cs);
             ra.x_rows = xr_ + tb * N;
         }
-        ra.ids_out = m_ids_ + tb * K; ra.w_out = m_w_ + tb * K; ra.seq = m_seq_;
+        ra.ids_out = m_ids_ + tb * K;
+        ra.w_out = m_w_ + tb * K;
+        ra.seq = m_seq_;
         // the q8_1 rows for both GPUs' experts, the Q8_K rows for the CPU's
         ra.xq1 = nat_xq_ + (size_t) tb * (N / 32) * 36;
         ra.xq1_out = n_tiers_ > 0 || x1_layer_[(size_t) l] ? m_xq1_ + (size_t) tb * (N / 32) * 36 : nullptr;
         ra.xk_out = xk_layer_[(size_t) l] ? m_xk_ + (size_t) tb * (size_t) xk_stride_ : nullptr;
         ra.xk_stride = (int) xk_stride_;
         ra.ring = (uint32_t) (l * G + grp + 1);   // the rings so far (the host waits for this one)
-        ra.res = res_ + (size_t) l * NE; ra.slot_ptr = slot_ptr_; ra.plan = hit_plan;
-        ra.cap = (int) (MT * K); ra.ptr_off = (int) plan_ptr_off_;
-        ra.counter = ring_count_; ra.n_tok = n; ra.n_embd = (int) N; ra.n_expert = (int) NE;
+        ra.res = res_ + (size_t) l * NE;
+        ra.slot_ptr = slot_ptr_;
+        ra.plan = hit_plan;
+        ra.cap = (int) (MT * K);
+        ra.ptr_off = (int) plan_ptr_off_;
+        ra.counter = ring_count_;
+        ra.n_tok = n;
+        ra.n_embd = (int) N;
+        ra.n_expert = (int) NE;
         try {
             verify_router(ra, cs);
         } catch (const std::exception& e) {
@@ -839,11 +907,19 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             if (!wr1) return false;
             const size_t half = (size_t) ((l + 1) & 1) * (size_t) (MT * K);
             VerifyRouterArgs pa;
-            pa.x = pmixed_; pa.w = (const uint16_t*) wr1->data;
-            pa.logits = plogits_ + (size_t) ((l + 1) & 1) * MT * NE; pa.ids = pids_; pa.weights = pw_;
-            pa.ids_out = m_pids_ + half; pa.w_out = m_pw_ + half; pa.seq = m_pseq_;
-            pa.ring = (uint32_t) (l + 1);              // the predictions published so far
-            pa.counter = ring_count_ + 1; pa.n_tok = n; pa.n_embd = (int) N; pa.n_expert = (int) NE;
+            pa.x = pmixed_;
+            pa.w = (const uint16_t*) wr1->data;
+            pa.logits = plogits_ + (size_t) ((l + 1) & 1) * MT * NE;
+            pa.ids = pids_;
+            pa.weights = pw_;
+            pa.ids_out = m_pids_ + half;
+            pa.w_out = m_pw_ + half;
+            pa.seq = m_pseq_;
+            pa.ring = (uint32_t) (l + 1);   // the predictions published so far
+            pa.counter = ring_count_ + 1;
+            pa.n_tok = n;
+            pa.n_embd = (int) N;
+            pa.n_expert = (int) NE;
             if (learn_) pa.bias = pbias_ + (size_t) (l + 1) * NE;
             try {
                 verify_router(pa, side_);
@@ -912,8 +988,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             if (L.gu_act == 15) {
                 xs = (int64_t) (N / 256) * 292;
                 xa = xk_dev_ + (size_t) tb * (size_t) xs;
-                if (!xk_ready) quantize_q8_K(mixed_ + (size_t) tb * N, xk_dev_ + (size_t) tb * (size_t) xs,
-                                             (int64_t) n * N, cs);
+                if (!xk_ready)
+                    quantize_q8_K(mixed_ + (size_t) tb * N, xk_dev_ + (size_t) tb * (size_t) xs, (int64_t) n * N, cs);
                 xk_ready = true;
             }
             native_expert_grouped(L, gp, gs, gn, p.dst, p.tok, cap, cap, xa, xs, hit_scratch_, hit_out, cs);
@@ -925,13 +1001,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         stamp(l, 6, cs);
         Plan pcie;
         if (pcie_share_) {
-            wait_flag_ge(m_flagA_, ring, cs);                  // the pool published this group's PCIe share
+            wait_flag_ge(m_flagA_, ring, cs);   // the pool published this group's PCIe share
             stamp(l, 7, cs);
             int32_t* pl = plan_ + (size_t) grp * (size_t) plan_stride_;
             copy_i32_from_mapped(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, cs);
             pcie = plan_at(pl);
-            wait_flag_ge(m_flagB_ + grp, ring, cs);            // it is in staging (DMA) or mapped
-            if (sink_.pcie_mode == 2) {                        // stage it with a copy kernel, then point at staging
+            wait_flag_ge(m_flagB_ + grp, ring, cs);   // it is in staging (DMA) or mapped
+            if (sink_.pcie_mode == 2) {               // stage it with a copy kernel, then point at staging
                 const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
                 uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
                 fetch_blobs(pcie.ptr2, pcie.counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
@@ -942,9 +1018,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             stamp(l, 7, cs);
         }
         stamp(l, 8, cs);
-        if (!wait(cpjoin_[grp])) return false;                 // the CPU's share is in the mapped rows
+        if (!wait(cpjoin_[grp])) return false;   // the CPU's share is in the mapped rows
         stamp(l, 9, cs);
-        for (int t = 0; t < n_tiers_; ++t)                     // the GPU tiers', in `hit_out`
+        for (int t = 0; t < n_tiers_; ++t)   // the GPU tiers', in `hit_out`
             if (!wait(g2join_[grp][t])) return false;
         stamp(l, 10, cs);
         if (beside && (cudaStreamWaitEvent(cs, shjoin_, 0) != cudaSuccess ||
@@ -970,8 +1046,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         }
         if (const float* cv = cvec(l)) {   // the layer's write and its control vector
             CvecRows r;
-            r.R = Rt(tb); r.T = n; r.n_embd = N; r.hc = HC;
-            r.bo = bo_ + tb * N; r.inj = inj2_ + tb * HC; r.inj_ld = HC;
+            r.R = Rt(tb);
+            r.T = n;
+            r.n_embd = N;
+            r.hc = HC;
+            r.bo = bo_ + tb * N;
+            r.inj = inj2_ + tb * HC;
+            r.inj_ld = HC;
             try {
                 cvec_apply(r, cv, cs);
             } catch (const std::exception& e) {
@@ -999,7 +1080,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     {
         const WeightRef *hn = wt.find("output_hc_norm.weight"), *hd = wt.find("output_hc_down.weight"),
                         *hu = wt.find("output_hc_up.weight");
-        if (!hn || !hd || !hu) { err = "verify: an output_hc_* weight is missing"; return false; }
+        if (!hn || !hd || !hu) {
+            err = "verify: an output_hc_* weight is missing";
+            return false;
+        }
         if (head_ != nullptr && head_->loaded()) {   // the final mixer, the window's tokens in one read
             if (hn->kind != WeightKind::F32 || hd->kind != WeightKind::Bf16InF32 || hu->kind != WeightKind::Bf16InF32) {
                 err = "verify: the output_hc_* weights have the wrong engine forms";
@@ -1007,12 +1091,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             }
             FusedGrArgs fa[kFusedGrMaxT];
             for (int t = 0; t < T; ++t) {
-                fa[t].R = Rt(t); fa[t].R_out = Rt(t); fa[t].apply = false;
-                fa[t].w_norm = (const float*) hn->data; fa[t].w_down = (const uint16_t*) hd->data;
-                fa[t].w_up = (const uint16_t*) hu->data; fa[t].eps = EPS;
-                fa[t].q_down = hd->hc_codes; fa[t].s_down = hd->hc_scales;
-                fa[t].q_up = hu->hc_codes; fa[t].s_up = hu->hc_scales;
-                fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC; fa[t].mixed = head_mixed_ + t * N;
+                fa[t].R = Rt(t);
+                fa[t].R_out = Rt(t);
+                fa[t].apply = false;
+                fa[t].w_norm = (const float*) hn->data;
+                fa[t].w_down = (const uint16_t*) hd->data;
+                fa[t].w_up = (const uint16_t*) hu->data;
+                fa[t].eps = EPS;
+                fa[t].q_down = hd->hc_codes;
+                fa[t].s_down = hd->hc_scales;
+                fa[t].q_up = hu->hc_codes;
+                fa[t].s_up = hu->hc_scales;
+                fa[t].lo = lo_ + t * g.hc_lr;
+                fa[t].rs = rs_ + t * HC;
+                fa[t].mixed = head_mixed_ + t * N;
             }
             fused_gr_read_multi(fa, T, grs_, cs);
         } else {
@@ -1116,19 +1208,22 @@ bool Verifier::capture_commit(std::string& err) {
                 float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
                 const float* qkv = qkv_L_ + (size_t) gdn_index * MT * C;
                 gdn_conv_commit(conv, qkv, (int) C, commit_, cs_);
-                gdn_step_commit(state, h_L_ + (size_t) gdn_index * MT * C, (int) C, gate_L_ + (size_t) gdn_index * MT * HV,
-                                beta_L_ + (size_t) gdn_index * MT * HV, (int) g.ssm_k_heads, (int) HV, (int) MT, commit_,
-                                cs_);
+                gdn_step_commit(state, h_L_ + (size_t) gdn_index * MT * C, (int) C,
+                                gate_L_ + (size_t) gdn_index * MT * HV, beta_L_ + (size_t) gdn_index * MT * HV,
+                                (int) g.ssm_k_heads, (int) HV, (int) MT, commit_, cs_);
                 ++gdn_index;
             } else {
                 const QsaState& st = ss.qsa_states[qsa_index];
                 const WeightRef* wikn = need(v, "indexer.k_norm.weight", err);
-                if (!wikn) { ok = false; break; }
+                if (!wikn) {
+                    ok = false;
+                    break;
+                }
                 copy_from_mapped(st.idx_tail, tail_snap_ + (size_t) qsa_index * TS, TS, cs_);
                 const QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
-                native_qsa_indexer_append_multi(idx_raw_L_ + (size_t) (qsa_index * MT) * ID, commit_ + 2, 1, (int) MT, 0,
-                                                (const float*) wikn->data, EPS, ib, s, st.max_cells,
-                                                rope_scaling(), cs_);
+                native_qsa_indexer_append_multi(idx_raw_L_ + (size_t) (qsa_index * MT) * ID, commit_ + 2, 1, (int) MT,
+                                                0, (const float*) wikn->data, EPS, ib, s, st.max_cells, rope_scaling(),
+                                                cs_);
                 ++qsa_index;
             }
         }
@@ -1155,10 +1250,16 @@ bool Verifier::capture_commit(std::string& err) {
 bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool, void* user, int32_t* out,
                    std::string& err) {
     using namespace lamina::kernels;
-    if (T < 1 || T > max_t_) { err = "verify: window size out of range"; return false; }
+    if (T < 1 || T > max_t_) {
+        err = "verify: window size out of range";
+        return false;
+    }
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
-    if (pos0 + T > ss.qsa_states[0].max_cells) { err = "verify: the window runs past the context"; return false; }
+    if (pos0 + T > ss.qsa_states[0].max_cells) {
+        err = "verify: the window runs past the context";
+        return false;
+    }
     if (!capture(T, err) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
     const Clock::time_point t0 = Clock::now();
@@ -1208,7 +1309,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         for (int grp = 0; grp < 2; ++grp)
             for (int i = 0; i < 4; ++i) h_list2_[grp * list2_stride_ + i] = 0;
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        for (uint32_t* f : {h_flag_, h_flagA_, h_flagB_, h_flagB_ + 1, h_pleflag_}) *(volatile uint32_t*) f = 0xffffffffu;
+        for (uint32_t* f : {h_flag_, h_flagA_, h_flagB_, h_flagB_ + 1, h_pleflag_})
+            *(volatile uint32_t*) f = 0xffffffffu;
         for (int grp = 0; grp < 2; ++grp)
             for (int t = 0; t < kMaxGpuTiers; ++t) *(volatile uint32_t*) tier_flag(grp, t) = 0xffffffffu;
         cudaStreamSynchronize(cs_);
@@ -1286,11 +1388,13 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         set_plan_slot(grp);
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
         sink_.x1 = h_xq1_ + (size_t) tb * (size_t) (g.n_embd / 32) * 36;
-        sink_.xk = xk_layer_[(size_t) l] ? h_xk_ + (size_t) tb * (size_t) xk_stride_ : x1_layer_[(size_t) l] ? sink_.x1 : nullptr;
+        sink_.xk = xk_layer_[(size_t) l]   ? h_xk_ + (size_t) tb * (size_t) xk_stride_
+                   : x1_layer_[(size_t) l] ? sink_.x1
+                                           : nullptr;
         sink_.xk_stride = x1_layer_[(size_t) l] ? (g.n_embd / 32) * 36 : xk_stride_;
         if (pool != nullptr)
-            pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, h_w_ + (size_t) tb * ss.k, n,
-                 ss.k, h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
+            pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, h_w_ + (size_t) tb * ss.k, n, ss.k,
+                 h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
         VDBG("layer %lld served\n", (long long) l);
         std::atomic_thread_fence(std::memory_order_seq_cst);
         platform::device_store_fence();
@@ -1379,9 +1483,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         ++done_n_;
     }
     const cudaError_t se = cudaStreamSynchronize(cs_);
-    if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
+    if (se != cudaSuccess) {
+        err = std::string("verify: ") + cudaGetErrorString(se);
+        return false;
+    }
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
-    if (shead_ != nullptr) {   // each token's larger logit; on equality this GPU's, the lower index
+    if (shead_ != nullptr) {        // each token's larger logit; on equality this GPU's, the lower index
         if (!shead_->wait(done_n_, err)) return false;
         for (int t = 0; t < T; ++t) {
             const float v1 = ((volatile float*) h_val_)[t], v2 = ((volatile const float*) shead_->val())[t];
@@ -1395,7 +1502,10 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         sp.counter = (uint64_t) pos0;
         sample_tokens(shead_ != nullptr ? head_full_ : head_logits_, T, (int) n_vocab_, hist_d_, hist_len_, sp, m_out_,
                       cs_);
-        if (cudaStreamSynchronize(cs_) != cudaSuccess) { err = "verify: the head sampling failed"; return false; }
+        if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+            err = "verify: the head sampling failed";
+            return false;
+        }
     }
     for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
     if (stamps_ != nullptr && G == 1) {
@@ -1410,9 +1520,11 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             const int kind = is_qsa_layer(g, l) ? 1 : 0;
             const unsigned long long before = l == 0 ? w[1] : (st - kStamps)[kLayerStamps - 1];
             prof_ns_[(size_t) kind * kStamps] += (double) (st[0] - before);
-            for (int i = 1; i < kLayerStamps; ++i) prof_ns_[(size_t) kind * kStamps + i] += (double) (st[i] - st[i - 1]);
-            // the shared expert's branch and the second GPU's rows', from the doorbell (they fork there) to their ends; a
-            // branch that ended before the doorbell (a Q8_0 shared expert beside a rotation and a router) counts as none
+            for (int i = 1; i < kLayerStamps; ++i)
+                prof_ns_[(size_t) kind * kStamps + i] += (double) (st[i] - st[i - 1]);
+            // the shared expert's branch and the second GPU's rows', from the doorbell (they fork there) to their ends;
+            // a branch that ended before the doorbell (a Q8_0 shared
+            // expert beside a rotation and a router) counts as none
             const auto after_ring = [&](unsigned long long end) { return end > st[4] ? (double) (end - st[4]) : 0.0; };
             prof_ns_[(size_t) kind * kStamps + kLayerStamps] += after_ring(st[kLayerStamps]);
             for (int t = 0; t < n_tiers_; ++t)
@@ -1437,10 +1549,13 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
 }
 
 bool Verifier::copy_logits(int T, float* out, std::string& err) const {
-    if (shead_ != nullptr && !logits_wanted_) { err = "verify: the logits need set_logits_wanted"; return false; }
+    if (shead_ != nullptr && !logits_wanted_) {
+        err = "verify: the logits need set_logits_wanted";
+        return false;
+    }
     const float* src = shead_ != nullptr ? head_full_ : head_logits_;
-    if (cudaMemcpyAsync(out, src, (size_t) T * (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost,
-                        cs_) != cudaSuccess ||
+    if (cudaMemcpyAsync(out, src, (size_t) T * (size_t) n_vocab_ * sizeof(float), cudaMemcpyDeviceToHost, cs_) !=
+            cudaSuccess ||
         cudaStreamSynchronize(cs_) != cudaSuccess) {
         err = std::string("verify: reading the logits back: ") + cudaGetErrorString(cudaGetLastError());
         return false;
@@ -1468,18 +1583,29 @@ bool Verifier::candidate_logprobs(const int32_t* cand, int n, float* out, std::s
 
 void Verifier::print_profile() const {
     if (prof_windows_ == 0) return;
-    static const char* const names[kStamps] = {"stamp gap",      "HC read, mixer",   "mixer",          "HC read, FFN",
-                                               "router, ring, hits", "expert inputs", "VRAM experts",
-                                               "wait for PCIe plan", "PCIe experts", "wait for CPU",
-                                               "wait for GPU tiers", "rows + combine", "last HC write",
-                                               "shared expert, beside", "2nd GPU rows, beside",
-                                               "3rd GPU rows, beside", "4th GPU rows, beside"};
+    static const char* const names[kStamps] = {"stamp gap",
+                                               "HC read, mixer",
+                                               "mixer",
+                                               "HC read, FFN",
+                                               "router, ring, hits",
+                                               "expert inputs",
+                                               "VRAM experts",
+                                               "wait for PCIe plan",
+                                               "PCIe experts",
+                                               "wait for CPU",
+                                               "wait for GPU tiers",
+                                               "rows + combine",
+                                               "last HC write",
+                                               "shared expert, beside",
+                                               "2nd GPU rows, beside",
+                                               "3rd GPU rows, beside",
+                                               "4th GPU rows, beside"};
     const double nw = (double) prof_windows_;
     std::printf("%-24s GPU time over %lld windows, ms per window: inputs %.3f, head %.3f, whole window %.3f; "
                 "one stamp %.2f us (each stage below includes one; the branches \"beside\" run from the ring beside "
-                "the six before \"rows + combine\")\n", "window profile", (long long) prof_windows_,
-                prof_window_ns_[0] / nw / 1e6, prof_window_ns_[1] / nw / 1e6, prof_window_ns_[2] / nw / 1e6,
-                prof_window_ns_[3] / nw / 1e3);
+                "the six before \"rows + combine\")\n",
+                "window profile", (long long) prof_windows_, prof_window_ns_[0] / nw / 1e6,
+                prof_window_ns_[1] / nw / 1e6, prof_window_ns_[2] / nw / 1e6, prof_window_ns_[3] / nw / 1e3);
     std::printf("  %-22s %12s %12s %14s\n", "stage", "GDN us/layer", "QSA us/layer", "ms per window");
     for (int i = 0; i < kLayerStamps + 1 + n_tiers_; ++i) {
         const double a = prof_ns_[(size_t) i], b = prof_ns_[(size_t) kStamps + i];
@@ -1517,7 +1643,8 @@ void Verifier::set_plan_slot(int grp) {
     sink_.start2 = base + plan_ptr_off_ + 4 * cap;
     const int G = groups_[last_t_] > 0 ? groups_[last_t_] : 1;
     const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
-    sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * lamina::kernels::cpu::expert_layout().max_blob);
+    sink_.staging =
+        (unsigned long long) (staging_ + (size_t) (grp * per) * lamina::kernels::cpu::expert_layout().max_blob);
     sink_.staging_cap = per;
     if (n_tiers_ > 0) {
         sink_.gpu2_list = h_list2_ + (size_t) grp * (size_t) list2_stride_;
@@ -1538,7 +1665,8 @@ void Verifier::raise_flag(uint32_t* flag, uint32_t value) {
     }
 #else
     uint32_t cur = __atomic_load_n((uint32_t*) flag, __ATOMIC_SEQ_CST);
-    while (cur < value && !__atomic_compare_exchange_n((uint32_t*) flag, &cur, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {}
+    while (cur < value &&
+           !__atomic_compare_exchange_n((uint32_t*) flag, &cur, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {}
 #endif
 }
 
@@ -1548,13 +1676,23 @@ void Verifier::raise_flag(uint32_t* flag, uint32_t value) {
 void Verifier::fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes) {
     Verifier* v = (Verifier*) ctx;
     const uint32_t want = v->cur_layer_ + 1;
-    if (n <= 0) { raise_flag(v->h_flagB_ + v->cur_group_, want); return; }
-    uint8_t* stage = (uint8_t*) v->sink_.staging;                  // this group's half in a split window
-    for (int i = 0; i < n; ++i) cudaMemcpyAsync(stage + (size_t) i * bytes, src[i], bytes, cudaMemcpyHostToDevice, v->copy_);
+    if (n <= 0) {
+        raise_flag(v->h_flagB_ + v->cur_group_, want);
+        return;
+    }
+    uint8_t* stage = (uint8_t*) v->sink_.staging;   // this group's half in a split window
+    for (int i = 0; i < n; ++i)
+        cudaMemcpyAsync(stage + (size_t) i * bytes, src[i], bytes, cudaMemcpyHostToDevice, v->copy_);
     FlagSet& fs = v->flag_sets_[v->cur_layer_ % (sizeof v->flag_sets_ / sizeof v->flag_sets_[0])];
     fs.flag = v->h_flagB_ + v->cur_group_;
     fs.value = want;
-    cudaLaunchHostFunc(v->copy_, [](void* p) { FlagSet* s = (FlagSet*) p; raise_flag(s->flag, s->value); }, &fs);
+    cudaLaunchHostFunc(
+        v->copy_,
+        [](void* p) {
+            FlagSet* s = (FlagSet*) p;
+            raise_flag(s->flag, s->value);
+        },
+        &fs);
 }
 
 void Verifier::publish_plan(void* ctx) {
@@ -1564,7 +1702,10 @@ void Verifier::publish_plan(void* ctx) {
 }
 
 bool Verifier::commit(int n_keep, std::string& err, bool wait) {
-    if (n_keep < 1 || n_keep > last_t_) { err = "verify: commit count out of range"; return false; }
+    if (n_keep < 1 || n_keep > last_t_) {
+        err = "verify: commit count out of range";
+        return false;
+    }
     const Clock::time_point t0 = Clock::now();
     h_commit_[0] = n_keep;
     h_commit_[1] = n_keep - 1;
@@ -1572,7 +1713,10 @@ bool Verifier::commit(int n_keep, std::string& err, bool wait) {
     if (last_t_ > 1) {   // a one-token window has advanced the state itself (record_window)
         std::atomic_thread_fence(std::memory_order_seq_cst);
         const cudaError_t le = cudaGraphLaunch(commit_exec_, cs_);
-        if (le != cudaSuccess) { err = std::string("verify: commit launch: ") + cudaGetErrorString(le); return false; }
+        if (le != cudaSuccess) {
+            err = std::string("verify: commit launch: ") + cudaGetErrorString(le);
+            return false;
+        }
         (void) cudaStreamQuery(cs_);   // submit now, not at the next driver call
         commit_pending_ = true;
     }
@@ -1590,8 +1734,11 @@ bool Verifier::wait_commit(std::string& err) {
     commit_pending_ = false;
     const cudaError_t se = cudaStreamSynchronize(cs_);
     ms_commit += ms_since(t0);
-    if (se != cudaSuccess) { err = std::string("verify: commit: ") + cudaGetErrorString(se); return false; }
+    if (se != cudaSuccess) {
+        err = std::string("verify: commit: ") + cudaGetErrorString(se);
+        return false;
+    }
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

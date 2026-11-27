@@ -58,14 +58,14 @@ struct RemoteFile {
 
 /// What a URL names: the files of its scope, at one commit
 struct RemoteListing {
-    std::string url;      ///< as given
-    bool hub = false;     ///< listed through the Hub's API (else: a direct URL)
-    std::string hub_origin;   ///< the Hub's scheme://host[:port], to which alone its token goes
-    std::string commit;   ///< the Hub's commit the files are read at
-    std::string repo;     ///< the Hub's owner/name
-    std::string base;     ///< the download URL `RemoteFile::path` is relative to, ending in '/'
-    std::string focus;    ///< the path of the file the URL names, "" for a folder
-    std::string scope;    ///< the folder of the files listed ("": the base itself)
+    std::string url;                 ///< as given
+    bool hub = false;                ///< listed through the Hub's API (else: a direct URL)
+    std::string hub_origin;          ///< the Hub's scheme://host[:port], to which alone its token goes
+    std::string commit;              ///< the Hub's commit the files are read at
+    std::string repo;                ///< the Hub's owner/name
+    std::string base;                ///< the download URL `RemoteFile::path` is relative to, ending in '/'
+    std::string focus;               ///< the path of the file the URL names, "" for a folder
+    std::string scope;               ///< the folder of the files listed ("": the base itself)
     std::vector<RemoteFile> files;   ///< the scope's files and its subfolders', by path
     const RemoteFile* find(const std::string& path) const;
 };
@@ -96,14 +96,14 @@ public:
     std::string error(const std::string& path) const;
     /// a listing's path from its copy's ("" where `local` is none of the copies)
     std::string listed(const std::string& local) const;
-    const std::string& root() const { return root_; }       ///< the copies' folder
-    uint64_t bytes_read() const { return bytes_read_; }      ///< over the network so far
-    size_t files_read() const { return files_read_; }        ///< the files read so far (one of several paths of one id once)
+    const std::string& root() const { return root_; }     ///< the copies' folder
+    uint64_t bytes_read() const { return bytes_read_; }   ///< over the network so far
+    size_t files_read() const { return files_read_; }   ///< the files read so far (one of several paths of one id once)
 
 private:
     struct Read {
-        std::string head;   ///< the bytes read of the file's start
-        uint64_t size = 0;  ///< the file's
+        std::string head;    ///< the bytes read of the file's start
+        uint64_t size = 0;   ///< the file's
         std::string error;
     };
     Read read_one(const RemoteFile& f);
@@ -141,13 +141,14 @@ std::vector<std::string> files_beside(const RemoteListing& listing, const std::s
 /// each model its other shards and the files the server reads beside it read too
 struct RemoteFound {
     RemoteModel model;
-    std::string kind;      ///< "model", or a GgufRole's: "projector", "drafter", "LoRA", "control vector", "engram", ...
-    std::string what;      ///< what it is (GgufRole's)
-    std::string use;       ///< how Lamina reads it, where it does
-    std::string problem;   ///< why Lamina does not read it ("" where it does)
-    bool read = false;     ///< Lamina reads it (a projector's and a LoRA's model aside)
+    std::string kind;                 ///< "model", or a GgufRole's: "projector", "drafter",
+                                      ///< "LoRA", "control vector", "engram", ...
+    std::string what;                 ///< what it is (GgufRole's)
+    std::string use;                  ///< how Lamina reads it, where it does
+    std::string problem;              ///< why Lamina does not read it ("" where it does)
+    bool read = false;                ///< Lamina reads it (a projector's and a LoRA's model aside)
     std::vector<std::string> notes;   ///< a split model's shard found under another name, and the like
-    std::string error;     ///< why its files could not be read (a model's: a shard missing or refused)
+    std::string error;                ///< why its files could not be read (a model's: a shard missing or refused)
 };
 struct RemoteModels {
     RemoteListing listing;
@@ -165,4 +166,4 @@ RemoteModels read_remote_models(const std::string& url);
 /// model line ("Model: ...") with the first shard's URL
 std::string shown_remote(const RemoteModels& r, std::string_view line);
 
-}  // namespace lamina
+}   // namespace lamina

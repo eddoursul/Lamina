@@ -96,22 +96,28 @@ namespace lamina::kernels {
 /// Geometry of one QSA layer.  The real artifact: n_head 24, n_head_kv 2, head_dim 256, n_rot 64,
 /// idx_n_head 4, idx_dim 128, idx_block 4, idx_top_k 2048, freq_base 1e7, rms_eps 1e-6.
 struct QsaShapes {
-    int64_t n_head = 0;     ///< query heads (24).  n_head must be a multiple of n_head_kv
-    int64_t n_head_kv = 0;  ///< key/value heads (2).  The q -> kv map is `q / (n_head/n_head_kv)`, NOT `q % kv`
-    int64_t head_dim = 0;   ///< 256, and must be a multiple of 4
-    int64_t n_rot = 0;      ///< 64 rotated dims of head_dim (and of idx_dim), NEOX pairs
-    int64_t idx_n_head = 0; ///< indexer query heads (4)
-    int64_t idx_dim = 0;    ///< indexer key width (128)
-    int64_t idx_block = 0;  ///< r = 4: the indexer pools one key per 4 cells
-    int64_t idx_top_k = 0;  ///< 2048 cells of selection budget
-    int64_t page_size = 0;  ///< KV page granule in CELLS; 1 is a legal unpaged configuration
+    int64_t n_head = 0;       ///< query heads (24).  n_head must be a multiple of n_head_kv
+    int64_t n_head_kv = 0;    ///< key/value heads (2).  The q -> kv map is `q / (n_head/n_head_kv)`, NOT `q % kv`
+    int64_t head_dim = 0;     ///< 256, and must be a multiple of 4
+    int64_t n_rot = 0;        ///< 64 rotated dims of head_dim (and of idx_dim), NEOX pairs
+    int64_t idx_n_head = 0;   ///< indexer query heads (4)
+    int64_t idx_dim = 0;      ///< indexer key width (128)
+    int64_t idx_block = 0;    ///< r = 4: the indexer pools one key per 4 cells
+    int64_t idx_top_k = 0;    ///< 2048 cells of selection budget
+    int64_t page_size = 0;    ///< KV page granule in CELLS; 1 is a legal unpaged configuration
 };
 
 /// The real artifact's geometry, so no caller transcribes it by hand.
 inline QsaShapes qsa_real_shapes() {
     QsaShapes s;
-    s.n_head = 24; s.n_head_kv = 2; s.head_dim = 256; s.n_rot = 64;
-    s.idx_n_head = 4; s.idx_dim = 128; s.idx_block = 4; s.idx_top_k = 2048;
+    s.n_head = 24;
+    s.n_head_kv = 2;
+    s.head_dim = 256;
+    s.n_rot = 64;
+    s.idx_n_head = 4;
+    s.idx_dim = 128;
+    s.idx_block = 4;
+    s.idx_top_k = 2048;
     // one page = one indexer block (4 cells): the granule KV streaming keeps resident (kv_stream.hpp). The readers
     // resolve a row per cell anyway, so the page size costs them nothing (measured: identical output and speed).
     s.page_size = 4;
@@ -185,7 +191,6 @@ inline uint64_t qsa_step_bytes() { return sizeof(int32_t) * (uint64_t) kStepCoun
 /// and a caller computing them by hand is a caller who can compute them differently.
 void qsa_step_fill(int32_t* host_step, int64_t pos, const QsaShapes& s);
 
-
 /// One token's K and V into the paged FP16 cache, at logical cell `pos`.
 ///
 ///   k_pool, v_pool  `[page][kv_head][page_size][head_dim]` fp16, page_size*n_pages cells each
@@ -193,8 +198,8 @@ void qsa_step_fill(int32_t* host_step, int64_t pos, const QsaShapes& s);
 ///   kcur, vcur      (n_head_kv, head_dim) f32.  `kcur` must ALREADY be normed and rotated - V is never rotated
 ///
 /// The fp32 -> fp16 conversion is `f16_from_f32` (see f16_bits.hpp) and not `__float2half`.
-void kv_append(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_table, int64_t pos,
-               const float* kcur, const float* vcur, const QsaShapes& s, void* stream);
+void kv_append(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_table, int64_t pos, const float* kcur,
+               const float* vcur, const QsaShapes& s, void* stream);
 
 /// The selected cells through the page table into a contiguous scratch.
 ///
@@ -258,9 +263,9 @@ struct QsaIndexerBuffers {
 /// index is only right for a sequence that starts at 0.  The test runs the fixture at `pos_base = 100`, where
 /// the two readings are 514% apart.  `pos_base` is CONSTANT for a sequence, so unlike `pos_dev` it is safe to
 /// bake into a graph.
-void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_base, const float* w_k_norm,
-                        float eps, const QsaIndexerBuffers& b, const QsaShapes& s, const float* cos_tab,
-                        const float* sin_tab, void* stream);
+void indexer_key_append(const float* raw, const int32_t* pos_dev, int32_t pos_base, const float* w_k_norm, float eps,
+                        const QsaIndexerBuffers& b, const QsaShapes& s, const float* cos_tab, const float* sin_tab,
+                        void* stream);
 
 /// Per-CELL indexer scores, `n_kv = pos + 1` of them, fp32.
 ///
@@ -294,8 +299,7 @@ void qsa_index(const float* pooled, int64_t n_bid, const float* q_idx, const flo
 /// radix select and Phase 7 raises the cap; until then a longer context is refused loudly.
 inline constexpr int64_t kTopkMaxCells = 32768;
 
-void topk_512(const float* cell_scores, int64_t n_kv, const QsaShapes& s, int64_t cap, int32_t* ids,
-              void* stream);
+void topk_512(const float* cell_scores, int64_t n_kv, const QsaShapes& s, int64_t cap, int32_t* ids, void* stream);
 
 /// Softmax GQA over ONLY the gathered cells.  `q` is (n_head, head_dim) f32, already normed and rotated.
 ///
@@ -310,8 +314,8 @@ void topk_512(const float* cell_scores, int64_t n_kv, const QsaShapes& s, int64_
 /// is what `docs/capture-format.md`'s `L{n}.qsa_scores` records.  Produced here rather than recomputed by the
 /// caller so the capture cannot drift from the attention it claims to describe.  An EMPTY `ids` is legal and
 /// gives a zero `attn` (no selected cell has no softmax to take).
-void qsa_attend(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch, int64_t n_ids,
-                const QsaShapes& s, float* attn, float* weights, void* stream);
+void qsa_attend(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch, int64_t n_ids, const QsaShapes& s,
+                float* attn, float* weights, void* stream);
 
 /// `attn *= sigmoid(gate)` in f32, then ONE round to fp16 for the `attn_output` GEMV.
 ///
@@ -341,23 +345,22 @@ void qsa_gate_apply(const float* attn, const float* q_full, const QsaShapes& s, 
 // capacity LARGER than this token needs is correct, not merely safe.
 
 /// `max_blocks` must be at least `(max_cells / idx_block) + 2`.
-void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, const QsaShapes& s,
-                    const int32_t* step, int64_t max_blocks, float* cell_scores, void* stream);
+void qsa_index_step(const float* pooled, const float* q_idx, const float* bias, const QsaShapes& s, const int32_t* step,
+                    int64_t max_blocks, float* cell_scores, void* stream);
 
 /// `cap` must be `qsa_selection_width(kTopkMaxCells, s)` - the largest width the kernel can ever write.
-void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, const int32_t* step,
-                   int32_t* ids, void* stream);
+void topk_512_step(const float* cell_scores, const QsaShapes& s, int64_t cap, const int32_t* step, int32_t* ids,
+                   void* stream);
 
 /// `max_ids` must be the CAPACITY of `k_scratch`/`v_scratch` in ids.
-void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* page_table,
-                    const int32_t* ids, const int32_t* step, int64_t max_ids, const QsaShapes& s,
-                    uint16_t* k_scratch, uint16_t* v_scratch, void* stream);
+void kv_gather_step(const uint16_t* k_pool, const uint16_t* v_pool, const int32_t* page_table, const int32_t* ids,
+                    const int32_t* step, int64_t max_ids, const QsaShapes& s, uint16_t* k_scratch, uint16_t* v_scratch,
+                    void* stream);
 
 /// `max_ids` must be at least the largest selection the geometry can produce, because it sizes the SHARED
 /// memory the softmax works in.
-void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch,
-                     const int32_t* step, int64_t max_ids, const QsaShapes& s, float* attn, float* weights,
-                     void* stream);
+void qsa_attend_step(const float* q, const uint16_t* k_scratch, const uint16_t* v_scratch, const int32_t* step,
+                     int64_t max_ids, const QsaShapes& s, float* attn, float* weights, void* stream);
 
 struct KvHostPools;   // kv_stream.hpp
 
@@ -367,4 +370,4 @@ void kv_append_step(uint16_t* k_pool, uint16_t* v_pool, const int32_t* page_tabl
                     const float* kcur, const float* vcur, const QsaShapes& s, void* stream,
                     const KvHostPools* host = nullptr);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

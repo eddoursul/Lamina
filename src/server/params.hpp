@@ -32,7 +32,7 @@ struct Param {
     std::string_view aliases;   ///< other spellings, space-separated ("-m", "--lazy", "--temp")
     std::string_view key;       ///< "port"; a dot names a section's key: "sampling.temperature"
     ParamKind kind;
-    std::string_view arg;       ///< the value's name in --help ("N", "FILE")
+    std::string_view arg;   ///< the value's name in --help ("N", "FILE")
     std::string_view help;
 };
 /// The table, in --help's order; a Param with an empty flag starts a group, its help the group's title.
@@ -50,25 +50,27 @@ extern const std::vector<Command> kCommands;
 
 /// lamina's command line: a command, then its options
 struct CommandLine {
-    std::string command;                 ///< serve, check, bench or write-config
-    json settings = json::object();      ///< the options' values by key, a section's nested ({"sampling": {"top_k": 20}})
-    std::vector<EngineOption> engine;    ///< the options the table does not have: the engine's
-    std::string config;                  ///< --config
-    std::string write_config;            ///< write-config's FILE
-    bool check = false;                  ///< the command check
-    bool help = false;                   ///< -h / --help after the command: its options
-    bool version = false;                ///< -v / --version after the command
-    bool verbose = false;                ///< check --verbose: a URL's table with what each file is and why not
+    std::string command;                ///< serve, check, bench or write-config
+    json settings = json::object();     ///< the options' values by key, a section's
+                                        ///< nested ({"sampling": {"top_k": 20}})
+    std::vector<EngineOption> engine;   ///< the options the table does not have: the engine's
+    std::string config;                 ///< --config
+    std::string write_config;           ///< write-config's FILE
+    bool check = false;                 ///< the command check
+    bool help = false;                  ///< -h / --help after the command: its options
+    bool version = false;               ///< -v / --version after the command
+    bool verbose = false;               ///< check --verbose: a URL's table with what each file is and why not
     // bench (src/server/bench.hpp): the suite against a server of its own, or a running one (--url)
-    bool bench = false;                  ///< the command bench, with a model to load (no --url, no --compare OLD NEW)
-    std::string bench_url;               ///< bench --url
-    int bench_runs = 3;                  ///< bench --runs
-    int bench_clients = 0;               ///< bench --clients
-    bool bench_long = false;             ///< bench --long
-    bool bench_think = false;            ///< bench --think
-    std::string bench_out;               ///< bench --out (made absolute)
+    bool bench = false;                       ///< the command bench, with a model to
+                                              ///< load (no --url, no --compare OLD NEW)
+    std::string bench_url;                    ///< bench --url
+    int bench_runs = 3;                       ///< bench --runs
+    int bench_clients = 0;                    ///< bench --clients
+    bool bench_long = false;                  ///< bench --long
+    bool bench_think = false;                 ///< bench --think
+    std::string bench_out;                    ///< bench --out (made absolute)
     std::vector<std::string> bench_compare;   ///< bench --compare OLD [NEW] (made absolute)
-    bool bench_options = false;          ///< any of bench's options but --url and --compare
+    bool bench_options = false;               ///< any of bench's options but --url and --compare
 };
 /// argv[1] the command, the words after it its options, into a CommandLine (a word that is no option of the command's
 /// and starts with -- is the engine's, with the values after it).  std::invalid_argument for a command that is not
@@ -91,4 +93,4 @@ std::string command_help(std::string_view command);
 /// `lamina <command>`'s usage line (a usage error's first line)
 std::string command_usage(std::string_view command);
 
-}  // namespace lamina
+}   // namespace lamina

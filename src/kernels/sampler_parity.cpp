@@ -40,7 +40,10 @@ int reference_pick(const std::vector<float>& l, const lamina::kernels::SamplerPa
         float bv = 0;
         for (int v = 0; v < nv; ++v) {
             if (taken[(size_t) v]) continue;
-            if (best < 0 || val(v) > bv) { best = v; bv = val(v); }
+            if (best < 0 || val(v) > bv) {
+                best = v;
+                bv = val(v);
+            }
         }
         taken[(size_t) best] = 1;
         ids.push_back(best);
@@ -54,12 +57,15 @@ int reference_pick(const std::vector<float>& l, const lamina::kernels::SamplerPa
         int cut = (int) ids.size();
         for (size_t i = 0; i < ids.size(); ++i) {
             cum += std::exp((double) val(ids[i]) - (double) mx) / sum;
-            if (cum >= (double) p.top_p) { cut = (int) i + 1; break; }
+            if (cum >= (double) p.top_p) {
+                cut = (int) i + 1;
+                break;
+            }
         }
         if (cut < p.min_keep) cut = p.min_keep < (int) ids.size() ? p.min_keep : (int) ids.size();
         ids.resize((size_t) cut);
     }
-    return ids[0];      // greedy: the largest SURVIVING logit, and `ids` is in descending order
+    return ids[0];   // greedy: the largest SURVIVING logit, and `ids` is in descending order
 }
 
 // The number of survivors AFTER top_p, in the given order - the quantity the order actually changes.
@@ -71,12 +77,17 @@ int reference_cut(const std::vector<float>& l, const lamina::kernels::SamplerPar
     std::vector<int> ids;
     std::vector<char> taken((size_t) nv, 0);
     for (int i = 0; i < k; ++i) {
-        int best = -1; float bv = 0;
+        int best = -1;
+        float bv = 0;
         for (int v = 0; v < nv; ++v) {
             if (taken[(size_t) v]) continue;
-            if (best < 0 || val(v) > bv) { best = v; bv = val(v); }
+            if (best < 0 || val(v) > bv) {
+                best = v;
+                bv = val(v);
+            }
         }
-        taken[(size_t) best] = 1; ids.push_back(best);
+        taken[(size_t) best] = 1;
+        ids.push_back(best);
     }
     if (p.top_p < 1.0f) {
         float mx = val(ids[0]);
@@ -87,7 +98,10 @@ int reference_cut(const std::vector<float>& l, const lamina::kernels::SamplerPar
         int cut = (int) ids.size();
         for (size_t i = 0; i < ids.size(); ++i) {
             cum += std::exp((double) val(ids[i]) - (double) mx) / sum;
-            if (cum >= (double) p.top_p) { cut = (int) i + 1; break; }
+            if (cum >= (double) p.top_p) {
+                cut = (int) i + 1;
+                break;
+            }
         }
         if (cut < p.min_keep) cut = p.min_keep < (int) ids.size() ? p.min_keep : (int) ids.size();
         return cut;
@@ -110,12 +124,12 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
         check(cudaMalloc(&d_h, hist.size() * sizeof(int)), "malloc hist");
         check(cudaMemcpy(d_h, hist.data(), hist.size() * sizeof(int), cudaMemcpyHostToDevice), "copy hist");
     }
-    lamina::kernels::sample_tokens(d_l, n_tokens, (int) (logits.size() / n_tokens), d_h, hist_len, p, d_o,
-                                   nullptr);
+    lamina::kernels::sample_tokens(d_l, n_tokens, (int) (logits.size() / n_tokens), d_h, hist_len, p, d_o, nullptr);
     std::vector<int> got((size_t) n_tokens);
     check(cudaMemcpy(got.data(), d_o, got.size() * sizeof(int), cudaMemcpyDeviceToHost), "back");
     int bad = 0;
-    for (int t = 0; t < n_tokens; ++t) if (got[(size_t) t] != want[(size_t) t]) ++bad;
+    for (int t = 0; t < n_tokens; ++t)
+        if (got[(size_t) t] != want[(size_t) t]) ++bad;
     std::printf("  %-34s %s (%d of %d differ)", name, bad ? "*** WRONG ***" : "matches", bad, n_tokens);
     if (bad) std::printf("   first: want %d got %d", want[0], got[0]);
     std::printf("\n");
@@ -129,7 +143,10 @@ int run(const char* name, const std::vector<float>& logits, int n_tokens, const 
 // greedy argmax) is pinned against a reference that is not the header's `philox_uniform` (which the kernels and the
 // host share; `main` checks the two against each other).
 struct PhiloxRound {
-    uint32_t& c0; uint32_t& c1; uint32_t& c2; uint32_t& c3;
+    uint32_t& c0;
+    uint32_t& c1;
+    uint32_t& c2;
+    uint32_t& c3;
     void step(uint32_t k0, uint32_t k1) const {
         const uint32_t hi0 = (uint32_t) (((uint64_t) 0x9E3779B9u * c0) >> 32);
         const uint32_t hi1 = (uint32_t) (((uint64_t) 0xBB67AE85u * c2) >> 32);
@@ -139,7 +156,10 @@ struct PhiloxRound {
         const uint32_t n1 = lo1;
         const uint32_t n2 = hi0 ^ c3 ^ k1;
         const uint32_t n3 = lo0;
-        c0 = n0; c1 = n1; c2 = n2; c3 = n3;
+        c0 = n0;
+        c1 = n1;
+        c2 = n2;
+        c3 = n3;
     }
 };
 
@@ -159,26 +179,37 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
                       const lamina::kernels::SamplerParams& p, int row) {
     auto penal = [&](float logit, int count) {
         if (count <= 0) return logit;
-        if (logit <= 0.0f) logit *= p.penalty_repeat; else logit /= p.penalty_repeat;
+        if (logit <= 0.0f) logit *= p.penalty_repeat;
+        else logit /= p.penalty_repeat;
         logit -= (float) count * p.penalty_freq + (count > 0 ? 1.0f : 0.0f) * p.penalty_present;
         return logit;
     };
-    auto count = [&](int v) { int c = 0; for (int h : hist) if (h == v) ++c; return c; };
+    auto count = [&](int v) {
+        int c = 0;
+        for (int h : hist)
+            if (h == v) ++c;
+        return c;
+    };
     const int nv = (int) l.size();
-    const int KMAX = 64;                       // 1..64 as given; 0 (off) and wider keep the widest list, 64
+    const int KMAX = 64;   // 1..64 as given; 0 (off) and wider keep the widest list, 64
     const int k = std::min(nv, (p.top_k > 0 && p.top_k < KMAX) ? p.top_k : KMAX);
     std::vector<int> sel_ids;
     std::vector<float> sel_logit;
     std::vector<char> taken((size_t) nv, 0);
     for (int i = 0; i < k; ++i) {
-        int best = -1; float bv = 0;
+        int best = -1;
+        float bv = 0;
         for (int v = 0; v < nv; ++v) {
             if (taken[(size_t) v]) continue;
             const float s = penal(l[(size_t) v], count(v));
-            if (best < 0 || s > bv) { best = v; bv = s; }
+            if (best < 0 || s > bv) {
+                best = v;
+                bv = s;
+            }
         }
         taken[(size_t) best] = 1;
-        sel_ids.push_back(best); sel_logit.push_back(bv);
+        sel_ids.push_back(best);
+        sel_logit.push_back(bv);
     }
     // llama.cpp's order (issue #53): top_p over the whole top_k list, then min_p on its survivors
     const int n_sel = (int) sel_ids.size();
@@ -190,7 +221,10 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
         int cut = n_sel;
         for (int i = 0; i < n_sel; ++i) {
             cum += std::exp((double) sel_logit[(size_t) i] - (double) sel_logit[0]) / sum;
-            if (cum >= (double) p.top_p) { cut = i + 1; break; }
+            if (cum >= (double) p.top_p) {
+                cut = i + 1;
+                break;
+            }
         }
         if (cut < p.min_keep) cut = p.min_keep < n_sel ? p.min_keep : n_sel;
         n_keep = cut;
@@ -198,7 +232,10 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
     if (p.min_p > 0.0f) {
         const float thresh = sel_logit[0] + std::log(p.min_p);
         for (int i = 0; i < n_keep; ++i)
-            if (sel_logit[(size_t) i] < thresh) { n_keep = i; break; }
+            if (sel_logit[(size_t) i] < thresh) {
+                n_keep = i;
+                break;
+            }
     }
     const float inv_t = p.temperature > 0.0f ? 1.0f / p.temperature : 0.0f;
     auto scaled = [&](int i) { return sel_logit[(size_t) i] * inv_t; };   // one penalties stage, before (#53)
@@ -211,7 +248,10 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
     double cum = 0.0;
     for (int i = 0; i < n_keep; ++i) {
         cum += std::exp((double) scaled(i) - (double) smx) / sum;
-        if ((double) u < cum) { pick = sel_ids[(size_t) i]; break; }
+        if ((double) u < cum) {
+            pick = sel_ids[(size_t) i];
+            break;
+        }
     }
     return pick;
 }
@@ -221,30 +261,44 @@ int sampled_reference(const std::vector<float>& l, const std::vector<int>& hist,
 int sampled_cut(const std::vector<float>& l, const std::vector<int>& hist, const lamina::kernels::SamplerParams& p) {
     auto penal = [&](float logit, int count) {
         if (count <= 0) return logit;
-        if (logit <= 0.0f) logit *= p.penalty_repeat; else logit /= p.penalty_repeat;
+        if (logit <= 0.0f) logit *= p.penalty_repeat;
+        else logit /= p.penalty_repeat;
         logit -= (float) count * p.penalty_freq + (count > 0 ? 1.0f : 0.0f) * p.penalty_present;
         return logit;
     };
-    auto count = [&](int v) { int c = 0; for (int h : hist) if (h == v) ++c; return c; };
+    auto count = [&](int v) {
+        int c = 0;
+        for (int h : hist)
+            if (h == v) ++c;
+        return c;
+    };
     const int nv = (int) l.size();
     const int KMAX = 64;
     const int k = std::min(nv, (p.top_k > 0 && p.top_k < KMAX) ? p.top_k : KMAX);
     std::vector<float> sel;
     std::vector<char> taken((size_t) nv, 0);
     for (int i = 0; i < k; ++i) {
-        int best = -1; float bv = 0;
+        int best = -1;
+        float bv = 0;
         for (int v = 0; v < nv; ++v) {
             if (taken[(size_t) v]) continue;
             const float s = penal(l[(size_t) v], count(v));
-            if (best < 0 || s > bv) { best = v; bv = s; }
+            if (best < 0 || s > bv) {
+                best = v;
+                bv = s;
+            }
         }
-        taken[(size_t) best] = 1; sel.push_back(bv);
+        taken[(size_t) best] = 1;
+        sel.push_back(bv);
     }
     int n_minp = (int) sel.size();
     if (p.min_p > 0.0f) {
         const float thresh = sel[0] + std::log(p.min_p);
         for (int i = 0; i < (int) sel.size(); ++i)
-            if (sel[(size_t) i] < thresh) { n_minp = i; break; }
+            if (sel[(size_t) i] < thresh) {
+                n_minp = i;
+                break;
+            }
     }
     if (p.top_p >= 1.0f) return n_minp;
     double sum = 0.0;
@@ -253,7 +307,10 @@ int sampled_cut(const std::vector<float>& l, const std::vector<int>& hist, const
     int cut = n_minp;
     for (int i = 0; i < n_minp; ++i) {
         cum += std::exp((double) sel[(size_t) i] - (double) sel[0]) / sum;
-        if (cum >= (double) p.top_p) { cut = i + 1; break; }
+        if (cum >= (double) p.top_p) {
+            cut = i + 1;
+            break;
+        }
     }
     if (cut < p.min_keep) cut = p.min_keep < n_minp ? p.min_keep : n_minp;
     return cut;
@@ -279,7 +336,8 @@ SelList mirror_select(const float* l, int nv, const std::vector<int>& window, co
         for (int h : window) c += h == v;
         float x = l[v];
         if (c > 0) {
-            if (x <= 0.0f) x *= p.penalty_repeat; else x /= p.penalty_repeat;
+            if (x <= 0.0f) x *= p.penalty_repeat;
+            else x /= p.penalty_repeat;
             x -= (float) c * p.penalty_freq + (c > 0 ? 1.0f : 0.0f) * p.penalty_present;
         }
         s[(size_t) v] = x;
@@ -290,7 +348,10 @@ SelList mirror_select(const float* l, int nv, const std::vector<int>& window, co
         int best = nv;
         float bv = -std::numeric_limits<float>::infinity();
         for (int v = 0; v < nv; ++v)
-            if (!taken[(size_t) v] && s[(size_t) v] > bv) { bv = s[(size_t) v]; best = v; }
+            if (!taken[(size_t) v] && s[(size_t) v] > bv) {
+                bv = s[(size_t) v];
+                best = v;
+            }
         const int id = best < nv ? best : 0;
         taken[(size_t) id] = 1;
         out.ids.push_back(id);
@@ -311,7 +372,10 @@ int mirror_pick(const SelList& sel, int k, const lamina::kernels::SamplerParams&
         int cut = k;
         for (int i = 0; i < k; ++i) {
             cum += std::exp((double) sel.logit[(size_t) i] - (double) mx) / sum;
-            if (cum >= (double) p.top_p) { cut = i + 1; break; }
+            if (cum >= (double) p.top_p) {
+                cut = i + 1;
+                break;
+            }
         }
         if (cut < p.min_keep) cut = p.min_keep < k ? p.min_keep : k;
         n_keep = cut;
@@ -319,7 +383,10 @@ int mirror_pick(const SelList& sel, int k, const lamina::kernels::SamplerParams&
     if (p.min_p > 0.0f) {
         const float thresh = sel.logit[0] + std::log(p.min_p);
         for (int i = 0; i < n_keep; ++i)
-            if (sel.logit[(size_t) i] < thresh) { n_keep = i; break; }
+            if (sel.logit[(size_t) i] < thresh) {
+                n_keep = i;
+                break;
+            }
     }
     const float inv_t = p.temperature > 0.0f ? 1.0f / p.temperature : 0.0f;
     auto scaled = [&](int i) { return sel.logit[(size_t) i] * inv_t; };
@@ -332,7 +399,10 @@ int mirror_pick(const SelList& sel, int k, const lamina::kernels::SamplerParams&
     double cum = 0.0;
     for (int i = 0; i < n_keep; ++i) {
         cum += std::exp((double) scaled(i) - (double) smx) / sum;
-        if ((double) u < cum) { pick = sel.ids[(size_t) i]; break; }
+        if ((double) u < cum) {
+            pick = sel.ids[(size_t) i];
+            break;
+        }
     }
     return pick;
 }
@@ -398,7 +468,10 @@ void bench_sampled() {
         check(cudaMemcpy(d_l, l.data(), l.size() * sizeof(float), cudaMemcpyHostToDevice), "bench copy");
         for (int k : {20, 64}) {
             lamina::kernels::SamplerParams p;
-            p.top_k = k; p.top_p = 0.95f; p.temperature = 0.7f; p.seed = 1;
+            p.top_k = k;
+            p.top_p = 0.95f;
+            p.temperature = 0.7f;
+            p.seed = 1;
             for (int w = 0; w < 3; ++w) lamina::kernels::sample_tokens(d_l, T, NV, nullptr, 0, p, d_o, s);
             check(cudaStreamSynchronize(s), "bench warmup");
             cudaEvent_t e0, e1;
@@ -425,18 +498,24 @@ void bench_sampled() {
     cudaStreamDestroy(s);
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false, bench = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
         else if (std::string(argv[i]) == "--bench") bench = true;
-        else { std::fprintf(stderr, "usage: sampler_parity [--selftest] [--bench]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: sampler_parity [--selftest] [--bench]\n");
+            return 2;
+        }
     }
     {
         // the sampled path under test; ctest runs this binary once per path
-        auto on = [](const char* n) { const char* e = std::getenv(n); return e && *e && std::strcmp(e, "0") != 0; };
+        auto on = [](const char* n) {
+            const char* e = std::getenv(n);
+            return e && *e && std::strcmp(e, "0") != 0;
+        };
         std::printf("  sampled path: %s\n", on("LAMINA_OLD_SAMPLER")         ? "sampler_kernel (LAMINA_OLD_SAMPLER)"
                                             : on("LAMINA_SAMPLER_ONE_BLOCK") ? "one block (LAMINA_SAMPLER_ONE_BLOCK)"
                                                                              : "split top_k (default)");
@@ -457,8 +536,8 @@ int main(int argc, char** argv) {
             const uint64_t seed = i * 0x9E3779B97F4A7C15ull + 12345u, counter = i * 2654435761u + (i << 33);
             wrong += lamina::kernels::philox_uniform(seed, counter) != host_philox_uniform(seed, counter);
         }
-        std::printf("  %-34s %s (%d of 200000 differ)\n", "philox_uniform on the host", wrong ? "*** WRONG ***" : "matches",
-                    wrong);
+        std::printf("  %-34s %s (%d of 200000 differ)\n", "philox_uniform on the host",
+                    wrong ? "*** WRONG ***" : "matches", wrong);
         bad += wrong;
     }
 
@@ -480,31 +559,42 @@ int main(int argc, char** argv) {
         check(cudaMemcpy(db, bias.data(), NV * sizeof(float), cudaMemcpyHostToDevice), "bias upload");
         std::vector<int> hist(NT * 4, 7);
         DeviceRows raw(l, NT, hist, 4), expected(adjusted, NT, hist, 4);
-        for (bool greedy : {true, false}) for (bool penalty : {false, true}) {
-            lamina::kernels::SamplerParams p;
-            p.greedy = greedy; p.temperature = greedy ? 0 : 0.8f; p.seed = 71; p.top_k = 16;
-            if (penalty) { p.penalty_last_n = 4; p.penalty_freq = 3; p.penalty_repeat = 1.1f; }
-            const auto want = expected.sample(p, nullptr);
-            p.logit_bias = db;
-            const auto got = raw.sample(p, nullptr);
-            if (got != want || std::find(got.begin(), got.end(), 0) != got.end()) ++bad;
-            p.logit_bias = nullptr;
-            DeviceRows plain(l, NT, hist, 4);
-            if (raw.sample(p, nullptr) != plain.sample(p, nullptr)) ++bad;
-        }
+        for (bool greedy : {true, false})
+            for (bool penalty : {false, true}) {
+                lamina::kernels::SamplerParams p;
+                p.greedy = greedy;
+                p.temperature = greedy ? 0 : 0.8f;
+                p.seed = 71;
+                p.top_k = 16;
+                if (penalty) {
+                    p.penalty_last_n = 4;
+                    p.penalty_freq = 3;
+                    p.penalty_repeat = 1.1f;
+                }
+                const auto want = expected.sample(p, nullptr);
+                p.logit_bias = db;
+                const auto got = raw.sample(p, nullptr);
+                if (got != want || std::find(got.begin(), got.end(), 0) != got.end()) ++bad;
+                p.logit_bias = nullptr;
+                DeviceRows plain(l, NT, hist, 4);
+                if (raw.sample(p, nullptr) != plain.sample(p, nullptr)) ++bad;
+            }
         std::vector<float> unchanged(l.size());
         check(cudaMemcpy(unchanged.data(), raw.l, l.size() * sizeof(float), cudaMemcpyDeviceToHost), "raw logits");
         if (unchanged != l) ++bad;
         // The reporter's vocabulary scale, with only one permitted token: masked entries cannot win top-k tails.
         const int vocab = 248320;
         std::vector<float> large(vocab, 100), bans(vocab, -std::numeric_limits<float>::infinity());
-        bans[109266] = 0; large[109266] = -50;
+        bans[109266] = 0;
+        large[109266] = -50;
         cudaFree(db);
         check(cudaMalloc(&db, vocab * sizeof(float)), "large bias malloc");
         check(cudaMemcpy(db, bans.data(), bans.size() * sizeof(float), cudaMemcpyHostToDevice), "large bias upload");
         DeviceRows many(large, 1, {}, 0);
         for (bool greedy : {true, false}) {
-            lamina::kernels::SamplerParams p; p.greedy = greedy; p.logit_bias = db;
+            lamina::kernels::SamplerParams p;
+            p.greedy = greedy;
+            p.logit_bias = db;
             if (many.sample(p, nullptr) != std::vector<int>{109266}) ++bad;
         }
         cudaFree(db);
@@ -512,20 +602,31 @@ int main(int argc, char** argv) {
 
     // ---- fixture 1: plain greedy.  top_k = 0 (disabled), top_p = 1 (disabled), T = 1 -> argmax.
     {
-        lamina::kernels::SamplerParams p; p.top_k = 0; p.top_p = 1.0f; p.temperature = 1.0f; p.greedy = true;
-        std::mt19937 rng(3); std::normal_distribution<float> g(0.0f, 1.0f);
+        lamina::kernels::SamplerParams p;
+        p.top_k = 0;
+        p.top_p = 1.0f;
+        p.temperature = 1.0f;
+        p.greedy = true;
+        std::mt19937 rng(3);
+        std::normal_distribution<float> g(0.0f, 1.0f);
         std::vector<float> l((size_t) NV * NT);
         for (auto& v : l) v = g(rng);
         std::vector<int> want((size_t) NT);
-        for (int t = 0; t < NT; ++t) want[(size_t) t] = reference_pick({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, p, false);
+        for (int t = 0; t < NT; ++t)
+            want[(size_t) t] =
+                reference_pick({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, p, false);
         bad += run("greedy argmax", l, NT, p, want);
     }
 
     // ---- fixture 2: THE ORDER FIXTURE.  T = 0.5 sharpens the distribution enough that top_p = 0.5 cuts
     // differently before and after the scaling, and the two orders then pick DIFFERENT tokens.
     {
-        lamina::kernels::SamplerParams p; p.top_k = 0; p.top_p = 0.5f; p.temperature = 0.5f;
-        p.min_keep = 1; p.greedy = true;
+        lamina::kernels::SamplerParams p;
+        p.top_k = 0;
+        p.top_p = 0.5f;
+        p.temperature = 0.5f;
+        p.min_keep = 1;
+        p.greedy = true;
         std::vector<float> l((size_t) NV * NT, -1000.0f);
         for (int t = 0; t < NT; ++t) {
             // a flat-ish head so the cumulative mass crosses 0.5 inside it, and one clear leader
@@ -535,8 +636,8 @@ int main(int argc, char** argv) {
         std::vector<int> want((size_t) NT), other((size_t) NT);
         for (int t = 0; t < NT; ++t) {
             const std::vector<float> row(l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV);
-            want[(size_t) t] = reference_pick(row, p, false);      // the SPECIFIED order
-            other[(size_t) t] = reference_pick(row, p, true);      // temperature first
+            want[(size_t) t] = reference_pick(row, p, false);   // the SPECIFIED order
+            other[(size_t) t] = reference_pick(row, p, true);   // temperature first
         }
         // If the two orders agree on this fixture the test cannot see the order, and saying "the kernel
         // matches the spec" would be vacuous.
@@ -552,8 +653,7 @@ int main(int argc, char** argv) {
         }
         const bool distinguishable = (cut_spec != cut_alt);
         std::printf("  %-34s %s (survivors: spec %d, temp-first %d)\n", "order is observable on this fixture",
-                    distinguishable ? "yes" : "*** NO - THE FIXTURE CANNOT SEE THE ORDER ***", cut_spec,
-                    cut_alt);
+                    distinguishable ? "yes" : "*** NO - THE FIXTURE CANNOT SEE THE ORDER ***", cut_spec, cut_alt);
         if (!distinguishable) ++bad;
         // greedy is still checked here, but as an ARGMAX check, not an order check
         bad += run("greedy over this fixture", l, NT, p, want);
@@ -562,14 +662,23 @@ int main(int argc, char** argv) {
     // ---- fixture 3: greedy consumes NO random number.  Two runs with different seeds must agree, or the
     // seeded streams diverge between greedy and sampled runs - which docs/sampling.md §3 calls out.
     {
-        lamina::kernels::SamplerParams a; a.top_k = 20; a.top_p = 0.95f; a.temperature = 1.0f; a.greedy = true; a.seed = 1;
-        lamina::kernels::SamplerParams b = a; b.seed = 999999;
-        std::mt19937 rng(5); std::normal_distribution<float> g(0.0f, 1.0f);
+        lamina::kernels::SamplerParams a;
+        a.top_k = 20;
+        a.top_p = 0.95f;
+        a.temperature = 1.0f;
+        a.greedy = true;
+        a.seed = 1;
+        lamina::kernels::SamplerParams b = a;
+        b.seed = 999999;
+        std::mt19937 rng(5);
+        std::normal_distribution<float> g(0.0f, 1.0f);
         std::vector<float> l((size_t) NV * NT);
         for (auto& v : l) v = g(rng);
         std::vector<int> wa((size_t) NT);
-        for (int t = 0; t < NT; ++t) wa[(size_t) t] = reference_pick({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, a, false);
-        float* d_l = nullptr; int *d_a = nullptr, *d_b = nullptr;
+        for (int t = 0; t < NT; ++t)
+            wa[(size_t) t] = reference_pick({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, a, false);
+        float* d_l = nullptr;
+        int *d_a = nullptr, *d_b = nullptr;
         check(cudaMalloc(&d_l, l.size() * sizeof(float)), "m1");
         check(cudaMalloc(&d_a, (size_t) NT * sizeof(int)), "m2");
         check(cudaMalloc(&d_b, (size_t) NT * sizeof(int)), "m3");
@@ -584,49 +693,63 @@ int main(int argc, char** argv) {
             if (ga[(size_t) t] != gb[(size_t) t]) ++mismatch;
             if (ga[(size_t) t] != wa[(size_t) t]) ++wrong;
         }
-        std::printf("  %-34s %s (seed-independent: %d differ; vs reference: %d wrong)\n",
-                    "greedy ignores the seed", (!mismatch && !wrong) ? "matches" : "*** WRONG ***", mismatch,
-                    wrong);
+        std::printf("  %-34s %s (seed-independent: %d differ; vs reference: %d wrong)\n", "greedy ignores the seed",
+                    (!mismatch && !wrong) ? "matches" : "*** WRONG ***", mismatch, wrong);
         bad += mismatch + wrong;
-        cudaFree(d_l); cudaFree(d_a); cudaFree(d_b);
+        cudaFree(d_l);
+        cudaFree(d_a);
+        cudaFree(d_b);
     }
-
 
     // ---- fixture 4: PENALTIES.  Two sub-cases, each built so the rule it tests decides the answer.
     {
         // host reference for the penalty stage, transcribed from llama_sampler_penalties_apply
         auto penal = [](float logit, int count, const lamina::kernels::SamplerParams& p) {
             if (count <= 0) return logit;
-            if (logit <= 0.0f) logit *= p.penalty_repeat; else logit /= p.penalty_repeat;
+            if (logit <= 0.0f) logit *= p.penalty_repeat;
+            else logit /= p.penalty_repeat;
             logit -= (float) count * p.penalty_freq + (count > 0 ? 1.0f : 0.0f) * p.penalty_present;
             return logit;
         };
         auto pick = [&](const std::vector<float>& l, const std::vector<int>& hist,
                         const lamina::kernels::SamplerParams& p, bool divide_unconditionally) {
-            int best = 0; float bv = 0; bool first = true;
+            int best = 0;
+            float bv = 0;
+            bool first = true;
             for (int v = 0; v < (int) l.size(); ++v) {
-                int c = 0; for (int h : hist) if (h == v) ++c;
+                int c = 0;
+                for (int h : hist)
+                    if (h == v) ++c;
                 float s;
                 if (divide_unconditionally && c > 0) {
-                    s = l[(size_t) v] / p.penalty_repeat
-                        - (float) c * p.penalty_freq - (c > 0 ? 1.0f : 0.0f) * p.penalty_present;
+                    s = l[(size_t) v] / p.penalty_repeat - (float) c * p.penalty_freq -
+                        (c > 0 ? 1.0f : 0.0f) * p.penalty_present;
                 } else {
                     s = penal(l[(size_t) v], c, p);
                 }
-                if (first || s > bv) { bv = s; best = v; first = false; }
+                if (first || s > bv) {
+                    bv = s;
+                    best = v;
+                    first = false;
+                }
             }
             return best;
         };
 
         const int NV2 = 8, NT2 = 2;
-        lamina::kernels::SamplerParams p; p.top_k = 0; p.top_p = 1.0f; p.temperature = 1.0f;
-        p.greedy = true; p.penalty_last_n = 4; p.penalty_repeat = 2.0f;
+        lamina::kernels::SamplerParams p;
+        p.top_k = 0;
+        p.top_p = 1.0f;
+        p.temperature = 1.0f;
+        p.greedy = true;
+        p.penalty_last_n = 4;
+        p.penalty_repeat = 2.0f;
 
         // A: ALL logits negative, so the multiply-or-divide rule decides the argmax
         std::vector<float> la((size_t) NV2 * NT2, -8.0f);
         for (int t = 0; t < NT2; ++t) {
-            la[(size_t) t * NV2 + 0] = -1.0f;      // in the history -> penalised
-            la[(size_t) t * NV2 + 1] = -1.2f;      // not penalised -> should win
+            la[(size_t) t * NV2 + 0] = -1.0f;   // in the history -> penalised
+            la[(size_t) t * NV2 + 1] = -1.2f;   // not penalised -> should win
         }
         std::vector<int> hist_a((size_t) NT2 * 4, -1);
         for (int t = 0; t < NT2; ++t) hist_a[(size_t) t * 4 + 0] = 0;
@@ -635,12 +758,11 @@ int main(int argc, char** argv) {
             const std::vector<float> row(la.begin() + (size_t) t * NV2, la.begin() + (size_t) (t + 1) * NV2);
             const std::vector<int> h(hist_a.begin() + (size_t) t * 4, hist_a.begin() + (size_t) (t + 1) * 4);
             want_a[(size_t) t] = pick(row, h, p, false);
-            alt_a[(size_t) t] = pick(row, h, p, true);      // divide unconditionally
+            alt_a[(size_t) t] = pick(row, h, p, true);   // divide unconditionally
         }
         const bool A_visible = want_a[0] != alt_a[0];
-        std::printf("  %-34s %s (multiply-rule %d, divide-always %d)\n",
-                    "multiply-or-divide is observable", A_visible ? "yes" : "*** NO ***", want_a[0],
-                    alt_a[0]);
+        std::printf("  %-34s %s (multiply-rule %d, divide-always %d)\n", "multiply-or-divide is observable",
+                    A_visible ? "yes" : "*** NO ***", want_a[0], alt_a[0]);
         if (!A_visible) ++bad;
         else bad += run("penalties: repeat on negatives", la, NT2, p, want_a, hist_a, 4);
 
@@ -648,15 +770,17 @@ int main(int argc, char** argv) {
         // is inside the difference between one and two applications.
         std::vector<float> lb((size_t) NV2 * NT2, -8.0f);
         for (int t = 0; t < NT2; ++t) {
-            lb[(size_t) t * NV2 + 0] = 5.0f;       // seen twice -> penalised ONCE (presence) + freq*2
-            lb[(size_t) t * NV2 + 1] = 3.4f;       // unseen
+            lb[(size_t) t * NV2 + 0] = 5.0f;   // seen twice -> penalised ONCE (presence) + freq*2
+            lb[(size_t) t * NV2 + 1] = 3.4f;   // unseen
         }
         std::vector<int> hist_b((size_t) NT2 * 4, -1);
         for (int t = 0; t < NT2; ++t) {
             hist_b[(size_t) t * 4 + 0] = 0;
-            hist_b[(size_t) t * 4 + 1] = 0;        // twice
+            hist_b[(size_t) t * 4 + 1] = 0;   // twice
         }
-        lamina::kernels::SamplerParams q = p; q.penalty_present = 1.5f; q.penalty_freq = 0.0f;
+        lamina::kernels::SamplerParams q = p;
+        q.penalty_present = 1.5f;
+        q.penalty_freq = 0.0f;
         std::vector<int> want_b((size_t) NT2);
         for (int t = 0; t < NT2; ++t) {
             const std::vector<float> row(lb.begin() + (size_t) t * NV2, lb.begin() + (size_t) (t + 1) * NV2);
@@ -664,7 +788,8 @@ int main(int argc, char** argv) {
             want_b[(size_t) t] = pick(row, h, q, false);
         }
         std::printf("  %-34s want token %d (with present=1.5, token 0 goes 5.0/2 - 1.5 = 1.0 vs token 1 at "
-                    "3.4)\n", "presence penalty is a boolean", want_b[0]);
+                    "3.4)\n",
+                    "presence penalty is a boolean", want_b[0]);
         bad += run("penalties: presence is boolean", lb, NT2, q, want_b, hist_b, 4);
     }
 
@@ -683,19 +808,25 @@ int main(int argc, char** argv) {
         std::vector<float> l((size_t) NV3 * NT3, -5.0f);
         std::vector<int> want((size_t) NT3);
         for (int t = 0; t < NT3; ++t) {
-            const int best = 100 + t;                    // the argmax is never token 0
+            const int best = 100 + t;   // the argmax is never token 0
             l[(size_t) t * NV3 + best] = 3.0f;
-            l[(size_t) t * NV3 + 0] = -9.0f;             // token 0 is the worst in the row
+            l[(size_t) t * NV3 + 0] = -9.0f;   // token 0 is the worst in the row
             want[(size_t) t] = best;
         }
         lamina::kernels::SamplerParams p0;
-        p0.top_k = 0; p0.top_p = 1.0f; p0.temperature = 0.0f; p0.greedy = false;
+        p0.top_k = 0;
+        p0.top_p = 1.0f;
+        p0.temperature = 0.0f;
+        p0.greedy = false;
         bad += run("T=0 greedy=false is the argmax", l, NT3, p0, want);
 
-        lamina::kernels::SamplerParams p1 = p0; p1.greedy = true;
+        lamina::kernels::SamplerParams p1 = p0;
+        p1.greedy = true;
         bad += run("T=0 greedy=true  is the argmax", l, NT3, p1, want);
 
-        lamina::kernels::SamplerParams p2 = p0; p2.greedy = true; p2.temperature = 1.0f;
+        lamina::kernels::SamplerParams p2 = p0;
+        p2.greedy = true;
+        p2.temperature = 1.0f;
         bad += run("T=1 greedy=true  is the argmax", l, NT3, p2, want);
     }
 
@@ -705,21 +836,33 @@ int main(int argc, char** argv) {
     {
         const int NV2 = 8, NT2 = 2;
         lamina::kernels::SamplerParams p;
-        p.top_k = 5; p.top_p = 0.9f; p.temperature = 0.8f; p.seed = 9; p.counter = 0;
-        p.penalty_last_n = 4; p.penalty_repeat = 3.0f; p.penalty_freq = 0.2f; p.penalty_present = 0.6f;
+        p.top_k = 5;
+        p.top_p = 0.9f;
+        p.temperature = 0.8f;
+        p.seed = 9;
+        p.counter = 0;
+        p.penalty_last_n = 4;
+        p.penalty_repeat = 3.0f;
+        p.penalty_freq = 0.2f;
+        p.penalty_present = 0.6f;
 
         std::vector<float> l((size_t) NV2 * NT2, -8.0f);
         std::vector<int> hist((size_t) NT2 * 4, -1);
         for (int t = 0; t < NT2; ++t) {
             float* row = l.data() + (size_t) t * NV2;
-            row[0] = 9.0f; row[1] = 4.5f; row[2] = 4.4f; row[3] = 4.3f;   // token 0 leads clean (9 vs 4.5)
-            hist[(size_t) t * 4 + 0] = 0;                                  // and falls to 2.2/2.0 penalised
-            hist[(size_t) t * 4 + 1] = t == 1 ? 0 : -1;                    // (repeat 3, freq, presence)
+            row[0] = 9.0f;
+            row[1] = 4.5f;
+            row[2] = 4.4f;
+            row[3] = 4.3f;                                // token 0 leads clean (9 vs 4.5)
+            hist[(size_t) t * 4 + 0] = 0;                 // and falls to 2.2/2.0 penalised
+            hist[(size_t) t * 4 + 1] = t == 1 ? 0 : -1;   // (repeat 3, freq, presence)
         }
         std::vector<int> want((size_t) NT2), clean((size_t) NT2);
         lamina::kernels::SamplerParams clean_p = p;
-        clean_p.penalty_last_n = 0; clean_p.penalty_repeat = 1.0f;
-        clean_p.penalty_freq = 0.0f; clean_p.penalty_present = 0.0f;
+        clean_p.penalty_last_n = 0;
+        clean_p.penalty_repeat = 1.0f;
+        clean_p.penalty_freq = 0.0f;
+        clean_p.penalty_present = 0.0f;
         for (int t = 0; t < NT2; ++t) {
             const std::vector<float> row(l.begin() + (size_t) t * NV2, l.begin() + (size_t) (t + 1) * NV2);
             const std::vector<int> h(hist.begin() + (size_t) t * 4, hist.begin() + (size_t) (t + 1) * 4);
@@ -727,9 +870,8 @@ int main(int argc, char** argv) {
             clean[(size_t) t] = sampled_reference(row, h, clean_p, t);
         }
         const bool visible = want[0] != clean[0] || want[1] != clean[1];
-        std::printf("  %-34s %s (penalised picks %d/%d, clean %d/%d)\n",
-                    "sampled penalties are observable", visible ? "yes" : "*** NO ***", want[0], want[1],
-                    clean[0], clean[1]);
+        std::printf("  %-34s %s (penalised picks %d/%d, clean %d/%d)\n", "sampled penalties are observable",
+                    visible ? "yes" : "*** NO ***", want[0], want[1], clean[0], clean[1]);
         if (!visible) ++bad;
         else bad += run("sampled chain: penalties + top_k/p", l, NT2, p, want, hist, 4);
     }
@@ -742,27 +884,37 @@ int main(int argc, char** argv) {
         std::vector<float> l((size_t) NV3 * NT3, -8.0f);
         for (int t = 0; t < NT3; ++t) {
             float* row = l.data() + (size_t) t * NV3;
-            row[0] = 4.0f; row[1] = 3.5f; row[2] = 3.2f; row[3] = 3.1f;   // gaps keep the cut off the
-            row[4] = 2.0f;                                                // logf/rounding knife edge
+            row[0] = 4.0f;
+            row[1] = 3.5f;
+            row[2] = 3.2f;
+            row[3] = 3.1f;   // gaps keep the cut off the
+            row[4] = 2.0f;   // logf/rounding knife edge
         }
         lamina::kernels::SamplerParams base;
-        base.top_k = 6; base.top_p = 1.0f; base.temperature = 0.9f; base.seed = 77;
+        base.top_k = 6;
+        base.top_p = 1.0f;
+        base.temperature = 0.9f;
+        base.seed = 77;
 
         int c0 = 0, c05 = 0, c09 = 0;
         for (int t = 0; t < NT3; ++t) {
             const std::vector<float> row(l.begin() + (size_t) t * NV3, l.begin() + (size_t) (t + 1) * NV3);
-            lamina::kernels::SamplerParams q = base; q.min_p = 0.0f;
+            lamina::kernels::SamplerParams q = base;
+            q.min_p = 0.0f;
             c0 += sampled_cut(row, {}, q);
-            q.min_p = 0.5f; c05 += sampled_cut(row, {}, q);
-            q.min_p = 0.9f; c09 += sampled_cut(row, {}, q);
+            q.min_p = 0.5f;
+            c05 += sampled_cut(row, {}, q);
+            q.min_p = 0.9f;
+            c09 += sampled_cut(row, {}, q);
         }
         const bool visible = c0 > c05 && c05 > c09 && c09 >= NT3;
-        std::printf("  %-34s %s (survivors: min_p 0 -> %d, 0.5 -> %d, 0.9 -> %d)\n",
-                    "min_p cut is observable", visible ? "yes" : "*** NO ***", c0, c05, c09);
+        std::printf("  %-34s %s (survivors: min_p 0 -> %d, 0.5 -> %d, 0.9 -> %d)\n", "min_p cut is observable",
+                    visible ? "yes" : "*** NO ***", c0, c05, c09);
         if (!visible) ++bad;
 
         for (float mp : {0.0f, 0.5f, 0.9f}) {
-            lamina::kernels::SamplerParams q = base; q.min_p = mp;
+            lamina::kernels::SamplerParams q = base;
+            q.min_p = mp;
             std::vector<int> want((size_t) NT3);
             for (int t = 0; t < NT3; ++t) {
                 const std::vector<float> row(l.begin() + (size_t) t * NV3, l.begin() + (size_t) (t + 1) * NV3);
@@ -781,29 +933,45 @@ int main(int argc, char** argv) {
     {
         const int NV4 = 8;
         lamina::kernels::SamplerParams p;
-        p.top_k = 0; p.top_p = 1.0f; p.temperature = 1.0f; p.greedy = true;
-        p.penalty_last_n = 4; p.penalty_repeat = 3.0f; p.penalty_freq = 0.3f; p.penalty_present = 0.5f;
+        p.top_k = 0;
+        p.top_p = 1.0f;
+        p.temperature = 1.0f;
+        p.greedy = true;
+        p.penalty_last_n = 4;
+        p.penalty_repeat = 3.0f;
+        p.penalty_freq = 0.3f;
+        p.penalty_present = 0.5f;
 
         std::vector<float> l((size_t) NV4, -8.0f);
-        l[0] = 6.0f; l[3] = 6.5f;                       // token 0 leads clean; token 3 is the tail offender
+        l[0] = 6.0f;
+        l[3] = 6.5f;                                        // token 0 leads clean; token 3 is the tail offender
         std::vector<int> hist = {0, 0, 0, 0, 3, 3, 3, 3};   // token 0 old (out), token 3 in the tail
 
         auto pick_clamped = [&](bool clamp) {
-            int best = 0; float bv = 0; bool first = true;
+            int best = 0;
+            float bv = 0;
+            bool first = true;
             for (int v = 0; v < NV4; ++v) {
                 int c = 0;
-                for (int i = 0; i < (clamp ? 4 : 8); ++i) if (hist[(size_t) (8 - (clamp ? 4 : 8) + i)] == v) ++c;
+                for (int i = 0; i < (clamp ? 4 : 8); ++i)
+                    if (hist[(size_t) (8 - (clamp ? 4 : 8) + i)] == v) ++c;
                 float logit = l[(size_t) v];
-                if (c > 0) { logit = logit <= 0.0f ? logit * p.penalty_repeat : logit / p.penalty_repeat;
-                             logit -= (float) c * p.penalty_freq + p.penalty_present; }
-                if (first || logit > bv) { bv = logit; best = v; first = false; }
+                if (c > 0) {
+                    logit = logit <= 0.0f ? logit * p.penalty_repeat : logit / p.penalty_repeat;
+                    logit -= (float) c * p.penalty_freq + p.penalty_present;
+                }
+                if (first || logit > bv) {
+                    bv = logit;
+                    best = v;
+                    first = false;
+                }
             }
             return best;
         };
         const int want = pick_clamped(true), unclamped = pick_clamped(false);
         const bool visible = want != unclamped;
-        std::printf("  %-34s %s (clamped pick %d, full-history pick %d)\n",
-                    "penalty window clamp is observable", visible ? "yes" : "*** NO ***", want, unclamped);
+        std::printf("  %-34s %s (clamped pick %d, full-history pick %d)\n", "penalty window clamp is observable",
+                    visible ? "yes" : "*** NO ***", want, unclamped);
         if (!visible) ++bad;
         else bad += run("penalty window: tail only", {l.begin(), l.end()}, 1, p, {want}, hist, 8);
     }
@@ -817,8 +985,16 @@ int main(int argc, char** argv) {
     {
         const int NT9 = 8000;
         lamina::kernels::SamplerParams p;
-        p.top_k = 2; p.top_p = 1.0f; p.min_p = 0.0f; p.temperature = 0.7f; p.seed = 53; p.counter = 0;
-        p.penalty_last_n = 1; p.penalty_repeat = 1.0f; p.penalty_freq = 0.0f; p.penalty_present = 1.5f;
+        p.top_k = 2;
+        p.top_p = 1.0f;
+        p.min_p = 0.0f;
+        p.temperature = 0.7f;
+        p.seed = 53;
+        p.counter = 0;
+        p.penalty_last_n = 1;
+        p.penalty_repeat = 1.0f;
+        p.penalty_freq = 0.0f;
+        p.penalty_present = 1.5f;
         std::vector<float> l((size_t) 2 * NT9, 0.0f);
         std::vector<int> hist((size_t) NT9, 0);
         std::vector<int> want((size_t) NT9);
@@ -842,7 +1018,12 @@ int main(int argc, char** argv) {
     {
         const int NT10 = 256;
         lamina::kernels::SamplerParams p;
-        p.top_k = 4; p.top_p = 0.75f; p.min_p = 0.3f; p.temperature = 1.0f; p.seed = 10; p.counter = 0;
+        p.top_k = 4;
+        p.top_p = 0.75f;
+        p.min_p = 0.3f;
+        p.temperature = 1.0f;
+        p.seed = 10;
+        p.counter = 0;
         const float lp[4] = {std::log(0.4f), std::log(0.3f), std::log(0.2f), std::log(0.1f)};
         std::vector<float> row = {lp[0], lp[1], lp[2], lp[3], -30.0f, -30.0f, -30.0f, -30.0f};
         std::vector<float> l;
@@ -863,25 +1044,32 @@ int main(int argc, char** argv) {
     // from a previous penalised request while this request disables the penalties - the run must equal the
     // no-history run in both kernels, and the bitmap the launch did not size must stay untouched.
     {
-        std::mt19937 rng(11); std::normal_distribution<float> g(0.0f, 1.0f);
+        std::mt19937 rng(11);
+        std::normal_distribution<float> g(0.0f, 1.0f);
         std::vector<float> l((size_t) NV * NT);
         for (auto& v : l) v = g(rng);
         std::vector<int> hist((size_t) NT * 8, -1);
         for (int t = 0; t < NT; ++t) hist[(size_t) t * 8] = 3;
 
         lamina::kernels::SamplerParams p;
-        p.top_k = 20; p.top_p = 0.95f; p.temperature = 0.8f; p.seed = 5;
+        p.top_k = 20;
+        p.top_p = 0.95f;
+        p.temperature = 0.8f;
+        p.seed = 5;
         std::vector<int> want((size_t) NT);
         for (int t = 0; t < NT; ++t)
-            want[(size_t) t] = sampled_reference({l.begin() + (size_t) t * NV,
-                                                  l.begin() + (size_t) (t + 1) * NV}, {}, p, t);
+            want[(size_t) t] =
+                sampled_reference({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, {}, p, t);
         bad += run("stale history, last_n=0 (sampled)", l, NT, p, want, hist, 8);
 
-        lamina::kernels::SamplerParams gp = p; gp.greedy = true; gp.top_k = 0; gp.top_p = 1.0f;
+        lamina::kernels::SamplerParams gp = p;
+        gp.greedy = true;
+        gp.top_k = 0;
+        gp.top_p = 1.0f;
         std::vector<int> gwant((size_t) NT);
         for (int t = 0; t < NT; ++t)
-            gwant[(size_t) t] = reference_pick({l.begin() + (size_t) t * NV,
-                                                l.begin() + (size_t) (t + 1) * NV}, gp, false);
+            gwant[(size_t) t] =
+                reference_pick({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, gp, false);
         bad += run("stale history, last_n=0 (greedy)", l, NT, gp, gwant, hist, 8);
     }
 
@@ -894,20 +1082,30 @@ int main(int argc, char** argv) {
     {
         auto greedy_pen = [](const std::vector<float>& l, const std::vector<int>& hist,
                              const lamina::kernels::SamplerParams& p) {
-            int best = 0; float bv = 0; bool first = true;
+            int best = 0;
+            float bv = 0;
+            bool first = true;
             for (int v = 0; v < (int) l.size(); ++v) {
-                int c = 0; for (int h : hist) if (h == v) ++c;
+                int c = 0;
+                for (int h : hist)
+                    if (h == v) ++c;
                 float s = l[(size_t) v];
                 if (c > 0) {
-                    if (s <= 0.0f) s *= p.penalty_repeat; else s /= p.penalty_repeat;
+                    if (s <= 0.0f) s *= p.penalty_repeat;
+                    else s /= p.penalty_repeat;
                     s -= (float) c * p.penalty_freq + p.penalty_present;
                 }
-                if (first || s > bv) { bv = s; best = v; first = false; }
+                if (first || s > bv) {
+                    bv = s;
+                    best = v;
+                    first = false;
+                }
             }
             return best;
         };
-        std::mt19937 rng(12); std::normal_distribution<float> g(0.0f, 1.0f);
-        const int TAIL = 5000;                           // longer than the widest window below
+        std::mt19937 rng(12);
+        std::normal_distribution<float> g(0.0f, 1.0f);
+        const int TAIL = 5000;   // longer than the widest window below
         std::vector<int32_t> tail((size_t) TAIL);
         for (auto& v : tail) v = (int32_t) (rng() % NV);
         int observable = 0, rows_checked = 0;
@@ -921,11 +1119,21 @@ int main(int argc, char** argv) {
                 for (auto& v : l) v = g(rng);
                 for (int t = 0; t < T; ++t) l[(size_t) t * NV + window[(size_t) t]] = 5.0f;
                 lamina::kernels::SamplerParams gp;
-                gp.greedy = true; gp.temperature = 0.0f; gp.top_k = 0; gp.top_p = 1.0f;
-                gp.penalty_last_n = H; gp.penalty_present = 4.0f;
+                gp.greedy = true;
+                gp.temperature = 0.0f;
+                gp.top_k = 0;
+                gp.top_p = 1.0f;
+                gp.penalty_last_n = H;
+                gp.penalty_present = 4.0f;
                 lamina::kernels::SamplerParams sp2;
-                sp2.top_k = 20; sp2.top_p = 0.9f; sp2.temperature = 0.7f; sp2.seed = 1000 + (uint64_t) H;
-                sp2.counter = 77; sp2.penalty_last_n = H; sp2.penalty_present = 4.0f; sp2.penalty_repeat = 1.1f;
+                sp2.top_k = 20;
+                sp2.top_p = 0.9f;
+                sp2.temperature = 0.7f;
+                sp2.seed = 1000 + (uint64_t) H;
+                sp2.counter = 77;
+                sp2.penalty_last_n = H;
+                sp2.penalty_present = 4.0f;
+                sp2.penalty_repeat = 1.1f;
                 std::vector<int> gwant((size_t) T), swant((size_t) T), rows_int(rows.begin(), rows.end());
                 for (int t = 0; t < T; ++t) {
                     const std::vector<float> lr(l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV);
@@ -953,7 +1161,8 @@ int main(int argc, char** argv) {
     // an id >= n_vocab used to set a bit past its end (a shared-memory write out of bounds - compute-sanitizer
     // memcheck reports it).  They can never be a candidate, so the result equals the reference without them.
     {
-        std::mt19937 rng(13); std::normal_distribution<float> g(0.0f, 1.0f);
+        std::mt19937 rng(13);
+        std::normal_distribution<float> g(0.0f, 1.0f);
         const int H = 16;
         std::vector<float> l((size_t) NV * NT);
         for (auto& v : l) v = g(rng);
@@ -966,24 +1175,44 @@ int main(int argc, char** argv) {
                 hist[(size_t) t * H + j] = v;
                 if (!bogus) valid_only[(size_t) t * H + j] = v;
             }
-            l[(size_t) t * NV + hist[(size_t) t * H + 1]] = 4.0f;     // a penalised favourite, so penalties matter
+            l[(size_t) t * NV + hist[(size_t) t * H + 1]] = 4.0f;   // a penalised favourite, so penalties matter
         }
         lamina::kernels::SamplerParams gp;
-        gp.greedy = true; gp.temperature = 0.0f; gp.top_k = 0; gp.top_p = 1.0f;
-        gp.penalty_last_n = H; gp.penalty_present = 3.0f;
+        gp.greedy = true;
+        gp.temperature = 0.0f;
+        gp.top_k = 0;
+        gp.top_p = 1.0f;
+        gp.penalty_last_n = H;
+        gp.penalty_present = 3.0f;
         lamina::kernels::SamplerParams sp2 = gp;
-        sp2.greedy = false; sp2.temperature = 0.8f; sp2.top_k = 20; sp2.top_p = 0.95f; sp2.seed = 13;
+        sp2.greedy = false;
+        sp2.temperature = 0.8f;
+        sp2.top_k = 20;
+        sp2.top_p = 0.95f;
+        sp2.seed = 13;
         std::vector<int> gwant((size_t) NT), swant((size_t) NT);
         for (int t = 0; t < NT; ++t) {
             const std::vector<float> lr(l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV);
             const std::vector<int> ok(valid_only.begin() + (size_t) t * H, valid_only.begin() + (size_t) (t + 1) * H);
             {   // the greedy reference with the penalty (reference_pick has none)
-                int best = 0; float bv = 0; bool first = true;
+                int best = 0;
+                float bv = 0;
+                bool first = true;
                 for (int v = 0; v < NV; ++v) {
-                    int c = 0; for (int h : ok) if (h == v) ++c;
+                    int c = 0;
+                    for (int h : ok)
+                        if (h == v) ++c;
                     float s = lr[(size_t) v];
-                    if (c > 0) { if (s <= 0.0f) s *= gp.penalty_repeat; else s /= gp.penalty_repeat; s -= gp.penalty_present; }
-                    if (first || s > bv) { bv = s; best = v; first = false; }
+                    if (c > 0) {
+                        if (s <= 0.0f) s *= gp.penalty_repeat;
+                        else s /= gp.penalty_repeat;
+                        s -= gp.penalty_present;
+                    }
+                    if (first || s > bv) {
+                        bv = s;
+                        best = v;
+                        first = false;
+                    }
                 }
                 gwant[(size_t) t] = best;
             }
@@ -997,21 +1226,28 @@ int main(int argc, char** argv) {
     // kernel keeps, 64 - and every row is written (the sampled kernel used to print an error for 0 and leave the
     // row unwritten, which a verify window then read as a token; `run` pre-fills -1 so that fails here).
     {
-        std::mt19937 rng(14); std::normal_distribution<float> g(0.0f, 1.0f);
+        std::mt19937 rng(14);
+        std::normal_distribution<float> g(0.0f, 1.0f);
         std::vector<float> l((size_t) NV * NT);
-        for (auto& v : l) v = g(rng) * 0.3f;             // flat: the 64-wide list matters to the draw
+        for (auto& v : l) v = g(rng) * 0.3f;   // flat: the 64-wide list matters to the draw
         lamina::kernels::SamplerParams p64;
-        p64.top_k = 64; p64.top_p = 1.0f; p64.temperature = 1.5f; p64.seed = 14;
+        p64.top_k = 64;
+        p64.top_p = 1.0f;
+        p64.temperature = 1.5f;
+        p64.seed = 14;
         std::vector<int> want((size_t) NT);
         for (int t = 0; t < NT; ++t)
-            want[(size_t) t] = sampled_reference({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV},
-                                                 {}, p64, t);
+            want[(size_t) t] =
+                sampled_reference({l.begin() + (size_t) t * NV, l.begin() + (size_t) (t + 1) * NV}, {}, p64, t);
         bad += run("sampled top_k=64", l, NT, p64, want);
-        lamina::kernels::SamplerParams p0 = p64; p0.top_k = 0;
+        lamina::kernels::SamplerParams p0 = p64;
+        p0.top_k = 0;
         bad += run("sampled top_k=0 means 64", l, NT, p0, want);
-        lamina::kernels::SamplerParams p100 = p64; p100.top_k = 100;
+        lamina::kernels::SamplerParams p100 = p64;
+        p100.top_k = 100;
         bad += run("sampled top_k=100 means 64", l, NT, p100, want);
-        lamina::kernels::SamplerParams pneg = p64; pneg.top_k = -3;
+        lamina::kernels::SamplerParams pneg = p64;
+        pneg.top_k = -3;
         bad += run("sampled top_k=-3 means 64", l, NT, pneg, want);
     }
 
@@ -1040,7 +1276,8 @@ int main(int argc, char** argv) {
                     // row 0 = the old single-row staging: consumed tail, then the fed-back head last
                     std::vector<int32_t> old((size_t) h, -1);
                     const int take0 = (int) std::min<int64_t>(h, (int64_t) n_tail + 1);
-                    for (int j = 0; j < take0 - 1; ++j) old[(size_t) (h - take0 + j)] = tail[(size_t) (n_tail - (take0 - 1) + j)];
+                    for (int j = 0; j < take0 - 1; ++j)
+                        old[(size_t) (h - take0 + j)] = tail[(size_t) (n_tail - (take0 - 1) + j)];
                     old[(size_t) (h - 1)] = window[0];
                     if (!std::equal(old.begin(), old.end(), rows.begin())) ++wrong;
                     ++cases;
@@ -1060,14 +1297,19 @@ int main(int argc, char** argv) {
         int* output = nullptr;
         check(cudaMalloc(&input, uniform.size() * sizeof(float)), "counter logits");
         check(cudaMalloc(&output, count * sizeof(int)), "counter output");
-        check(cudaMemcpy(input, uniform.data(), uniform.size() * sizeof(float), cudaMemcpyHostToDevice), "counter upload");
+        check(cudaMemcpy(input, uniform.data(), uniform.size() * sizeof(float), cudaMemcpyHostToDevice),
+              "counter upload");
         lamina::kernels::SamplerParams p;
-        p.top_k = vocab; p.top_p = 1.0f; p.seed = 123; p.counter = (uint64_t(1) << 32) + 7;
+        p.top_k = vocab;
+        p.top_p = 1.0f;
+        p.seed = 123;
+        p.counter = (uint64_t(1) << 32) + 7;
         lamina::kernels::sample_tokens(input, count, vocab, nullptr, 0, p, output, nullptr);
         std::vector<int> batch(count), singles(count), repeated(count);
         check(cudaMemcpy(batch.data(), output, count * sizeof(int), cudaMemcpyDeviceToHost), "counter batch");
         for (int i = 0; i < count; ++i) {
-            auto one = p; one.counter += i;
+            auto one = p;
+            one.counter += i;
             lamina::kernels::sample_tokens(input, 1, vocab, nullptr, 0, one, output + i, nullptr);
         }
         check(cudaMemcpy(singles.data(), output, count * sizeof(int), cudaMemcpyDeviceToHost), "counter singles");
@@ -1078,7 +1320,8 @@ int main(int argc, char** argv) {
         const bool valid = batch == singles && batch == repeated && varies;
         std::printf("  sampler draw counter segmentation/repeat: %s\n", valid ? "PASS" : "FAIL");
         bad += !valid;
-        cudaFree(input); cudaFree(output);
+        cudaFree(input);
+        cudaFree(output);
     }
 
     // ---- fixture 16: THE WHOLE top_k LIST, POSITION BY POSITION, UNDER TIES.  A pick shows the list
@@ -1099,7 +1342,7 @@ int main(int argc, char** argv) {
             std::mt19937 rng((unsigned) (1600 + nv));
             std::normal_distribution<float> g(0.0f, 1.0f);
             std::vector<float> l((size_t) nv * T);
-            for (auto& v : l) v = std::floor(g(rng) * 4.0f) / 4.0f;          // quarter steps: ties everywhere
+            for (auto& v : l) v = std::floor(g(rng) * 4.0f) / 4.0f;   // quarter steps: ties everywhere
             auto spread = [&](int j) { return (int) (((int64_t) j * 7919 + 13) % nv); };
             // row 0: 20 logits at 6.25 and 300 at 6.0 over the whole row, two +inf
             float* r0 = l.data();
@@ -1131,18 +1374,23 @@ int main(int argc, char** argv) {
             for (int e : edges)
                 if (e < nv && e != nv / 2) {
                     h3[hn++] = e;
-                    if (hn % 3 == 0) h3[hn++] = e;                              // counted twice
+                    if (hn % 3 == 0) h3[hn++] = e;   // counted twice
                     r3[e] = 9.0f;
                 }
-            h3[hn++] = nv;                                                      // ignored: outside
+            h3[hn++] = nv;   // ignored: outside
             h3[hn++] = nv + 77;
             h3[hn++] = -5;
             for (int j = 0; j < 30; ++j) r3[spread(j + 600)] = j < 15 ? 3.75f : 3.5f;
-            r3[nv / 2] = inf;                                                   // not in the window
+            r3[nv / 2] = inf;   // not in the window
 
             lamina::kernels::SamplerParams base;
-            base.top_p = 1.0f; base.min_p = 0.0f; base.temperature = 0.8f; base.seed = 16;
-            base.penalty_last_n = H; base.penalty_repeat = 2.0f; base.penalty_freq = 0.25f;
+            base.top_p = 1.0f;
+            base.min_p = 0.0f;
+            base.temperature = 0.8f;
+            base.seed = 16;
+            base.penalty_last_n = H;
+            base.penalty_repeat = 2.0f;
+            base.penalty_freq = 0.25f;
             base.penalty_present = 0.5f;
             const int kmax = sampled_k(64, nv);
             std::vector<SelList> lists;
@@ -1151,8 +1399,8 @@ int main(int argc, char** argv) {
             DeviceRows rows(l, T, hist, H);
             for (int top_k = 0; top_k <= 66; ++top_k) {
                 lamina::kernels::SamplerParams p = base;
-                p.top_k = top_k == 65 ? 100 : top_k == 66 ? -3 : top_k;       // 0, 100 and -3 mean 64
-                p.top_p = (top_k & 1) ? 0.5f : 1.0f;                            // both tail branches (NaN: no cut)
+                p.top_k = top_k == 65 ? 100 : top_k == 66 ? -3 : top_k;   // 0, 100 and -3 mean 64
+                p.top_p = (top_k & 1) ? 0.5f : 1.0f;                      // both tail branches (NaN: no cut)
                 p.counter = (uint64_t) top_k;
                 const int k = sampled_k(p.top_k, nv);
                 const std::vector<int> got = rows.sample(p, nullptr);
@@ -1192,7 +1440,7 @@ int main(int argc, char** argv) {
             std::vector<float> l((size_t) nv * T);
             for (auto& v : l) v = std::floor(g(rng) * 2.0f) / 2.0f;
             if (nv == 512)
-                for (auto& v : l) v = std::floor(v / 2.0f);                    // whole steps: a few big tie groups
+                for (auto& v : l) v = std::floor(v / 2.0f);   // whole steps: a few big tie groups
             std::vector<int> hist((size_t) T * H);
             for (int t = 0; t < T; ++t) {
                 const float* row = l.data() + (size_t) t * nv;
@@ -1201,27 +1449,32 @@ int main(int argc, char** argv) {
                 for (int v = 0; v < nv; ++v)
                     if (row[v] >= mx - 1.0f) head.push_back(v);
                 for (int j = 0; j < H; ++j)
-                    hist[(size_t) t * H + j] = (j & 1) ? (int) (rng() % (unsigned) nv)
-                                                       : head[(size_t) (rng() % (unsigned) head.size())];
+                    hist[(size_t) t * H + j] =
+                        (j & 1) ? (int) (rng() % (unsigned) nv) : head[(size_t) (rng() % (unsigned) head.size())];
             }
             DeviceRows rows(l, T, hist, H);
             int config = 0;
             for (int pen = 0; pen < 2; ++pen) {
                 lamina::kernels::SamplerParams base;
-                base.temperature = 2.5f; base.seed = 17;
+                base.temperature = 2.5f;
+                base.seed = 17;
                 base.penalty_last_n = pen ? H : 0;
-                base.penalty_repeat = 1.25f; base.penalty_freq = 0.25f; base.penalty_present = 0.5f;
+                base.penalty_repeat = 1.25f;
+                base.penalty_freq = 0.25f;
+                base.penalty_present = 0.5f;
                 const int kmax = sampled_k(64, nv);
                 std::vector<SelList> lists;
                 for (int t = 0; t < T; ++t)
-                    lists.push_back(mirror_select(l.data() + (size_t) t * nv, nv, window_of(hist, H, t, base.penalty_last_n),
-                                                  base, kmax));
+                    lists.push_back(mirror_select(l.data() + (size_t) t * nv, nv,
+                                                  window_of(hist, H, t, base.penalty_last_n), base, kmax));
                 for (int top_k : {1, 20, 64})
                     for (float top_p : {0.9f, 1.0f})
                         for (float min_p : {0.0f, 0.05f})
                             for (cudaStream_t st : {(cudaStream_t) nullptr, cs}) {
                                 lamina::kernels::SamplerParams p = base;
-                                p.top_k = top_k; p.top_p = top_p; p.min_p = min_p;
+                                p.top_k = top_k;
+                                p.top_p = top_p;
+                                p.min_p = min_p;
                                 p.counter = (uint64_t) (1000 * ++config);
                                 const int k = sampled_k(top_k, nv);
                                 const std::vector<int> got = rows.sample(p, st);
@@ -1232,15 +1485,17 @@ int main(int argc, char** argv) {
                                     int same = 0;
                                     for (int i = 0; i < k; ++i) {
                                         if (sl.ids[(size_t) i] != want) continue;
-                                        for (int j = 0; j < k; ++j) same += sl.logit[(size_t) j] == sl.logit[(size_t) i];
+                                        for (int j = 0; j < k; ++j)
+                                            same += sl.logit[(size_t) j] == sl.logit[(size_t) i];
                                         break;
                                     }
                                     tied += same > 1;
                                     if (got[(size_t) t] != want) {
                                         if (wrong < 8)
                                             std::printf("    n_vocab %d row %d top_k %d top_p %.2f min_p %.2f pen %d: "
-                                                        "want %d got %d\n", nv, t, top_k, (double) top_p,
-                                                        (double) min_p, pen, want, got[(size_t) t]);
+                                                        "want %d got %d\n",
+                                                        nv, t, top_k, (double) top_p, (double) min_p, pen, want,
+                                                        got[(size_t) t]);
                                         ++wrong;
                                     }
                                 }
@@ -1286,8 +1541,15 @@ int main(int argc, char** argv) {
             std::vector<int> hist;
             make(nv, T, 1800u, l, hist);
             lamina::kernels::SamplerParams p;
-            p.top_k = 20; p.top_p = 0.9f; p.temperature = 2.5f; p.seed = 18; p.counter = 77;
-            p.penalty_last_n = H; p.penalty_repeat = 1.25f; p.penalty_freq = 0.25f; p.penalty_present = 0.5f;
+            p.top_k = 20;
+            p.top_p = 0.9f;
+            p.temperature = 2.5f;
+            p.seed = 18;
+            p.counter = 77;
+            p.penalty_last_n = H;
+            p.penalty_repeat = 1.25f;
+            p.penalty_freq = 0.25f;
+            p.penalty_present = 0.5f;
             const int k = sampled_k(p.top_k, nv);
             std::vector<SelList> lists;
             for (int t = 0; t < T; ++t)
@@ -1321,7 +1583,11 @@ int main(int argc, char** argv) {
             std::vector<int> hist;
             make(nv, T, 1810u + (unsigned) T, l, hist);
             lamina::kernels::SamplerParams p;
-            p.top_k = 64; p.top_p = 1.0f; p.temperature = 2.5f; p.seed = 18; p.counter = (uint64_t) T;
+            p.top_k = 64;
+            p.top_p = 1.0f;
+            p.temperature = 2.5f;
+            p.seed = 18;
+            p.counter = (uint64_t) T;
             const int k = sampled_k(p.top_k, nv);
             std::vector<SelList> lists;
             for (int t = 0; t < T; ++t) lists.push_back(mirror_select(l.data() + (size_t) t * nv, nv, {}, p, k));

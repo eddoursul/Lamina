@@ -34,4 +34,4 @@ void iq128_down_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, c
 /// copy of q8k_quant_avx2 (no 256-bit integer ops, no FMA).  q8k_quant_parity checks the bytes.
 void q8k_quant_avx1(const float* x, void* y, int64_t n);
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

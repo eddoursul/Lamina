@@ -40,4 +40,4 @@ std::pair<json, std::shared_ptr<const Validator>> prepare_format(const json& res
 /// StructuredOutputError otherwise
 std::string validated_json(const std::string& text, const Validator* validator, const std::string& finish);
 
-}  // namespace lamina
+}   // namespace lamina

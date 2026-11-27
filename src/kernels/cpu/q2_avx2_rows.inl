@@ -13,11 +13,14 @@ LAMINA_ROWS_FN inline __m256i dot4(__m256i codes, __m256i act) {
 #endif
 }
 
-template <int NT> LAMINA_ROWS_FN
-inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, float* res) {
+template <int NT>
+LAMINA_ROWS_FN inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, float* res) {
     __m256 acc[NT];
     float corr[NT];
-    for (int t = 0; t < NT; ++t) { acc[t] = _mm256_setzero_ps(); corr[t] = 0.f; }
+    for (int t = 0; t < NT; ++t) {
+        acc[t] = _mm256_setzero_ps();
+        corr[t] = 0.f;
+    }
     for (int b = 0; b < nblocks; ++b) {
         const uint8_t* blk = row + (size_t) b * 18;
         const float d = h2f(blk);
@@ -39,8 +42,9 @@ inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, flo
     }
 }
 
-template <int NT> LAMINA_ROWS_FN
-void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, float* const* out, int r0, int r1) {
+template <int NT>
+LAMINA_ROWS_FN void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, float* const* out,
+                         int r0, int r1) {
     float res[NT];
     for (int r = r0; r < r1; ++r) {
         row_multi<NT>(w + (size_t) r * row_bytes, a, nblocks, res);

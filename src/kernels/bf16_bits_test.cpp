@@ -33,7 +33,7 @@ uint16_t previous_bf16(uint32_t u) {
 
 bool is_nan_bits(uint32_t u) { return (u & 0x7fffffffu) > 0x7f800000u; }
 
-}  // namespace
+}   // namespace
 
 int main() {
     unsigned long long vs_ggml = 0, vs_previous = 0, nan_lost = 0, nan_inputs = 0, previous_masked = 0;
@@ -46,7 +46,10 @@ int main() {
         const uint16_t got = lamina::kernels::bf16_from_f32(f);
         if (got != ggml_bf16(u)) {
             ++vs_ggml;
-            if (!have_bad) { first_bad = u; have_bad = true; }
+            if (!have_bad) {
+                first_bad = u;
+                have_bad = true;
+            }
         }
         if (is_nan_bits(u)) {
             ++nan_inputs;
@@ -56,7 +59,10 @@ int main() {
             if (!is_nan_bits((uint32_t) previous_bf16(u) << 16)) ++previous_masked;
         } else if (got != previous_bf16(u)) {
             ++vs_previous;
-            if (!have_bad) { first_bad = u; have_bad = true; }
+            if (!have_bad) {
+                first_bad = u;
+                have_bad = true;
+            }
         }
     }
     std::printf("  f32 -> bf16 over 2^32 inputs: %llu differ from ggml, %llu non-NaN differ from the previous rule\n",

@@ -35,11 +35,10 @@ LAMINA_ROWS_FN inline float ggml_hsum8(__m256 x) {
     return _mm_cvtss_f32(s);
 }
 
-template <int NT, bool GGML = false> LAMINA_ROWS_FN
-inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res);
+template <int NT, bool GGML = false>
+LAMINA_ROWS_FN inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res);
 
-template <int TY> LAMINA_ROWS_FN
-inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K* y) {
+template <int TY> LAMINA_ROWS_FN inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K* y) {
     if constexpr (TY == 17) {
         const block_q8_K* act[1] = {y};
         float result = 0.0f;
@@ -68,9 +67,9 @@ inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K*
     else return ggml_hsum8(accum);
 }
 
-template <int TY> LAMINA_ROWS_FN
-void gu_ggml_one(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const block_q8_K* y, float* ff,
-                 int r0, int r1) {
+template <int TY>
+LAMINA_ROWS_FN void gu_ggml_one(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const block_q8_K* y,
+                                float* ff, int r0, int r1) {
     for (int r = r0; r < r1; ++r) {
         const float g = row_dot_ggml_one<TY>(blob + (size_t) r * gu_row, n / QK_K, y);
         const float u = row_dot_ggml_one<TY>(blob + up_off + (size_t) r * gu_row, n / QK_K, y);
@@ -78,8 +77,8 @@ void gu_ggml_one(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const
     }
 }
 
-template <int TY, int NT> LAMINA_ROWS_FN
-inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
+template <int TY, int NT>
+LAMINA_ROWS_FN inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     const int pf = prefetch_distance();
     __m256 accf[NT];
     for (int t = 0; t < NT; ++t) accf[t] = _mm256_setzero_ps();
@@ -113,31 +112,32 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
 // 32-byte load.  The 8 scale bytes become all 16 half-scales with ggml's unpack trick.  The grid lookups
 // stay scalar loads into set_epi64x (ggml does the same).  Every token still only pays a load, a sign,
 // a maddubs, a madd and an add per half, into alternating accumulators.
-template <int NT, bool GGML> LAMINA_ROWS_FN
-inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
-    static const uint8_t bit_sel[32] = {
-        1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80, 1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80,
-        1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80, 1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80 };
-    static const char shuf_even[32] = {   // sign bits of u16 0,1,2,3 (even bytes of the sign register)
-        0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2,
-        4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 6, 6 };
-    static const char shuf_odd[32] = {    // sign bits of u16 4,5,6,7
-        8, 8, 8, 8, 8, 8, 8, 8, 10, 10, 10, 10, 10, 10, 10, 10,
-        12, 12, 12, 12, 12, 12, 12, 12, 14, 14, 14, 14, 14, 14, 14, 14 };
-    static const uint8_t bit_help[32] = {  // 0x80 when the 4-bit index has odd popcount (parity bit 7)
-        0x00, (uint8_t) 0x80, (uint8_t) 0x80, 0x00, (uint8_t) 0x80, 0x00, 0x00, (uint8_t) 0x80,
-        (uint8_t) 0x80, 0x00, 0x00, (uint8_t) 0x80, 0x00, (uint8_t) 0x80, (uint8_t) 0x80, 0x00,
-        0x00, (uint8_t) 0x80, (uint8_t) 0x80, 0x00, (uint8_t) 0x80, 0x00, 0x00, (uint8_t) 0x80,
-        (uint8_t) 0x80, 0x00, 0x00, (uint8_t) 0x80, 0x00, (uint8_t) 0x80, (uint8_t) 0x80, 0x00 };
-    static const uint8_t k_sc_shuffle[128] = {  // half h -> scale bytes 2h (lanes 0-7), 2h+1 (lanes 8-15)
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-        2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
-        4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5,
-        6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
-        8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9,
-        10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11,
-        12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13,
-        14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15 };
+template <int NT, bool GGML>
+LAMINA_ROWS_FN inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
+    static const uint8_t bit_sel[32] = {1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80, 1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80,
+                                        1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80, 1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80};
+    static const char shuf_even[32] = {// sign bits of u16 0,1,2,3 (even bytes of the sign register)
+                                       0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2,
+                                       4, 4, 4, 4, 4, 4, 4, 4, 6, 6, 6, 6, 6, 6, 6, 6};
+    static const char shuf_odd[32] = {// sign bits of u16 4,5,6,7
+                                      8,  8,  8,  8,  8,  8,  8,  8,  10, 10, 10, 10, 10, 10, 10, 10,
+                                      12, 12, 12, 12, 12, 12, 12, 12, 14, 14, 14, 14, 14, 14, 14, 14};
+    static const uint8_t bit_help[32] = {// 0x80 when the 4-bit index has odd popcount (parity bit 7)
+                                         0x00,           (uint8_t) 0x80, (uint8_t) 0x80, 0x00,
+                                         (uint8_t) 0x80, 0x00,           0x00,           (uint8_t) 0x80,
+                                         (uint8_t) 0x80, 0x00,           0x00,           (uint8_t) 0x80,
+                                         0x00,           (uint8_t) 0x80, (uint8_t) 0x80, 0x00,
+                                         0x00,           (uint8_t) 0x80, (uint8_t) 0x80, 0x00,
+                                         (uint8_t) 0x80, 0x00,           0x00,           (uint8_t) 0x80,
+                                         (uint8_t) 0x80, 0x00,           0x00,           (uint8_t) 0x80,
+                                         0x00,           (uint8_t) 0x80, (uint8_t) 0x80, 0x00};
+    static const uint8_t k_sc_shuffle[128] = {
+        // half h -> scale bytes 2h (lanes 0-7), 2h+1 (lanes 8-15)
+        0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,  2,  3,  3,
+        3,  3,  3,  3,  3,  3,  4,  4,  4,  4,  4,  4,  4,  4,  5,  5,  5,  5,  5,  5,  5,  5,  6,  6,  6,  6,
+        6,  6,  6,  6,  7,  7,  7,  7,  7,  7,  7,  7,  8,  8,  8,  8,  8,  8,  8,  8,  9,  9,  9,  9,  9,  9,
+        9,  9,  10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12,
+        13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15};
     const __m256i bsel = _mm256_loadu_si256((const __m256i*) bit_sel);
     const __m256i shev = _mm256_loadu_si256((const __m256i*) shuf_even);
     const __m256i shod = _mm256_loadu_si256((const __m256i*) shuf_odd);
@@ -160,25 +160,24 @@ inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* con
         for (int t = 0; t < NT; ++t) acc[t][0] = acc[t][1] = _mm256_setzero_si256();
         for (int jj = 0; jj < 2; ++jj) {   // 128 values (16 u16) per step
             const __m256i q2 = _mm256_loadu_si256((const __m256i*) (blk + 2 + 32 * jj));
-            const __m256i p7 = _mm256_srli_epi16(q2, 9);              // 7 sign bits per u16, even bytes
-            const __m256i p3 = _mm256_srli_epi16(q2, 13);             // sign index bits 4-6
-            const __m256i fsb = _mm256_or_si256(p7,
-                _mm256_shuffle_epi8(bhelp, _mm256_xor_si256(p7, p3)));  // + the parity sign bit 7
-            const __m256i s01 = _mm256_broadcastsi128_si256(_mm256_castsi256_si128(fsb)); // u16 0-7
-            const __m256i s23 = _mm256_broadcastsi128_si256(_mm256_extracti128_si256(fsb, 1)); // u16 8-15
+            const __m256i p7 = _mm256_srli_epi16(q2, 9);    // 7 sign bits per u16, even bytes
+            const __m256i p3 = _mm256_srli_epi16(q2, 13);   // sign index bits 4-6
+            const __m256i fsb =
+                _mm256_or_si256(p7, _mm256_shuffle_epi8(bhelp, _mm256_xor_si256(p7, p3)));       // + the parity
+                                                                                                 // sign bit 7
+            const __m256i s01 = _mm256_broadcastsi128_si256(_mm256_castsi256_si128(fsb));        // u16 0-7
+            const __m256i s23 = _mm256_broadcastsi128_si256(_mm256_extracti128_si256(fsb, 1));   // u16 8-15
             alignas(32) uint16_t gi[16];
             _mm256_store_si256((__m256i*) gi, _mm256_and_si256(q2, m511));
             for (int h = 0; h < 4; ++h) {   // the four 32-value halves of this group
                 const int H = 4 * jj + h;   // global half index -> scales byte pair
-                const __m256i g = _mm256_set_epi64x((long long) iq2xs_grid[gi[4 * h + 3]],
-                                                   (long long) iq2xs_grid[gi[4 * h + 2]],
-                                                   (long long) iq2xs_grid[gi[4 * h + 1]],
-                                                   (long long) iq2xs_grid[gi[4 * h]]);
+                const __m256i g =
+                    _mm256_set_epi64x((long long) iq2xs_grid[gi[4 * h + 3]], (long long) iq2xs_grid[gi[4 * h + 2]],
+                                      (long long) iq2xs_grid[gi[4 * h + 1]], (long long) iq2xs_grid[gi[4 * h]]);
                 const __m256i sb = _mm256_shuffle_epi8(h < 2 ? s01 : s23, (h & 1) ? shod : shev);
-                const __m256i sgn = _mm256_or_si256(
-                    _mm256_cmpeq_epi8(_mm256_and_si256(sb, bsel), bsel), one8);
-                const __m256i sc = _mm256_cvtepi8_epi16(
-                    _mm_shuffle_epi8(scales, _mm_loadu_si128((const __m128i*) k_sc_shuffle + H)));
+                const __m256i sgn = _mm256_or_si256(_mm256_cmpeq_epi8(_mm256_and_si256(sb, bsel), bsel), one8);
+                const __m256i sc =
+                    _mm256_cvtepi8_epi16(_mm_shuffle_epi8(scales, _mm_loadu_si128((const __m128i*) k_sc_shuffle + H)));
                 const int off = 128 * jj + 32 * h;
                 for (int t = 0; t < NT; ++t) {
                     const __m256i yv = _mm256_loadu_si256((const __m256i*) (y[t][i].qs + off));
@@ -190,22 +189,22 @@ inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* con
         for (int t = 0; t < NT; ++t) {
             const float d = h2f(u16(blk)) * (GGML ? y[t][i].d : 0.125f);
             const float scale = GGML ? d : d * y[t][i].d;
-            accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(scale),
-                _mm256_cvtepi32_ps(_mm256_add_epi32(acc[t][0], acc[t][1])), accf[t]);
+            accf[t] = _mm256_fmadd_ps(_mm256_set1_ps(scale), _mm256_cvtepi32_ps(_mm256_add_epi32(acc[t][0], acc[t][1])),
+                                      accf[t]);
         }
     }
     for (int t = 0; t < NT; ++t) res[t] = GGML ? 0.125f * ggml_hsum8(accf[t]) : hsum8(accf[t]);
 }
 
-template <int TY, int NT> LAMINA_ROWS_FN
-inline void row_dot_any(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
+template <int TY, int NT>
+LAMINA_ROWS_FN inline void row_dot_any(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     if constexpr (TY == 17) row_dot_iq2xs<NT>(row, nblocks, y, res);
-    else                    row_dot<TY, NT>(row, nblocks, y, res);
+    else row_dot<TY, NT>(row, nblocks, y, res);
 }
 
-template <int TY, int NT> LAMINA_ROWS_FN
-void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, float* const* ff,
-             int r0, int r1) {
+template <int TY, int NT>
+LAMINA_ROWS_FN void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
+                            float* const* ff, int r0, int r1) {
     const block_q8_K* y[NT];
     for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
     const int nb = n / QK_K;
@@ -217,8 +216,9 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
     }
 }
 
-template <int TY, int NT> LAMINA_ROWS_FN
-void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0, int r1) {
+template <int TY, int NT>
+LAMINA_ROWS_FN void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out,
+                             int r0, int r1) {
     const block_q8_K* y[NT];
     for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
     float res[NT];
@@ -228,9 +228,9 @@ void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act,
     }
 }
 
-template <int TY> LAMINA_ROWS_FN
-void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
-                float* const* ff, int r0, int r1) {
+template <int TY>
+LAMINA_ROWS_FN void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
+                               float* const* ff, int r0, int r1) {
     switch (nt) {
         case 1: gu_rows<TY, 1>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 2: gu_rows<TY, 2>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
@@ -243,25 +243,26 @@ void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n
     }
 }
 
-template <int TY> LAMINA_ROWS_FN
-void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0,
-                 int r1) {
+template <int TY>
+LAMINA_ROWS_FN void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act,
+                                float* const* out, int r0, int r1) {
     switch (nt) {
         case 1: dot_rows<TY, 1>(w, row_bytes, n, act, out, r0, r1); break;
         case 2: dot_rows<TY, 2>(w, row_bytes, n, act, out, r0, r1); break;
         case 3: dot_rows<TY, 3>(w, row_bytes, n, act, out, r0, r1); break;
         case 4: dot_rows<TY, 4>(w, row_bytes, n, act, out, r0, r1); break;
-        default: for (int t0 = 0; t0 < nt; t0 += 4) {
-            const int k = nt - t0 < 4 ? nt - t0 : 4;
-            dot_rows_nt<TY>(k, w, row_bytes, n, act + t0, out + t0, r0, r1);
-        }
+        default:
+            for (int t0 = 0; t0 < nt; t0 += 4) {
+                const int k = nt - t0 < 4 ? nt - t0 : 4;
+                dot_rows_nt<TY>(k, w, row_bytes, n, act + t0, out + t0, r0, r1);
+            }
     }
 }
 
 // The decode of each format for a variant: the gathered one (kIq256Gather) for IQ3_XXS, IQ3_S and IQ2_S.
-template <bool G> LAMINA_ROWS_FN
-void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
-             float* const* ff, int r0, int r1) {
+template <bool G>
+LAMINA_ROWS_FN void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+                            const void* const* act, float* const* ff, int r0, int r1) {
     switch (type) {
         case 16: gu_rows_nt<16>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 17: gu_rows_nt<17>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
@@ -273,9 +274,9 @@ void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off
     }
 }
 
-template <bool G> LAMINA_ROWS_FN
-void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out,
-              int r0, int r1) {
+template <bool G>
+LAMINA_ROWS_FN void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act,
+                             float* const* out, int r0, int r1) {
     switch (type) {
         case 16: dot_rows_nt<16>(nt, w, row_bytes, n, act, out, r0, r1); break;
         case 17: dot_rows_nt<17>(nt, w, row_bytes, n, act, out, r0, r1); break;
@@ -292,9 +293,9 @@ void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const
 // kvalues_iq4nl pshufb decode and the |w| half of the signed x signed product.  Here both are computed once
 // per block; every token then costs a sign, a maddubs, a madd and an fmadd.  The arithmetic is ggml's - only
 // the order of the float additions differs.
-template <int NT> LAMINA_ROWS_FN
-void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out,
-                int r0, int r1) {
+template <int NT>
+LAMINA_ROWS_FN void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out,
+                               int r0, int r1) {
     const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
     const __m128i m4b = _mm_set1_epi8(0x0f);
     const int nb = n / QK4_NL;
@@ -308,7 +309,7 @@ void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* con
             rows_ahead(blk, pf);
             const __m128i bits = _mm_loadu_si128((const __m128i*) (blk + 2));
             const __m128i lo = _mm_and_si128(bits, m4b);                      // values 0..15
-            const __m128i hi = _mm_and_si128(_mm_srli_epi16(bits, 4), m4b);    // values 16..31
+            const __m128i hi = _mm_and_si128(_mm_srli_epi16(bits, 4), m4b);   // values 16..31
             const __m256i q4 = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_shuffle_epi8(values, lo)),
                                                        _mm_shuffle_epi8(values, hi), 1);
             const __m256i aq = _mm256_sign_epi8(q4, q4);   // |w|: the unsigned operand of maddubs
@@ -331,10 +332,11 @@ LAMINA_ROWS_FN void iq4nl_nt(const uint8_t* w, size_t row_bytes, int n, const bl
         case 2: iq4nl_rows<2>(w, row_bytes, n, y, out, r0, r1); break;
         case 3: iq4nl_rows<3>(w, row_bytes, n, y, out, r0, r1); break;
         case 4: iq4nl_rows<4>(w, row_bytes, n, y, out, r0, r1); break;
-        default: for (int t0 = 0; t0 < nt; t0 += 4) {
-            const int k = nt - t0 < 4 ? nt - t0 : 4;
-            iq4nl_nt(w, row_bytes, n, y + t0, k, out + t0, r0, r1);
-        }
+        default:
+            for (int t0 = 0; t0 < nt; t0 += 4) {
+                const int k = nt - t0 < 4 ? nt - t0 : 4;
+                iq4nl_nt(w, row_bytes, n, y + t0, k, out + t0, r0, r1);
+            }
     }
 }
 

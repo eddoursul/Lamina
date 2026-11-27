@@ -5,10 +5,12 @@
 //   lamina-check decode GGUF CASES     {"ids"} -> {"text"}
 //   lamina-check convert CASES         {"api": "openai"|"anthropic", "req", "think_unasked"} -> {"messages", "tools",
 //                                      "kwargs", "req"} or {"error"}
-//   lamina-check render GGUF CASES     {"messages", "tools", "kwargs", "add_generation_prompt"} -> {"prompt"} or {"error"}
-//   lamina-check mark GGUF CASES       {"messages", "tools", "kwargs"} -> the server's prompt path: {"prompt" (unmarked),
-//                                      "spans", "ids"}
-//   lamina-check parse CASES           {"thinking", "tools", "stream_tools", "recover", "deltas", "reason"} -> {"events"}
+//   lamina-check render GGUF CASES     {"messages", "tools", "kwargs", "add_generation_prompt"} -> {"prompt"} or
+//                                      {"error"}
+//   lamina-check mark GGUF CASES       {"messages", "tools", "kwargs"} -> the server's prompt path: {"prompt"
+//                                      (unmarked), "spans", "ids"}
+//   lamina-check parse CASES           {"thinking", "tools", "stream_tools", "recover", "deltas", "reason"} ->
+//                                      {"events"}
 //   lamina-check caps GGUF             the template's capabilities
 #include "frontend.hpp"
 #include "tokenizer.hpp"
@@ -23,12 +25,12 @@ using namespace lamina;
 namespace {
 
 int usage() {
-    std::fprintf(stderr, "usage: lamina-check tokenize|decode|render|mark GGUF CASES | convert|parse CASES | caps GGUF\n");
+    std::fprintf(stderr,
+                 "usage: lamina-check tokenize|decode|render|mark GGUF CASES | convert|parse CASES | caps GGUF\n");
     return 2;
 }
 
-template <class F>
-int each_case(const char* path, F&& f) {
+template <class F> int each_case(const char* path, F&& f) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         std::fprintf(stderr, "cannot open %s\n", path);
@@ -66,7 +68,7 @@ json events_json(const std::vector<Event>& evs) {
     return out;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) return usage();
@@ -111,20 +113,22 @@ int main(int argc, char** argv) {
             return {{"ids", tok->encode(c["text"].get<std::string>(), truthy(jget(c, "parse_special")), plain)}};
         });
     if (mode == "decode")
-        return each_case(argv[3], [&](json& c) -> json { return {{"text", tok->decode(c["ids"].get<std::vector<int32_t>>())}}; });
+        return each_case(
+            argv[3], [&](json& c) -> json { return {{"text", tok->decode(c["ids"].get<std::vector<int32_t>>())}}; });
     const ChatTemplate tpl(tok->chat_template);
     if (mode == "render")
         return each_case(argv[3], [&](json& c) -> json {
             return {{"prompt", tpl.render(c["messages"], jget(c, "tools"),
-                                          !jget(c, "add_generation_prompt").is_boolean() || c["add_generation_prompt"].get<bool>(),
+                                          !jget(c, "add_generation_prompt").is_boolean() ||
+                                              c["add_generation_prompt"].get<bool>(),
                                           jget(c, "kwargs").is_object() ? c["kwargs"] : json::object())}};
         });
     if (mode == "mark") {
         const LiteralTags tags = literal_tags(tok->control_tokens());
         return each_case(argv[3], [&](json& c) -> json {
             const Marked m = mark_think_literals(c["messages"], jget(c, "tools"), tags);
-            const std::string rendered = tpl.render(m.messages, m.tools, true,
-                                                    jget(c, "kwargs").is_object() ? c["kwargs"] : json::object());
+            const std::string rendered =
+                tpl.render(m.messages, m.tools, true, jget(c, "kwargs").is_object() ? c["kwargs"] : json::object());
             auto [prompt, spans] = m.changed ? unmark_think_literals(rendered, tags)
                                              : std::make_pair(rendered, std::vector<std::pair<size_t, size_t>>{});
             std::vector<Span> plain;

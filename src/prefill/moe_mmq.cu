@@ -30,13 +30,19 @@ int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 bool is_tq(int t) { return t >= 147 && t <= 149; }
 int64_t type_blck(int t) { return is_tq(t) ? 128 : (int64_t) ggml_blck_size((ggml_type) t); }
 size_t type_bytes(int t) { return is_tq(t) ? (size_t) (2 + 8 * (t - 142)) : ggml_type_size((ggml_type) t); }
-const char* type_str(int t) { return t == 147 ? "tqp5" : t == 148 ? "tqp6" : t == 149 ? "tqp7" : ggml_type_name((ggml_type) t); }
+const char* type_str(int t) {
+    return t == 147 ? "tqp5" : t == 148 ? "tqp6" : t == 149 ? "tqp7" : ggml_type_name((ggml_type) t);
+}
 
 // A warp's 128 values, four a lane, as H_128 (signs * x) (hadamard.hpp): hadamard_rotate's butterflies in its order
-__device__ __forceinline__ float4 rotate128(float4 v, const float* __restrict__ signs, int64_t i0, int64_t ne00, float scale) {
+__device__ __forceinline__ float4 rotate128(float4 v, const float* __restrict__ signs, int64_t i0, int64_t ne00,
+                                            float scale) {
     if (signs != nullptr && i0 < ne00) {
         const float4 s = *(const float4*) (signs + i0);
-        v.x *= s.x; v.y *= s.y; v.z *= s.z; v.w *= s.w;
+        v.x *= s.x;
+        v.y *= s.y;
+        v.z *= s.z;
+        v.w *= s.w;
     }
     const float a = v.x + v.y, b = v.x - v.y, c = v.z + v.w, d = v.z - v.w;
     float r[4] = {a + c, b + d, a - c, b - d};
@@ -52,7 +58,8 @@ __device__ __forceinline__ float4 rotate128(float4 v, const float* __restrict__ 
 }
 
 __global__ void copy16_kernel(const uint4* __restrict__ a, int64_t na, const uint4* __restrict__ b, int64_t nb,
-                              uint4* __restrict__ ab_dst, const uint4* __restrict__ c, int64_t nc, uint4* __restrict__ c_dst) {
+                              uint4* __restrict__ ab_dst, const uint4* __restrict__ c, int64_t nc,
+                              uint4* __restrict__ c_dst) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < na) ab_dst[i] = a[i];
     else if (i < na + nb) ab_dst[i] = b[i - na];
@@ -75,7 +82,8 @@ __global__ void copy16_group_kernel(GroupArgs ga, int64_t na, int64_t nc, uint4*
     else if (i < 2 * na + nc) cd[i - 2 * na] = src[ga.down_off + (i - 2 * na)];
 }
 __global__ void copy1_kernel(const uint8_t* __restrict__ a, int64_t na, const uint8_t* __restrict__ b, int64_t nb,
-                             uint8_t* __restrict__ ab_dst, const uint8_t* __restrict__ c, int64_t nc, uint8_t* __restrict__ c_dst) {
+                             uint8_t* __restrict__ ab_dst, const uint8_t* __restrict__ c, int64_t nc,
+                             uint8_t* __restrict__ c_dst) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < na) ab_dst[i] = a[i];
     else if (i < na + nb) ab_dst[i] = b[i - na];
@@ -102,9 +110,9 @@ unsigned blocks(int64_t n) { return (unsigned) ((n + 255) / 256); }
 // llama.cpp's quantize_mmq_q8_1 (quantize.cu, MIT) for FP16 rows: one channel, row i of the output from row ids[i]
 // (or i), the same arithmetic on the values the FP16 rows hold
 template <mmq_q8_1_ds_layout ds_layout, bool rotated>
-__global__ void quantize_mmq_q8_1_f16(const half* __restrict__ x, const int32_t* __restrict__ ids, void* __restrict__ vy,
-                                      const int64_t ne00, const int64_t s01, const int64_t ne0, const int ne1,
-                                      const float* __restrict__ signs, const float scale) {
+__global__ void quantize_mmq_q8_1_f16(const half* __restrict__ x, const int32_t* __restrict__ ids,
+                                      void* __restrict__ vy, const int64_t ne00, const int64_t s01, const int64_t ne0,
+                                      const int ne1, const float* __restrict__ signs, const float scale) {
     constexpr int vals_per_scale = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 64 : 32;
     constexpr int vals_per_sum = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 16 : 32;
     const int64_t i0 = ((int64_t) blockDim.x * blockIdx.y + threadIdx.x) * 4;
@@ -169,10 +177,24 @@ __global__ void swiglu_quantize_mmq_q8_1(const float* __restrict__ gu, void* __r
         float g[4], u[4], h[4];
         if (interleaved) {
             const float4 a = *(const float4*) (row + 2 * i0), b = *(const float4*) (row + 2 * i0 + 4);
-            g[0] = a.x; u[0] = a.y; g[1] = a.z; u[1] = a.w; g[2] = b.x; u[2] = b.y; g[3] = b.z; u[3] = b.w;
+            g[0] = a.x;
+            u[0] = a.y;
+            g[1] = a.z;
+            u[1] = a.w;
+            g[2] = b.x;
+            u[2] = b.y;
+            g[3] = b.z;
+            u[3] = b.w;
         } else {
             const float4 a = *(const float4*) (row + i0), b = *(const float4*) (row + n_ff + i0);
-            g[0] = a.x; g[1] = a.y; g[2] = a.z; g[3] = a.w; u[0] = b.x; u[1] = b.y; u[2] = b.z; u[3] = b.w;
+            g[0] = a.x;
+            g[1] = a.y;
+            g[2] = a.z;
+            g[3] = a.w;
+            u[0] = b.x;
+            u[1] = b.y;
+            u[2] = b.z;
+            u[3] = b.w;
         }
 #pragma unroll
         for (int k = 0; k < 4; ++k) h[k] = g[k] / (1.0f + __expf(-g[k])) * u[k];
@@ -213,26 +235,37 @@ __global__ void swiglu_quantize_mmq_q8_1(const float* __restrict__ gu, void* __r
     }
 }
 
-}  // namespace
+}   // namespace
 
 bool built() { return true; }
 
 bool supported(int t) {
     switch ((ggml_type) t) {
-        case GGML_TYPE_Q2_0: case GGML_TYPE_IQ1_S: case GGML_TYPE_IQ2_XXS: case GGML_TYPE_IQ2_XS:
-        case GGML_TYPE_IQ2_S: case GGML_TYPE_IQ3_XXS: case GGML_TYPE_IQ3_S: case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_Q2_0:
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ3_S:
+        case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_IQ4_XS:
-        case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K: case GGML_TYPE_Q6_K: case GGML_TYPE_Q5_1:   // unsloth's files
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q5_K:
+        case GGML_TYPE_Q6_K:
+        case GGML_TYPE_Q5_1:   // unsloth's files
         case GGML_TYPE_Q3_K:   // AngelSlim's Hy4-flash Q3_K
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q8_0:
-        case GGML_TYPE_MXFP4: case GGML_TYPE_NVFP4:   // Inkling 2 Mini's experts
+        case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:   // Inkling 2 Mini's experts
 #if defined(LAMINA_MMQ_TQP)
-        case GGML_TYPE_TQP5: case GGML_TYPE_TQP6: case GGML_TYPE_TQP7:   // Gyro-L (cmake/lamina_ggml_tq_overlay.cmake)
+        case GGML_TYPE_TQP5:
+        case GGML_TYPE_TQP6:
+        case GGML_TYPE_TQP7:   // Gyro-L (cmake/lamina_ggml_tq_overlay.cmake)
 #endif
             return true;
-        default:
-            return false;
+        default: return false;
     }
 }
 
@@ -261,8 +294,9 @@ bool fits(int t, int64_t w_rows) {
             static bool said[GGML_TYPE_COUNT] = {};
             if (is_tq(t) || (t >= 0 && t < GGML_TYPE_COUNT && !said[t])) {
                 if (!is_tq(t)) said[t] = true;
-                std::fprintf(stderr, "lamina: prompt kernels: llama.cpp's MMQ has no tile for %s (%lld rows) on GPU %d "
-                                     "(cc %d, %zu bytes of shared memory per block): that product takes the non-MMQ path\n",
+                std::fprintf(stderr,
+                             "lamina: prompt kernels: llama.cpp's MMQ has no tile for %s (%lld rows) on GPU %d "
+                             "(cc %d, %zu bytes of shared memory per block): that product takes the non-MMQ path\n",
                              type_str(t), (long long) w_rows, id, cc, smpbo);
             }
             return false;
@@ -288,8 +322,8 @@ void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols,
             std::exit(1);
         }
         const bool aligned = (uintptr_t) x % 32 == 0 && (ld * 4) % 32 == 0;
-        quantize_mmq_fp4_cuda(x, ids, xq, scale, (ggml_type) t, aligned, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1,
-                              1, (cudaStream_t) stream);
+        quantize_mmq_fp4_cuda(x, ids, xq, scale, (ggml_type) t, aligned, cols, ld, rows * ld, rows * ld, pad512(cols),
+                              rows, 1, 1, (cudaStream_t) stream);
     } else {
         quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
                                (cudaStream_t) stream);
@@ -310,15 +344,15 @@ void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int t, int64_
     const cudaStream_t s = (cudaStream_t) stream;
     const half* h = (const half*) x;
     const float scale = 1.0f / sqrtf(128.0f);
-#define LAMINA_QF16(L) (signs != nullptr ? quantize_mmq_q8_1_f16<L, true><<<grid, B, 0, s>>>(h, ids, xq, cols, ld, ne0, (int) rows, signs, scale) \
-                                         : quantize_mmq_q8_1_f16<L, false><<<grid, B, 0, s>>>(h, ids, xq, cols, ld, ne0, (int) rows, nullptr, 1.0f))
+#define LAMINA_QF16(L)                                                                                                 \
+    (signs != nullptr                                                                                                  \
+         ? quantize_mmq_q8_1_f16<L, true><<<grid, B, 0, s>>>(h, ids, xq, cols, ld, ne0, (int) rows, signs, scale)      \
+         : quantize_mmq_q8_1_f16<L, false><<<grid, B, 0, s>>>(h, ids, xq, cols, ld, ne0, (int) rows, nullptr, 1.0f))
     switch (mmq_get_q8_1_ds_layout((ggml_type) t)) {
         case MMQ_Q8_1_DS_LAYOUT_D4: LAMINA_QF16(MMQ_Q8_1_DS_LAYOUT_D4); break;
         case MMQ_Q8_1_DS_LAYOUT_DS4: LAMINA_QF16(MMQ_Q8_1_DS_LAYOUT_DS4); break;
         case MMQ_Q8_1_DS_LAYOUT_D2S6: LAMINA_QF16(MMQ_Q8_1_DS_LAYOUT_D2S6); break;
-        default:
-            std::fprintf(stderr, "prefill mmq: no q8_1 layout for type %d\n", t);
-            std::exit(1);
+        default: std::fprintf(stderr, "prefill mmq: no q8_1 layout for type %d\n", t); std::exit(1);
     }
 #undef LAMINA_QF16
     ck(cudaGetLastError(), "quantize_f16");
@@ -336,7 +370,9 @@ namespace {
 // the pointer-table MMQ for the types CMakeLists builds it for; false: none (nothing launched; ctx null: only asked)
 bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, const mmq_x_tab& tab, cudaStream_t s) {
     switch (t) {
+        // clang-format off
 #define LAMINA_TAB_CASE(T) case T: return ctx == nullptr || mul_mat_q_tab_case<T>(*ctx, a, tab, s)
+        // clang-format on
         LAMINA_TAB_CASE(GGML_TYPE_IQ2_S);
         LAMINA_TAB_CASE(GGML_TYPE_IQ3_XXS);
         LAMINA_TAB_CASE(GGML_TYPE_IQ3_S);
@@ -357,7 +393,7 @@ bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, con
         default: return false;
     }
 }
-}  // namespace
+}   // namespace
 #endif
 
 bool tab_takes(int t, int64_t w_rows, int64_t w_cols) {
@@ -365,7 +401,9 @@ bool tab_takes(int t, int64_t w_rows, int64_t w_cols) {
     return w_rows % 128 == 0 && w_cols % type_blck(t) == 0 &&
            run_tab(nullptr, (ggml_type) t, mmq_args{}, mmq_x_tab{}, nullptr);
 #else
-    (void) t; (void) w_rows; (void) w_cols;
+    (void) t;
+    (void) w_rows;
+    (void) w_cols;
     return false;
 #endif
 }
@@ -393,7 +431,7 @@ struct ZeroArgs {
 __global__ void zero_after_kernel(const __grid_constant__ ZeroArgs za, int words) {
     if ((int) threadIdx.x < words) za.at[blockIdx.x][threadIdx.x] = 0;
 }
-}  // namespace
+}   // namespace
 
 void zero_after(uint8_t* const* at, int n, size_t bytes, void* stream) {
     if (n <= 0 || bytes == 0) return;
@@ -411,19 +449,40 @@ void zero_after(uint8_t* const* at, int n, size_t bytes, void* stream) {
 void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
     if (p.ids_rows < ids_table_rows(p.total_rows, p.max_rows)) {
-        std::fprintf(stderr, "prefill mmq: a row map of %lld entries, where its launch takes %lld (%lld rows, %lld an "
-                             "expert)\n", (long long) p.ids_rows, (long long) ids_table_rows(p.total_rows, p.max_rows),
+        std::fprintf(stderr,
+                     "prefill mmq: a row map of %lld entries, where its launch takes %lld (%lld rows, %lld an "
+                     "expert)\n",
+                     (long long) p.ids_rows, (long long) ids_table_rows(p.total_rows, p.max_rows),
                      (long long) p.total_rows, (long long) p.max_rows);
         std::exit(1);
     }
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = type_blck(t), bpr = p.w_cols / qk;
-    const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst,
+    const mmq_args a = {(const char*) p.w,
+                        t,
+                        (const int*) p.xq,
+                        p.ids,
+                        p.bounds,
+                        p.dst,
                         t == GGML_TYPE_NVFP4 && native_fp4(p.type) ? p.scale : nullptr,
-                        p.w_cols, p.w_rows, p.total_rows, bpr, p.total_rows, p.ld_dst,
-                        p.n, p.n, p.tab ? 0 : (int64_t) (p.expert_bytes / type_bytes(t)), 0, 0,
-                        1, 1, 0, 0, 0,
-                        p.max_rows, p.opt_rows > 0 ? std::min(p.opt_rows, p.max_rows) : p.max_rows};
+                        p.w_cols,
+                        p.w_rows,
+                        p.total_rows,
+                        bpr,
+                        p.total_rows,
+                        p.ld_dst,
+                        p.n,
+                        p.n,
+                        p.tab ? 0 : (int64_t) (p.expert_bytes / type_bytes(t)),
+                        0,
+                        0,
+                        1,
+                        1,
+                        0,
+                        0,
+                        0,
+                        p.max_rows,
+                        p.opt_rows > 0 ? std::min(p.opt_rows, p.max_rows) : p.max_rows};
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
     if (p.tab) {
@@ -463,9 +522,7 @@ void Context::run(const Product& p, void* stream) {
         case GGML_TYPE_TQP6: mul_mat_q_case<GGML_TYPE_TQP6>(ctx, a, s); break;
         case GGML_TYPE_TQP7: mul_mat_q_case<GGML_TYPE_TQP7>(ctx, a, s); break;
 #endif
-        default:
-            std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t);
-            std::exit(1);
+        default: std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t); std::exit(1);
     }
     ck(cudaGetLastError(), "mul_mat_q");
 }
@@ -480,11 +537,9 @@ void Context::run_dense(const void* w, int type, int64_t rows, int64_t cols, con
     }
     const int64_t bpr = cols / ggml_blck_size(t);
     const int64_t s12 = T * pad512(cols) * (int64_t) sizeof(block_q8_1) / (QK8_1 * (int64_t) sizeof(int));
-    const mmq_args a = {(const char*) w, t, (const int*) xq, nullptr, nullptr, dst, nullptr,
-                        cols, rows, T, bpr, T, ld_dst,
-                        1, 1, rows * bpr, s12, T * ld_dst,
-                        1, 1, 0, 0, 0,
-                        T, T};
+    const mmq_args a = {
+        (const char*) w, t,   (const int*) xq, nullptr, nullptr, dst, nullptr, cols, rows, T, bpr, T, ld_dst, 1, 1,
+        rows * bpr,      s12, T * ld_dst,      1,       1,       0,   0,       0,    T,    T};
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
     switch (t) {
@@ -506,9 +561,7 @@ void Context::run_dense(const void* w, int type, int64_t rows, int64_t cols, con
         case GGML_TYPE_Q5_1: mul_mat_q_case<GGML_TYPE_Q5_1>(ctx, a, s); break;
         case GGML_TYPE_MXFP4: mul_mat_q_case<GGML_TYPE_MXFP4>(ctx, a, s); break;
         case GGML_TYPE_NVFP4: mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s); break;
-        default:
-            std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t);
-            std::exit(1);
+        default: std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t); std::exit(1);
     }
     ck(cudaGetLastError(), "mul_mat_q (dense)");
 }
@@ -517,15 +570,18 @@ void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const
                    void* gu_dst, void* d_dst, void* stream) {
     const cudaStream_t s = (cudaStream_t) stream;
     const bool a16 = ((uintptr_t) gate | (uintptr_t) up | (uintptr_t) down | (uintptr_t) gu_dst | (uintptr_t) d_dst |
-                      gu_half_bytes | d_bytes) % 16 == 0;
+                      gu_half_bytes | d_bytes) %
+                         16 ==
+                     0;
     if (a16) {
         const int64_t na = (int64_t) gu_half_bytes / 16, nc = (int64_t) d_bytes / 16;
-        copy16_kernel<<<blocks(2 * na + nc), 256, 0, s>>>((const uint4*) gate, na, (const uint4*) up, na, (uint4*) gu_dst,
-                                                          (const uint4*) down, nc, (uint4*) d_dst);
+        copy16_kernel<<<blocks(2 * na + nc), 256, 0, s>>>((const uint4*) gate, na, (const uint4*) up, na,
+                                                          (uint4*) gu_dst, (const uint4*) down, nc, (uint4*) d_dst);
     } else {
         const int64_t na = (int64_t) gu_half_bytes, nc = (int64_t) d_bytes;
         copy1_kernel<<<blocks(2 * na + nc), 256, 0, s>>>((const uint8_t*) gate, na, (const uint8_t*) up, na,
-                                                         (uint8_t*) gu_dst, (const uint8_t*) down, nc, (uint8_t*) d_dst);
+                                                         (uint8_t*) gu_dst, (const uint8_t*) down, nc,
+                                                         (uint8_t*) d_dst);
     }
     ck(cudaGetLastError(), "gather_native");
 }
@@ -533,8 +589,8 @@ void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const
 bool gather_native_group(const uint8_t* const* blob, int n, size_t up_off, size_t gu_half_bytes, size_t down_off,
                          size_t d_bytes, void* gu_dst, size_t gu_stride, void* d_dst, size_t d_stride, void* stream) {
     if (n <= 0 || n > kGatherGroupMax) return false;
-    uintptr_t a = (uintptr_t) gu_dst | (uintptr_t) d_dst | up_off | gu_half_bytes | down_off | d_bytes | gu_stride |
-                  d_stride;
+    uintptr_t a =
+        (uintptr_t) gu_dst | (uintptr_t) d_dst | up_off | gu_half_bytes | down_off | d_bytes | gu_stride | d_stride;
     for (int q = 0; q < n; ++q) a |= (uintptr_t) blob[q];
     if (a % 16 != 0) return false;
     GroupArgs ga{};
@@ -544,9 +600,8 @@ bool gather_native_group(const uint8_t* const* blob, int n, size_t up_off, size_
     ga.gu_stride = (int64_t) gu_stride / 16;
     ga.d_stride = (int64_t) d_stride / 16;
     const int64_t na = (int64_t) gu_half_bytes / 16, nc = (int64_t) d_bytes / 16;
-    copy16_group_kernel<<<dim3(blocks(2 * na + nc), (unsigned) n), 256, 0, (cudaStream_t) stream>>>(ga, na, nc,
-                                                                                                  (uint4*) gu_dst,
-                                                                                                  (uint4*) d_dst);
+    copy16_group_kernel<<<dim3(blocks(2 * na + nc), (unsigned) n), 256, 0, (cudaStream_t) stream>>>(
+        ga, na, nc, (uint4*) gu_dst, (uint4*) d_dst);
     ck(cudaGetLastError(), "gather_native_group");
     return true;
 }
@@ -561,7 +616,8 @@ void swiglu_quantize(const float* gu, void* xq, int t, int64_t rows, int64_t n_f
                      const float* signs) {
     if (rows <= 0) return;
     if (n_ff % 4 != 0 || native_fp4(t)) {
-        std::fprintf(stderr, "prefill mmq: swiglu_quantize needs a multiple of 4 values a row (%lld) and q8_1's type (%d)\n",
+        std::fprintf(stderr,
+                     "prefill mmq: swiglu_quantize needs a multiple of 4 values a row (%lld) and q8_1's type (%d)\n",
                      (long long) n_ff, t);
         std::exit(1);
     }
@@ -570,16 +626,17 @@ void swiglu_quantize(const float* gu, void* xq, int t, int64_t rows, int64_t n_f
     const dim3 grid((unsigned) rows, (unsigned) ((ne0 + 4 * B - 1) / (4 * B)));
     const cudaStream_t s = (cudaStream_t) stream;
     const float scale = 1.0f / sqrtf(128.0f);
-#define LAMINA_SWQ(L) (signs != nullptr ? swiglu_quantize_mmq_q8_1<L, false, true><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, signs, scale) \
-                       : interleaved ? swiglu_quantize_mmq_q8_1<L, true, false><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, nullptr, 1.0f) \
-                                     : swiglu_quantize_mmq_q8_1<L, false, false><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, nullptr, 1.0f))
+#define LAMINA_SWQ(L)                                                                                                  \
+    (signs != nullptr                                                                                                  \
+         ? swiglu_quantize_mmq_q8_1<L, false, true><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, signs, scale)    \
+     : interleaved                                                                                                     \
+         ? swiglu_quantize_mmq_q8_1<L, true, false><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, nullptr, 1.0f)   \
+         : swiglu_quantize_mmq_q8_1<L, false, false><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows, nullptr, 1.0f))
     switch (mmq_get_q8_1_ds_layout((ggml_type) t)) {
         case MMQ_Q8_1_DS_LAYOUT_D4: LAMINA_SWQ(MMQ_Q8_1_DS_LAYOUT_D4); break;
         case MMQ_Q8_1_DS_LAYOUT_DS4: LAMINA_SWQ(MMQ_Q8_1_DS_LAYOUT_DS4); break;
         case MMQ_Q8_1_DS_LAYOUT_D2S6: LAMINA_SWQ(MMQ_Q8_1_DS_LAYOUT_D2S6); break;
-        default:
-            std::fprintf(stderr, "prefill mmq: no q8_1 layout for type %d\n", t);
-            std::exit(1);
+        default: std::fprintf(stderr, "prefill mmq: no q8_1 layout for type %d\n", t); std::exit(1);
     }
 #undef LAMINA_SWQ
     ck(cudaGetLastError(), "swiglu_quantize");
@@ -591,4 +648,4 @@ void iota(int32_t* dst, int64_t n, void* stream) {
     ck(cudaGetLastError(), "iota");
 }
 
-}  // namespace lamina::prefill::mmq
+}   // namespace lamina::prefill::mmq

@@ -55,4 +55,4 @@ void quantize_q8_K(const float* x, uint8_t* blocks, int64_t n, void* stream);
 // The inverse: each element becomes `d * qs[j]`, with `d = 1/iscale` stored as f32.
 void dequant_q8_K(const uint8_t* blocks, float* x, int64_t n, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

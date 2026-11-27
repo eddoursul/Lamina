@@ -18,9 +18,15 @@ inline bool read_blob(const char* path, long long index, std::vector<uint8_t>& o
     std::FILE* f = std::fopen(path, "rb");
     if (!f) return false;
 #if defined(_MSC_VER)
-    if (_fseeki64(f, index * (long long) BLOB, SEEK_SET) != 0) { std::fclose(f); return false; }
+    if (_fseeki64(f, index * (long long) BLOB, SEEK_SET) != 0) {
+        std::fclose(f);
+        return false;
+    }
 #else
-    if (fseeko(f, (off_t) index * (off_t) BLOB, SEEK_SET) != 0) { std::fclose(f); return false; }
+    if (fseeko(f, (off_t) index * (off_t) BLOB, SEEK_SET) != 0) {
+        std::fclose(f);
+        return false;
+    }
 #endif
     const size_t got = std::fread(out.data(), 1, out.size(), f);
     std::fclose(f);
@@ -39,4 +45,4 @@ inline void synth_blob(long long index, std::vector<uint8_t>& out) {
     }
 }
 
-}  // namespace lamina::kernels::cpu::test
+}   // namespace lamina::kernels::cpu::test

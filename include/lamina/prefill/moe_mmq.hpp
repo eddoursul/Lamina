@@ -40,9 +40,10 @@ void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64
               void* stream, float* scale = nullptr);
 /// The same from FP16 rows (`ld` halves apart, cols a multiple of 4): llama.cpp's quantizer reading FP16, the bytes
 /// of quantize() over those rows in FP32.  q8_1 alone: not for a native_fp4 type (the process ends).
-/// `signs` (`cols` floats on this device, Hadamard-folded experts: hadamard.hpp): each 128 values rotated first, signs and all.
-void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
-                  void* stream, const float* signs = nullptr);
+/// `signs` (`cols` floats on this device, Hadamard-folded experts:
+/// hadamard.hpp): each 128 values rotated first, signs and all.
+void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld,
+                  int64_t rows, void* stream, const float* signs = nullptr);
 
 /// Entries the row map (Product::ids) takes for a launch over `total_rows` rows, `max_rows` the most one expert has.
 /// The kernels copy a tile's J ids at a time (J up to 128): the product from each expert's first row to the end of
@@ -113,9 +114,9 @@ private:
 /// slot: gate rows then up rows at `gu_dst`, down at `d_dst`.
 void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const void* down, size_t d_bytes,
                    void* gu_dst, void* d_dst, void* stream);
-/// gather_native for up to kGatherGroupMax experts in one launch: expert q's blob (`blob[q]`: gate at +0, up at +up_off,
-/// down at +down_off) to gu_dst + q * gu_stride and d_dst + q * d_stride, the bytes gather_native would put there.
-/// Every pointer, offset and size 16-byte aligned, else false (nothing launched).
+/// gather_native for up to kGatherGroupMax experts in one launch: expert q's blob (`blob[q]`: gate at +0, up at
+/// +up_off, down at +down_off) to gu_dst + q * gu_stride and d_dst + q * d_stride, the bytes gather_native would put
+/// there.  Every pointer, offset and size 16-byte aligned, else false (nothing launched).
 constexpr int kGatherGroupMax = 16;
 bool gather_native_group(const uint8_t* const* blob, int n, size_t up_off, size_t gu_half_bytes, size_t down_off,
                          size_t d_bytes, void* gu_dst, size_t gu_stride, void* d_dst, size_t d_stride, void* stream);
@@ -126,9 +127,10 @@ void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interlea
 
 /// swiglu() and quantize() of its h (n_ff a multiple of 4) in one kernel, their bytes: H's q8_1 rows for the down
 /// product without the FP32 rows between.  Not for a native_fp4 type (the process ends).
-void swiglu_quantize(const float* gu, void* xq, int ggml_type, int64_t rows, int64_t n_ff, bool interleaved, void* stream, const float* signs = nullptr);
+void swiglu_quantize(const float* gu, void* xq, int ggml_type, int64_t rows, int64_t n_ff, bool interleaved,
+                     void* stream, const float* signs = nullptr);
 
 /// dst[i] = i for i < n (the identity row map MMQ's MoE mode writes through).
 void iota(int32_t* dst, int64_t n, void* stream);
 
-}  // namespace lamina::prefill::mmq
+}   // namespace lamina::prefill::mmq

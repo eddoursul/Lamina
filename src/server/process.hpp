@@ -35,17 +35,19 @@ Environment environment();
 std::string exit_code_text(int code);
 
 struct SpawnOptions {
-    std::vector<std::string> args;     ///< the program and its arguments; with `shell`, one command line
-    bool shell = false;                ///< args[0] runs through the shell (cmd.exe /c, /bin/sh -c)
-    std::string cwd;                   ///< "": this process's
-    std::optional<Environment> env;    ///< nullopt: this process's
+    std::vector<std::string> args;    ///< the program and its arguments; with `shell`, one command line
+    bool shell = false;               ///< args[0] runs through the shell (cmd.exe /c, /bin/sh -c)
+    std::string cwd;                  ///< "": this process's
+    std::optional<Environment> env;   ///< nullopt: this process's
     enum Stream { inherit, null, pipe, file };
     Stream in = inherit, out = inherit, err = inherit;
-    std::string err_file;              ///< err == file: appended to this file
-    bool contain = true;               ///< ends with the server; kill() ends what it started too
-    bool own_group = false;            ///< out of the console's Ctrl+C (Windows: a new process group)
-    bool no_window = false;           ///< Windows: no console of its own (CREATE_NO_WINDOW)
-    bool cr_lines = false;             ///< out == pipe: a lone CR ends a line too (a progress bar's updates)
+    std::string err_file;                                  ///< err == file: appended to this file
+    bool contain = true;                                   ///< ends with the server; kill() ends what it started too
+    bool own_group = false;                                ///< out of the console's Ctrl+C
+                                                           ///< (Windows: a new process group)
+    bool no_window = false;                                ///< Windows: no console of its own (CREATE_NO_WINDOW)
+    bool cr_lines = false;                                 ///< out == pipe: a lone CR ends a line
+                                                           ///< too (a progress bar's updates)
     std::function<void(const std::string&)> on_err_line;   ///< err == pipe: each line of its stderr, as it comes
 };
 
@@ -100,4 +102,4 @@ std::string self_dir();
 std::filesystem::path u8_path(std::string_view utf8);
 std::string u8_str(const std::filesystem::path& p);
 
-}  // namespace lamina
+}   // namespace lamina

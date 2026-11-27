@@ -45,4 +45,4 @@ std::string listen_problem(const std::string& host, int port, int code);
 /// binds and closes a socket on host:port: 0 when it is free, else the OS's error code
 int probe_listen(const std::string& host, int port);
 
-}  // namespace lamina
+}   // namespace lamina

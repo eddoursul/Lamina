@@ -31,7 +31,10 @@ int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: elementwise_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: elementwise_parity [--selftest]\n");
+            return 2;
+        }
     }
     int bad = 0;
     const int64_t H_V = 48;
@@ -74,7 +77,8 @@ int main(int argc, char** argv) {
         }
         // the sign property, asserted rather than assumed
         int positive = 0;
-        for (int i = 0; i < n; ++i) if (a[(size_t) i] >= 0.0f) ++positive;
+        for (int i = 0; i < n; ++i)
+            if (a[(size_t) i] >= 0.0f) ++positive;
         std::printf("  %-44s %s (%d of %d non-negative)\n", "the fixture's ssm_a is negative",
                     positive ? "*** NO ***" : "yes", positive, n);
         if (positive) ++bad;
@@ -94,7 +98,10 @@ int main(int argc, char** argv) {
         const double rel = rel_l1(want, got);
         std::printf("  %-44s rel %.3e\n", "gdn_gate vs the reference", rel);
         // double softplus and double multiply on both sides, then one cast
-        if (!(rel <= 1e-6)) { std::printf("    *** over 1e-6 ***\n"); ++bad; }
+        if (!(rel <= 1e-6)) {
+            std::printf("    *** over 1e-6 ***\n");
+            ++bad;
+        }
 
         // two tokens of the same alpha: the second token's heads are computed too, the same as the first's
         {
@@ -128,7 +135,7 @@ int main(int argc, char** argv) {
             std::vector<float> rival((size_t) n);
             for (int i = 0; i < n; ++i) {
                 const float x = alpha[(size_t) i] + dt[(size_t) i];
-                const float sp = std::log1p(std::exp(x));       // no branch, f32
+                const float sp = std::log1p(std::exp(x));   // no branch, f32
                 rival[(size_t) i] = sp * a[(size_t) i];
                 if (!std::isfinite(sp)) ++wrong;
                 const float branched = x > 20.0f ? x : std::log1pf(std::exp(x));
@@ -140,19 +147,23 @@ int main(int argc, char** argv) {
             const double r = rel_l1(want, rival);
             const bool visible = r > 0.05 || wrong > 0;
             std::printf("  %-44s %s (%.2f%% apart, %d non-finite, %d heads differ, first at x = %.1f)\n",
-                        "the softplus large-x branch is observable", visible ? "yes" : "*** NO ***",
-                        r * 100, wrong, differing, (double) first_differ);
+                        "the softplus large-x branch is observable", visible ? "yes" : "*** NO ***", r * 100, wrong,
+                        differing, (double) first_differ);
             if (!visible) ++bad;
         }
         // PROPERTY: exp(gate) < 1 for every element, which is what makes the state decay
         {
             int over = 0;
-            for (float v : got) if (!(std::exp(v) < 1.0f)) ++over;
-            std::printf("  %-44s %s (%d of %d not < 1)\n", "exp(gate) < 1 for every head",
-                        over ? "*** NO ***" : "yes", over, n);
+            for (float v : got)
+                if (!(std::exp(v) < 1.0f)) ++over;
+            std::printf("  %-44s %s (%d of %d not < 1)\n", "exp(gate) < 1 for every head", over ? "*** NO ***" : "yes",
+                        over, n);
             if (over) ++bad;
         }
-        cudaFree(d_a); cudaFree(d_dt); cudaFree(d_sa); cudaFree(d_g);
+        cudaFree(d_a);
+        cudaFree(d_dt);
+        cudaFree(d_sa);
+        cudaFree(d_g);
     }
 
     // ---- 2. silu, in double then cast
@@ -174,7 +185,10 @@ int main(int argc, char** argv) {
         check(cudaMemcpy(got.data(), d_x, n * 4, cudaMemcpyDeviceToHost), "csg");
         const double rel = rel_l1(want, got);
         std::printf("\n  %-44s rel %.3e\n", "silu (double) vs the reference", rel);
-        if (!(rel <= 1e-7)) { std::printf("    *** over 1e-7 ***\n"); ++bad; }
+        if (!(rel <= 1e-7)) {
+            std::printf("    *** over 1e-7 ***\n");
+            ++bad;
+        }
         cudaFree(d_x);
     }
 
@@ -195,7 +209,8 @@ int main(int argc, char** argv) {
         std::vector<float> got((size_t) n);
         check(cudaMemcpy(got.data(), d_x, n * 4, cudaMemcpyDeviceToHost), "ceg");
         int diff = 0;
-        for (int i = 0; i < n; ++i) if (got[(size_t) i] != want[(size_t) i]) ++diff;
+        for (int i = 0; i < n; ++i)
+            if (got[(size_t) i] != want[(size_t) i]) ++diff;
         std::printf("  %-44s %d of %d differ\n", "scale_inplace is exact", diff, n);
         if (diff) ++bad;
 
@@ -207,7 +222,8 @@ int main(int argc, char** argv) {
             if (h[(size_t) i] != lamina::kernels::f16_from_f32(got[(size_t) i])) ++hbad;
         std::printf("  %-44s %d of %d differ\n", "f32_to_f16_bulk uses the shared conversion", hbad, n);
         if (hbad) ++bad;
-        cudaFree(d_x); cudaFree(d_h);
+        cudaFree(d_x);
+        cudaFree(d_h);
     }
 
     // ---- 4. rms_norm_weighted, and the TWO RIVAL READINGS it exists to be told apart from.
@@ -217,7 +233,7 @@ int main(int argc, char** argv) {
     // readings and requires each to differ from the right one by more than the tolerance before it judges the
     // kernel - the same discipline the shared-expert test uses for silu-on-gate.
     {
-        const int64_t rows = 24, cols = 256;          // the real `attn_q`-norm shape
+        const int64_t rows = 24, cols = 256;   // the real `attn_q`-norm shape
         const float eps = 1e-6f;
         std::vector<float> x((size_t) (rows * cols));
         for (size_t i = 0; i < x.size(); ++i) x[i] = (float) std::sin((double) i * 0.017) * 1.7f + 0.4f;
@@ -260,8 +276,14 @@ int main(int argc, char** argv) {
         std::printf("  %-44s %.2f%% apart\n", "with-w-vs-without-w is observable", r_now * 100);
         // `sqrt(cols)` = 16 for the first and the weight's own spread for the second; a fixture that cannot
         // separate them is not testing the kernel that was written.
-        if (!(r_sum > 0.5)) { std::printf("  *** the sum reading is NOT observable ***\n"); ++bad; }
-        if (!(r_now > 0.5)) { std::printf("  *** the no-weight reading is NOT observable ***\n"); ++bad; }
+        if (!(r_sum > 0.5)) {
+            std::printf("  *** the sum reading is NOT observable ***\n");
+            ++bad;
+        }
+        if (!(r_now > 0.5)) {
+            std::printf("  *** the no-weight reading is NOT observable ***\n");
+            ++bad;
+        }
 
         float* d_x = nullptr;
         float* d_w = nullptr;
@@ -281,13 +303,17 @@ int main(int argc, char** argv) {
             if (e > worst) worst = e;
         }
         int nonfinite = 0;
-        for (float v : got) if (!std::isfinite(v)) ++nonfinite;
-        std::printf("  %-44s rel %.3e  worst %.3e  nonfinite %d\n", "rms_norm_weighted vs f64 oracle", r_got,
-                    worst, nonfinite);
+        for (float v : got)
+            if (!std::isfinite(v)) ++nonfinite;
+        std::printf("  %-44s rel %.3e  worst %.3e  nonfinite %d\n", "rms_norm_weighted vs f64 oracle", r_got, worst,
+                    nonfinite);
         if (nonfinite) ++bad;
         // The kernel accumulates in f32 over 256 terms; 1e-6 is loose enough for that and far tighter than the
         // 16x the rival readings are off by.
-        if (!(r_got < 1e-6)) { std::printf("  *** rms_norm_weighted is WRONG ***\n"); ++bad; }
+        if (!(r_got < 1e-6)) {
+            std::printf("  *** rms_norm_weighted is WRONG ***\n");
+            ++bad;
+        }
         // and a null `w` must be legal, because `ref/qsa.py` allows it.
         //
         // THE INPUT HAS TO BE RE-UPLOADED FIRST.  The kernel is IN PLACE, so `d_x` currently holds the
@@ -344,9 +370,14 @@ int main(int argc, char** argv) {
                     check(cudaMalloc(&ds, scales.size() * sizeof(float)), "embedding scales");
                     check(cudaMalloc(&dof, offsets.size() * sizeof(float)), "embedding offsets");
                     check(cudaMalloc(&out, ((size_t) n + 2) * sizeof(float)), "embedding output");
-                    check(cudaMemcpyAsync(dc, codes.data(), codes.size(), cudaMemcpyHostToDevice, stream), "embedding codes upload");
-                    check(cudaMemcpyAsync(ds, scales.data(), scales.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "embedding scales upload");
-                    check(cudaMemcpyAsync(dof, offsets.data(), offsets.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "embedding offsets upload");
+                    check(cudaMemcpyAsync(dc, codes.data(), codes.size(), cudaMemcpyHostToDevice, stream),
+                          "embedding codes upload");
+                    check(cudaMemcpyAsync(ds, scales.data(), scales.size() * sizeof(float), cudaMemcpyHostToDevice,
+                                          stream),
+                          "embedding scales upload");
+                    check(cudaMemcpyAsync(dof, offsets.data(), offsets.size() * sizeof(float), cudaMemcpyHostToDevice,
+                                          stream),
+                          "embedding offsets upload");
                     check(cudaStreamSynchronize(stream), "embedding upload sync");
 
                     for (const bool with_offset : {false, true}) {
@@ -361,15 +392,20 @@ int main(int argc, char** argv) {
                                 const float fused = std::fma(code, scales[gi], offset);
                                 if (std::memcmp(&fused, &want[(size_t) i], sizeof(float)) != 0) ++fma_diff;
                             }
-                            check(cudaMemcpyAsync(out, got.data(), got.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "embedding output guards");
+                            check(cudaMemcpyAsync(out, got.data(), got.size() * sizeof(float), cudaMemcpyHostToDevice,
+                                                  stream),
+                                  "embedding output guards");
                             lamina::kernels::embedding_gather(dc + (size_t) row * row_bytes,
-                                ds + (size_t) row * row_groups,
-                                with_offset ? dof + (size_t) row * row_groups : nullptr,
-                                n, bits, bias, group, out + 1, stream);
-                            check(cudaMemcpyAsync(got.data(), out, got.size() * sizeof(float), cudaMemcpyDeviceToHost, stream), "embedding result");
+                                                              ds + (size_t) row * row_groups,
+                                                              with_offset ? dof + (size_t) row * row_groups : nullptr,
+                                                              n, bits, bias, group, out + 1, stream);
+                            check(cudaMemcpyAsync(got.data(), out, got.size() * sizeof(float), cudaMemcpyDeviceToHost,
+                                                  stream),
+                                  "embedding result");
                             check(cudaStreamSynchronize(stream), "embedding sync");
                             for (int i = 0; i < n; ++i) {
-                                if (std::memcmp(&want[(size_t) i], &got[(size_t) i + 1], sizeof(float)) != 0) ++mismatches;
+                                if (std::memcmp(&want[(size_t) i], &got[(size_t) i + 1], sizeof(float)) != 0)
+                                    ++mismatches;
                             }
                             if (got.front() != -12345.0f || got.back() != -12345.0f) ++guards;
                             ++cases;
@@ -379,16 +415,19 @@ int main(int argc, char** argv) {
                             if (row == 1) {
                                 cudaGraph_t graph;
                                 cudaGraphExec_t exec;
-                                check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "embedding capture");
-                                lamina::kernels::embedding_gather(dc + (size_t) row * row_bytes,
-                                    ds + (size_t) row * row_groups,
-                                    with_offset ? dof + (size_t) row * row_groups : nullptr,
-                                    n, bits, bias, group, out + 1, stream);
+                                check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal),
+                                      "embedding capture");
+                                lamina::kernels::embedding_gather(
+                                    dc + (size_t) row * row_bytes, ds + (size_t) row * row_groups,
+                                    with_offset ? dof + (size_t) row * row_groups : nullptr, n, bits, bias, group,
+                                    out + 1, stream);
                                 lamina::kernels::scale_inplace(out + 1, n, 2.0f, stream);
                                 check(cudaStreamEndCapture(stream, &graph), "embedding capture end");
                                 check(cudaGraphInstantiate(&exec, graph, 0), "embedding instantiate");
                                 check(cudaGraphLaunch(exec, stream), "embedding replay");
-                                check(cudaMemcpyAsync(got.data(), out, got.size() * sizeof(float), cudaMemcpyDeviceToHost, stream), "embedding graph result");
+                                check(cudaMemcpyAsync(got.data(), out, got.size() * sizeof(float),
+                                                      cudaMemcpyDeviceToHost, stream),
+                                      "embedding graph result");
                                 check(cudaStreamSynchronize(stream), "embedding graph sync");
                                 for (int i = 0; i < n; ++i) {
                                     const float expected = want[(size_t) i] * 2.0f;
@@ -400,7 +439,10 @@ int main(int argc, char** argv) {
                             }
                         }
                     }
-                    cudaFree(dc); cudaFree(ds); cudaFree(dof); cudaFree(out);
+                    cudaFree(dc);
+                    cudaFree(ds);
+                    cudaFree(dof);
+                    cudaFree(out);
                 }
             }
         }
@@ -419,9 +461,9 @@ int main(int argc, char** argv) {
             if ((u & 0x7fffffffu) > 0x7f800000u) return (uint16_t) ((u >> 16) | 64);
             return (uint16_t) ((u + (0x7fffu + ((u >> 16) & 1u))) >> 16);
         };
-        std::vector<uint32_t> bits = {0x7FFFFFFFu, 0xFFFFFFFFu, 0x7F800001u, 0xFF800001u, 0x7FC00000u, 0x7FBFFFFFu,
-                                      0x7F800000u, 0xFF800000u, 0x7F7FFFFFu, 0x00000000u, 0x80000000u, 0x3F808000u,
-                                      0x3F818000u, 0x00008000u, 0x7F7F8000u};
+        std::vector<uint32_t> bits = {0x7FFFFFFFu, 0xFFFFFFFFu, 0x7F800001u, 0xFF800001u, 0x7FC00000u,
+                                      0x7FBFFFFFu, 0x7F800000u, 0xFF800000u, 0x7F7FFFFFu, 0x00000000u,
+                                      0x80000000u, 0x3F808000u, 0x3F818000u, 0x00008000u, 0x7F7F8000u};
         std::mt19937 rng(13);
         while (bits.size() < 4096) bits.push_back((uint32_t) rng());
         const size_t n = bits.size();
@@ -439,8 +481,10 @@ int main(int argc, char** argv) {
         // A Q8_0 block (type 8) whose fp16 scale is a NaN: every dequantized value is NaN * q, a NaN, and it must
         // still be one in BF16.  A second block with an ordinary scale checks the finite path did not move.
         std::vector<uint8_t> blk(2 * 34, 0);
-        blk[0] = 0x00; blk[1] = 0x7E;                        // fp16 quiet NaN
-        blk[34] = 0x00; blk[35] = 0x3C;                      // fp16 1.0
+        blk[0] = 0x00;
+        blk[1] = 0x7E;   // fp16 quiet NaN
+        blk[34] = 0x00;
+        blk[35] = 0x3C;   // fp16 1.0
         for (int j = 0; j < 32; ++j) {
             blk[(size_t) (2 + j)] = (uint8_t) (int8_t) (j - 16);
             blk[(size_t) (36 + j)] = (uint8_t) (int8_t) (3 * j - 50);
@@ -456,16 +500,19 @@ int main(int argc, char** argv) {
         check(cudaMemcpy(q.data(), dq, 64 * 2, cudaMemcpyDeviceToHost), "q8 cout");
         int dq_wrong = 0;
         for (int j = 0; j < 32; ++j) {
-            if (!((q[(size_t) j] & 0x7FFFu) > 0x7F80u)) ++dq_wrong;           // row 0: NaN scale -> NaN
-            const float v = (float) (3 * j - 50);                                // row 1: d = 1.0 -> the integer
+            if (!((q[(size_t) j] & 0x7FFFu) > 0x7F80u)) ++dq_wrong;   // row 0: NaN scale -> NaN
+            const float v = (float) (3 * j - 50);                     // row 1: d = 1.0 -> the integer
             uint32_t vb;
             std::memcpy(&vb, &v, 4);
             if (q[(size_t) (32 + j)] != ggml_bf16(vb)) ++dq_wrong;
         }
-        std::printf("  f32 -> bf16 (NaN kept): bulk %d of %zu differ from ggml, dequant_bf16 %d of 64 wrong\n",
-                    wrong, n, dq_wrong);
+        std::printf("  f32 -> bf16 (NaN kept): bulk %d of %zu differ from ggml, dequant_bf16 %d of 64 wrong\n", wrong,
+                    n, dq_wrong);
         if (wrong || dq_wrong) ++bad;
-        cudaFree(dx); cudaFree(dy); cudaFree(db); cudaFree(dq);
+        cudaFree(dx);
+        cudaFree(dy);
+        cudaFree(db);
+        cudaFree(dq);
     }
 
     std::printf("\nelementwise: %d failures\n", bad);

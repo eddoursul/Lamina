@@ -21,9 +21,9 @@
 // `w_down[k][i]` with i contiguous - `ref/gr.py`'s (hc_lr, hc*n_embd) row-major.  `hc_attn_up.weight` is
 // [320, 10240] so it holds `w_up[i][k]` with k contiguous - `ref/gr.py`'s (hc*n_embd, hc_lr) row-major.  Both
 // index with no permutation at all.
-#include "lamina/kernels/gr.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/gr.hpp"
 #include "lamina/kernels/native_gr_norm.hpp"
 #include "lamina/kernels/native_gr_postops.hpp"
 
@@ -54,9 +54,7 @@ __device__ __forceinline__ float bf16_bits_to_f32(uint16_t h) { return f32_from_
 __device__ __forceinline__ float activation_f32(float x) { return x; }
 __device__ __forceinline__ float activation_f32(uint16_t x) { return bf16_bits_to_f32(x); }
 __device__ __forceinline__ void store_activation(float* dst, int i, float x) { dst[i] = x; }
-__device__ __forceinline__ void store_activation(uint16_t* dst, int i, float x) {
-    dst[i] = f32_to_bf16_bits(x);
-}
+__device__ __forceinline__ void store_activation(uint16_t* dst, int i, float x) { dst[i] = f32_to_bf16_bits(x); }
 
 /// silu and sigmoid exactly as `ref/gr.py` writes them - in FLOAT, not double.
 ///
@@ -105,8 +103,8 @@ __device__ float block_sumf(float v, double* scratch_raw) {
 /// normalise by its own square.  That mistake is silent - it produces a plausible vector of the right shape -
 /// and it is what `gr_parity`'s `mixed vs reference` caught at 2.0e+01 in round 196.
 template <bool FP32_ACT>
-__global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restrict__ w_norm, float eps,
-                               int n_embd, float* __restrict__ xn, uint16_t* __restrict__ xq) {
+__global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restrict__ w_norm, float eps, int n_embd,
+                               float* __restrict__ xn, uint16_t* __restrict__ xq) {
     __shared__ double scratch[8];
     const int c = blockIdx.x;
     const float* Rc = R + (size_t) c * n_embd;
@@ -140,7 +138,7 @@ __global__ void gr_down_kernel(const Activation* __restrict__ xq, const uint16_t
     if (k >= hc_lr) return;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
-    const int nw = (int) (blockDim.x >> 5);          // warps per row == warps per block
+    const int nw = (int) (blockDim.x >> 5);   // warps per row == warps per block
     const uint16_t* row = w_down + (size_t) k * hc_dim;
     // **THE OCCUPANCY HERE IS 10% AND IT IS REAL, BUT FIXING IT DOES NOT PAY.**  `hc_lr` is 320, one warp per
     // row, 8 warps per block, so this launches 40 blocks = 320 warps: **6.7 warps per SM out of the 64 a
@@ -184,8 +182,7 @@ __global__ void gr_down_kernel(const Activation* __restrict__ xq, const uint16_t
     // shared memory.  Lanes within a warp still read consecutive addresses, because warp `w` starts at
     // `w * 32` and strides by `nw * 32`.
     float acc = 0.0f;
-    for (int i = warp * 32 + lane; i < hc_dim; i += nw * 32)
-        acc += activation_f32(xq[i]) * bf16_bits_to_f32(row[i]);
+    for (int i = warp * 32 + lane; i < hc_dim; i += nw * 32) acc += activation_f32(xq[i]) * bf16_bits_to_f32(row[i]);
     acc = warp_sumf(acc);
 
     __shared__ float part[WARPS];
@@ -210,8 +207,7 @@ __global__ void gr_gate_kernel(const Activation* __restrict__ lq, const uint16_t
     const int lane = threadIdx.x & 31;
     const uint16_t* row = w_up + (size_t) i * hc_lr;
     float acc = 0.0f;
-    for (int k = lane; k < hc_lr; k += 32)
-        acc += activation_f32(lq[k]) * bf16_bits_to_f32(row[k]);
+    for (int k = lane; k < hc_lr; k += 32) acc += activation_f32(lq[k]) * bf16_bits_to_f32(row[k]);
     acc = warp_sumf(acc);
     // Every lane computes the sigmoid (the shuffle broadcasts acc), so there is no second sync point and no
     // branch; lane 0 stores.
@@ -235,8 +231,8 @@ __global__ void gr_mean_kernel(const float* __restrict__ gated, int n_embd, int 
 /// work; a warp per stream is the same shape as the down projection and reuses its pattern exactly.  The
 /// whole kernel is one block of `32*hc` threads, which is small - and it is a 4-value output, so it is.
 template <typename Activation>
-__global__ void gr_inject_kernel(const Activation* __restrict__ xq, const uint16_t* __restrict__ w_inject,
-                                 int hc_dim, int hc, float* __restrict__ inject) {
+__global__ void gr_inject_kernel(const Activation* __restrict__ xq, const uint16_t* __restrict__ w_inject, int hc_dim,
+                                 int hc, float* __restrict__ inject) {
     const int c = threadIdx.x >> 5;
     if (c >= hc) return;
     const int lane = threadIdx.x & 31;
@@ -246,8 +242,7 @@ __global__ void gr_inject_kernel(const Activation* __restrict__ xq, const uint16
     // 48.**  It is the fourth largest consumer of GPU time in the engine and it cannot use more than 1/48th of
     // the machine.  In FP32 the same reduction is a few microseconds and the block size stops mattering.
     float acc = 0.0f;
-    for (int i = lane; i < hc_dim; i += 32)
-        acc += activation_f32(xq[i]) * bf16_bits_to_f32(row[i]);
+    for (int i = lane; i < hc_dim; i += 32) acc += activation_f32(xq[i]) * bf16_bits_to_f32(row[i]);
     acc = warp_sumf(acc);
     if (lane == 0) inject[c] = acc;
 }
@@ -268,7 +263,7 @@ __global__ void gr_write_kernel(const float* __restrict__ R, const float* __rest
     }
 }
 
-}  // namespace
+}   // namespace
 
 void gr_set_fp32_activations(bool enabled) { fp32_activations = enabled; }
 void gr_set_native_mmvf(bool enabled) { native_mmvf = enabled; }
@@ -289,7 +284,7 @@ size_t gr_workspace_init(const GrShapes& s, void* base, GrWorkspace& out) {
         hc_dim * sizeof(uint16_t),             // 1: xq
         (size_t) s.hc_lr * sizeof(uint16_t),   // 2: lq
         hc_dim * sizeof(float),                // 3: gated
-        (size_t) s.hc_lr * sizeof(float),        // 4: lo (FP32 activation experiment)
+        (size_t) s.hc_lr * sizeof(float),      // 4: lo (FP32 activation experiment)
     };
     size_t al[5], bytes = 0;
     for (int k = 0; k < 5; ++k) {
@@ -314,16 +309,16 @@ size_t gr_workspace_init(const GrShapes& s, void* base, GrWorkspace& out) {
 }
 
 void gr_read(const float* R, const float* w_norm, const uint16_t* w_down, const uint16_t* w_up,
-             const uint16_t* w_inject, float eps, const GrShapes& s, const GrWorkspace& ws, float* mixed,
-             float* inject, void* stream) {
+             const uint16_t* w_inject, float eps, const GrShapes& s, const GrWorkspace& ws, float* mixed, float* inject,
+             void* stream) {
     if (s.n_embd <= 0 || s.hc <= 0 || s.hc_lr <= 0) return;
     if (ws.xn == nullptr || ws.xq == nullptr || ws.lq == nullptr || ws.gated == nullptr || ws.lo == nullptr) {
         std::fprintf(stderr, "gr_read: GrWorkspace is not initialised (see gr_workspace_init)\n");
         std::exit(1);
     }
     if (ws.bytes < gr_workspace_bytes(s)) {
-        std::fprintf(stderr, "gr_read: GrWorkspace is %zu bytes but this geometry needs %zu\n",
-                     ws.bytes, gr_workspace_bytes(s));
+        std::fprintf(stderr, "gr_read: GrWorkspace is %zu bytes but this geometry needs %zu\n", ws.bytes,
+                     gr_workspace_bytes(s));
         std::exit(1);
     }
     const int n_embd = (int) s.n_embd, hc = (int) s.hc, hc_lr = (int) s.hc_lr;
@@ -346,26 +341,22 @@ void gr_read(const float* R, const float* w_norm, const uint16_t* w_down, const 
     } else if (use_fp32) {
         gr_norm_kernel<true><<<hc, THREADS, 0, st>>>(R, w_norm, eps, n_embd, ws.xn, ws.xq);
         gr_down_kernel<float><<<hc_lr, THREADS, 0, st>>>(ws.xn, w_down, hc_dim, hc_lr, hc, ws.lo);
-        gr_gate_kernel<float><<<(hc_dim + WARPS - 1) / WARPS, THREADS, 0, st>>>(
-            ws.lo, w_up, ws.xn, hc_dim, hc_lr, ws.gated);
+        gr_gate_kernel<float>
+            <<<(hc_dim + WARPS - 1) / WARPS, THREADS, 0, st>>>(ws.lo, w_up, ws.xn, hc_dim, hc_lr, ws.gated);
     } else {
         gr_norm_kernel<false><<<hc, THREADS, 0, st>>>(R, w_norm, eps, n_embd, ws.xn, ws.xq);
         gr_down_kernel<uint16_t><<<hc_lr, THREADS, 0, st>>>(ws.xq, w_down, hc_dim, hc_lr, hc, ws.lq);
-        gr_gate_kernel<uint16_t><<<(hc_dim + WARPS - 1) / WARPS, THREADS, 0, st>>>(
-            ws.lq, w_up, ws.xn, hc_dim, hc_lr, ws.gated);
+        gr_gate_kernel<uint16_t>
+            <<<(hc_dim + WARPS - 1) / WARPS, THREADS, 0, st>>>(ws.lq, w_up, ws.xn, hc_dim, hc_lr, ws.gated);
     }
-    if (!use_native)
-        gr_mean_kernel<<<(n_embd + THREADS - 1) / THREADS, THREADS, 0, st>>>(ws.gated, n_embd, hc, mixed);
+    if (!use_native) gr_mean_kernel<<<(n_embd + THREADS - 1) / THREADS, THREADS, 0, st>>>(ws.gated, n_embd, hc, mixed);
     // Absent for the final mixer, and then nothing is written - computing an injection nobody reads would be
     // a claim, not a convenience.
     if (w_inject != nullptr) {
         const int nthreads = 32 * hc;
-        if (use_native)
-            bf16_gemv_fp32_mmvf(ws.xn, w_inject, inject, hc_dim, hc, stream);
-        else if (use_fp32)
-            gr_inject_kernel<float><<<1, nthreads, 0, st>>>(ws.xn, w_inject, hc_dim, hc, inject);
-        else
-            gr_inject_kernel<uint16_t><<<1, nthreads, 0, st>>>(ws.xq, w_inject, hc_dim, hc, inject);
+        if (use_native) bf16_gemv_fp32_mmvf(ws.xn, w_inject, inject, hc_dim, hc, stream);
+        else if (use_fp32) gr_inject_kernel<float><<<1, nthreads, 0, st>>>(ws.xn, w_inject, hc_dim, hc, inject);
+        else gr_inject_kernel<uint16_t><<<1, nthreads, 0, st>>>(ws.xq, w_inject, hc_dim, hc, inject);
     }
 
     const cudaError_t e = cudaGetLastError();
@@ -387,8 +378,7 @@ void gr_write(const float* R, const float* block_out, const float* inject, const
     if (s.n_embd <= 0 || s.hc <= 0) return;
     const long long n = (long long) s.hc * s.n_embd;
     const int blocks = (int) ((n + THREADS - 1) / THREADS);
-    if (native_mmvf)
-        native_gr_post(R, block_out, inject, R_out, (int) s.n_embd, (int) s.hc, stream);
+    if (native_mmvf) native_gr_post(R, block_out, inject, R_out, (int) s.n_embd, (int) s.hc, stream);
     else
         gr_write_kernel<<<blocks, THREADS, (size_t) s.hc * sizeof(float), (cudaStream_t) stream>>>(
             R, block_out, inject, (int) s.n_embd, (int) s.hc, R_out);
@@ -401,4 +391,4 @@ void gr_write(const float* R, const float* block_out, const float* inject, const
     }
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

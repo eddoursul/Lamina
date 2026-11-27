@@ -8,9 +8,9 @@
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/fused_gr.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
-#include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/kv_q4.hpp"
 #include "lamina/kernels/kv_q8.hpp"
 #include "lamina/kernels/native_moe.hpp"
@@ -18,10 +18,10 @@
 #include "lamina/kernels/native_qsa.hpp"
 #include "lamina/kernels/native_qsa_indexer.hpp"
 #include "lamina/kernels/native_rope.hpp"
-#include "lamina/kernels/qsa_decode_attn.hpp"
-#include "lamina/kernels/sampler.hpp"
 #include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
 #include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/sampler.hpp"
 #include "lamina/kernels/shared_expert.hpp"
 #include "lamina/kernels/verify_kernels.hpp"
 #include "lamina/prefill/kernels.hpp"
@@ -45,7 +45,7 @@ const lamina::kernels::RopeScaling kTestRope = [] {
     r.freq_base = 5e6;
     return r;
 }();
-}  // namespace
+}   // namespace
 
 namespace {
 
@@ -76,7 +76,8 @@ int bitwise_diff(const std::vector<float>& a, const std::vector<float>& b, const
         std::memcpy(&x, &a[i], 4);
         std::memcpy(&y, &b[i], 4);
         if (x != y && !(std::isnan(a[i]) && std::isnan(b[i]))) {
-            if (bad < 5) std::fprintf(stderr, "  %s: element %zu: %.9g (0x%08x) vs %.9g (0x%08x)\n", what, i, a[i], x, b[i], y);
+            if (bad < 5)
+                std::fprintf(stderr, "  %s: element %zu: %.9g (0x%08x) vs %.9g (0x%08x)\n", what, i, a[i], x, b[i], y);
             ++bad;
         }
     }
@@ -84,8 +85,8 @@ int bitwise_diff(const std::vector<float>& a, const std::vector<float>& b, const
 }
 
 // ---- the MoE combine: copy all rows + add the hits + one combine per token  vs  the GPU tiers' rows taken into VRAM
-// (fetch_listed_rows, whole or in each tier's part) and native_moe_gather_combine; from rep 2 on the shared rows gated by shared_expert_gate_rows vs
-// the gather-combine gating them
+// (fetch_listed_rows, whole or in each tier's part) and native_moe_gather_combine; from rep 2 on the shared rows gated
+// by shared_expert_gate_rows vs the gather-combine gating them
 int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
     const int64_t N = 2560, K = 10;
     int bad = 0;
@@ -176,8 +177,7 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
             if (second && rep >= 6)
                 for (int part = 0; part < 3; ++part)
                     lamina::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s, part);
-            else if (second)
-                lamina::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s);
+            else if (second) lamina::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s);
             lamina::kernels::native_moe_gather_combine(d_hit, m_map, d_dst, d_count + 1,
                                                        rep % 2 == 0 ? nullptr : d_dst + split, d_count + 2,
                                                        second ? d_list + 4 : nullptr, second ? d_list : nullptr, d_w,
@@ -194,13 +194,15 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
                     ++b;
                 }
             }
-            if (b) std::fprintf(stderr, "gather_combine: n_tok %d rep %d: %d of %zu differ\n", n_tok, rep, b, shared.size());
+            if (b)
+                std::fprintf(stderr, "gather_combine: n_tok %d rep %d: %d of %zu differ\n", n_tok, rep, b,
+                             shared.size());
             bad += b;
             cudaFreeHost(h_map);
             cudaFreeHost(h_list);
-            for (void* p : {(void*) d_hit, (void*) d_parts, (void*) d_w, (void*) d_sh, (void*) d_out_old,
-                            (void*) d_out_new, (void*) d_shg, (void*) d_g, (void*) d_glog, (void*) d_dst,
-                            (void*) d_count, (void*) d_list})
+            for (void* p :
+                 {(void*) d_hit, (void*) d_parts, (void*) d_w, (void*) d_sh, (void*) d_out_old, (void*) d_out_new,
+                  (void*) d_shg, (void*) d_g, (void*) d_glog, (void*) d_dst, (void*) d_count, (void*) d_list})
                 cudaFree(p);
         }
     }
@@ -225,7 +227,8 @@ int test_hit_plan(std::mt19937& rng, cudaStream_t s) {
     for (int n_tok : {1, 2, 3, 4, 8}) {
         for (int rep = 0; rep < 24; ++rep) {
             const int n = n_tok * K;
-            // each token's k experts distinct (rep 3: repeats within a token too), drawn from a small set so tokens share
+            // each token's k experts distinct (rep 3: repeats within
+            // a token too), drawn from a small set so tokens share
             std::vector<int32_t> set((size_t) (4 + rng() % 40)), ids((size_t) n), res((size_t) NE, -1);
             for (auto& e : set) e = (int32_t) (rng() % NE);
             for (int t = 0; t < n_tok; ++t)
@@ -246,14 +249,20 @@ int test_hit_plan(std::mt19937& rng, cudaStream_t s) {
             for (int i = 0; i < n; ++i) {
                 first[(size_t) i] = i;
                 for (int j = 0; j < i; ++j)
-                    if (ids[(size_t) j] == ids[(size_t) i]) { first[(size_t) i] = j; break; }
+                    if (ids[(size_t) j] == ids[(size_t) i]) {
+                        first[(size_t) i] = j;
+                        break;
+                    }
             }
             for (int i = 0; i < n; ++i) {
                 if (first[(size_t) i] != i || res[(size_t) ids[(size_t) i]] < 0) continue;
                 ptr.push_back(slot_ptr[(size_t) res[(size_t) ids[(size_t) i]]]);
                 start.push_back((int32_t) dst.size());
                 for (int j = i; j < n; ++j)
-                    if (first[(size_t) j] == i) { dst.push_back(j); tok.push_back(j / K); }
+                    if (first[(size_t) j] == i) {
+                        dst.push_back(j);
+                        tok.push_back(j / K);
+                    }
             }
             start.push_back((int32_t) dst.size());
             up(d_ids, ids);
@@ -271,10 +280,11 @@ int test_hit_plan(std::mt19937& rng, cudaStream_t s) {
                 ok = p == ptr[(size_t) q];
             }
             for (int q = 0; ok && q < entries; ++q)
-                ok = pl[(size_t) (4 + cap + 1 + q)] == dst[(size_t) q] && pl[(size_t) (4 + 2 * cap + 1 + q)] == tok[(size_t) q];
+                ok = pl[(size_t) (4 + cap + 1 + q)] == dst[(size_t) q] &&
+                     pl[(size_t) (4 + 2 * cap + 1 + q)] == tok[(size_t) q];
             if (!ok) {
-                std::fprintf(stderr, "hit_plan: n_tok %d rep %d: groups %d/%d entries %d/%d\n", n_tok, rep, pl[0], groups,
-                             pl[1], entries);
+                std::fprintf(stderr, "hit_plan: n_tok %d rep %d: groups %d/%d entries %d/%d\n", n_tok, rep, pl[0],
+                             groups, pl[1], entries);
                 ++bad;
             }
         }
@@ -424,16 +434,33 @@ int test_verify_router(std::mt19937& rng, cudaStream_t s) {
                                               m_ids[0], m_w[0], m_seq[0], s);
             lamina::kernels::verify_hit_plan(d_ids[0], n_tok * K, K, d_res, NE, d_sp, d_plan[0], cap, ptr_off, s);
             lamina::kernels::VerifyRouterArgs a;
-            a.x = d_x; a.w = d_w; a.logits = d_logits[1]; a.ids = d_ids[1]; a.weights = d_wts[1];
-            a.x_out = m_x[1]; a.ids_out = m_ids[1]; a.w_out = m_w[1]; a.seq = m_seq[1]; a.ring = 6;
-            a.res = d_res; a.slot_ptr = d_sp; a.plan = d_plan[1]; a.cap = (int) cap; a.ptr_off = (int) ptr_off;
-            a.counter = d_counter; a.n_tok = n_tok; a.n_embd = N; a.n_expert = NE;
+            a.x = d_x;
+            a.w = d_w;
+            a.logits = d_logits[1];
+            a.ids = d_ids[1];
+            a.weights = d_wts[1];
+            a.x_out = m_x[1];
+            a.ids_out = m_ids[1];
+            a.w_out = m_w[1];
+            a.seq = m_seq[1];
+            a.ring = 6;
+            a.res = d_res;
+            a.slot_ptr = d_sp;
+            a.plan = d_plan[1];
+            a.cap = (int) cap;
+            a.ptr_off = (int) ptr_off;
+            a.counter = d_counter;
+            a.n_tok = n_tok;
+            a.n_embd = N;
+            a.n_expert = NE;
             lamina::kernels::verify_router(a, s);
             check(cudaStreamSynchronize(s), "router");
             const size_t nk = (size_t) n_tok * K;
-            int b = bitwise_diff(down(d_logits[0], (size_t) n_tok * NE), down(d_logits[1], (size_t) n_tok * NE), "logits");
+            int b =
+                bitwise_diff(down(d_logits[0], (size_t) n_tok * NE), down(d_logits[1], (size_t) n_tok * NE), "logits");
             b += bitwise_diff(down(d_wts[0], nk), down(d_wts[1], nk), "weights");
-            b += bitwise_diff(std::vector<float>(h_w[0], h_w[0] + nk), std::vector<float>(h_w[1], h_w[1] + nk), "mapped weights");
+            b += bitwise_diff(std::vector<float>(h_w[0], h_w[0] + nk), std::vector<float>(h_w[1], h_w[1] + nk),
+                              "mapped weights");
             b += bitwise_diff(std::vector<float>(h_x[0], h_x[0] + (size_t) n_tok * N),
                               std::vector<float>(h_x[1], h_x[1] + (size_t) n_tok * N), "mapped x");
             if (down(d_ids[0], nk) != down(d_ids[1], nk) ||
@@ -530,24 +557,36 @@ int test_router_rows(std::mt19937& rng, cudaStream_t s) {
             std::vector<float> x((size_t) n_tok * N);
             for (auto& v : x) v = rng() % 32 == 0 ? edgy(rng) : std::normal_distribution<float>(0.0f, 1.0f)(rng);
             if (rep == 1) std::fill(x.begin(), x.begin() + 256, 0.0f);   // a zero block (and eight q8_1 ones)
-            if (rep == 2) {   // the largest magnitude twice, in two warps and in one: the first one counts
+            if (rep == 2) {                                              // the largest magnitude twice, in two
+                                                                         // warps and in one: the first one counts
                 x[7] = 5e4f;
                 x[40] = -5e4f;
                 x[256 + 3] = -6e4f;
                 x[256 + 20] = 6e4f;
                 x[512 + 1] = x[512 + 2] = x[512 + 3] = 3e4f;   // a block's sum past 65504 (#606)
-                x[1024 + 5] = -2e7f;                            // its scale past 65504
+                x[1024 + 5] = -2e7f;                           // its scale past 65504
             }
             up(d_x, x);
             std::memset(h_q1, 0xcd, 8 * row1);
             std::memset(h_xk, 0xcd, 8 * stride);
             std::memset(h_x, 0xcd, (size_t) 8 * N * 4);
             lamina::kernels::VerifyRouterArgs a;
-            a.x = d_x; a.w = d_w; a.logits = d_logits; a.ids = d_ids; a.weights = d_wts;
-            a.xq1 = d_q1; a.xq1_out = m_q1;
-            a.xk_out = rep == 3 ? nullptr : m_xk; a.xk_stride = (int) stride;
+            a.x = d_x;
+            a.w = d_w;
+            a.logits = d_logits;
+            a.ids = d_ids;
+            a.weights = d_wts;
+            a.xq1 = d_q1;
+            a.xq1_out = m_q1;
+            a.xk_out = rep == 3 ? nullptr : m_xk;
+            a.xk_stride = (int) stride;
             a.x_out = rep == 3 ? m_x : nullptr;   // a layer the pool takes as floats
-            a.seq = m_seq; a.ring = 1; a.counter = d_counter; a.n_tok = n_tok; a.n_embd = N; a.n_expert = NE;
+            a.seq = m_seq;
+            a.ring = 1;
+            a.counter = d_counter;
+            a.n_tok = n_tok;
+            a.n_embd = N;
+            a.n_expert = NE;
             lamina::kernels::verify_router(a, s);
             lamina::kernels::quantize_q8_1_rows(d_x, n_tok, N, d_ref, s);
             check(cudaStreamSynchronize(s), "router rows");
@@ -570,8 +609,10 @@ int test_router_rows(std::mt19937& rng, cudaStream_t s) {
                 const uint8_t* got = h_xk + (size_t) t * stride;
                 for (size_t i = 0; i < f.act_bytes; ++i)
                     if (got[i] != want[i]) {
-                        std::fprintf(stderr, "router_rows: n_tok %d rep %d token %d: Q8_K byte %zu (block %zu) %02x "
-                                             "vs ggml's %02x\n", n_tok, rep, t, i, i / 292, got[i], want[i]);
+                        std::fprintf(stderr,
+                                     "router_rows: n_tok %d rep %d token %d: Q8_K byte %zu (block %zu) %02x "
+                                     "vs ggml's %02x\n",
+                                     n_tok, rep, t, i, i / 292, got[i], want[i]);
                         ++b;
                         break;
                     }
@@ -609,10 +650,16 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
         }
         return v;
     };
-    auto bf = [](uint16_t v) { const uint32_t b = (uint32_t) v << 16; float f; std::memcpy(&f, &b, 4); return (double) f; };
+    auto bf = [](uint16_t v) {
+        const uint32_t b = (uint32_t) v << 16;
+        float f;
+        std::memcpy(&f, &b, 4);
+        return (double) f;
+    };
     std::vector<float> wn((size_t) D);
     for (auto& v : wn) v = edgy(rng);
-    const std::vector<uint16_t> wd = bf16((size_t) (LR * D)), wu = bf16((size_t) (D * LR)), wi = bf16((size_t) (HC * D));
+    const std::vector<uint16_t> wd = bf16((size_t) (LR * D)), wu = bf16((size_t) (D * LR)),
+                                wi = bf16((size_t) (HC * D));
     uint16_t *d_wd = dev<uint16_t>(wd.size()), *d_wu = dev<uint16_t>(wu.size()), *d_wi = dev<uint16_t>(wi.size());
     // the 8-bit forms: codes, and normal f16 scales of 2^-12 to 2^-4 (the weights about the BF16 ones' size)
     auto codes = [&](size_t n) {
@@ -687,14 +734,32 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
             for (int p = 0; p < 2; ++p)
                 for (int t = 0; t < n_tok; ++t) {
                     lamina::kernels::FusedGrArgs a;
-                    a.R = d[p][0] + t * D; a.R_out = d[p][0] + t * D; a.apply = apply;
-                    a.bo_prev = d_bo + t * N; a.inj_prev = d_inj + t * HC;
-                    a.w_norm = d_wn; a.w_down = d_wd; a.w_up = d_wu; a.w_inject = inject ? d_wi : nullptr;
-                    if (q8) { a.q_down = d_qd; a.s_down = d_sd; a.q_up = d_qu; a.s_up = d_su; }
+                    a.R = d[p][0] + t * D;
+                    a.R_out = d[p][0] + t * D;
+                    a.apply = apply;
+                    a.bo_prev = d_bo + t * N;
+                    a.inj_prev = d_inj + t * HC;
+                    a.w_norm = d_wn;
+                    a.w_down = d_wd;
+                    a.w_up = d_wu;
+                    a.w_inject = inject ? d_wi : nullptr;
+                    if (q8) {
+                        a.q_down = d_qd;
+                        a.s_down = d_sd;
+                        a.q_up = d_qu;
+                        a.s_up = d_su;
+                    }
                     a.eps = 1e-6f;
-                    a.lo = d[p][1] + t * LR; a.rs = d[p][2] + t * HC; a.inject_out = d[p][3] + t * HC;
+                    a.lo = d[p][1] + t * LR;
+                    a.rs = d[p][2] + t * HC;
+                    a.inject_out = d[p][3] + t * HC;
                     a.mixed = d[p][4] + t * N;
-                    if (p == 0) { a.gate_ema = d_ema; a.est_norm = d_wn2; a.est_gates = d_eg; a.est = d_est + t * N; }
+                    if (p == 0) {
+                        a.gate_ema = d_ema;
+                        a.est_norm = d_wn2;
+                        a.est_gates = d_eg;
+                        a.est = d_est + t * N;
+                    }
                     args[p].push_back(a);
                 }
             lamina::kernels::fused_gr_read_multi(args[0].data(), n_tok, d_scratch, s);
@@ -708,7 +773,8 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
             for (int o = 0; o < 5; ++o) {
                 got[o] = down(d[0][o], sizes[o]);
                 const int b = bitwise_diff(got[o], down(d[1][o], sizes[o]), names[o]);
-                if (b) std::fprintf(stderr, "gr_read: n_tok %d variant %d: %s: %d differ\n", n_tok, variant, names[o], b);
+                if (b)
+                    std::fprintf(stderr, "gr_read: n_tok %d variant %d: %s: %d differ\n", n_tok, variant, names[o], b);
                 bad += b;
             }
             // FP64 for the first token of the 1- and 4-token reads
@@ -737,12 +803,14 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
                     const double e = std::fabs(gpu - ref);
                     worst = std::max(worst, e / (bound + 1e-300));
                     if (!(e <= bound) && off++ < 5)
-                        std::fprintf(stderr, "  gr_read FP64: n_tok %d variant %d: %s[%lld] %.9g vs %.9g (bound %.3g)\n", n_tok,
+                        std::fprintf(stderr,
+                                     "  gr_read FP64: n_tok %d variant %d: %s[%lld] %.9g vs %.9g (bound %.3g)\n", n_tok,
                                      variant, what, (long long) i, gpu, ref, bound);
                 };
                 for (int c = 0; c < HC; ++c) near(got[2][(size_t) c], rs[(size_t) c], 1e-5 * rs[(size_t) c], "rs", c);
                 if (apply)
-                    for (int64_t i = 0; i < D; ++i) near(got[0][(size_t) i], Rp[(size_t) i], 1e-6 * Ra[(size_t) i] + 1e-30, "R", i);
+                    for (int64_t i = 0; i < D; ++i)
+                        near(got[0][(size_t) i], Rp[(size_t) i], 1e-6 * Ra[(size_t) i] + 1e-30, "R", i);
                 std::vector<double> lo((size_t) LR), lo_b((size_t) LR);
                 for (int64_t r = 0; r < LR + (inject ? HC : 0); ++r) {
                     double y = 0.0, mag = 0.0;
@@ -829,10 +897,11 @@ int test_rope_tokens(std::mt19937& rng, cudaStream_t s) {
                 up(d_b, x);
                 up(d_pos, pos);
                 for (int t = 0; t < n_tok; ++t)
-                    lamina::kernels::native_rope_apply(d_a + (size_t) t * heads * head_dim, d_a + (size_t) t * heads * head_dim,
-                                                       heads, head_dim, 64, kTestRope, d_pos + t * NH, s);
-                lamina::kernels::native_rope_apply_tokens(d_b, d_b, n_tok * heads, head_dim, 64, kTestRope, d_pos, heads,
-                                                          NH, s);
+                    lamina::kernels::native_rope_apply(d_a + (size_t) t * heads * head_dim,
+                                                       d_a + (size_t) t * heads * head_dim, heads, head_dim, 64,
+                                                       kTestRope, d_pos + t * NH, s);
+                lamina::kernels::native_rope_apply_tokens(d_b, d_b, n_tok * heads, head_dim, 64, kTestRope, d_pos,
+                                                          heads, NH, s);
                 check(cudaStreamSynchronize(s), "rope");
                 bad += bitwise_diff(down(d_a, x.size()), down(d_b, x.size()), "rope_tokens");
                 cudaFree(d_a);
@@ -876,8 +945,7 @@ int test_norm_rope(std::mt19937& rng, cudaStream_t s) {
                 up(d_x, x);
                 up(d_pos, pos);
                 lamina::kernels::native_qsa_rms_norm_weighted(d_a, d_gamma, d_a, head_dim, rows, 1e-6f, s);
-                lamina::kernels::native_rope_apply_tokens(d_a, d_a, rows, head_dim, 64, kTestRope, d_pos, heads, NH,
-                                                          s);
+                lamina::kernels::native_rope_apply_tokens(d_a, d_a, rows, head_dim, 64, kTestRope, d_pos, heads, NH, s);
                 lamina::kernels::native_qsa_norm_rope_tokens(d_b, head_dim, d_gamma, d_b, head_dim, rows, 1e-6f, 64,
                                                              kTestRope, d_pos, heads, NH, s);
                 lamina::kernels::native_qsa_norm_rope_tokens(d_x, 2 * head_dim, d_gamma, d_c, head_dim, rows, 1e-6f, 64,
@@ -894,8 +962,9 @@ int test_norm_rope(std::mt19937& rng, cudaStream_t s) {
             cudaFree(d_gamma);
         }
     }
-    std::printf("norm_rope_tokens: %s\n", bad ? "MISMATCH" : "bitwise equal (2, 4, 24 heads of 128, 256; 1-8 tokens; "
-                                                           "in place and strided)");
+    std::printf("norm_rope_tokens: %s\n", bad ? "MISMATCH"
+                                              : "bitwise equal (2, 4, 24 heads of 128, 256; 1-8 tokens; "
+                                                "in place and strided)");
     return bad;
 }
 
@@ -915,7 +984,8 @@ int test_kv_append(std::mt19937& rng, cudaStream_t s) {
         for (auto& x : k) x = edgy(rng);
         for (auto& x : v) x = edgy(rng);
         std::vector<int32_t> steps((size_t) n_tok * lamina::kernels::kStepCount, 0);
-        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
+        for (int t = 0; t < n_tok; ++t)
+            steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
         float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
         int32_t* d_steps = dev<int32_t>(steps.size());
         up(d_k, k);
@@ -976,7 +1046,10 @@ void q4_row_host(const float* in, uint8_t* codes, uint16_t* scales) {
         float a = std::fabs(x[32 * b]), m = x[32 * b];
         for (int j = 1; j < 32; ++j) {
             const float v = x[32 * b + j];
-            if (std::fabs(v) > a || (std::fabs(v) == a && v > m)) { a = std::fabs(v); m = v; }
+            if (std::fabs(v) > a || (std::fabs(v) == a && v > m)) {
+                a = std::fabs(v);
+                m = v;
+            }
         }
         scales[b] = lamina::kernels::f16_from_f32(m / -8.0f);
         const float d = lamina::kernels::f32_from_f16(scales[b]);
@@ -997,7 +1070,7 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
     for (int i = 0; i < pages; ++i) table[(size_t) i] = (i * 5 + 2) % pages;
     int32_t* d_table = dev<int32_t>(table.size());
     up(d_table, table);
-    uint8_t *d_c[2][2];
+    uint8_t* d_c[2][2];
     uint16_t* d_s[2][2];   // [form: steps, rows][K, V]
     for (int f = 0; f < 2; ++f)
         for (int kv = 0; kv < 2; ++kv) {
@@ -1011,10 +1084,13 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
         for (auto& x : k) x = edgy(rng);
         for (auto& x : v) x = edgy(rng);
         std::vector<int32_t> steps((size_t) n_tok * lamina::kernels::kStepCount, 0);
-        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
+        for (int t = 0; t < n_tok; ++t)
+            steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
         float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
         int32_t* d_steps = dev<int32_t>(steps.size());
-        up(d_k, k); up(d_v, v); up(d_steps, steps);
+        up(d_k, k);
+        up(d_v, v);
+        up(d_steps, steps);
         for (int f = 0; f < 2; ++f)
             for (int kv = 0; kv < 2; ++kv) {
                 check(cudaMemset(d_c[f][kv], 0, rows * 128), "memset");
@@ -1034,8 +1110,8 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
             for (int t = 0; t < n_tok; ++t)
                 for (int h = 0; h < NKV; ++h) {
                     const int pos = p0 + t;
-                    const size_t row = ((size_t) table[(size_t) (pos / sh.page_size)] * NKV + h) * sh.page_size +
-                                       pos % sh.page_size;
+                    const size_t row =
+                        ((size_t) table[(size_t) (pos / sh.page_size)] * NKV + h) * sh.page_size + pos % sh.page_size;
                     q4_row_host((kv ? v : k).data() + (size_t) t * per_tok + h * HD, hc.data() + row * 128,
                                 hs.data() + row * 8);
                 }
@@ -1046,7 +1122,9 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
                     ++bad;
                 }
         }
-        cudaFree(d_k); cudaFree(d_v); cudaFree(d_steps);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_steps);
     }
     // k8v4's INT8 half: K alone equals a both-sides append's K and leaves V untouched
     {
@@ -1056,10 +1134,13 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
         for (auto& x : k) x = edgy(rng);
         for (auto& x : v) x = edgy(rng);
         std::vector<int32_t> steps((size_t) n_tok * lamina::kernels::kStepCount, 0);
-        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
+        for (int t = 0; t < n_tok; ++t)
+            steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
         float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
         int32_t* d_steps = dev<int32_t>(steps.size());
-        up(d_k, k); up(d_v, v); up(d_steps, steps);
+        up(d_k, k);
+        up(d_v, v);
+        up(d_steps, steps);
         int8_t *q0 = dev<int8_t>(codes), *q1 = dev<int8_t>(codes), *qv = dev<int8_t>(codes);
         uint16_t *s0 = dev<uint16_t>(scales), *s1 = dev<uint16_t>(scales), *sv = dev<uint16_t>(scales);
         for (void* x : {(void*) q0, (void*) q1, (void*) qv}) check(cudaMemset(x, 0, codes), "memset");
@@ -1083,8 +1164,9 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
             cudaFree(d_s[f][kv]);
         }
     cudaFree(d_table);
-    std::printf("kv_q4: %s\n", bad ? "MISMATCH" : "the appends bitwise the host's rotation and rounding (1-37 tokens, "
-                                                  "both forms), the INT8 append of K alone bitwise both sides'");
+    std::printf("kv_q4: %s\n", bad ? "MISMATCH"
+                                   : "the appends bitwise the host's rotation and rounding (1-37 tokens, "
+                                     "both forms), the INT8 append of K alone bitwise both sides'");
     return bad;
 }
 
@@ -1111,7 +1193,7 @@ int test_indexer_append(std::mt19937& rng, cudaStream_t s) {
                 for (auto& x : tail) x = edgy(rng);
                 for (auto& x : dead) x = edgy(rng);
                 for (auto& x : pooled) x = edgy(rng);
-                float *d_raw = dev<float>(raw.size());
+                float* d_raw = dev<float>(raw.size());
                 int32_t* d_pos = dev<int32_t>(pos.size());
                 up(d_raw, raw);
                 up(d_pos, pos);
@@ -1130,8 +1212,8 @@ int test_indexer_append(std::mt19937& rng, cudaStream_t s) {
                 const lamina::kernels::QsaIndexerBuffers ib0{bufs[0][0], bufs[0][1], bufs[0][2], bp[0]};
                 const lamina::kernels::QsaIndexerBuffers ib1{bufs[1][0], bufs[1][1], bufs[1][2], bp[1]};
                 for (int t = 0; t < n_tok; ++t)
-                    lamina::kernels::native_qsa_indexer_append(d_raw + (size_t) t * D, d_pos + t, 0, d_gamma, 1e-6f, ib0, sh,
-                                                               max_cells, kTestRope, s);
+                    lamina::kernels::native_qsa_indexer_append(d_raw + (size_t) t * D, d_pos + t, 0, d_gamma, 1e-6f,
+                                                               ib0, sh, max_cells, kTestRope, s);
                 float* d_snap = dev<float>(tail.size());
                 lamina::kernels::native_qsa_indexer_append_multi(d_raw, d_pos, 1, n_tok, 0, d_gamma, 1e-6f, ib1, sh,
                                                                  max_cells, kTestRope, s, d_snap);
@@ -1145,7 +1227,9 @@ int test_indexer_append(std::mt19937& rng, cudaStream_t s) {
                 const char* names[3] = {"tail", "dead", "pooled"};
                 for (int o = 0; o < 3; ++o) {
                     const int b = bitwise_diff(down(bufs[0][o], sizes[o]), down(bufs[1][o], sizes[o]), names[o]);
-                    if (b) std::fprintf(stderr, "indexer: n_tok %d start %d rejected %d: %s differ\n", n_tok, start, rejected, names[o]);
+                    if (b)
+                        std::fprintf(stderr, "indexer: n_tok %d start %d rejected %d: %s differ\n", n_tok, start,
+                                     rejected, names[o]);
                     bad += b;
                 }
                 if (down(bp[0], 1) != down(bp[1], 1)) {
@@ -1177,14 +1261,21 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
         for (auto& x : *v) x = 0.5f + std::uniform_real_distribution<float>(0.0f, 1.0f)(rng);
     std::vector<uint16_t> taps((size_t) 4 * D);
     for (auto& t : taps) {   // F16 in [-1, 1): sign, exponent 0..14, random mantissa
-        const uint16_t sign = (uint16_t) ((rng() & 1u) << 15), e = (uint16_t) (rng() % 15), m = (uint16_t) (rng() & 0x3FFu);
+        const uint16_t sign = (uint16_t) ((rng() & 1u) << 15), e = (uint16_t) (rng() % 15),
+                       m = (uint16_t) (rng() & 0x3FFu);
         t = (uint16_t) (sign | (e << 10) | m);
     }
     float *d_nk = dev<float>(D), *d_nq = dev<float>(D), *d_nc = dev<float>(D);
     uint16_t* d_taps = dev<uint16_t>(taps.size());
-    up(d_nk, nk); up(d_nq, nq); up(d_nc, nc); up(d_taps, taps);
+    up(d_nk, nk);
+    up(d_nq, nq);
+    up(d_nc, nc);
+    up(d_taps, taps);
     lamina::kernels::PleWeights w;
-    w.norm_key = d_nk; w.norm_query = d_nq; w.norm_conv = d_nc; w.conv1d_f16 = d_taps;
+    w.norm_key = d_nk;
+    w.norm_query = d_nq;
+    w.norm_conv = d_nc;
+    w.conv1d_f16 = d_taps;
     int bad = 0;
     for (int n_tok : {1, 2, 5, 9, 10, 23}) {
         std::vector<float> key((size_t) n_tok * D), hidden((size_t) n_tok * D), value((size_t) n_tok * N),
@@ -1193,8 +1284,11 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
         for (auto& x : hidden) x = edgy(rng);
         for (auto& x : value) x = nd(rng);
         for (auto& x : hist) x = nd(rng);
-        float *d_key = dev<float>(key.size()), *d_hidden = dev<float>(hidden.size()), *d_value = dev<float>(value.size());
-        up(d_key, key); up(d_hidden, hidden); up(d_value, value);
+        float *d_key = dev<float>(key.size()), *d_hidden = dev<float>(hidden.size()),
+              *d_value = dev<float>(value.size());
+        up(d_key, key);
+        up(d_hidden, hidden);
+        up(d_value, value);
         // per token: the decode path's calls, the history after each token kept
         float *h0 = dev<float>(hist.size()), *r0 = dev<float>(hidden.size()),
               *s0 = dev<float>((size_t) n_tok * hist.size());
@@ -1218,8 +1312,8 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
         check(cudaStreamSynchronize(s), "ple tokens");
         const int br = bitwise_diff(down(r0, hidden.size()), down(r2, hidden.size()), "result");
         const int bh = bitwise_diff(down(h0, hist.size()), down(h2, hist.size()), "history");
-        const int bs = bitwise_diff(down(s0, (size_t) n_tok * hist.size()), down(s2, (size_t) n_tok * hist.size()),
-                                    "histories");
+        const int bs =
+            bitwise_diff(down(s0, (size_t) n_tok * hist.size()), down(s2, (size_t) n_tok * hist.size()), "histories");
         if (br || bh || bs) std::fprintf(stderr, "ple tokens: n_tok %d: results or histories differ\n", n_tok);
         bad += br + bh + bs;
         for (float* p : {d_key, d_hidden, d_value, h0, r0, s0, k1, q1, g1, gd1, c1, h2, r2, k2, q2, g2, gd2, s2})
@@ -1262,7 +1356,12 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
     int8_t *d_kq = dev<int8_t>(n_codes), *d_vq = dev<int8_t>(n_codes);
     uint16_t *d_ks = dev<uint16_t>(n_scales), *d_vs = dev<uint16_t>(n_scales), *d_kh = dev<uint16_t>(n_codes),
              *d_vh = dev<uint16_t>(n_codes);
-    up(d_kq, kq); up(d_vq, vq); up(d_ks, ks); up(d_vs, vs); up(d_kh, kh); up(d_vh, vh);
+    up(d_kq, kq);
+    up(d_vq, vq);
+    up(d_ks, ks);
+    up(d_vs, vs);
+    up(d_kh, kh);
+    up(d_vh, vh);
     // 4-bit pools: any code bytes, a scale per 32 values
     const size_t n_q4 = n_codes / 2, n_s4 = n_codes / lamina::kernels::KV_Q4_GROUP;
     std::vector<uint8_t> kq4(n_q4), vq4(n_q4);
@@ -1273,7 +1372,10 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
     for (auto& x : vs4) x = (uint16_t) (half_bits(0.01f, 0.3f) | ((rng() & 1u) << 15));
     uint8_t *d_kq4 = dev<uint8_t>(n_q4), *d_vq4 = dev<uint8_t>(n_q4);
     uint16_t *d_ks4 = dev<uint16_t>(n_s4), *d_vs4 = dev<uint16_t>(n_s4);
-    up(d_kq4, kq4); up(d_vq4, vq4); up(d_ks4, ks4); up(d_vs4, vs4);
+    up(d_kq4, kq4);
+    up(d_vq4, vq4);
+    up(d_ks4, ks4);
+    up(d_vs4, vs4);
     const std::vector<int> widths = {1, 5, 64, 65, 700, 2051};
     const int n_q = (int) widths.size();
     std::vector<int32_t> ids((size_t) n_q * cap, 0), steps((size_t) n_q * lamina::kernels::kStepCount, 0);
@@ -1293,7 +1395,10 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
     float *d_qf = dev<float>(qf.size()), *d_g = dev<float>(q.size()), *d_c = dev<float>(q.size());
     const uint64_t scr = lamina::kernels::qsa_decode_attn_scratch_floats(cap, sh);
     float* d_scratch = dev<float>((size_t) n_q * scr);
-    up(d_ids, ids); up(d_steps, steps); up(d_q, q); up(d_qf, qf);
+    up(d_ids, ids);
+    up(d_steps, steps);
+    up(d_q, q);
+    up(d_qf, qf);
     check(cudaDeviceSynchronize(), "attn inputs");
     const int64_t SC = lamina::kernels::kStepCount;
     int bad = 0, gate_bad = 0, ref_bad = 0;
@@ -1310,7 +1415,8 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
             else {
                 const uint8_t b = (kv ? vq4 : kq4)[row * (HD / 2) + (d / 32) * 16 + d % 16];
                 const int code = (d % 32) < 16 ? (b & 15) : (b >> 4);
-                out[d] = (double) (code - 8) * lamina::kernels::f32_from_f16((kv ? vs4 : ks4)[row * (HD / 32) + d / 32]);
+                out[d] =
+                    (double) (code - 8) * lamina::kernels::f32_from_f16((kv ? vs4 : ks4)[row * (HD / 32) + d / 32]);
             }
         }
     };
@@ -1318,10 +1424,25 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
         const char* name = kNames[fmt];
         lamina::kernels::QsaAttnPools pools;
         pools.page_table = d_table;
-        if (fmt == 1) { pools.k_q = d_kq; pools.v_q = d_vq; pools.k_scale = d_ks; pools.v_scale = d_vs; }
-        else if (fmt == 2) { pools.k_q = d_kq; pools.k_scale = d_ks; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4; }
-        else if (fmt == 3) { pools.k_q4 = d_kq4; pools.k_q4s = d_ks4; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4; }
-        else { pools.k_pool = d_kh; pools.v_pool = d_vh; }
+        if (fmt == 1) {
+            pools.k_q = d_kq;
+            pools.v_q = d_vq;
+            pools.k_scale = d_ks;
+            pools.v_scale = d_vs;
+        } else if (fmt == 2) {
+            pools.k_q = d_kq;
+            pools.k_scale = d_ks;
+            pools.v_q4 = d_vq4;
+            pools.v_q4s = d_vs4;
+        } else if (fmt == 3) {
+            pools.k_q4 = d_kq4;
+            pools.k_q4s = d_ks4;
+            pools.v_q4 = d_vq4;
+            pools.v_q4s = d_vs4;
+        } else {
+            pools.k_pool = d_kh;
+            pools.v_pool = d_vh;
+        }
         lamina::kernels::qsa_prefill_attn(d_q, pools, d_ids, d_steps, cap, sh, d_b, n_q, s);
         for (int alone = 0; alone < 2; ++alone) {   // the queries in one call, and each alone (the most splits)
             if (alone)
@@ -1408,9 +1529,10 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
             ++gate_bad;
         }
     }
-    for (void* p : {(void*) d_table, (void*) d_kq, (void*) d_vq, (void*) d_ks, (void*) d_vs, (void*) d_kh, (void*) d_vh,
-                    (void*) d_kq4, (void*) d_vq4, (void*) d_ks4, (void*) d_vs4, (void*) d_ids, (void*) d_steps,
-                    (void*) d_q, (void*) d_a, (void*) d_b, (void*) d_qf, (void*) d_g, (void*) d_c, (void*) d_scratch})
+    for (void* p :
+         {(void*) d_table, (void*) d_kq,  (void*) d_vq,  (void*) d_ks,  (void*) d_vs,  (void*) d_kh,     (void*) d_vh,
+          (void*) d_kq4,   (void*) d_vq4, (void*) d_ks4, (void*) d_vs4, (void*) d_ids, (void*) d_steps,  (void*) d_q,
+          (void*) d_a,     (void*) d_b,   (void*) d_qf,  (void*) d_g,   (void*) d_c,   (void*) d_scratch})
         cudaFree(p);
     std::printf("decode_attn: %s, the gate %s, %s (FP16, INT8, k8v4 and q4_0 pools, 1-2051 cells, 6 queries at once "
                 "and each alone; largest relative differences %.2g, %.2g from FP64)\n",
@@ -1440,7 +1562,8 @@ int test_kv_roundtrip(std::mt19937& rng, cudaStream_t s) {
         v[i] = nd(rng);
     }
     float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
-    up(d_k, k); up(d_v, v);
+    up(d_k, k);
+    up(d_v, v);
     int8_t *d_kq = dev<int8_t>(rows * HD), *d_vq = dev<int8_t>(rows * HD);
     uint16_t *d_ks = dev<uint16_t>(rows * 4), *d_vs = dev<uint16_t>(rows * 4);
     uint8_t *d_kq4 = dev<uint8_t>(rows * 128), *d_vq4 = dev<uint8_t>(rows * 128);
@@ -1457,7 +1580,9 @@ int test_kv_roundtrip(std::mt19937& rng, cudaStream_t s) {
     int32_t *d_ids = dev<int32_t>(ids.size()), *d_steps = dev<int32_t>(steps.size());
     float *d_q = dev<float>(q.size()), *d_a = dev<float>(q.size()), *d_b = dev<float>(q.size());
     float* d_scratch = dev<float>((size_t) n_q * lamina::kernels::qsa_decode_attn_scratch_floats(cap, sh));
-    up(d_ids, ids); up(d_steps, steps); up(d_q, q);
+    up(d_ids, ids);
+    up(d_steps, steps);
+    up(d_q, q);
     // FP64 over the values as appended
     std::vector<double> ref(q.size());
     for (int i = 0; i < n_q; ++i)
@@ -1491,15 +1616,25 @@ int test_kv_roundtrip(std::mt19937& rng, cudaStream_t s) {
         if (fmt == 0) {
             lamina::prefill::kv_append(d_k, d_v, cells, 0, d_table, sh.page_size, nullptr, nullptr, d_kq, d_vq, d_ks,
                                        d_vs, s);
-            pools.k_q = d_kq; pools.v_q = d_vq; pools.k_scale = d_ks; pools.v_scale = d_vs;
+            pools.k_q = d_kq;
+            pools.v_q = d_vq;
+            pools.k_scale = d_ks;
+            pools.v_scale = d_vs;
         } else if (fmt == 1) {
             lamina::prefill::kv_append(d_k, d_v, cells, 0, d_table, sh.page_size, nullptr, nullptr, d_kq, nullptr, d_ks,
                                        nullptr, s, 1);
-            lamina::kernels::kv_append_q4_rows(nullptr, nullptr, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh, s);
-            pools.k_q = d_kq; pools.k_scale = d_ks; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4;
+            lamina::kernels::kv_append_q4_rows(nullptr, nullptr, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh,
+                                               s);
+            pools.k_q = d_kq;
+            pools.k_scale = d_ks;
+            pools.v_q4 = d_vq4;
+            pools.v_q4s = d_vs4;
         } else {
             lamina::kernels::kv_append_q4_rows(d_kq4, d_ks4, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh, s);
-            pools.k_q4 = d_kq4; pools.k_q4s = d_ks4; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4;
+            pools.k_q4 = d_kq4;
+            pools.k_q4s = d_ks4;
+            pools.v_q4 = d_vq4;
+            pools.v_q4s = d_vs4;
         }
         lamina::kernels::qsa_prefill_attn(d_q, pools, d_ids, d_steps, cap, sh, d_b, n_q, s);
         lamina::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
@@ -1552,7 +1687,10 @@ int test_prefill_gdn(std::mt19937& rng, cudaStream_t s) {
         for (auto& x : z) x = nd(rng);
         float *d_qkv = dev<float>(qkv.size()), *d_gate = dev<float>(gate.size()), *d_beta = dev<float>(beta.size()),
               *d_z = dev<float>(z.size());
-        up(d_qkv, qkv); up(d_gate, gate); up(d_beta, beta); up(d_z, z);
+        up(d_qkv, qkv);
+        up(d_gate, gate);
+        up(d_beta, beta);
+        up(d_z, z);
         float* d_hist[2];
         float* d_state[2];
         float* d_h[2];
@@ -1577,12 +1715,13 @@ int test_prefill_gdn(std::mt19937& rng, cudaStream_t s) {
             lamina::kernels::gdn_conv_l2_multi(d_hist[0], d_qkv + t0 * C, d_w, d_h[0] + t0 * C, C, 2 * HK, eps, n, s);
             lamina::kernels::gdn_conv_commit(d_hist[0], d_qkv + t0 * C, C, d_counts + i, s);
             lamina::kernels::gdn_step_norm_multi(d_state[0], d_h[0] + t0 * C, C, d_gate + t0 * HV, d_beta + t0 * HV,
-                                                 d_z + t0 * ZV, d_gamma, eps, d_y[0] + t0 * ZV, HK, HV, n, d_counts + i, s);
+                                                 d_z + t0 * ZV, d_gamma, eps, d_y[0] + t0 * ZV, HK, HV, n, d_counts + i,
+                                                 s);
         }
         // the prompt path, all T at once
         lamina::prefill::gdn_conv(d_hist[1], d_qkv, d_w, d_h[1], T, eps, s);
         lamina::prefill::gdn_scan(d_state[1], d_h[1], d_gate, d_beta, d_y[1], T, s);
-        lamina::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16, T, s);   // the engine's: FP16 only
+        lamina::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16, T, s);          // the engine's: FP16 only
         lamina::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16b, T, s, true);   // and FP32, in place
         check(cudaStreamSynchronize(s), "prefill gdn");
         const bool y16_same = down(d_y16, z.size()) == down(d_y16b, z.size());
@@ -1619,8 +1758,9 @@ int test_prefill_gdn(std::mt19937& rng, cudaStream_t s) {
     }
     cudaFree(d_w);
     cudaFree(d_gamma);
-    std::printf("prefill_gdn: %s (1-300 tokens; the recurrence within %.2g / %.2g of the decode steps' output / state)\n",
-                bad ? "MISMATCH" : "the conv bitwise", worst_y, worst_s);
+    std::printf(
+        "prefill_gdn: %s (1-300 tokens; the recurrence within %.2g / %.2g of the decode steps' output / state)\n",
+        bad ? "MISMATCH" : "the conv bitwise", worst_y, worst_s);
     return bad;
 }
 
@@ -1643,16 +1783,16 @@ int test_argmax(std::mt19937& rng, cudaStream_t s) {
             for (int r = 0; r < rows; ++r) {
                 float* row = h.data() + (size_t) r * n;
                 const int a = (int) (rng() % n), b = (int) (rng() % n);
-                row[a] = row[b] = 40.0f;                       // a tie at the maximum
-                if (r % 4 == 1) {                              // finite
+                row[a] = row[b] = 40.0f;   // a tie at the maximum
+                if (r % 4 == 1) {          // finite
                     want_nf[(size_t) r] = 0;
-                } else if (r % 4 == 3) {                       // an infinity alone
+                } else if (r % 4 == 3) {   // an infinity alone
                     row[(int) (rng() % n)] = -INFINITY;
                 } else {
-                    row[(int) (rng() % n)] = std::nanf("");    // never picked
+                    row[(int) (rng() % n)] = std::nanf("");   // never picked
                     row[(int) (rng() % n)] = -INFINITY;
                 }
-                if (r == 2)                                    // no value above -inf: 0
+                if (r == 2)   // no value above -inf: 0
                     for (int i = 0; i < n; ++i) row[i] = i % 7 ? -INFINITY : std::nanf("");
             }
             float* d_l = dev<float>(h.size());
@@ -1687,18 +1827,24 @@ int test_argmax(std::mt19937& rng, cudaStream_t s) {
                         ++bad;
                     }
             }
-            cudaFree(d_l); cudaFree(d_ref); cudaFree(d_out); cudaFree(d_p1); cudaFree(d_p2); cudaFree(d_nf);
+            cudaFree(d_l);
+            cudaFree(d_ref);
+            cudaFree(d_out);
+            cudaFree(d_p1);
+            cudaFree(d_p2);
+            cudaFree(d_nf);
         }
     }
     cudaFree(sa);
     cudaFree(st);
     std::printf("argmax_rows, row_top_prob_split: %s\n",
-                bad ? "MISMATCH" : "bitwise equal to the one-block kernels (ties, NaN, -inf, 1-8 rows on one scratch), "
-                                   "the rows with a NaN or an infinity flagged");
+                bad ? "MISMATCH"
+                    : "bitwise equal to the one-block kernels (ties, NaN, -inf, 1-8 rows on one scratch), "
+                      "the rows with a NaN or an infinity flagged");
     return bad;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {

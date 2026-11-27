@@ -74,7 +74,8 @@ std::string dense_directory(const GgufModel& m) {
         std::vector<uint64_t> offsets;
         for (const TensorInfo& t : gguf.tensors()) offsets.push_back(t.offset);
         std::sort(offsets.begin(), offsets.end());
-        if (std::adjacent_find(offsets.begin(), offsets.end()) != offsets.end()) return "native dense: tensor payload offsets overlap";
+        if (std::adjacent_find(offsets.begin(), offsets.end()) != offsets.end())
+            return "native dense: tensor payload offsets overlap";
         const uint64_t payload = gguf.file_size() - gguf.data_start();
         for (const TensorInfo& t : gguf.tensors()) {
             int be = 0, bb = 0;
@@ -82,11 +83,13 @@ std::string dense_directory(const GgufModel& m) {
             if (t.shape.empty() || !block_geometry(t.type, be, bb) || t.shape[0] % (uint64_t) be != 0)
                 return "native dense: invalid block geometry " + t.name;
             for (const uint64_t d : t.shape) {
-                if (!d || elements > (std::numeric_limits<uint64_t>::max)() / d) return "native dense: invalid tensor extent " + t.name;
+                if (!d || elements > (std::numeric_limits<uint64_t>::max)() / d)
+                    return "native dense: invalid tensor extent " + t.name;
                 elements *= d;
             }
             const uint64_t blocks = elements / (uint64_t) be;
-            if (blocks > (std::numeric_limits<uint64_t>::max)() / (uint64_t) bb) return "native dense: tensor byte count overflow " + t.name;
+            if (blocks > (std::numeric_limits<uint64_t>::max)() / (uint64_t) bb)
+                return "native dense: tensor byte count overflow " + t.name;
             const uint64_t bytes = blocks * (uint64_t) bb;
             if (t.offset > payload || bytes > payload - t.offset) return "native dense: truncated payload " + t.name;
             const auto next = std::upper_bound(offsets.begin(), offsets.end(), t.offset);
@@ -97,14 +100,16 @@ std::string dense_directory(const GgufModel& m) {
 }
 
 /// The dense matrices NativeDense serves (native_dense.cpp's eligible) and the verify window must find served
-const char* const kServed[] = {".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight", ".attn_q.weight",
-                               ".attn_k.weight", ".attn_v.weight", ".attn_output.weight", ".ffn_gate_shexp.weight",
-                               ".ffn_up_shexp.weight", ".ffn_down_shexp.weight"};
+const char* const kServed[] = {".attn_qkv.weight",      ".attn_gate.weight",      ".ssm_out.weight",
+                               ".attn_q.weight",        ".attn_k.weight",         ".attn_v.weight",
+                               ".attn_output.weight",   ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight",
+                               ".ffn_down_shexp.weight"};
 bool served_name(const std::string& n) {
     if (n.rfind("blk.", 0) != 0) return false;
     if (n == "blk.1.ple_key.weight") return true;
     for (const char* s : kServed)
-        if (n.size() > std::char_traits<char>::length(s) && n.compare(n.size() - std::char_traits<char>::length(s), std::string::npos, s) == 0)
+        if (n.size() > std::char_traits<char>::length(s) &&
+            n.compare(n.size() - std::char_traits<char>::length(s), std::string::npos, s) == 0)
             return true;
     return false;
 }
@@ -115,10 +120,11 @@ bool hc_matrix(const std::string& n) {
         return n.size() > k && n.compare(n.size() - k, std::string::npos, s) == 0;
     };
     if (n.rfind("blk.", 0) != 0) return n == "output_hc_down.weight" || n == "output_hc_up.weight";
-    return ends(".hc_attn_down.weight") || ends(".hc_attn_up.weight") || ends(".hc_ffn_down.weight") || ends(".hc_ffn_up.weight");
+    return ends(".hc_attn_down.weight") || ends(".hc_attn_up.weight") || ends(".hc_ffn_down.weight") ||
+           ends(".hc_ffn_up.weight");
 }
 
-}  // namespace
+}   // namespace
 
 FileCheckOptions file_check_options(const std::vector<std::string>& args) {
     FileCheckOptions o;
@@ -142,7 +148,8 @@ FileCheckOptions file_check_options(const std::vector<std::string>& args) {
         else if (a == "--vision") o.vision = true;
         else if (a == "--no-vision") o.vision = false;
         else if (a == "--emb") o.vision = !value().empty();
-        else if (std::find(drafter_flags().begin(), drafter_flags().end(), a) != drafter_flags().end()) o.mtp = value().empty() && o.mtp;
+        else if (std::find(drafter_flags().begin(), drafter_flags().end(), a) != drafter_flags().end())
+            o.mtp = value().empty() && o.mtp;
     }
     return o;
 }
@@ -175,13 +182,16 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
                    std::to_string(f.d_type) + ") have no GPU kernels";
         if (o.expert_exact && (!K::native_expert_exact_supported(f.gu_type, f.d_type, f.gu_act, f.d_act) ||
                                ((f.gu_type == 13 || f.d_type == 13) && q5k_mins < 0)))
-            return "--expert-math exact has no bit-exact GPU kernels for layer " + std::to_string(l) + "'s experts (GGML "
-                   "types " + std::to_string(f.gu_type) + " / " + std::to_string(f.d_type) + "); use --expert-math fast";
+            return "--expert-math exact has no bit-exact GPU kernels for layer " + std::to_string(l) +
+                   "'s experts (GGML "
+                   "types " +
+                   std::to_string(f.gu_type) + " / " + std::to_string(f.d_type) + "); use --expert-math fast";
     }
     // the arena takes the compiled expert count (ArenaExpertSource::open)
     if (lay.n_expert != g0.n_expert)
         return "the model has " + std::to_string(lay.n_expert) + " experts a layer; this path runs " +
-               std::to_string(g0.n_expert) + " (ArenaExpertSource: the expert layout was loaded for a different geometry)";
+               std::to_string(g0.n_expert) +
+               " (ArenaExpertSource: the expert layout was loaded for a different geometry)";
     try {
         const GgufModel m(shards);
         // the token embedding (NativeEmbed::load: its rows dequantized on the GPU)
@@ -208,15 +218,18 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
                 for (const TensorInfo& t : m.shard(s).tensors()) {
                     if (!hc_matrix(t.name)) continue;
                     const std::string tn = t.type_name();
-                    if (t.shape.size() != 2 || t.shape[0] % 32 != 0 || (tn != "Q8_0" && tn != "BF16" && tn != "F16" && tn != "F32"))
+                    if (t.shape.size() != 2 || t.shape[0] % 32 != 0 ||
+                        (tn != "Q8_0" && tn != "BF16" && tn != "F16" && tn != "F32"))
                         return "hc q8: " + t.name + " has another shape or type (" + tn + ")";
                 }
         // the PLE table (PleTable::open: its shape, its row format, its span in the file) and the PLE's weights
         {
-            if (std::string e = ple_table_problem(o.ple_gguf.empty() ? K::ple_table_shard(shards) : o.ple_gguf); !e.empty())
+            if (std::string e = ple_table_problem(o.ple_gguf.empty() ? K::ple_table_shard(shards) : o.ple_gguf);
+                !e.empty())
                 return e;
-            for (const char* n : {"blk.1.ple_key.weight", "blk.1.ple_value.weight", "blk.1.ple_norm_key.weight",
-                                  "blk.1.ple_norm_query.weight", "blk.1.ple_norm_conv.weight", "blk.1.ple_conv1d.weight"})
+            for (const char* n :
+                 {"blk.1.ple_key.weight", "blk.1.ple_value.weight", "blk.1.ple_norm_key.weight",
+                  "blk.1.ple_norm_query.weight", "blk.1.ple_norm_conv.weight", "blk.1.ple_conv1d.weight"})
                 if (m.find(n) == nullptr)
                     return "the pack has no blk.1.ple_* tensors, so the PLE cannot be wired - and running without it is a "
                            "DIFFERENT MODEL";
@@ -224,24 +237,26 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
         // what the verify window and the prompt path read of each layer (Verifier::record_window, Prefill::run): every
         // tensor there, the projections served natively (an MMVQ type)
         for (int64_t l = 0; l < g0.n_layers; ++l) {
-            std::vector<const char*> need = {"hc_attn_norm.weight", "hc_attn_down.weight", "hc_attn_up.weight",
-                                             "hc_attn_inject.weight", "hc_ffn_norm.weight", "hc_ffn_down.weight",
-                                             "hc_ffn_up.weight", "hc_ffn_inject.weight", "ffn_gate_inp.weight",
-                                             "ffn_gate_inp_shexp.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight",
-                                             "ffn_down_shexp.weight"};
+            std::vector<const char*> need = {
+                "hc_attn_norm.weight",  "hc_attn_down.weight",       "hc_attn_up.weight",     "hc_attn_inject.weight",
+                "hc_ffn_norm.weight",   "hc_ffn_down.weight",        "hc_ffn_up.weight",      "hc_ffn_inject.weight",
+                "ffn_gate_inp.weight",  "ffn_gate_inp_shexp.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight",
+                "ffn_down_shexp.weight"};
             if (is_qsa_layer(g0, l))
                 need.insert(need.end(), {"indexer.k_proj.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight",
                                          "attn_output.weight", "indexer.q_proj.weight", "attn_q_norm.weight",
                                          "attn_k_norm.weight", "indexer.q_norm.weight", "indexer.k_norm.weight"});
             else
-                need.insert(need.end(), {"attn_qkv.weight", "attn_gate.weight", "ssm_out.weight", "ssm_alpha.weight",
-                                         "ssm_beta.weight", "ssm_conv1d.weight", "ssm_norm.weight", "ssm_dt.bias", "ssm_a"});
+                need.insert(need.end(),
+                            {"attn_qkv.weight", "attn_gate.weight", "ssm_out.weight", "ssm_alpha.weight",
+                             "ssm_beta.weight", "ssm_conv1d.weight", "ssm_norm.weight", "ssm_dt.bias", "ssm_a"});
             for (const char* n : need) {
                 const std::string name = blk(l, n);
                 const TensorInfo* t = m.find(name);
                 if (t == nullptr) return name + " is missing";
                 if (served_name(name) && (!K::native_mmvq_supported((int) t->type) || t->shape.size() != 2))
-                    return "verify: " + name + " is not served natively (" + t->type_name() + ", which the native MMVQ "
+                    return "verify: " + name + " is not served natively (" + t->type_name() +
+                           ", which the native MMVQ "
                            "does not take)";
             }
         }
@@ -252,13 +267,14 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
             size_t at = 0;
             const TensorInfo* t = m.find("output.weight", &at);
             if (t == nullptr) return "output.weight is missing";
-            if (!K::native_mmvq_supported((int) t->type) || t->shape.size() != 2 || t->shape[0] != (uint64_t) g0.n_embd ||
-                t->shape[1] > INT_MAX)
+            if (!K::native_mmvq_supported((int) t->type) || t->shape.size() != 2 ||
+                t->shape[0] != (uint64_t) g0.n_embd || t->shape[1] > INT_MAX)
                 return "native head: expected a natively supported output.weight with the canonical head dimensions";
             const GgufFile& f = m.shard(at);
             const uint64_t bytes = K::native_mmvq_weight_bytes((int) t->type, (int) g0.n_embd, (int) t->shape[1]);
             const uint64_t payload = f.file_size() - f.data_start();
-            if (t->offset > payload || bytes > payload - t->offset) return "native head: truncated output.weight payload";
+            if (t->offset > payload || bytes > payload - t->offset)
+                return "native head: truncated output.weight payload";
         }
     } catch (const std::exception& e) {
         return e.what();
@@ -275,8 +291,9 @@ std::string qwen35_file_problem(const GgufModel& m) {
         return "this path runs Qwen3.6-35B-A3B (qwen35moe) and Qwen3.8-27B (qwen35) files";
     const bool moe = g.family == ModelFamily::Qwen35Moe;
     if (!check_gguf_layout(m, g, err)) return err;
-    if (g.head_dim != 256 || g.ssm_state_size != 128 || g.ssm_d_conv != 4 || (moe && (g.n_expert > 512 || top_k > 15)) ||
-        g.n_head_kv < 1 || g.n_head % g.n_head_kv != 0 || g.n_head / g.n_head_kv > 8)
+    if (g.head_dim != 256 || g.ssm_state_size != 128 || g.ssm_d_conv != 4 ||
+        (moe && (g.n_expert > 512 || top_k > 15)) || g.n_head_kv < 1 || g.n_head % g.n_head_kv != 0 ||
+        g.n_head / g.n_head_kv > 8)
         return "a geometry this driver's kernels do not take (head 256, state 128, conv 4, <= 512 experts, top-k <= 15, "
                "<= 8 query heads a KV head)";
     // each tensor's type as load() reads it (q36_engine.cu): f32 (upload_f32), mat (the native MMVQ), the experts
@@ -292,7 +309,8 @@ std::string qwen35_file_problem(const GgufModel& m) {
         const TensorInfo* t = m.find(name);
         if (!bad.empty()) return;
         if (t == nullptr) bad = "missing " + name;
-        else if (!K::native_mmvq_supported((int) t->type)) bad = name + " is " + t->type_name() + ", which the native MMVQ does not take";
+        else if (!K::native_mmvq_supported((int) t->type))
+            bad = name + " is " + t->type_name() + ", which the native MMVQ does not take";
     };
     const bool has_mtp = g.n_mtp_layers > 0;
     for (int64_t l = 0; l < g.n_layers + (has_mtp ? 1 : 0) && bad.empty(); ++l) {
@@ -303,10 +321,12 @@ std::string qwen35_file_problem(const GgufModel& m) {
             mat(blk(l, "attn_qkv.weight"));
             mat(blk(l, "attn_gate.weight"));
             mat(blk(l, "ssm_out.weight"));
-            for (const char* n : {"ssm_alpha.weight", "ssm_beta.weight", "ssm_dt.bias", "ssm_a", "ssm_conv1d.weight", "ssm_norm.weight"})
+            for (const char* n : {"ssm_alpha.weight", "ssm_beta.weight", "ssm_dt.bias", "ssm_a", "ssm_conv1d.weight",
+                                  "ssm_norm.weight"})
                 f32(blk(l, n));
         } else {
-            for (const char* n : {"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight"}) mat(blk(l, n));
+            for (const char* n : {"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight"})
+                mat(blk(l, n));
             f32(blk(l, "attn_q_norm.weight"));
             f32(blk(l, "attn_k_norm.weight"));
         }
@@ -321,14 +341,19 @@ std::string qwen35_file_problem(const GgufModel& m) {
         const TensorInfo* tg = m.find(blk(l, "ffn_gate_exps.weight"));
         const TensorInfo* tu = m.find(blk(l, "ffn_up_exps.weight"));
         const TensorInfo* td = m.find(blk(l, "ffn_down_exps.weight"));
-        if (!tg || !tu || !td) return "missing " + blk(l, !tg ? "ffn_gate_exps.weight" : !tu ? "ffn_up_exps.weight" : "ffn_down_exps.weight");
+        if (!tg || !tu || !td)
+            return "missing " + blk(l, !tg   ? "ffn_gate_exps.weight"
+                                       : !tu ? "ffn_up_exps.weight"
+                                             : "ffn_down_exps.weight");
         if (tg->type != tu->type) return blk(l, "ffn_gate_exps / ffn_up_exps differ in type");
         if (!K::native_expert_supported((int) tg->type, (int) td->type, g.n_embd, g.n_ff))
-            return blk(l, "experts are ") + tg->type_name() + "/" + td->type_name() + ", which the native expert kernels do not take";
+            return blk(l, "experts are ") + tg->type_name() + "/" + td->type_name() +
+                   ", which the native expert kernels do not take";
     }
     if (has_mtp && bad.empty()) {
         mat(blk(g.n_layers, "nextn.eh_proj.weight"));
-        for (const char* n : {"nextn.enorm.weight", "nextn.hnorm.weight", "nextn.shared_head_norm.weight"}) f32(blk(g.n_layers, n));
+        for (const char* n : {"nextn.enorm.weight", "nextn.hnorm.weight", "nextn.shared_head_norm.weight"})
+            f32(blk(g.n_layers, n));
     }
     f32("output_norm.weight");
     mat("output.weight");
@@ -356,14 +381,18 @@ std::string hy4_file_problem(const GgufModel& m, const FileCheckOptions& o) {
             bad = name + " is " + t->type_name() + ", expected F32 or BF16";
     };
     auto mat = [&](const std::string& name) {
-        if (const TensorInfo* t = find(name); t && t->type != 8 && ((t->type != 30 && t->type != 0) || t->shape[0] % 32 != 0))
-            bad = name + " is " + t->type_name() + "; this path reads its dense matrices as Q8_0 (or BF16 / F32 made Q8_0)";
+        if (const TensorInfo* t = find(name);
+            t && t->type != 8 && ((t->type != 30 && t->type != 0) || t->shape[0] % 32 != 0))
+            bad = name + " is " + t->type_name() +
+                  "; this path reads its dense matrices as Q8_0 (or BF16 / F32 made Q8_0)";
     };
     if (const TensorInfo* t = find("per_layer_token_embd.weight"); t && t->type != 43)
         return "per_layer_token_embd.weight is " + std::string(t->type_name()) + ", expected F8_E4M3";
     if (const TensorInfo* t = find("token_embd.weight"); t && !K::iq_supported((int) t->type))
         return std::string("token_embd.weight is ") + t->type_name() + ", which iq_embed_rows does not read";
-    for (const char* n : {"output_norm.weight", "output_hc_fn.weight", "output_hc_base.weight", "output_hc_scale.weight"}) f32(n);
+    for (const char* n :
+         {"output_norm.weight", "output_hc_fn.weight", "output_hc_base.weight", "output_hc_scale.weight"})
+        f32(n);
     if (const TensorInfo* t = find("output.weight"); t && t->type != 30)
         return std::string("output.weight is ") + t->type_name() + ", expected BF16";
     if (!bad.empty()) return bad;
@@ -382,18 +411,19 @@ std::string hy4_file_problem(const GgufModel& m, const FileCheckOptions& o) {
             mat(p + n);
         if (mtp) {
             mat(p + "nextn.eh_proj.weight");
-            for (const char* n : {"nextn.enorm.weight", "nextn.hnorm.weight", "nextn.shared_head_norm.weight"}) f32(p + n);
+            for (const char* n : {"nextn.enorm.weight", "nextn.hnorm.weight", "nextn.shared_head_norm.weight"})
+                f32(p + n);
         } else {
-            for (const char* n : {"hc_attn_fn.weight", "hc_attn_base.weight", "hc_attn_scale.weight", "hc_ffn_fn.weight",
-                                  "hc_ffn_base.weight", "hc_ffn_scale.weight"})
+            for (const char* n : {"hc_attn_fn.weight", "hc_attn_base.weight", "hc_attn_scale.weight",
+                                  "hc_ffn_fn.weight", "hc_ffn_base.weight", "hc_ffn_scale.weight"})
                 f32(p + n);
         }
         if (has_idx) {
             for (const char* n : {"indexer.attn_q_b.weight", "indexer.attn_k.weight", "indexer_compressor_value.weight",
                                   "indexer_compressor_gate.weight"})
                 mat(p + n);
-            for (const char* n : {"indexer.k_norm.weight", "indexer_compressor_ape.weight", "indexer_compressor_norm.weight",
-                                  "indexer.proj.weight"})
+            for (const char* n : {"indexer.k_norm.weight", "indexer_compressor_ape.weight",
+                                  "indexer_compressor_norm.weight", "indexer.proj.weight"})
                 f32(p + n);
         }
         if (eng >= 0) {
@@ -408,8 +438,8 @@ std::string hy4_file_problem(const GgufModel& m, const FileCheckOptions& o) {
         }
         f32(p + "ffn_gate_inp.weight");
         f32(p + "exp_probs_b.bias");
-        for (const char* n : {"ffn_routed_down.weight", "ffn_routed_up.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight",
-                              "ffn_down_shexp.weight"})
+        for (const char* n : {"ffn_routed_down.weight", "ffn_routed_up.weight", "ffn_gate_shexp.weight",
+                              "ffn_up_shexp.weight", "ffn_down_shexp.weight"})
             mat(p + n);
         if (!bad.empty()) break;
         // the routed experts (load()'s blobs): gate and up of one type, the CPU and GPU kernels' format, their layout
@@ -424,7 +454,8 @@ std::string hy4_file_problem(const GgufModel& m, const FileCheckOptions& o) {
         if (!C::native_fmt(gt, dt, g.n_latent, g.n_ff_exp, fmt, err)) return p + "routed experts: " + err;
         const size_t gsz = (size_t) (tensor_payload_bytes(*tg) / (uint64_t) g.n_expert);
         const size_t dsz = (size_t) (tensor_payload_bytes(*td) / (uint64_t) g.n_expert);
-        if (!bf16 && (gsz != fmt.up_off || 2 * gsz + dsz != fmt.bytes)) return p + "routed experts: unexpected blob layout";
+        if (!bf16 && (gsz != fmt.up_off || 2 * gsz + dsz != fmt.bytes))
+            return p + "routed experts: unexpected blob layout";
     }
     if (!bad.empty()) return bad;
     // pictures: the vocabulary's token for a picture's rows (run_engine)
@@ -446,10 +477,12 @@ std::string inkling2_file_problem(const GgufModel& m, const FileCheckOptions& o)
         const TensorInfo* td = m.find(p + "ffn_down_exps.weight");
         if (!tg || !td) return "missing " + p + (tg ? "ffn_down_exps.weight" : "ffn_gate_up_exps.weight");
         if (!K::native_expert_supported((int) tg->type, (int) td->type, N, g.n_ff, true))
-            return p + ": experts of " + tg->type_name() + " gate/up and " + td->type_name() + " down rows, which the "
+            return p + ": experts of " + tg->type_name() + " gate/up and " + td->type_name() +
+                   " down rows, which the "
                    "expert kernels do not read at this geometry";
         const K::NativeExpertLayout gl = K::native_expert_layout((int) tg->type, (int) td->type, N, g.n_ff);
-        if (tensor_payload_bytes(*tg) != (uint64_t) E * gl.down_off || tensor_payload_bytes(*td) != (uint64_t) E * (gl.bytes - gl.down_off))
+        if (tensor_payload_bytes(*tg) != (uint64_t) E * gl.down_off ||
+            tensor_payload_bytes(*td) != (uint64_t) E * (gl.bytes - gl.down_off))
             return p + ": the experts' tensors are not " + std::to_string(E) + " blobs of the layout's rows";
     }
     // each dense tensor as load() reads it (inkling2_engine.cu): floats (F32, or a type ggml dequantizes), mat
@@ -473,7 +506,8 @@ std::string inkling2_file_problem(const GgufModel& m, const FileCheckOptions& o)
                                       : (K::native_mmvq_supported(type) || K::iq_supported(type)) &&
                                             K::iq_row_bytes(type, n_in) * rows == tensor_payload_bytes(*t);
         if (!takes)
-            bad = name + " is " + t->type_name() + " with rows of " + std::to_string(n_in) + " values, which this path's "
+            bad = name + " is " + t->type_name() + " with rows of " + std::to_string(n_in) +
+                  " values, which this path's "
                   "kernels do not read";
     };
     if (const TensorInfo* t = find("token_embd.weight"); t && !ggml_reads(t->type))
@@ -487,8 +521,9 @@ std::string inkling2_file_problem(const GgufModel& m, const FileCheckOptions& o)
         for (const char* n : {"attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_rel.weight", "attn_gate.weight",
                               "attn_output.weight"})
             mat(p + n);
-        for (const char* n : {"attn_sink_proj.weight", "attn_q_clip.weight", "attn_rel_clip.weight", "attn_rel_bias.weight",
-                              "attn_k_conv.weight", "attn_v_conv.weight", "attn_post_conv.weight", "ffn_post_conv.weight"})
+        for (const char* n :
+             {"attn_sink_proj.weight", "attn_q_clip.weight", "attn_rel_clip.weight", "attn_rel_bias.weight",
+              "attn_k_conv.weight", "attn_v_conv.weight", "attn_post_conv.weight", "ffn_post_conv.weight"})
             floats(p + n);
         if (g.full(l)) {
             for (const char* n : {"attn_q_inp_norm.weight", "attn_k_inp_norm.weight", "attn_v_inp_norm.weight",
@@ -539,12 +574,15 @@ std::string lora_file_problem(const GgufFile& f, const GgufModel* m) {
         int64_t top_k = 0;
         std::string err;
         if (!geometry_from_gguf(m->meta(), g, top_k, err)) return "the model: " + err;
-        if (arch != model_family_arch(g.family)) return "an adapter of " + arch + ", the model is " + model_family_arch(g.family);
-    } else if (const ModelFamily fam = model_family_from_arch(arch); fam != ModelFamily::Qwen35 && fam != ModelFamily::Qwen35Moe) {
+        if (arch != model_family_arch(g.family))
+            return "an adapter of " + arch + ", the model is " + model_family_arch(g.family);
+    } else if (const ModelFamily fam = model_family_from_arch(arch);
+               fam != ModelFamily::Qwen35 && fam != ModelFamily::Qwen35Moe) {
         return "an adapter of " + (arch.empty() ? std::string("no architecture") : arch) +
                ": Lamina takes LoRA adapters on Qwen3.6-35B-A3B and Qwen3.8-27B (qwen35moe, qwen35)";
     }
-    if (f.get("adapter.alora.invocation_tokens") != nullptr) return "an activated LoRA (aLoRA), which this path does not run";
+    if (f.get("adapter.alora.invocation_tokens") != nullptr)
+        return "an activated LoRA (aLoRA), which this path does not run";
     struct Pair {
         const TensorInfo *a = nullptr, *b = nullptr;
     };
@@ -555,11 +593,13 @@ std::string lora_file_problem(const GgufFile& f, const GgufModel* m) {
             const size_t k = std::char_traits<char>::length(s);
             return n.size() > k && n.compare(n.size() - k, k, s) == 0;
         };
-        if (ends(".lora_a") || ends(".lora_b")) (ends(".lora_a") ? pairs[n.substr(0, n.size() - 7)].a : pairs[n.substr(0, n.size() - 7)].b) = &t;
+        if (ends(".lora_a") || ends(".lora_b"))
+            (ends(".lora_a") ? pairs[n.substr(0, n.size() - 7)].a : pairs[n.substr(0, n.size() - 7)].b) = &t;
         else if (!ends("_norm.weight")) return "the tensor " + n + " has an unexpected suffix";
     }
     for (const auto& [name, p] : pairs) {
-        if (p.a == nullptr || p.b == nullptr) return "the pair of " + name + " lacks its " + (p.a ? "lora_b" : "lora_a");
+        if (p.a == nullptr || p.b == nullptr)
+            return "the pair of " + name + " lacks its " + (p.a ? "lora_b" : "lora_a");
         if (p.a->shape.size() != 2 || p.b->shape.size() != 2 || p.a->shape[1] != p.b->shape[0] || p.a->shape[1] == 0)
             return name + ": lora_a and lora_b do not pair (an adapter of llama.cpp's old finetune example?)";
         for (const TensorInfo* t : {p.a, p.b})
@@ -576,8 +616,8 @@ std::string lora_file_problem(const GgufFile& f, const GgufModel* m) {
         const size_t dot = name.find('.', 4);
         const std::string s = dot == std::string::npos ? std::string() : name.substr(dot + 1);
         static const std::set<std::string> mats = {
-            "attn_qkv.weight", "attn_gate.weight", "ssm_out.weight", "attn_q.weight", "attn_k.weight",
-            "attn_v.weight", "attn_output.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+            "attn_qkv.weight",       "attn_gate.weight",    "ssm_out.weight",       "attn_q.weight", "attn_k.weight",
+            "attn_v.weight",         "attn_output.weight",  "ffn_gate.weight",      "ffn_up.weight", "ffn_down.weight",
             "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"};
         const TensorInfo* t = m->find(name);
         auto take = [&] {
@@ -593,17 +633,20 @@ std::string lora_file_problem(const GgufFile& f, const GgufModel* m) {
         else if (l < 0 || l > g.n_layers || (l == g.n_layers && g.n_mtp_layers == 0) || dot == std::string::npos)
             why = "the model has no such tensor";
         else if (mats.count(s) != 0 || (s == "nextn.eh_proj.weight" && l == g.n_layers)) take();
-        else if ((s == "ssm_alpha.weight" || s == "ssm_beta.weight") && t != nullptr && l < g.n_layers && !is_qsa_layer(g, l)) {
+        else if ((s == "ssm_alpha.weight" || s == "ssm_beta.weight") && t != nullptr && l < g.n_layers &&
+                 !is_qsa_layer(g, l)) {
             n_in = g.n_embd;
             n_out = g.ssm_v_heads;
         } else if (s.find("_exps.") != std::string::npos) why = "this path takes no pair for the routed experts";
-        else if (s.rfind("ffn_gate_inp", 0) == 0) why = "this path takes no pair for the router or the shared expert's gate";
+        else if (s.rfind("ffn_gate_inp", 0) == 0)
+            why = "this path takes no pair for the router or the shared expert's gate";
         else why = "the model has no such tensor";
         if (!why.empty()) return name + ": " + why;
         const int64_t rank = (int64_t) p.a->shape[1], padded = (rank + 7) / 8 * 8;
         if ((int64_t) p.a->shape[0] != n_in || (int64_t) p.b->shape[1] != n_out)
             return name + " is " + std::to_string(n_in) + " x " + std::to_string(n_out) + " in the model, its pair " +
-                   std::to_string(p.a->shape[0]) + " x " + std::to_string(p.b->shape[1]) + " (an adapter of another model?)";
+                   std::to_string(p.a->shape[0]) + " x " + std::to_string(p.b->shape[1]) +
+                   " (an adapter of another model?)";
         if (n_in % 8 != 0 || padded > 512)
             return name + ": rank " + std::to_string(rank) + " over " + std::to_string(n_in) +
                    " inputs (ranks up to 512, inputs a multiple of 8)";
@@ -630,15 +673,15 @@ std::string model_file_problem(const std::string& path, const FileCheckOptions& 
             family = model_family(first);
         }
         switch (family) {
-        case ModelFamily::Qwen35Moe:
-        case ModelFamily::Qwen35: return qwen35_file_problem(GgufModel(shards));
-        case ModelFamily::HyV4Flash: return hy4_file_problem(GgufModel(shards), o);
-        case ModelFamily::Inkling2: return inkling2_file_problem(GgufModel(shards), o);
-        default: return flash_file_problem(shards, o);
+            case ModelFamily::Qwen35Moe:
+            case ModelFamily::Qwen35: return qwen35_file_problem(GgufModel(shards));
+            case ModelFamily::HyV4Flash: return hy4_file_problem(GgufModel(shards), o);
+            case ModelFamily::Inkling2: return inkling2_file_problem(GgufModel(shards), o);
+            default: return flash_file_problem(shards, o);
         }
     } catch (const std::exception& e) {
         return e.what();
     }
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

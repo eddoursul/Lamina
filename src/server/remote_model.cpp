@@ -36,10 +36,10 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr uint64_t kMiB = 1048576;
-constexpr uint64_t kHeaderMax = 256 * kMiB;    // a GGUF header past this is refused (the largest known: ~20 MB)
-constexpr uint64_t kJsonMax = 1 * kMiB;        // a JSON file read whole
+constexpr uint64_t kHeaderMax = 256 * kMiB;       // a GGUF header past this is refused (the largest known: ~20 MB)
+constexpr uint64_t kJsonMax = 1 * kMiB;           // a JSON file read whole
 constexpr uint64_t kSafetensorsMax = 64 * kMiB;   // as artifact/drafter.hpp's safetensors_header reads one
-constexpr double kTimeout = 60.0;               // the connection and each read
+constexpr double kTimeout = 60.0;                 // the connection and each read
 
 /// %XX for each byte but the URL's unreserved ones (and '/' with `keep_slash`)
 std::string encode(std::string_view s, bool keep_slash) {
@@ -95,7 +95,8 @@ std::string bare_host(const std::string& h) { return starts_with(h, "www.") ? h.
 /// the scheme's own port left out
 std::string origin_key(const std::string& url) {
     const UrlParts u = split_url(url);
-    const bool own = u.port.empty() || (u.scheme == "https" && u.port == "443") || (u.scheme == "http" && u.port == "80");
+    const bool own =
+        u.port.empty() || (u.scheme == "https" && u.port == "443") || (u.scheme == "http" && u.port == "80");
     return u.scheme + "://" + bare_host(u.host) + (own ? "" : ":" + u.port);
 }
 
@@ -156,7 +157,8 @@ std::string refusal(const HttpReply& r, bool token) {
                (token ? ": the token (HF_TOKEN) cannot read it, or it is not valid"
                       : ": there is none, or a private or gated one, which needs a token (HF_TOKEN)");
     if (r.status == 403)
-        return "refused (" + status + "): a gated repository needs its terms accepted on its page, and a token of "
+        return "refused (" + status +
+               "): a gated repository needs its terms accepted on its page, and a token of "
                "that account (HF_TOKEN)";
     if (r.status == 404) return "not found (" + status + ")";
     return status + (r.reason.empty() ? "" : " " + r.reason);
@@ -165,14 +167,13 @@ std::string refusal(const HttpReply& r, bool token) {
 /// A GET, its redirects followed here: the token goes to the Hub alone, `hub` its origin_key (a download's redirect
 /// points at another host, with a signed URL)
 HttpReply get(const std::string& url, const std::string& hub, const std::string& token, HttpHeaders extra,
-              size_t max_bytes, const std::function<bool(std::string_view)>& on_data, const std::function<void()>& on_hop,
-              std::string* final_url = nullptr) {
+              size_t max_bytes, const std::function<bool(std::string_view)>& on_data,
+              const std::function<void()>& on_hop, std::string* final_url = nullptr) {
     std::string at = url;
     for (int hop = 0; hop < 10; ++hop) {
         HttpHeaders h = extra;
         h.emplace_back("User-Agent", "lamina");
-        if (!token.empty() && !hub.empty() && origin_key(at) == hub)
-            h.emplace_back("Authorization", "Bearer " + token);
+        if (!token.empty() && !hub.empty() && origin_key(at) == hub) h.emplace_back("Authorization", "Bearer " + token);
         HttpReply r = http_request("GET", at, h, "", kTimeout, max_bytes, on_data, false);
         const std::string loc = r.header("location");
         if (r.status >= 300 && r.status < 400 && !loc.empty()) {
@@ -247,7 +248,8 @@ RemoteListing list_hub(const HfTarget& t, const std::string& url, const std::str
                 l.files.push_back(std::move(f));
             }
         }
-        std::sort(l.files.begin(), l.files.end(), [](const RemoteFile& a, const RemoteFile& b) { return a.path < b.path; });
+        std::sort(l.files.begin(), l.files.end(),
+                  [](const RemoteFile& a, const RemoteFile& b) { return a.path < b.path; });
     };
     bool file = t.file;
     if (!file) {
@@ -329,7 +331,7 @@ void write_sparse(const fs::path& path, const std::string& head, uint64_t size) 
     CloseHandle(h);
     if (!sparse)
         throw RemoteError(u8_str(path.parent_path()) + ": its drive keeps no sparse files (an NTFS drive does): TEMP "
-                          "names the folder lamina writes the files' headers in");
+                                                       "names the folder lamina writes the files' headers in");
     if (!ok) throw RemoteError(u8_str(path) + " cannot be written");
 #else
     const int fd = ::open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
@@ -360,11 +362,12 @@ uint64_t reply_size(const HttpReply& r) {
     const std::string range = r.header("content-range");   // bytes 0-1048575/49720539552
     if (const size_t slash = range.rfind('/'); slash != std::string::npos && range.compare(slash + 1, 1, "*") != 0)
         return std::strtoull(range.c_str() + slash + 1, nullptr, 10);
-    if (r.status == 200 && !r.header("content-length").empty()) return std::strtoull(r.header("content-length").c_str(), nullptr, 10);
+    if (r.status == 200 && !r.header("content-length").empty())
+        return std::strtoull(r.header("content-length").c_str(), nullptr, 10);
     return 0;
 }
 
-}  // namespace
+}   // namespace
 
 bool is_url(std::string_view s) {
     const std::string l = lower(s.substr(0, 8));
@@ -383,13 +386,15 @@ bool parse_hf_url(const std::string& url, HfTarget& t, const std::string& endpoi
     for (const std::string& s : split(u.path, "/"))
         if (!s.empty()) seg.push_back(s);
     auto bad = [&](const std::string& why) {
-        throw RemoteError(url + ": " + why + ". lamina reads a repository's URL, a folder's in it "
+        throw RemoteError(url + ": " + why +
+                          ". lamina reads a repository's URL, a folder's in it "
                           "(.../tree/REVISION/FOLDER) or a file's (.../blob/REVISION/FILE, .../resolve/REVISION/FILE)");
     };
     size_t i = 0;
-    static const char* const not_repos[] = {"api", "docs", "blog", "papers", "collections", "organizations", "settings",
-                                            "models", "join", "login", "logout", "pricing", "tasks", "learn", "posts",
-                                            "chat", "new", "enterprise", "search", "notifications", "billing"};
+    static const char* const not_repos[] = {
+        "api",    "docs", "blog",  "papers",     "collections", "organizations", "settings",
+        "models", "join", "login", "logout",     "pricing",     "tasks",         "learn",
+        "posts",  "chat", "new",   "enterprise", "search",      "notifications", "billing"};
     if (!seg.empty() && seg[0] == "datasets") {
         t.dataset = true;
         i = 1;
@@ -466,7 +471,8 @@ RemoteListing list_remote(const std::string& url, const std::string& token, cons
     return list_direct(url);
 }
 
-RemoteCopies::RemoteCopies(const RemoteListing& listing, std::string token) : listing_(listing), token_(std::move(token)) {
+RemoteCopies::RemoteCopies(const RemoteListing& listing, std::string token)
+    : listing_(listing), token_(std::move(token)) {
     std::error_code ec;
     const fs::path tmp = fs::temp_directory_path(ec);
     if (ec) throw RemoteError("no temporary folder (TEMP) for the files' headers: " + ec.message());
@@ -576,7 +582,8 @@ RemoteCopies::Read RemoteCopies::read_one(const RemoteFile& f) {
         }
         try {   // the whole file was read before a check: is its header whole?
             if (gguf_header_length((const uint8_t*) buf.data(), buf.size()) == 0) {
-                out.error = buf.size() >= out.size ? "the file ends inside its header" : "the reply ends inside its header";
+                out.error =
+                    buf.size() >= out.size ? "the file ends inside its header" : "the reply ends inside its header";
                 return out;
             }
         } catch (const std::exception& e) {
@@ -709,7 +716,8 @@ std::vector<RemoteModel> remote_models(const RemoteListing& l) {
         size_t at = 0;
         RemoteModel m;
         if (split_name(name, no, count, at)) {
-            for (int i = 1; i <= count; ++i) m.shards.push_back((dir.empty() ? "" : dir + "/") + with_shard(name, at, i));
+            for (int i = 1; i <= count; ++i)
+                m.shards.push_back((dir.empty() ? "" : dir + "/") + with_shard(name, at, i));
         } else {
             m.shards.push_back(f.path);
         }
@@ -745,10 +753,10 @@ std::vector<std::string> files_beside(const RemoteListing& l, const std::string&
         if (f.path == model) continue;
         bool want = false;
         if (folder == dir) {
-            want = (starts_with(n, "mmproj") && ends_with(n, ".gguf")) ||       // projectors_beside
-                   (starts_with(name, "dspark-") && ends_with(name, ".gguf")) ||  // find_dspark
-                   name == "mtp.safetensors" || n == lower(kDraftLayerFile) ||   // find_dspark, resolve_draft_layer
-                   n == "config.json" ||                                         // find_dfly
+            want = (starts_with(n, "mmproj") && ends_with(n, ".gguf")) ||          // projectors_beside
+                   (starts_with(name, "dspark-") && ends_with(name, ".gguf")) ||   // find_dspark
+                   name == "mtp.safetensors" || n == lower(kDraftLayerFile) ||     // find_dspark, resolve_draft_layer
+                   n == "config.json" ||                                           // find_dfly
                    (ends_with(name, ".safetensors") && dfly(folder));
         } else if (folder == inside("dspark")) {
             want = starts_with(name, "dspark-") && ends_with(name, ".gguf");
@@ -793,7 +801,7 @@ std::string slurp(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-}  // namespace
+}   // namespace
 
 RemoteModels read_remote_models(const std::string& url) {
     RemoteModels r;
@@ -807,8 +815,9 @@ RemoteModels read_remote_models(const std::string& url) {
         size_t safetensors = 0;
         for (const RemoteFile& f : r.listing.files) safetensors += ends_with(lower(f.path), ".safetensors");
         throw RemoteError(url + ": no GGUF file there" +
-                          (safetensors > 0 ? " (" + std::to_string(safetensors) + " safetensors files: a checkpoint, "
-                                             "which Lamina does not run; its GGUF quants are in other repositories)"
+                          (safetensors > 0 ? " (" + std::to_string(safetensors) +
+                                                 " safetensors files: a checkpoint, "
+                                                 "which Lamina does not run; its GGUF quants are in other repositories)"
                                            : ""));
     }
     // every first shard, then what each is
@@ -847,21 +856,24 @@ RemoteModels read_remote_models(const std::string& url) {
             if (total == 0 || !split_name(name_of(f.model.missing), no, count, at)) break;
             const RemoteFound* match = nullptr;
             for (const RemoteFound& o : r.found) {
-                const std::string local = o.kind == "model" || o.model.shards.size() != 1 ? "" : r.copies->local(o.model.path);
+                const std::string local =
+                    o.kind == "model" || o.model.shards.size() != 1 ? "" : r.copies->local(o.model.path);
                 if (local.empty()) continue;
                 try {
                     const GgufFile g(local);
-                    const MetaValue *sno = g.get("split.no"), *scount = g.get("split.count"), *stc = g.get("split.tensors.count");
-                    if (sno != nullptr && scount != nullptr && stc != nullptr && g.get("general.architecture") == nullptr &&
-                        sno->u + 1 == (uint64_t) no && scount->u == (uint64_t) count && stc->u == total)
+                    const MetaValue *sno = g.get("split.no"), *scount = g.get("split.count"),
+                                    *stc = g.get("split.tensors.count");
+                    if (sno != nullptr && scount != nullptr && stc != nullptr &&
+                        g.get("general.architecture") == nullptr && sno->u + 1 == (uint64_t) no &&
+                        scount->u == (uint64_t) count && stc->u == total)
                         match = &o;
-                } catch (const std::exception&) {
-                }
+                } catch (const std::exception&) {}
                 if (match != nullptr) break;
             }
             if (match == nullptr || !r.copies->alias(f.model.missing, match->model.path)) break;
             const std::string shard = "shard " + std::to_string(no) + " of " + std::to_string(count);
-            f.notes.push_back("its " + shard + " is " + match->model.path + " (its split keys): a download keeps it under the "
+            f.notes.push_back("its " + shard + " is " + match->model.path +
+                              " (its split keys): a download keeps it under the "
                               "shard's name");
             if (const RemoteFile* src = r.listing.find(match->model.path)) f.model.bytes += src->size;
             for (RemoteFound& o : r.found)
@@ -924,7 +936,7 @@ std::string shown_remote(const RemoteModels& r, std::string_view line) {
         for (size_t at = out.find(root); at != std::string::npos; at = out.find(root, at + kDownload.size())) {
             out.replace(at, root.size(), kDownload);
             for (size_t i = at + kDownload.size(); i < out.size() && out[i] != ' ' && out[i] != '"' && out[i] != '\'' &&
-                                                    out[i] != ',' && out[i] != ')' && out[i] != '\n';
+                                                   out[i] != ',' && out[i] != ')' && out[i] != '\n';
                  ++i)
                 if (out[i] == '\\') out[i] = '/';
         }
@@ -938,4 +950,4 @@ std::string shown_remote(const RemoteModels& r, std::string_view line) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

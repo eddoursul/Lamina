@@ -5,8 +5,8 @@
 #include "lamina/platform/cpu_arch.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <chrono>
+#include <cmath>
 #if LAMINA_X86 && defined(_MSC_VER)
 #include <intrin.h>
 #elif LAMINA_X86
@@ -93,7 +93,10 @@ namespace {
 // processor performance information (winternl.h names its DpcTime and InterruptTime Reserved1); the kernel adds to
 // them at each clock tick, so over a second they resolve ~1.6%.
 std::vector<uint64_t> interrupt_times() {
-    struct Info { LARGE_INTEGER idle, kernel, user, dpc, interrupt; ULONG interrupts; };
+    struct Info {
+        LARGE_INTEGER idle, kernel, user, dpc, interrupt;
+        ULONG interrupts;
+    };
     using Query = LONG(WINAPI*)(int, void*, ULONG, ULONG*);
     static const Query query = reinterpret_cast<Query>(
         reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation")));
@@ -111,7 +114,7 @@ std::vector<uint64_t> interrupt_times() {
 constexpr double kBusy = 0.05;    // a processor over this share of a second in interrupts and DPCs takes them
 constexpr double kQuiet = 0.02;   // one below it may take a thread
 
-}  // namespace
+}   // namespace
 
 CorePlacement::CorePlacement(bool spare_first) : cores_(physical_cores()) {
     for (size_t c = 0; c < cores_.size(); ++c)
@@ -178,8 +181,9 @@ std::string CorePlacement::tick(ExpertPool& pool) {
         char line[160];
         std::snprintf(line, sizeof line,
                       "%slogical processor %d spent %.0f%% of the last second in interrupts and DPCs: "
-                      "the %s moved to %d", moved.empty() ? "" : "; ", at, 100.0 * load[(size_t) at],
-                      t < 0 ? "host thread" : "pool worker", to);
+                      "the %s moved to %d",
+                      moved.empty() ? "" : "; ", at, 100.0 * load[(size_t) at], t < 0 ? "host thread" : "pool worker",
+                      to);
         moved += line;
         hot_[(size_t) at] = 0;
         at = to;
@@ -248,7 +252,7 @@ void pin_this_thread(int core) {
 #endif
 }
 
-}  // namespace
+}   // namespace
 
 ThreadAffinity pin_current_thread(int core) {
     ThreadAffinity prev;
@@ -416,7 +420,7 @@ void ExpertPool::drain(int id, ExpertScratch& scratch) {
             s2_expert_down_rows(jobs_[e].blob, split_[(size_t) e].a2, jobs_[e].out, r0, r1);
         } else
 #endif
-        if (mode_ == 7) {
+            if (mode_ == 7) {
             // the fused native layer (run_fused_native): every expert's gate/up parts, then every expert's down
             // parts, claimed in that order; a down part waits (spins) for its expert's h, which the thread that
             // finishes the expert's last gate/up part quantizes.  Every gate/up part is claimed before any down
@@ -470,12 +474,15 @@ void ExpertPool::run_split(ExpertJob* jobs, int n) {
     std::abort();   // the Q2_0 pack's kernels (expert.cpp) are x86-64 only: nothing on arm64 makes these jobs
 #else
     if (n <= 0) return;
-    if (n > kMaxSplit || n_ == 1) { run(jobs, n); return; }
+    if (n > kMaxSplit || n_ == 1) {
+        run(jobs, n);
+        return;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     jobs_ = jobs;
     const int threads = n_ + (host_works_ ? 1 : 0);
     // about three tasks per thread in each phase, so the tail is short
-    parts_a_ = (std::max)(1, (3 * threads + n - 1) / n);
+    parts_a_ = (std::max) (1, (3 * threads + n - 1) / n);
     parts_b_ = parts_a_;
     run_phase(1, n * parts_a_);
     for (int e = 0; e < n; ++e) act_quant_q8_1(split_[(size_t) e].ff, FF, split_[(size_t) e].a2);
@@ -484,7 +491,6 @@ void ExpertPool::run_split(ExpertJob* jobs, int n) {
     ms_drain_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 #endif
 }
-
 
 void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*),
                                         void* ctx) {
@@ -495,7 +501,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
     const auto t0 = std::chrono::steady_clock::now();
     // more distinct experts than buffers: run them in batches
     for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
-        const int nb = (std::min)(kMaxSplitMulti, n - b0);
+        const int nb = (std::min) (kMaxSplitMulti, n - b0);
         mjobs_ = jobs + b0;
         nfmt_ = &f;
         const int threads = n_ + (host_works_ ? 1 : 0);
@@ -506,7 +512,8 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         const auto b = std::chrono::steady_clock::now();
         for (int e = 0; e < nb; ++e)
             for (int t = 0; t < mjobs_[e].nt; ++t)
-                if (q2_native_kernels(f.d_type)) act_quant_any(split_multi_[(size_t) e].ff[t], (int) f.n_ff, split_multi_[(size_t) e].a2[t]);
+                if (q2_native_kernels(f.d_type))
+                    act_quant_any(split_multi_[(size_t) e].ff[t], (int) f.n_ff, split_multi_[(size_t) e].a2[t]);
                 else native_quant_h(f, split_multi_[(size_t) e].ff[t], split_multi_[(size_t) e].hq[t]);
         const auto c = std::chrono::steady_clock::now();
         mrows_ = (int64_t) nb * f.n_embd;
@@ -528,13 +535,15 @@ void ExpertPool::native_gu_part(int e, int r0, int r1) {
         thread_local float gbuf[MAXT][FF], ubuf[MAXT][FF];
         float* gp[MAXT];
         float* up[MAXT];
-        for (int t = 0; t < mjobs_[e].nt; ++t) { gp[t] = gbuf[t]; up[t] = ubuf[t]; }
+        for (int t = 0; t < mjobs_[e].nt; ++t) {
+            gp[t] = gbuf[t];
+            up[t] = ubuf[t];
+        }
         const int nbk = (int) (nfmt_->n_embd / 64);
         q2_rows_any(mjobs_[e].blob, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, gp, r0, r1);
         q2_rows_any(mjobs_[e].blob + nfmt_->up_off, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, up, r0, r1);
         for (int t = 0; t < mjobs_[e].nt; ++t)
-            for (int r = r0; r < r1; ++r)
-                sb.ff[t][r] = (gbuf[t][r] / (1.f + std::exp(-gbuf[t][r]))) * ubuf[t][r];
+            for (int r = r0; r < r1; ++r) sb.ff[t][r] = (gbuf[t][r] / (1.f + std::exp(-gbuf[t][r]))) * ubuf[t][r];
     } else {
         float* ff[MAXT];
         for (int t = 0; t < mjobs_[e].nt; ++t) ff[t] = sb.ff[t];
@@ -555,8 +564,8 @@ void ExpertPool::native_down_part(int e, int r0, int r1) {
         // Q2_0 down (most IQ layers): the AVX-512 kernel, ggml-cpu has only a scalar one on x86
         const ActQ* a2[MAXT];
         for (int t = 0; t < mjobs_[e].nt; ++t) a2[t] = &sb.a2[t];
-        q2_rows_any(mjobs_[e].blob + nfmt_->down_off, nfmt_->d_row, (int) (nfmt_->n_ff / 64), a2,
-                    mjobs_[e].nt, mjobs_[e].out, r0, r1);
+        q2_rows_any(mjobs_[e].blob + nfmt_->down_off, nfmt_->d_row, (int) (nfmt_->n_ff / 64), a2, mjobs_[e].nt,
+                    mjobs_[e].out, r0, r1);
     } else {
         const void* hq[MAXT];
         for (int t = 0; t < mjobs_[e].nt; ++t) hq[t] = sb.hq[t];
@@ -564,16 +573,18 @@ void ExpertPool::native_down_part(int e, int r0, int r1) {
     }
 }
 
-void ExpertPool::run_fused_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*),
-                                  void* ctx) {
-    if (n <= 0 || n > kMaxSplitMulti) { run_split_multi_native(f, jobs, n, first, ctx); return; }
+void ExpertPool::run_fused_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*), void* ctx) {
+    if (n <= 0 || n > kMaxSplitMulti) {
+        run_split_multi_native(f, jobs, n, first, ctx);
+        return;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     mjobs_ = jobs;
     nfmt_ = &f;
     fn_ = n;
     const int threads = n_ + (host_works_ ? 1 : 0);
     // about three parts per thread over the layer's experts in each half, as the two-phase path cuts them
-    fa_ = (std::max)(1, (3 * threads + n - 1) / n);
+    fa_ = (std::max) (1, (3 * threads + n - 1) / n);
     fb_ = fa_;
     for (int e = 0; e < n; ++e) {   // every worker is parked (the previous phase closed): published by open_phase
         fstate_[(size_t) e].gu_done.store(0, std::memory_order_relaxed);
@@ -645,4 +656,4 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
 #endif
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

@@ -24,7 +24,7 @@ BOOL WINAPI on_ctrl(DWORD type) {
     quit_fn();
     return TRUE;
 }
-}  // namespace
+}   // namespace
 
 void set_console_quit(std::function<void()> quit) {
     std::lock_guard<std::mutex> lk(mu);
@@ -35,4 +35,4 @@ void set_console_quit(std::function<void()> quit) {
 void set_console_quit(std::function<void()>) {}
 #endif
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

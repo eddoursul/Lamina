@@ -54,7 +54,10 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
     if (N * K > scratch_elems_) {
         // Too large for the scratch at once: in row slices.
         const int64_t rows = scratch_elems_ / K;
-        if (rows <= 0) { std::fprintf(stderr, "prefill gemm: scratch too small for K=%lld\n", (long long) K); std::exit(1); }
+        if (rows <= 0) {
+            std::fprintf(stderr, "prefill gemm: scratch too small for K=%lld\n", (long long) K);
+            std::exit(1);
+        }
         if (ldy <= 0) ldy = N;
         for (int64_t r0 = 0; r0 < N; r0 += rows) {
             const int64_t n = (N - r0 < rows) ? N - r0 : rows;
@@ -67,4 +70,4 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
     f16(X, scratch_, Y, T, N, K, ldy, beta);
 }
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

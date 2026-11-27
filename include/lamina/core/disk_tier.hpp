@@ -29,10 +29,10 @@ struct DiskFile {
         uint64_t off;     ///< where it starts in the K/V file
         uint64_t bytes;   ///< its layout's bytes
     };
-    std::vector<Block> blocks;   ///< lo ascending; a later block's cells over an earlier one's
-    int64_t cells = 0;           ///< the blocks hold the sequence's cells [0, cells)
-    uint64_t kv_end = 0;         ///< where the next block goes in the K/V file (whole pages)
-    uint64_t kv_size = 0;        ///< the K/V file's length
+    std::vector<Block> blocks;                         ///< lo ascending; a later block's cells over an earlier one's
+    int64_t cells = 0;                                 ///< the blocks hold the sequence's cells [0, cells)
+    uint64_t kv_end = 0;                               ///< where the next block goes in the K/V file (whole pages)
+    uint64_t kv_size = 0;                              ///< the K/V file's length
     std::vector<std::pair<int64_t, uint32_t>> slots;   ///< a record's key and its slot
     uint32_t n_slots = 0;
     std::vector<uint32_t> free_slots;   ///< slots of records that went
@@ -125,4 +125,4 @@ private:
     uint64_t serial_ = 0;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

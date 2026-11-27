@@ -21,18 +21,18 @@
 namespace lamina::hy4 {
 
 struct Geometry {
-    int64_t n_layers = 0;    ///< the trunk (block_count - nextn_predict_layers)
-    int64_t n_mtp = 0;       ///< nextn_predict_layers: the MTP blocks after the trunk
-    int64_t n_embd = 0;      ///< embedding_length (3,072)
-    int64_t n_vocab = 0;     ///< the length of tokenizer.ggml.tokens
-    float eps = 1e-5f;       ///< attention.layer_norm_rms_epsilon
+    int64_t n_layers = 0;   ///< the trunk (block_count - nextn_predict_layers)
+    int64_t n_mtp = 0;      ///< nextn_predict_layers: the MTP blocks after the trunk
+    int64_t n_embd = 0;     ///< embedding_length (3,072)
+    int64_t n_vocab = 0;    ///< the length of tokenizer.ggml.tokens
+    float eps = 1e-5f;      ///< attention.layer_norm_rms_epsilon
 
     // gated MLA, one latent row a token (head_count_kv 1)
-    int64_t q_lora = 0;      ///< attention.q_lora_rank (1,024)
-    int64_t kv_lora = 0;     ///< attention.kv_lora_rank (512): the latent, also the attention's value width
-    int64_t k_head = 0;      ///< attention.key_length_mla (256): a query head before absorption, nope + rope
-    int64_t v_head = 0;      ///< attention.value_length_mla (256): a head's output after v_b
-    int64_t n_rot = 0;       ///< rope.dimension_count (64), in consecutive pairs (ROPE_TYPE_NORM)
+    int64_t q_lora = 0;            ///< attention.q_lora_rank (1,024)
+    int64_t kv_lora = 0;           ///< attention.kv_lora_rank (512): the latent, also the attention's value width
+    int64_t k_head = 0;            ///< attention.key_length_mla (256): a query head before absorption, nope + rope
+    int64_t v_head = 0;            ///< attention.value_length_mla (256): a head's output after v_b
+    int64_t n_rot = 0;             ///< rope.dimension_count (64), in consecutive pairs (ROPE_TYPE_NORM)
     std::vector<int64_t> n_head;   ///< attention.head_count, per layer of block_count (sparse 32, window 64)
     std::vector<uint8_t> swa;      ///< attention.sliding_window_pattern, per layer of block_count
     int64_t n_swa = 0;             ///< attention.sliding_window (512): a window layer's cells, its own included
@@ -40,45 +40,46 @@ struct Geometry {
     double rope_base_swa = 0;      ///< rope.freq_base_swa (1e4): the window layers'
 
     // the sparse layers' indexer
-    int64_t idx_heads = 0;   ///< attention.indexer.head_count (16)
-    int64_t idx_dim = 0;     ///< attention.indexer.key_length (128): rope on its last n_rot values
-    int64_t idx_top_k = 0;   ///< attention.indexer.top_k (2,048): cells a query attends at most
-    int64_t idx_pool = 0;    ///< attention.indexer.kpool (4): cells a pooled key covers
-    bool idx_tail = false;   ///< attention.indexer.kpool_select_tail: the query's own group is always attended
+    int64_t idx_heads = 0;      ///< attention.indexer.head_count (16)
+    int64_t idx_dim = 0;        ///< attention.indexer.key_length (128): rope on its last n_rot values
+    int64_t idx_top_k = 0;      ///< attention.indexer.top_k (2,048): cells a query attends at most
+    int64_t idx_pool = 0;       ///< attention.indexer.kpool (4): cells a pooled key covers
+    bool idx_tail = false;      ///< attention.indexer.kpool_select_tail: the query's own group is always attended
     std::vector<uint8_t> idx;   ///< attention.indexer.types, per trunk layer (the MTP block always has one)
 
     // iHC
-    int64_t hc = 0;          ///< hyper_connection.count (4 streams)
-    float hc_eps = 0;        ///< hyper_connection.epsilon
-    float hc_mag = 0;        ///< hyper_connection.magnitude (the post weights' scale)
+    int64_t hc = 0;     ///< hyper_connection.count (4 streams)
+    float hc_eps = 0;   ///< hyper_connection.epsilon
+    float hc_mag = 0;   ///< hyper_connection.magnitude (the post weights' scale)
 
     // FFN
-    int64_t n_dense = 0;     ///< leading_dense_block_count (1)
-    int64_t n_ff = 0;        ///< feed_forward_length (13,824): the dense FFN's
-    int64_t n_expert = 0;    ///< expert_count (512)
-    int64_t top_k = 0;       ///< expert_used_count (16)
-    int64_t n_ff_exp = 0;    ///< expert_feed_forward_length (1,536): an expert's hidden width, the shared expert's too
-    int64_t n_latent = 0;    ///< expert_latent_length (1,536): the routed experts' input and output width
-    int64_t n_shared = 0;    ///< expert_shared_count (1)
-    float w_scale = 1;       ///< expert_weights_scale (3.998)
-    bool w_norm = false;     ///< expert_weights_norm
+    int64_t n_dense = 0;               ///< leading_dense_block_count (1)
+    int64_t n_ff = 0;                  ///< feed_forward_length (13,824): the dense FFN's
+    int64_t n_expert = 0;              ///< expert_count (512)
+    int64_t top_k = 0;                 ///< expert_used_count (16)
+    int64_t n_ff_exp = 0;              ///< expert_feed_forward_length (1,536): an
+                                       ///< expert's hidden width, the shared expert's too
+    int64_t n_latent = 0;              ///< expert_latent_length (1,536): the routed experts' input and output width
+    int64_t n_shared = 0;              ///< expert_shared_count (1)
+    float w_scale = 1;                 ///< expert_weights_scale (3.998)
+    bool w_norm = false;               ///< expert_weights_norm
     std::vector<float> swiglu_limit;   ///< swiglu_clamp_exp per layer of block_count (10): the routed experts' only
 
     // Engram
-    std::vector<int64_t> eng_layers;    ///< ple.layers (1, 11, 21, 31): the trunk layers its rows join, before attention
-    int64_t ngram = 0;                  ///< ple.ngram_size (3): the token and two predecessors
-    int64_t heads_per_ngram = 0;        ///< ple.heads_per_ngram (8)
-    int64_t eng_dim = 0;                ///< embedding_length_per_layer_input (96): a row's values
-    std::vector<uint64_t> eng_mult;     ///< ple.layer_multipliers [module][ngram]
-    std::vector<uint64_t> eng_off;      ///< ple.head_offsets [module][head]: a head's first row in the table
-    std::vector<uint64_t> eng_prime;    ///< ple.head_vocab_sizes [module][head]: its rows (the hash's modulus)
-    int64_t eng_pad = 0;                ///< engram.pad_token_id (a missing predecessor)
-    std::vector<int32_t> eng_map;       ///< engram.token_map [n_vocab]: the hash's compressed token ids
-    uint64_t eng_rows = 0;              ///< the table's rows: the last head's end
+    std::vector<int64_t> eng_layers;   ///< ple.layers (1, 11, 21, 31): the trunk layers its rows join, before attention
+    int64_t ngram = 0;                 ///< ple.ngram_size (3): the token and two predecessors
+    int64_t heads_per_ngram = 0;       ///< ple.heads_per_ngram (8)
+    int64_t eng_dim = 0;               ///< embedding_length_per_layer_input (96): a row's values
+    std::vector<uint64_t> eng_mult;    ///< ple.layer_multipliers [module][ngram]
+    std::vector<uint64_t> eng_off;     ///< ple.head_offsets [module][head]: a head's first row in the table
+    std::vector<uint64_t> eng_prime;   ///< ple.head_vocab_sizes [module][head]: its rows (the hash's modulus)
+    int64_t eng_pad = 0;               ///< engram.pad_token_id (a missing predecessor)
+    std::vector<int32_t> eng_map;      ///< engram.token_map [n_vocab]: the hash's compressed token ids
+    uint64_t eng_rows = 0;             ///< the table's rows: the last head's end
 
     int64_t eng_heads() const { return (ngram - 1) * heads_per_ngram; }   ///< a module's rows a token (16)
-    int64_t nope() const { return k_head - n_rot; }                        ///< 192
-    int64_t kv_row() const { return kv_lora + n_rot; }                     ///< 576: a cached latent row
+    int64_t nope() const { return k_head - n_rot; }                       ///< 192
+    int64_t kv_row() const { return kv_lora + n_rot; }                    ///< 576: a cached latent row
     bool sparse(int64_t l) const { return !swa[(size_t) l]; }
     bool has_indexer(int64_t l) const { return l >= n_layers || idx[(size_t) l]; }
     /// Layer l's Engram module, or -1
@@ -166,7 +167,8 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     ints("engram.token_map", map);
     if (!f.numbers(p + "swiglu_clamp_exp", nullptr, &limits) && err.empty()) err = p + "swiglu_clamp_exp: not an array";
     if (!err.empty()) return err;
-    if (const MetaValue* v = f.get("tokenizer.ggml.tokens"); v && v->type == MetaType::ARRAY) g.n_vocab = (int64_t) v->count;
+    if (const MetaValue* v = f.get("tokenizer.ggml.tokens"); v && v->type == MetaType::ARRAY)
+        g.n_vocab = (int64_t) v->count;
 
     auto bad = [&](const std::string& what) { return f.path() + ": " + what; };
     g.n_layers = block_count - g.n_mtp;
@@ -183,10 +185,12 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     for (uint64_t v : idx) g.idx.push_back(v ? 1 : 0);
     if (g.n_mtp && g.swa.back()) return bad("the MTP block is a window layer");
     for (int64_t l = 0; l < g.n_layers; ++l)
-        if (g.idx[(size_t) l] && g.swa[(size_t) l]) return bad("layer " + std::to_string(l) + ": a window layer with an indexer");
+        if (g.idx[(size_t) l] && g.swa[(size_t) l])
+            return bad("layer " + std::to_string(l) + ": a window layer with an indexer");
     for (int64_t h : g.n_head)
         if (h <= 0) return bad("a layer of no heads");
-    if (const MetaValue* kv = f.get(p + "attention.head_count_kv"); kv->u != 1) return bad("attention.head_count_kv is not 1 (MLA)");
+    if (const MetaValue* kv = f.get(p + "attention.head_count_kv"); kv->u != 1)
+        return bad("attention.head_count_kv is not 1 (MLA)");
     if (g.n_embd <= 0 || g.q_lora <= 0 || g.kv_lora <= 0 || g.n_rot <= 0 || g.k_head <= g.n_rot || g.v_head <= 0 ||
         g.n_swa <= 0 || g.idx_heads <= 0 || g.idx_dim <= g.n_rot || g.idx_pool < 2 || g.idx_top_k % g.idx_pool ||
         (g.idx_tail && g.idx_top_k / g.idx_pool < 2) || g.hc <= 0 || g.n_dense < 0 || g.n_ff <= 0 || g.n_expert <= 0 ||
@@ -195,9 +199,10 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     if (gating != 2) return bad("expert_gating_func is not 2 (sigmoid)");
     // Engram: multipliers [module][ngram], offsets and primes [module][head]
     const size_t n_e = layers.size(), n_h = (size_t) g.eng_heads();
-    if (n_e == 0 || g.ngram < 2 || g.heads_per_ngram <= 0 || g.eng_dim <= 0 || g.eng_mult.size() != n_e * (size_t) g.ngram ||
-        g.eng_off.size() != n_e * n_h || g.eng_prime.size() != n_e * n_h || map.size() != (size_t) g.n_vocab ||
-        g.eng_pad < 0 || g.eng_pad >= (int64_t) map.size())
+    if (n_e == 0 || g.ngram < 2 || g.heads_per_ngram <= 0 || g.eng_dim <= 0 ||
+        g.eng_mult.size() != n_e * (size_t) g.ngram || g.eng_off.size() != n_e * n_h ||
+        g.eng_prime.size() != n_e * n_h || map.size() != (size_t) g.n_vocab || g.eng_pad < 0 ||
+        g.eng_pad >= (int64_t) map.size())
         return bad("the Engram metadata is inconsistent");
     for (size_t e = 0; e < n_e; ++e) {
         if ((int64_t) layers[e] >= g.n_layers || (e > 0 && layers[e] <= layers[e - 1]))
@@ -205,7 +210,8 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
         g.eng_layers.push_back((int64_t) layers[e]);
     }
     for (size_t c = 0; c < g.eng_off.size(); ++c) {
-        if (g.eng_prime[c] < 2 || g.eng_off[c] + g.eng_prime[c] > (uint64_t) INT32_MAX) return bad("an Engram head's rows out of range");
+        if (g.eng_prime[c] < 2 || g.eng_off[c] + g.eng_prime[c] > (uint64_t) INT32_MAX)
+            return bad("an Engram head's rows out of range");
         g.eng_rows = std::max(g.eng_rows, g.eng_off[c] + g.eng_prime[c]);
     }
     for (uint64_t v : map) g.eng_map.push_back((int32_t) v);
@@ -217,7 +223,8 @@ struct TensorWant {
     std::vector<int64_t> shape;
 };
 
-/// Every tensor of block l (a trunk layer, or the MTP block at l >= n_layers): GGUF names (blk.N.<suffix>), GGUF shapes.
+/// Every tensor of block l (a trunk layer, or the MTP block at
+/// l >= n_layers): GGUF names (blk.N.<suffix>), GGUF shapes.
 inline std::vector<TensorWant> layer_tensors(const Geometry& g, int64_t l) {
     const int64_t N = g.n_embd, H = g.n_head[(size_t) l], hc = g.hc;
     const bool mtp = l >= g.n_layers;
@@ -316,7 +323,8 @@ inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* c
             for (int64_t x : shape) want += (want.empty() ? "" : ", ") + std::to_string(x);
             return name + " is [" + got + "], Hy4-flash's layout wants [" + want + "]";
         }
-        if (!m.in_bounds(*t, s)) return name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
+        if (!m.in_bounds(*t, s))
+            return name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
         ++n;
         return {};
     };
@@ -332,4 +340,4 @@ inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* c
     return {};
 }
 
-}  // namespace lamina::hy4
+}   // namespace lamina::hy4

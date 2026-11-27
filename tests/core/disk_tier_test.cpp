@@ -41,11 +41,13 @@ struct Device {
     void fill(int64_t lo, int64_t hi, uint8_t gen) {
         for (int k = 0; k < 2; ++k)
             for (int64_t c = lo; c < hi; ++c)
-                for (uint64_t b = 0; b < kRow[k]; ++b) a[k][(size_t) (c * kRow[k] + b)] = (uint8_t) (c * 7 + b + k * 13 + gen);
+                for (uint64_t b = 0; b < kRow[k]; ++b)
+                    a[k][(size_t) (c * kRow[k] + b)] = (uint8_t) (c * 7 + b + k * 13 + gen);
     }
     bool same(const Device& o, int64_t lo, int64_t hi) const {
         for (int k = 0; k < 2; ++k)
-            if (std::memcmp(a[k].data() + lo * kRow[k], o.a[k].data() + lo * kRow[k], (size_t) ((hi - lo) * kRow[k])) != 0)
+            if (std::memcmp(a[k].data() + lo * kRow[k], o.a[k].data() + lo * kRow[k], (size_t) ((hi - lo) * kRow[k])) !=
+                0)
                 return false;
         return true;
     }
@@ -66,7 +68,7 @@ DiskTier::Copy copy_of(Device& d) {
 
 uint64_t bytes_of(int64_t lo, int64_t held) { return (uint64_t) (held - lo) * (kRow[0] + kRow[1]); }
 
-}  // namespace
+}   // namespace
 
 int main() {
     std::printf("disk_tier_test\n");
@@ -102,14 +104,16 @@ int main() {
               "appended from the cut: a block of the new cells");
         check(f->blocks[1].off == end_before, "after the old block, which holds the cells before the cut");
         Device again;
-        check(tier.get_cells(*f, 35000, copy_of(again)) && again.same(dev, 0, 35000), "read back: the new cells over the old");
+        check(tier.get_cells(*f, 35000, copy_of(again)) && again.same(dev, 0, 35000),
+              "read back: the new cells over the old");
         f->cut(10000);
         dev.fill(10000, 15000, 3);
         check(tier.put_cells(*f, 10000, 15000, 4, bytes, copy_of(dev)) && f->blocks.size() == 2 &&
                   f->blocks[1].lo == 10000 && f->blocks[1].off == end_before,
               "cut before the second block: it gives its place to the new one");
         Device third;
-        check(tier.get_cells(*f, 15000, copy_of(third)) && third.same(dev, 0, 15000), "read back as the sequence is now");
+        check(tier.get_cells(*f, 15000, copy_of(third)) && third.same(dev, 0, 15000),
+              "read back as the sequence is now");
         // 4. a copy in RAM, as the park lays it out
         dev.fill(0, kCells, 4);
         std::vector<uint8_t> ram((size_t) bytes_of(0, 25000));
@@ -139,12 +143,12 @@ int main() {
         const std::string big(5000, 'c');   // (a slot is the record's bytes in whole pages: 4,096)
         check(!tier.put_record(*g, 400, {{big.data(), big.size()}}), "a record past its slot refused");
         tier.remove(*f);
-        check(!std::filesystem::exists(std::filesystem::path(std::u8string(
-                  reinterpret_cast<const char8_t*>(f->kv_path.data()), f->kv_path.size()))),
+        check(!std::filesystem::exists(std::filesystem::path(
+                  std::u8string(reinterpret_cast<const char8_t*>(f->kv_path.data()), f->kv_path.size()))),
               "a file's removal takes its files");
     }
-    check(!dir.empty() && !std::filesystem::exists(std::filesystem::path(std::u8string(
-                              reinterpret_cast<const char8_t*>(dir.data()), dir.size()))),
+    check(!dir.empty() && !std::filesystem::exists(std::filesystem::path(
+                              std::u8string(reinterpret_cast<const char8_t*>(dir.data()), dir.size()))),
           "the folder goes with the tier");
     std::filesystem::remove_all(root, ec);
     std::printf(g_fail ? "FAIL\n" : "PASS\n");

@@ -100,4 +100,4 @@ void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream);
 /// BF16 of int8 codes times their f16 scale a 32 values (n codes), rounded as the pack rounds Q8_0 to BF16.
 void q8_to_bf16(const int8_t* q, const uint16_t* scales, int64_t n, uint16_t* y, void* stream);
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

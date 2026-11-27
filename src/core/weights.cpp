@@ -3,11 +3,11 @@
 
 #include "lamina/kernels/f16_bits.hpp"
 
-#include <cinttypes>
 #include <cuda_runtime.h>
+#include <cinttypes>
 
-#include <chrono>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,10 +37,10 @@ struct IndexRow {
 
 /// How a segment's bytes must be transformed on the way from the pack to the arena.
 enum class Conv : int {
-    Copy = 0,      ///< the bytes are already the engine form
-    Bf16High = 1,  ///< f32 container holding a bf16 value: take the high 16 bits
-    ToF16 = 2,     ///< f32 container holding an f16 value: a real round-to-nearest-even conversion
-    WidenF16 = 3,  ///< fp16 bits to be held as f32: EXACT, and the reason this path exists at all
+    Copy = 0,       ///< the bytes are already the engine form
+    Bf16High = 1,   ///< f32 container holding a bf16 value: take the high 16 bits
+    ToF16 = 2,      ///< f32 container holding an f16 value: a real round-to-nearest-even conversion
+    WidenF16 = 3,   ///< fp16 bits to be held as f32: EXACT, and the reason this path exists at all
 };
 
 /// One contiguous run of a tensor's source span with a single destination range and one transform.
@@ -87,25 +87,32 @@ bool pool_from(IndexLines& lines, const std::string& where, uint64_t& out, std::
         if (line[0] == '#') {
             unsigned long long p = 0;
             int a = 0, tensors = 0;
-            if (std::sscanf(line, "# align %d pool %llu tensors %d", &a, &p, &tensors) == 3) { pool = p; align = a; }
+            if (std::sscanf(line, "# align %d pool %llu tensors %d", &a, &p, &tensors) == 3) {
+                pool = p;
+                align = a;
+            }
             continue;
         }
         if (skip == nullptr) continue;
         char name[256] = {0};
         unsigned long long dst_bytes = 0, dummy = 0;
         int i1 = 0, i2 = 0;
-        if (std::sscanf(line, "%255s %d %d %llu %llu %llu %llu", name, &i1, &i2, &dummy, &dummy, &dummy, &dst_bytes) != 7)
+        if (std::sscanf(line, "%255s %d %d %llu %llu %llu %llu", name, &i1, &i2, &dummy, &dummy, &dummy, &dst_bytes) !=
+            7)
             continue;
         if (skip->count(name)) continue;
         const uint64_t a = align > 0 ? (uint64_t) align : 256;
         compact += (dst_bytes + a - 1) / a * a;
     }
-    if (pool == 0) { err = "no '# align ... pool ...' header in " + where; return false; }
+    if (pool == 0) {
+        err = "no '# align ... pool ...' header in " + where;
+        return false;
+    }
     out = skip ? compact : pool;
     return true;
 }
 
-}  // namespace
+}   // namespace
 
 bool WeightTable::pool_bytes(const PackContents& pack, uint64_t& out, std::string& err,
                              const std::set<std::string>* skip) {
@@ -125,7 +132,10 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
         if (line[0] == '#') {
             unsigned long long p = 0;
             int a = 0, t = 0;
-            if (std::sscanf(line, "# align %d pool %llu tensors %d", &a, &p, &t) == 3) { pool = p; align = a; }
+            if (std::sscanf(line, "# align %d pool %llu tensors %d", &a, &p, &t) == 3) {
+                pool = p;
+                align = a;
+            }
             continue;
         }
         IndexRow r;
@@ -134,11 +144,11 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
         // The format is space-separated with no quoting; a name with a space in it would break the parse, which is
         // why the parser REFUSES rather than taking what it got.
         const int n = std::sscanf(line,
-                                  "%255s %d %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNd64 " %" SCNd64 " %d %d %d %d %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %d %d",
-                                  name, &r.file, &kind, &r.src_off, &r.src_bytes, &r.dst_off, &r.dst_bytes,
-                                  &r.ne0, &r.ne1, &r.code_bits, &r.code_bias, &r.group_elems, &r.codebook,
-                                  &r.has_offset, &r.codes_bytes, &r.scales_bytes, &r.offset_bytes,
-                                  &r.scales_fp16, &r.act_kind);
+                                  "%255s %d %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNd64 " %" SCNd64
+                                  " %d %d %d %d %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %d %d",
+                                  name, &r.file, &kind, &r.src_off, &r.src_bytes, &r.dst_off, &r.dst_bytes, &r.ne0,
+                                  &r.ne1, &r.code_bits, &r.code_bias, &r.group_elems, &r.codebook, &r.has_offset,
+                                  &r.codes_bytes, &r.scales_bytes, &r.offset_bytes, &r.scales_fp16, &r.act_kind);
         if (n != 19) {
             // A malformed index line is a WRONG BYTE OFFSET waiting to happen, and a wrong offset decodes to
             // a plausible weight.  Refuse loudly instead of loading the rows that happened to parse.
@@ -156,7 +166,10 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
         rows.push_back(r);
     }
 
-    if (pool == 0 || rows.empty()) { err = "index.txt has no header or no rows"; return false; }
+    if (pool == 0 || rows.empty()) {
+        err = "index.txt has no header or no rows";
+        return false;
+    }
     // Plan v0.3 P1: a skip set compacts the arena.  Kept rows are re-placed in index order at the index's
     // alignment; skipped rows keep their metadata and get no bytes.
     std::vector<bool> skipped(rows.size(), false);
@@ -164,7 +177,10 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
         const uint64_t a = align > 0 ? (uint64_t) align : 256;
         uint64_t at = 0;
         for (size_t i = 0; i < rows.size(); ++i) {
-            if (skip->count(rows[i].name)) { skipped[i] = true; continue; }
+            if (skip->count(rows[i].name)) {
+                skipped[i] = true;
+                continue;
+            }
             rows[i].dst_off = at;
             at += (rows[i].dst_bytes + a - 1) / a * a;
         }
@@ -235,12 +251,14 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
         if (r.code_bits != 0 && r.dst_bytes == 0) {
             // plan v0.3 P6: a native pack's row that carries a shape only - the GGUF form must serve it
             err = r.name + ": this pack holds the tensor only in its GGUF form (run with --native SHARD1)";
-            cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+            cudaFreeHost(stage_in);
+            cudaFreeHost(stage_out);
             return false;
         }
         if (r.file != 0) {
             err = r.name + ": " + pack.where() + " has dense.bin only (file 0), not file " + std::to_string(r.file);
-            cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+            cudaFreeHost(stage_in);
+            cudaFreeHost(stage_out);
             return false;
         }
 
@@ -264,8 +282,7 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
             }
             if (r.offset_bytes) {
                 const uint64_t after = r.codes_bytes + (r.scales_fp16 ? r.scales_bytes / 2 : r.scales_bytes);
-                segs[n_segs++] = Seg{after, r.offset_bytes, r.codes_bytes + r.scales_bytes, r.offset_bytes,
-                                     Conv::Copy};
+                segs[n_segs++] = Seg{after, r.offset_bytes, r.codes_bytes + r.scales_bytes, r.offset_bytes, Conv::Copy};
             }
         } else {
             // Everything else is one run whose transform is the row's kind.  The two promoted types shrink
@@ -290,7 +307,10 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
             }
             segs[n_segs++] = Seg{0, r.src_bytes, 0, r.dst_bytes, c};
         }
-        for (int i = 0; i < n_segs; ++i) { sum_src += segs[i].src_bytes; sum_dst += segs[i].dst_bytes; }
+        for (int i = 0; i < n_segs; ++i) {
+            sum_src += segs[i].src_bytes;
+            sum_dst += segs[i].dst_bytes;
+        }
         // The segment list is this loop's own idea of the layout, and it is the ONLY thing standing between a
         // mis-sized plane and a wrong byte offset.  It is checked against both recorded totals, not trusted.
         if (!bad && (sum_src != r.src_bytes || sum_dst != r.dst_bytes)) {
@@ -303,14 +323,19 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
             err = buf;
             bad = true;
         }
-        if (bad) { cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
+        if (bad) {
+            cudaFreeHost(stage_in);
+            cudaFreeHost(stage_out);
+            return false;
+        }
 
         for (int si = 0; si < n_segs; ++si) {
             const Seg& s = segs[si];
             const bool widening = (s.conv == Conv::WidenF16);
             if (widening && (s.src_bytes & 1ull)) {
                 err = r.name + ": an fp16 plane with an odd source byte count";
-                cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+                cudaFreeHost(stage_in);
+                cudaFreeHost(stage_out);
                 return false;
             }
             uint64_t done = 0;
@@ -319,11 +344,17 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
                 // WIDENING NEVER SPLITS AN ELEMENT.  CHUNK is even, so a full chunk cannot, but the tail of a
                 // plane whose length is odd would - and half an fp16 is a plausible-looking scale.
                 if (widening && (n & 1ull)) {
-                    if (n == 1) { err = r.name + ": an fp16 plane ending on a half element"; cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
+                    if (n == 1) {
+                        err = r.name + ": an fp16 plane ending on a half element";
+                        cudaFreeHost(stage_in);
+                        cudaFreeHost(stage_out);
+                        return false;
+                    }
                     n -= 1;
                 }
                 if (!pack.read(r.src_off + s.src_off + done, (size_t) n, stage_in, err)) {
-                    cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+                    cudaFreeHost(stage_in);
+                    cudaFreeHost(stage_out);
                     return false;
                 }
                 const uint8_t* src = (const uint8_t*) stage_in;
@@ -332,8 +363,7 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
                 uint64_t out_at = s.dst_off + done;
 
                 switch (s.conv) {
-                    case Conv::Copy:
-                        break;
+                    case Conv::Copy: break;
                     case Conv::Bf16High: {
                         // THE HIGH 16 BITS ARE THE BF16 ENCODING, exactly - not a rounding.  A bf16 value is
                         // the top half of its f32 image, and the pack promoted it without changing it, so
@@ -387,7 +417,8 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
                 if (cudaMemcpy(dst_base + r.dst_off + out_at, host_src, out_bytes, cudaMemcpyHostToDevice) !=
                     cudaSuccess) {
                     err = "cudaMemcpy failed for " + r.name;
-                    cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+                    cudaFreeHost(stage_in);
+                    cudaFreeHost(stage_out);
                     return false;
                 }
                 upload_ms += now_ms() - u0;
@@ -429,7 +460,10 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
     report_.arena_bytes = pool;
     report_.read_ms = now_ms() - t_read0 - upload_ms;
     report_.upload_ms = upload_ms;
-    if (cudaDeviceSynchronize() != cudaSuccess) { err = "cudaDeviceSynchronize after the load failed"; return false; }
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        err = "cudaDeviceSynchronize after the load failed";
+        return false;
+    }
     return true;
 }
 
@@ -438,4 +472,4 @@ const WeightRef* WeightTable::find(const std::string& name) const {
     return it == table_.end() ? nullptr : &it->second;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

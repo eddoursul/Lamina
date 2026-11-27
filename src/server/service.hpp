@@ -50,7 +50,8 @@ struct Prepared {
 class Service {
 public:
     Service(std::shared_ptr<Engine> engine, const Tokenizer& tok, std::shared_ptr<ChatTemplate> tpl, std::string model,
-            std::shared_ptr<Vision> vision = nullptr, json sampling_defaults = json::object(), bool fit_max_tokens = true);
+            std::shared_ptr<Vision> vision = nullptr, json sampling_defaults = json::object(),
+            bool fit_max_tokens = true);
     ~Service();
 
     // ---- configuration (main sets these; the Settings view's keys may change while requests run: apply_setting)
@@ -62,7 +63,7 @@ public:
     bool tool_call_recovery = false, before_load_strict = false, before_load_ignore_failure = false;
     std::string reasoning_loop_recovery;   ///< "", "stop" or "recover"
     int64_t repeat_stop_tokens = 256;
-    std::string model_arch;                ///< the family ("qwen4exp", "qwen35moe", "qwen35"): the model card's sampling
+    std::string model_arch;   ///< the family ("qwen4exp", "qwen35moe", "qwen35"): the model card's sampling
     std::string shared_path, config_path, config_effort;
     /// #564: the run's settings as the Settings view shows them: the merged config as it started (started_config),
     /// as this session has it now (live_config: POST /config's changes), the preset under the file, the keys the
@@ -71,17 +72,17 @@ public:
     json preset_config = json::object();   ///< the preset the config file's settings went over (empty: none)
     std::set<std::string> command_line_keys;
     std::vector<std::string> cors_origins, trusted_origins, allowed_hosts;
-    json api_key = "";                     ///< a key ("k1,k2": several) or a list of keys; "" none
-    int64_t requested_slots = 0;           ///< the slots the config asked for (0: what the engine has)
-    std::vector<int> gpu_indices;          ///< every card the engine uses (the Monitor's)
-    std::mutex config_mu;                  ///< POST /config: one change of the run config at a time
-    std::set<std::string> hosted_tools_noted;   ///< /v1/responses' hosted tools said once each
+    json api_key = "";                              ///< a key ("k1,k2": several) or a list of keys; "" none
+    int64_t requested_slots = 0;                    ///< the slots the config asked for (0: what the engine has)
+    std::vector<int> gpu_indices;                   ///< every card the engine uses (the Monitor's)
+    std::mutex config_mu;                           ///< POST /config: one change of the run config at a time
+    std::set<std::string> hosted_tools_noted;       ///< /v1/responses' hosted tools said once each
     static constexpr double kUnloadWaitS = 300.0;   ///< POST /unload?wait=1 waits this long for the running turn
     std::set<std::string> host_names;
     std::atomic<double> idle_unload_s{0};
     double before_load_timeout_s = 120, vram_free_wait_s = 15;
     int64_t min_free_vram_mib = 0;
-    json before_load;                      ///< a command: a string (shell) or a list
+    json before_load;   ///< a command: a string (shell) or a list
     std::optional<int64_t> max_queue;
     std::optional<double> queue_timeout_s;
     int gpu_index = 0;
@@ -113,7 +114,7 @@ public:
     int64_t admission_reserved = 0, admission_rejected = 0, queue_timeouts = 0, client_disconnect_cancels = 0;
     bool draining = false;
     std::set<Cancel*> active_cancels;
-    std::deque<std::shared_ptr<json>> api_requests;  ///< the request monitor (/api-monitor), when on
+    std::deque<std::shared_ptr<json>> api_requests;   ///< the request monitor (/api-monitor), when on
     std::tuple<int64_t, double, int64_t, double> scrape_bucket{0, 0, 0, 0};
     /// a finished request's latencies for the Prometheus histograms (time to first token, tokens, decode s, total s)
     std::function<void(std::optional<double>, int64_t, double, double)> observe_latencies;
@@ -140,11 +141,11 @@ public:
     /// the config's "sampling" block, a copy
     json sampling_defaults_now() const;
     // ---- LoRA adapters (the engine's --lora, llama.cpp's server API)
-    /// GET /lora-adapters: [{id, path, scale, task_name, prompt_prefix}] with the scales a request that names none takes
-    /// (empty until the engine has started with adapters)
+    /// GET /lora-adapters: [{id, path, scale, task_name, prompt_prefix}] with the scales a request that names none
+    /// takes (empty until the engine has started with adapters)
     json lora_adapters();
-    /// POST /lora-adapters: [{id, scale}, ...] sets those scales, every adapter left out at 0 (llama.cpp's); RequestError
-    /// for a bad body
+    /// POST /lora-adapters: [{id, scale}, ...] sets those scales, every adapter left out at 0 (llama.cpp's);
+    /// RequestError for a bad body
     void set_lora(const json& body);
     /// a request's "lora" field checked (RequestError: a 400 before anything is sent)
     void check_lora(const json& req);
@@ -184,7 +185,8 @@ public:
     std::vector<int32_t> encode_prompt(const json& messages, const json& tools, const json& kwargs, bool store = true);
     void forget_prompt(const std::vector<int32_t>& ids);
     Prepared prepare(json& messages, const json& tools, const json& kwargs, std::optional<int64_t> max_new,
-                     const std::optional<std::string>& force = std::nullopt, json* req = nullptr, Cancel* cancel = nullptr);
+                     const std::optional<std::string>& force = std::nullopt, json* req = nullptr,
+                     Cancel* cancel = nullptr);
     json resolve_prefix(const json& spec, const json& messages, const json& tools, const json& kwargs,
                         const std::vector<int32_t>& ids, bool has_images);
     json choose(const json& req, Cancel& cancel);
@@ -196,7 +198,9 @@ public:
     /// waiting for it gives its place up (#1999: ClientGone)
     std::unique_lock<std::timed_mutex> turn(Cancel* cancel = nullptr);
     /// the turn if it is free now (owns_lock() false: a request has it)
-    std::unique_lock<std::timed_mutex> try_turn() { return std::unique_lock<std::timed_mutex>(fifo_, std::try_to_lock); }
+    std::unique_lock<std::timed_mutex> try_turn() {
+        return std::unique_lock<std::timed_mutex>(fifo_, std::try_to_lock);
+    }
     /// a request is running in the engine's batch slots
     bool slots_busy();
 
@@ -267,9 +271,9 @@ std::optional<std::string> held_departure(const Tokenizer& tok, const Held& held
 int64_t prompt_tokens_seen(int64_t prompt_tokens, const json& last);
 json request_timings(int64_t prompt_tokens, int64_t generated, const json& last);
 json request_stats(const std::vector<json>& segments);
-double now_s();   ///< time.time()
-double mono_s();  ///< time.perf_counter(): the request records' clock
+double now_s();    ///< time.time()
+double mono_s();   ///< time.perf_counter(): the request records' clock
 
 inline constexpr int64_t kCtxSlack = 8;   // `lamina-engine --serve` rejects prompt + max_new + 8 > context
 
-}  // namespace lamina
+}   // namespace lamina

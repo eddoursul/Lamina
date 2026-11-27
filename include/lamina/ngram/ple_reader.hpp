@@ -25,22 +25,22 @@
 
 namespace lamina::ngram {
 
-inline constexpr uint32_t ROW_BYTES = 90;          ///< an IQ4_NL row; `open` takes the table's own size
+inline constexpr uint32_t ROW_BYTES = 90;   ///< an IQ4_NL row; `open` takes the table's own size
 inline constexpr uint32_t PAGE = 4096;
 
 struct ReaderStats {
-    uint64_t requests = 0;        ///< rows asked for
-    uint64_t cache_hits = 0;      ///< rows served from the row cache
-    uint64_t dedup_rows = 0;      ///< rows that shared a page already being read in the same ticket
-    uint64_t reads = 0;           ///< SSD read requests issued
-    uint64_t bytes = 0;           ///< bytes read from the SSD
-    double wait_us = 0;           ///< time `collect` spent blocked
-    double submit_us = 0;         ///< time spent inside the read submission call (non-zero = it blocks)
-    double read_us_sum = 0;       ///< sum of per-read latencies (issue to completion)
-    uint64_t late_injected = 0;   ///< reads delayed by fault injection
-    uint64_t keepalive_reads = 0; ///< pages read only to keep the SSD awake (not in `reads`, `bytes` or latencies)
-    double keepalive_us_max = 0;  ///< the slowest of them
-    std::vector<float> read_us;   ///< last <= 65,536 read latencies, for percentiles
+    uint64_t requests = 0;          ///< rows asked for
+    uint64_t cache_hits = 0;        ///< rows served from the row cache
+    uint64_t dedup_rows = 0;        ///< rows that shared a page already being read in the same ticket
+    uint64_t reads = 0;             ///< SSD read requests issued
+    uint64_t bytes = 0;             ///< bytes read from the SSD
+    double wait_us = 0;             ///< time `collect` spent blocked
+    double submit_us = 0;           ///< time spent inside the read submission call (non-zero = it blocks)
+    double read_us_sum = 0;         ///< sum of per-read latencies (issue to completion)
+    uint64_t late_injected = 0;     ///< reads delayed by fault injection
+    uint64_t keepalive_reads = 0;   ///< pages read only to keep the SSD awake (not in `reads`, `bytes` or latencies)
+    double keepalive_us_max = 0;    ///< the slowest of them
+    std::vector<float> read_us;     ///< last <= 65,536 read latencies, for percentiles
     double percentile(double q) const;
 };
 
@@ -100,4 +100,4 @@ private:
     Impl* impl_ = nullptr;
 };
 
-}  // namespace lamina::ngram
+}   // namespace lamina::ngram

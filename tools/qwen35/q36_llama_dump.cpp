@@ -1,6 +1,6 @@
-// tools/qwen35/q36_llama_dump.cpp - llama.cpp's side of the Qwen3.6 parity check (NEW-MODELS-PLAN.md T1): the same GGUF,
-// the same token ids, llama.cpp's own graph.  Prints the prompt's ids and the greedy ids, and dumps every processed
-// position's layer outputs ("l_out-N", through the scheduler's eval callback) in lamina-q36ref's format
+// tools/qwen35/q36_llama_dump.cpp - llama.cpp's side of the Qwen3.6 parity check (NEW-MODELS-PLAN.md T1): the same
+// GGUF, the same token ids, llama.cpp's own graph.  Prints the prompt's ids and the greedy ids, and dumps every
+// processed position's layer outputs ("l_out-N", through the scheduler's eval callback) in lamina-q36ref's format
 // ([pos][layer][n_embd] f32) plus each greedy step's top-2 (id, logit).
 //
 // Built against a llama.cpp checkout (not part of Lamina's build):
@@ -11,8 +11,8 @@
 //   --force feeds that continuation instead of the greedy ids (teacher forcing); --dump-full-logits writes every
 //   step's logits (f32, [step][vocab]).
 //   --prompt is tokenized with special tokens parsed and no BOS added (Qwen adds none).
-#include "llama.h"
 #include "ggml-backend.h"
+#include "llama.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -51,7 +51,7 @@ std::vector<int> parse_ids(const std::string& s) {
     }
     return v;
 }
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     std::string model, prompt, tokens, dump_layers, dump_logits, force, dump_full;
@@ -67,24 +67,34 @@ int main(int argc, char** argv) {
         else if (a == "--dump-logits") dump_logits = v;
         else if (a == "--force") force = v;
         else if (a == "--dump-full-logits") dump_full = v;
-        else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
+        else {
+            std::fprintf(stderr, "unknown option %s\n", a.c_str());
+            return 2;
+        }
     }
-    // LAMINA_DUMP_NGL: the GPU layers when the caller asks for the GPU (--ngl > 0) but the file does not fit (UD-Q4_K_XL
-    // on a 12 GB card); the other layers run on llama.cpp's CPU backend
+    // LAMINA_DUMP_NGL: the GPU layers when the caller asks for the GPU (--ngl > 0) but the file does not fit
+    // (UD-Q4_K_XL on a 12 GB card); the other layers run on llama.cpp's CPU backend
     if (const char* g = std::getenv("LAMINA_DUMP_NGL"); g != nullptr && ngl > 0) ngl = std::atoi(g);
     llama_backend_init();
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = ngl;
     llama_model* mdl = llama_model_load_from_file(model.c_str(), mp);
-    if (!mdl) { std::fprintf(stderr, "cannot load %s\n", model.c_str()); return 1; }
+    if (!mdl) {
+        std::fprintf(stderr, "cannot load %s\n", model.c_str());
+        return 1;
+    }
     const llama_vocab* vocab = llama_model_get_vocab(mdl);
     std::vector<llama_token> ids;
     if (!tokens.empty()) {
         for (int t : parse_ids(tokens)) ids.push_back(t);
     } else {
         ids.resize(prompt.size() + 16);
-        const int n = llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), ids.data(), (int) ids.size(), false, true);
-        if (n < 0) { std::fprintf(stderr, "tokenize failed\n"); return 1; }
+        const int n =
+            llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), ids.data(), (int) ids.size(), false, true);
+        if (n < 0) {
+            std::fprintf(stderr, "tokenize failed\n");
+            return 1;
+        }
         ids.resize(n);
     }
     Capture cap;
@@ -101,7 +111,10 @@ int main(int argc, char** argv) {
     cp.cb_eval = on_tensor;
     cp.cb_eval_user_data = &cap;
     llama_context* ctx = llama_init_from_model(mdl, cp);
-    if (!ctx) { std::fprintf(stderr, "cannot create the context\n"); return 1; }
+    if (!ctx) {
+        std::fprintf(stderr, "cannot create the context\n");
+        return 1;
+    }
     FILE* fl = dump_layers.empty() ? nullptr : std::fopen(dump_layers.c_str(), "wb");
     FILE* fg = dump_logits.empty() ? nullptr : std::fopen(dump_logits.c_str(), "wb");
     FILE* ff = dump_full.empty() ? nullptr : std::fopen(dump_full.c_str(), "wb");
@@ -128,20 +141,31 @@ int main(int argc, char** argv) {
     std::printf("\n");
     std::vector<llama_token> gen;
     llama_batch b = llama_batch_get_one(ids.data(), (int) ids.size());
-    if (llama_decode(ctx, b) != 0) { std::fprintf(stderr, "decode failed\n"); return 1; }
+    if (llama_decode(ctx, b) != 0) {
+        std::fprintf(stderr, "decode failed\n");
+        return 1;
+    }
     write_layers((int) ids.size());
     for (int i = 0; i < n_gen; ++i) {
         const float* lg = llama_get_logits_ith(ctx, -1);
         int a = 0, c = -1;
-        for (int j = 1; j < V; ++j) if (lg[j] > lg[a]) a = j;
-        for (int j = 0; j < V; ++j) if (j != a && (c < 0 || lg[j] > lg[c])) c = j;
-        if (fg) { const float rec[4] = {(float) a, lg[a], (float) c, lg[c]}; std::fwrite(rec, 4, 4, fg); }
+        for (int j = 1; j < V; ++j)
+            if (lg[j] > lg[a]) a = j;
+        for (int j = 0; j < V; ++j)
+            if (j != a && (c < 0 || lg[j] > lg[c])) c = j;
+        if (fg) {
+            const float rec[4] = {(float) a, lg[a], (float) c, lg[c]};
+            std::fwrite(rec, 4, 4, fg);
+        }
         gen.push_back(a);
         if (ff) std::fwrite(lg, 4, V, ff);
         if (i + 1 == n_gen) break;
         llama_token t = i < (int) forced.size() ? forced[i] : a;
         llama_batch one = llama_batch_get_one(&t, 1);
-        if (llama_decode(ctx, one) != 0) { std::fprintf(stderr, "decode failed\n"); return 1; }
+        if (llama_decode(ctx, one) != 0) {
+            std::fprintf(stderr, "decode failed\n");
+            return 1;
+        }
         write_layers(1);
     }
     std::printf("gen:");

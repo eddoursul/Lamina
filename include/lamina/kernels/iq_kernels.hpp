@@ -45,40 +45,43 @@ void iq_dequant_experts_f16(int gu_type, int d_type, const uint8_t* const* blobs
 /// The layout of one native expert blob: [gate rows | up rows | down rows], raw GGUF blocks.
 struct NativeExpertLayout {
     int gu_type = -1, d_type = -1;
-    int gu_act = 9, d_act = 9;             // ggml vec_dot activation types
-    bool q5k_fma = true;                   // exact Q5_K dots: the mins' sum as one FMA (set_exact_q5_K_fma)
+    int gu_act = 9, d_act = 9;   // ggml vec_dot activation types
+    bool q5k_fma = true;         // exact Q5_K dots: the mins' sum as one FMA (set_exact_q5_K_fma)
     int64_t n_embd = 0, n_ff = 0;
-    size_t gu_row = 0, d_row = 0;       // bytes per row
-    size_t up_off = 0, down_off = 0;    // byte offsets inside the blob
-    size_t bytes = 0;                   // the whole blob
-    int had_block = 0;                  // Hadamard-folded down weights: h is rotated before it is quantized (hadamard.hpp)
-    const float* d_signs = nullptr;     // their sign vector, n_ff floats on this device, or null
-    float swiglu_limit = 0.f;           // SwiGLU's clamp: silu(min(g, L)) * clamp(u, -L, L) (Hy4-flash); 0: none
-    int act = 0;                        // 0: SwiGLU; 1: beta tanh(g / beta) sigmoid(g) * lbeta tanh(u / lbeta) (Inkling 2)
+    size_t gu_row = 0, d_row = 0;      // bytes per row
+    size_t up_off = 0, down_off = 0;   // byte offsets inside the blob
+    size_t bytes = 0;                  // the whole blob
+    int had_block = 0;                 // Hadamard-folded down weights: h is rotated
+                                       // before it is quantized (hadamard.hpp)
+    const float* d_signs = nullptr;    // their sign vector, n_ff floats on this device, or null
+    float swiglu_limit = 0.f;          // SwiGLU's clamp: silu(min(g, L)) * clamp(u, -L, L) (Hy4-flash); 0: none
+    int act = 0;                       // 0: SwiGLU; 1: beta tanh(g / beta)
+                                       // sigmoid(g) * lbeta tanh(u / lbeta) (Inkling 2)
     float act_beta = 0.f, act_lbeta = 0.f;
-    size_t scale_off = 0;               // > 0: two floats there in the blob, the scales of its gate/up and down rows'
-                                        // products (NVFP4's per-expert scales); the q8_1 kernels alone read them
-    bool x_il = false;                  // the caller's q8_1 activations are interleaved (q8_1_il16.hpp): the kernels
-                                        // that decode an NVFP4 word once take them, where native_expert_il says so
+    size_t scale_off = 0;   // > 0: two floats there in the blob, the scales of its gate/up and down rows'
+                            // products (NVFP4's per-expert scales); the q8_1 kernels alone read them
+    bool x_il = false;      // the caller's q8_1 activations are interleaved (q8_1_il16.hpp): the kernels
+                            // that decode an NVFP4 word once take them, where native_expert_il says so
 };
 /// `native_expert_grouped` has kernels for this layout that read interleaved activations (NVFP4 gate/up and down rows
 /// at Inkling 2 Mini's shape): a caller sets `x_il` and writes its q8_1 blocks in that order; the rows are the same
 /// to the bit as with plain blocks.
 bool native_expert_il(const NativeExpertLayout& L);
-NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd, int64_t n_ff,
-                                        int gu_act = -1, int d_act = -1);
+NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, int gu_act = -1,
+                                        int d_act = -1);
 
-/// How the GPU's native expert kernels quantize and sum (`--expert-math`).  The CPU pool always runs ggml's own contract
-/// (each layer's vec_dot types); this decides what the GPU does with the experts it holds.
+/// How the GPU's native expert kernels quantize and sum (`--expert-math`).  The CPU pool always runs ggml's own
+/// contract (each layer's vec_dot types); this decides what the GPU does with the experts it holds.
 ///  - Fast (the default): llama.cpp's CUDA contract - q8_1 activations for gate/up and the hidden, lane-strided warp
 ///    sums.  A GPU hit agrees with the CPU computing the same expert to rounding (~1e-2 relative at the expert output,
 ///    the same as the CPU's own distance from fp32), not bit for bit, so greedy output can change with which experts
 ///    happen to be resident.
 ///  - Exact: the CPU pool's ggml arithmetic - Q8_K / Q8_0 / Q8_1 per the layer's vec_dot types, the accumulation and
-///    reduction order of ggml's x86 dots (AVX2 code: an AVX-512 build of the pinned ggml has no other branches for these
-///    formats), and `expf_contract`, which the pool's SwiGLU takes too under Exact (`cpu::set_native_exact_swiglu`) -
-///    so a GPU hit is bit-identical to the CPU's result and the output does not depend on residency.  Slower; for
-///    regression tests, A/B runs and reproducible output.  Another CPU back end would need its own contract.
+///    reduction order of ggml's x86 dots (AVX2 code: an AVX-512 build of the pinned ggml has no other branches for
+///    these formats), and
+///    `expf_contract`, which the pool's SwiGLU takes too under Exact (`cpu::set_native_exact_swiglu`) - so a GPU hit is
+///    bit-identical to the CPU's result and the output does not depend on residency.  Slower; for regression
+///    tests, A/B runs and reproducible output.  Another CPU back end would need its own contract.
 enum class ExpertMath { Fast, Exact };
 void set_expert_math(ExpertMath m) noexcept;   ///< once, before any expert work
 /// Exact's Q5_K dots round the mins' sum as ggml's compiled C does: one FMA (GCC, Clang) or a product then a sum
@@ -106,8 +109,9 @@ void native_q8_0_contract_probe(const float* x, int64_t n, void* y, void* stream
 /// Bytes of scratch `native_expert_grouped` needs for `cap_entries` entries.  The largest supported hidden
 /// activation format is selected automatically (Q8_K, Q8_0 or Q8_1).
 size_t native_expert_scratch_bytes(int64_t cap_entries, int64_t n_ff, bool rotated = false);
-/// y = H_128 (signs * x), the Hadamard-folded experts' rotation (hadamard.hpp), per 128 values of each of `rows` rows of `width`
-/// floats, bitwise hadamard_rotate; x and y may be the same.  `signs`: `width` floats on this device, or null.
+/// y = H_128 (signs * x), the Hadamard-folded experts' rotation (hadamard.hpp), per 128 values of each of
+/// `rows` rows of `width` floats, bitwise hadamard_rotate; x and y
+/// may be the same.  `signs`: `width` floats on this device, or null.
 void hadamard_rows(const float* x, float* y, int64_t rows, int64_t width, const float* signs, void* stream);
 /// The same in place on FP16 rows: FP32 arithmetic, rounded once on the store.
 void hadamard_rows_f16(uint16_t* x, int64_t rows, int64_t width, const float* signs, void* stream);
@@ -133,4 +137,4 @@ void native_expert_rows_out(const float* rows, const int32_t* n_groups, const in
                             const int32_t* ent_dst, int64_t n_embd, int64_t max_rows, float* const* out,
                             uint32_t* const* flag, const int32_t* ring, unsigned* counter, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

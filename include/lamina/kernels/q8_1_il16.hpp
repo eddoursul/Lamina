@@ -10,4 +10,4 @@ namespace lamina::kernels {
 /// where value l (0..31) of a q8_1 block stands in the interleaved block
 __device__ __forceinline__ int q8_1_il16(int l) { return (l & 16) | ((l & 7) << 1) | ((l >> 3) & 1); }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

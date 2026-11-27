@@ -31,7 +31,10 @@ __device__ __forceinline__ void hit_plan_block(const int32_t* __restrict__ ids, 
     int first = i;
     if (hit)
         for (int j = 0; j < i; ++j)
-            if (s_id[j] == e) { first = j; break; }
+            if (s_id[j] == e) {
+                first = j;
+                break;
+            }
     const bool lead = hit && first == i;
     int size = 0;
     if (lead)
@@ -46,7 +49,10 @@ __device__ __forceinline__ void hit_plan_block(const int32_t* __restrict__ ids, 
     if (lead) {
         int grp = 0, at = 0;
         for (int j = 0; j < i; ++j)
-            if (s_size[j] > 0) { ++grp; at += s_size[j]; }
+            if (s_size[j] > 0) {
+                ++grp;
+                at += s_size[j];
+            }
         s_start[i] = at;
         start[grp] = at;
         ptr[grp] = slot_ptr[slot];
@@ -67,5 +73,5 @@ __device__ __forceinline__ void hit_plan_block(const int32_t* __restrict__ ids, 
     }
 }
 
-}  // namespace
-}  // namespace lamina::kernels
+}   // namespace
+}   // namespace lamina::kernels

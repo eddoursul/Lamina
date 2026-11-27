@@ -21,13 +21,13 @@ namespace lamina::bench {
 inline constexpr int kSchema = 1;   ///< results.json's; the suite it names
 
 struct Options {
-    int runs = 3;           ///< runs per test
-    int clients = 0;        ///< N requests at once (0: that test is left out)
+    int runs = 3;               ///< runs per test
+    int clients = 0;            ///< N requests at once (0: that test is left out)
     bool long_prompt = false;   ///< also ~32K tokens
-    bool think = false;     ///< thinking on
-    std::string out;        ///< the reports' folder ("": bench-results beside the program)
-    std::string compare;    ///< an earlier report (its folder or results.json) to print beside this run's
-    std::string command;    ///< the command line as the report names it
+    bool think = false;         ///< thinking on
+    std::string out;            ///< the reports' folder ("": bench-results beside the program)
+    std::string compare;        ///< an earlier report (its folder or results.json) to print beside this run's
+    std::string command;        ///< the command line as the report names it
 };
 
 /// the server measured
@@ -107,4 +107,4 @@ int run(const Target& t, const json& cfg, const Options& o, const std::string& l
 /// --compare OLD NEW: the two reports' table; 2 when one cannot be read
 int compare_only(const std::string& older, const std::string& newer);
 
-}  // namespace lamina::bench
+}   // namespace lamina::bench

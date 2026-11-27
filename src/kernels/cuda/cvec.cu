@@ -1,6 +1,6 @@
 // src/kernels/cuda/cvec.cu - see include/lamina/kernels/cvec.hpp.
-#include "lamina/kernels/cvec.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/cvec.hpp"
 #include "lamina/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
@@ -48,8 +48,8 @@ __global__ void __launch_bounds__(THREADS) cvec_kernel(CvecRows r, const float* 
         const int d = threadIdx.x + THREADS * k;
         float v = h[d];
         if (r.bo != nullptr) {
-            const float b = r.partial ? r.bo[t * N + d] + __half2float(__ushort_as_half(r.partial[t * N + d]))
-                                      : r.bo[t * N + d];
+            const float b =
+                r.partial ? r.bo[t * N + d] + __half2float(__ushort_as_half(r.partial[t * N + d])) : r.bo[t * N + d];
             v = fmaf(b, sc, v);
         }
         x[k] = v;
@@ -75,7 +75,7 @@ __global__ void __launch_bounds__(THREADS) cvec_kernel(CvecRows r, const float* 
     }
 }
 
-}  // namespace
+}   // namespace
 
 bool cvec_supported(int64_t n_embd) { return n_embd == N; }
 
@@ -90,4 +90,4 @@ void cvec_apply(const CvecRows& rows, const float* cv, void* stream) {
     if (e != cudaSuccess) throw std::runtime_error(std::string("cvec_apply: ") + cudaGetErrorString(e));
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

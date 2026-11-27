@@ -22,8 +22,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-#include "lamina/kernels/native_rope.hpp"
 #include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/native_rope.hpp"
 #include <cuda_runtime.h>
 #include <atomic>
 #include <cmath>
@@ -39,9 +39,9 @@ bool overlaps(const void* a, size_t an, const void* b, size_t bn) {
     return x <= y ? y - x < an : x - y < bn;
 }
 template <int MODE>
-__global__ void apply(const float* x, float* out, int rows, int width,
-                      int n_rot, float theta_scale, const int* positions, const int32_t* mtab, int heads,
-                      int pos_stride, RopeKernelArgs k, RopeTab rt) {
+__global__ void apply(const float* x, float* out, int rows, int width, int n_rot, float theta_scale,
+                      const int* positions, const int32_t* mtab, int heads, int pos_stride, RopeKernelArgs k,
+                      RopeTab rt) {
     const int row = blockIdx.y;
     const int pair = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= rows || pair >= width / 2) return;
@@ -60,7 +60,7 @@ __global__ void apply(const float* x, float* out, int rows, int width,
     out[start + pair] = a * c - b * s;
     out[start + pair + n_rot / 2] = a * s + b * c;
 }
-}
+}   // namespace
 // one table per device (a layer split runs the rope kernels on several): set and read for the current device
 namespace {
 constexpr int kMropeDevices = 64;
@@ -70,8 +70,10 @@ int mrope_dev() {
     if (cudaGetDevice(&d) != cudaSuccess || d < 0 || d >= kMropeDevices) d = 0;
     return d;
 }
-}  // namespace
-void mrope_table_set(const int32_t* device_table) { mrope_tab[mrope_dev()].store(device_table, std::memory_order_relaxed); }
+}   // namespace
+void mrope_table_set(const int32_t* device_table) {
+    mrope_tab[mrope_dev()].store(device_table, std::memory_order_relaxed);
+}
 const int32_t* mrope_table() { return mrope_tab[mrope_dev()].load(std::memory_order_relaxed); }
 namespace {
 // #280: the float64 angle table of each device, set at session init (before any graph is captured)
@@ -81,9 +83,9 @@ struct RopeReg {
 };
 RopeReg rope_tab[kMropeDevices] = {};
 bool same_scaling(const RopeScaling& a, const RopeScaling& b) {
-    return a.type == b.type && a.freq_base == b.freq_base && a.factor == b.factor && a.freq_scale_in == b.freq_scale_in &&
-           a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor && a.attn_factor == b.attn_factor &&
-           a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
+    return a.type == b.type && a.freq_base == b.freq_base && a.factor == b.factor &&
+           a.freq_scale_in == b.freq_scale_in && a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor &&
+           a.attn_factor == b.attn_factor && a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
 }
 // opt-in: LAMINA_ROPE_TABLE=1 (the table's angles differ from the analytic ones in the last bits, so outputs move)
 bool rope_table_enabled() {
@@ -93,7 +95,7 @@ bool rope_table_enabled() {
     }();
     return on;
 }
-}  // namespace
+}   // namespace
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling) {
     rope_tab[mrope_dev()] = RopeReg{RopeTab{cos_tab, sin_tab, max_pos}, scaling};
 }
@@ -102,8 +104,8 @@ RopeTab rope_table_for(const RopeScaling& scaling) {
     const RopeReg& r = rope_tab[mrope_dev()];
     return r.tab.cos != nullptr && same_scaling(r.scaling, scaling) ? r.tab : RopeTab{};
 }
-void native_rope_apply(const float* x, float* out, int rows, int head_dim,
-                       int n_rot, const RopeScaling& scaling, const int* positions, void* stream) {
+void native_rope_apply(const float* x, float* out, int rows, int head_dim, int n_rot, const RopeScaling& scaling,
+                       const int* positions, void* stream) {
     native_rope_apply_tokens(x, out, rows, head_dim, n_rot, scaling, positions, rows, rows, stream);
 }
 void native_rope_apply_tokens(const float* x, float* out, int rows, int head_dim, int n_rot, const RopeScaling& scaling,
@@ -112,12 +114,12 @@ void native_rope_apply_tokens(const float* x, float* out, int rows, int head_dim
         (head_dim != 128 && head_dim != 256) || n_rot != 64 || rope_scaling_invalid(scaling) != nullptr ||
         reinterpret_cast<uintptr_t>(x) % 4 || reinterpret_cast<uintptr_t>(out) % 4 ||
         reinterpret_cast<uintptr_t>(positions) % 4) {
-        throw std::invalid_argument("native RoPE requires aligned F32 rows, width 128/256, rotation 64, valid base and explicit stream");
+        throw std::invalid_argument(
+            "native RoPE requires aligned F32 rows, width 128/256, rotation 64, valid base and explicit stream");
     }
     const size_t bytes = size_t(rows) * head_dim * sizeof(float);
     const size_t pos_bytes = (size_t((rows - 1) / heads) * pos_stride + heads) * sizeof(int);
-    if ((x != out && overlaps(x, bytes, out, bytes)) ||
-        overlaps(positions, pos_bytes, out, bytes) ||
+    if ((x != out && overlaps(x, bytes, out, bytes)) || overlaps(positions, pos_bytes, out, bytes) ||
         overlaps(positions, pos_bytes, x, bytes)) {
         throw std::invalid_argument("native RoPE buffers partially overlap");
     }
@@ -140,4 +142,4 @@ void native_rope_apply_tokens(const float* x, float* out, int rows, int head_dim
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-}
+}   // namespace lamina::kernels

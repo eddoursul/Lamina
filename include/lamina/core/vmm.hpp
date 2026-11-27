@@ -74,4 +74,4 @@ template <class Take> bool VmmRange::map_range(int64_t lo, int64_t hi, Take take
     return run < 0 || commit_run(run, hi);
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

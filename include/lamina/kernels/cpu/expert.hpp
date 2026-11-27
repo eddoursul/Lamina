@@ -27,25 +27,25 @@
 
 #include "lamina/core/geometry.hpp"
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
 namespace lamina::kernels::cpu {
 
 // ---- geometry, all of it fixed by the artifact (tools/verify_q2_0_geometry.py: 202/202 tensors at QK=64) ----
-inline constexpr int H = 2560;      // n_embd
-inline constexpr int FF = 640;      // expert intermediate width
-inline constexpr int NE = 512;      // routed experts per layer
+inline constexpr int H = 2560;   // n_embd
+inline constexpr int FF = 640;   // expert intermediate width
+inline constexpr int NE = 512;   // routed experts per layer
 static_assert(H == lamina::core::kCompiledGeometry.n_embd && FF == lamina::core::kCompiledGeometry.n_ff,
               "the CPU expert path is compiled for core/geometry.hpp");
-inline constexpr int QK = 64;       // QK2_0: weights per fp16 scale
-inline constexpr int QKA = 32;      // QK8_1/QK8_0: ACTIVATION elements per scale
-inline constexpr int BB = 18;       // bytes per 64-weight Q2_0 block: 2 fp16-scale + 16 codes
-inline constexpr int MAXC = H / QKA;             // 80 activation chunks across the widest reduction
-inline constexpr int ROW_GU = H * 2 / 8;         // 640 B of codes per gate/up row
-inline constexpr int ROW_D = FF * 2 / 8;         // 160 B of codes per down row
-inline constexpr int SC_GU = H / QK;             // 40 weight blocks per gate/up row
-inline constexpr int SC_D = FF / QK;             // 10 weight blocks per down row
+inline constexpr int QK = 64;                               // QK2_0: weights per fp16 scale
+inline constexpr int QKA = 32;                              // QK8_1/QK8_0: ACTIVATION elements per scale
+inline constexpr int BB = 18;                               // bytes per 64-weight Q2_0 block: 2 fp16-scale + 16 codes
+inline constexpr int MAXC = H / QKA;                        // 80 activation chunks across the widest reduction
+inline constexpr int ROW_GU = H * 2 / 8;                    // 640 B of codes per gate/up row
+inline constexpr int ROW_D = FF * 2 / 8;                    // 160 B of codes per down row
+inline constexpr int SC_GU = H / QK;                        // 40 weight blocks per gate/up row
+inline constexpr int SC_D = FF / QK;                        // 10 weight blocks per down row
 inline constexpr size_t BLOB = 3ull * (H * FF * BB / QK);   // 1,382,400
 
 // ---- the blob's internal layout (one expert) ----
@@ -70,8 +70,9 @@ struct ActQ {
     float hx[MAXC];
     int nchunks;
     /// The AVX-2 "bit-plane" image of `q` (src/kernels/cpu/q2_avx2.cpp explains it), filled only by
-    /// `act_quant_q8_1_avx2` with LAMINA_Q2_BITPLANE=1 and read only by `q2_0_gguf_rows_multi_avx2`.  Per pair p of 64-value blocks:
-    /// `qp[128p + 32k + 16h + i] = q[128p + 64h + 4i + k]`, `psum[8p + 4h + m]` = the sum of q[128p + 64h + 16m ..
+    /// `act_quant_q8_1_avx2` with LAMINA_Q2_BITPLANE=1 and read only by `q2_0_gguf_rows_multi_avx2`.  Per pair p of
+    /// 64-value blocks: `qp[128p + 32k + 16h + i] = q[128p + 64h + 4i + k]`,
+    /// `psum[8p + 4h + m]` = the sum of q[128p + 64h + 16m ..
     /// + 16), `pscale[8p + 2c + e] = scale[4p + c]`.  `bp_pairs` is 0 when the image is absent (n % 128 != 0).
     alignas(32) int8_t qp[H];
     alignas(32) int32_t psum[H / 16];
@@ -101,7 +102,6 @@ struct CpuFeatures {
     const char* reason() const;
 };
 CpuFeatures cpu_features();
-
 
 /// `x` -> `a`. The function name is historical;
 /// `n` must be a multiple of QKA and at most H. No allocation occurs.
@@ -140,7 +140,7 @@ void s2_expert_down_rows_multi(const uint8_t* blob, const ActQ* const* a2, int n
 struct ExpertScratchMulti {
     ActQ a2[MAXT];
     alignas(64) float ff[MAXT][FF];
-    ExpertScratch single;                 // the oracle-contract fallback
+    ExpertScratch single;   // the oracle-contract fallback
 };
 void s2_expert_vnni_multi(const uint8_t* blob, const ActQ* const* a1, int n_tokens, float* const* out,
                           ExpertScratchMulti& ws);
@@ -183,4 +183,4 @@ void act_quant_q8_1_avx1(const float* x, int n, ActQ& a);
 
 void s2_expert_scalar(const uint8_t* blob, const float* x, float* out, bool quant_acts);
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

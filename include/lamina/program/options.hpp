@@ -49,4 +49,4 @@ std::string wrapped(std::string_view text, size_t indent, size_t width, size_t f
 /// An option's line: `left` after two spaces, its help from column `col` (on the next line where `left` reaches it).
 std::string help_line(std::string_view left, std::string_view help, size_t width, size_t col);
 
-}  // namespace lamina::program
+}   // namespace lamina::program

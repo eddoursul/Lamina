@@ -79,7 +79,7 @@ void read_words(const uint8_t* p, uint64_t bytes) {
     g_sink.fetch_xor(a0 ^ a1 ^ a2 ^ a3, std::memory_order_relaxed);
 }
 
-}  // namespace
+}   // namespace
 
 std::vector<float> time_places(const std::vector<const uint8_t*>& places, uint64_t bytes, float* cut) {
     const size_t n = places.size();
@@ -109,4 +109,4 @@ std::vector<float> time_places(const std::vector<const uint8_t*>& places, uint64
     return gbs;
 }
 
-}  // namespace lamina::hy4
+}   // namespace lamina::hy4

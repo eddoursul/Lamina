@@ -164,8 +164,8 @@ __global__ void k_add_scaled(float* x, const float* y, const float* b, const flo
     x[i] += (y[i] + (b != nullptr ? b[i % n] : 0.0f)) * s[i % n];
 }
 
-constexpr int kHeadPad = 80;   // a head's values as the attention takes them: its 72 (Inkling 2's 64) and zeros to 80
-constexpr int kRopeFreqs = 18; // rotary pairs a section at most: Qwen's d_head / 4 (Inkling 2's 16)
+constexpr int kHeadPad = 80;     // a head's values as the attention takes them: its 72 (Inkling 2's 64) and zeros to 80
+constexpr int kRopeFreqs = 18;   // rotary pairs a section at most: Qwen's d_head / 4 (Inkling 2's 16)
 
 /// A chunk's q, k and v rows ([T][3 E] FP32, the three one after the other, plus their bias) into the attention's
 /// FP16 layouts: q16 [token][head][80], k16 and v16 [head][token][80], a head's values padded with zeros.  With `cs`
@@ -176,8 +176,8 @@ constexpr int kRopeFreqs = 18; // rotary pairs a section at most: Qwen's d_head 
 /// half of a head, as mtmd's build_rope_2d asks for it: the pairs (2 i, 2 i + 1), the first half's turned by the
 /// token's column and the second's by its row, both counted from 1 (token 0 is the class token, at 0: not turned; the
 /// patches follow in the grid's order), cs[position][i] the pair's cosine and sine.  grid (T), block 256.
-__global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* k16, __half* v16, const float* cs, int t0,
-                      int N, int H, int D, int pw, int ink) {
+__global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* k16, __half* v16, const float* cs,
+                      int t0, int N, int H, int D, int pw, int ink) {
     const int t = (int) blockIdx.x, gt = t0 + t;
     const int E = H * D;
     const float* row = qkv + (size_t) t * 3 * E;
@@ -201,24 +201,25 @@ __global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* 
             v = row[2 * E + e] + bias[2 * E + e];
             if (cs != nullptr && ink != 0) {
                 const int other = (d & 1) != 0 ? e - 1 : e + 1;   // the pair's other value (the halves are even)
-                const float* a = cs + ((size_t) (d < half ? pcol : prow) * kRopeFreqs + ((d < half ? d : d - half) >> 1)) * 2;
+                const float* a =
+                    cs + ((size_t) (d < half ? pcol : prow) * kRopeFreqs + ((d < half ? d : d - half) >> 1)) * 2;
                 const float qo = row[other] + bias[other], ko = row[E + other] + bias[E + other];
                 if ((d & 1) == 0) {   // x0 cos - x1 sin
                     q = q * a[0] - qo * a[1];
                     k = k * a[0] - ko * a[1];
-                } else {              // x0 sin + x1 cos
+                } else {   // x0 sin + x1 cos
                     q = qo * a[1] + q * a[0];
                     k = ko * a[1] + k * a[0];
                 }
             } else if (cs != nullptr) {
-                const int ic = d < half ? d : d - half;          // the pair's index
-                const int other = d < half ? e + half : e - half; // its other value
+                const int ic = d < half ? d : d - half;             // the pair's index
+                const int other = d < half ? e + half : e - half;   // its other value
                 const float* a = cs + ((size_t) (ic < kRopeFreqs ? prow : pcol) * kRopeFreqs + ic % kRopeFreqs) * 2;
                 const float qo = row[other] + bias[other], ko = row[E + other] + bias[E + other];
                 if (d < half) {   // x0 cos - x1 sin
                     q = q * a[0] - qo * a[1];
                     k = k * a[0] - ko * a[1];
-                } else {          // x0 sin + x1 cos
+                } else {   // x0 sin + x1 cos
                     q = qo * a[1] + q * a[0];
                     k = ko * a[1] + k * a[0];
                 }
@@ -230,7 +231,7 @@ __global__ void k_qkv(const float* qkv, const float* bias, __half* q16, __half* 
     }
 }
 
-// ---- the attention on the tensor cores ----------------------------------------------------------------------------------
+// ---- the attention on the tensor cores ------------------------------------------------------------------------------
 
 namespace va {
 
@@ -328,7 +329,8 @@ __global__ void __launch_bounds__(256) k_vit_attn(const __half* __restrict__ q, 
             mma16816(s[0], qa[k], b[0], b[1]);
             mma16816(s[1], qa[k], b[2], b[3]);
         }
-        // the cells past the last token out, the tile's row maxima (the four lanes of a row, then the m-tile's other warp)
+        // the cells past the last token out, the tile's row maxima
+        // (the four lanes of a row, then the m-tile's other warp)
         float xA = -INFINITY, xB = -INFINITY;
 #pragma unroll
         for (int n = 0; n < 2; ++n)
@@ -411,15 +413,19 @@ __global__ void __launch_bounds__(256) k_vit_attn(const __half* __restrict__ q, 
     for (int n = 0; n < kOut; ++n) {
         const int d = (c_first + n) * 8 + 2 * tig;
         if (n < 2 * n_pairs && d < D) {
-            if (okA) *reinterpret_cast<float2*>(out + ((size_t) tA * H + head) * D + d) = make_float2(o[n][0] * iA, o[n][1] * iA);
-            if (okB) *reinterpret_cast<float2*>(out + ((size_t) tB * H + head) * D + d) = make_float2(o[n][2] * iB, o[n][3] * iB);
+            if (okA)
+                *reinterpret_cast<float2*>(out + ((size_t) tA * H + head) * D + d) =
+                    make_float2(o[n][0] * iA, o[n][1] * iA);
+            if (okB)
+                *reinterpret_cast<float2*>(out + ((size_t) tB * H + head) * D + d) =
+                    make_float2(o[n][2] * iB, o[n][3] * iB);
         }
     }
 }
 
-}  // namespace va
+}   // namespace va
 
-// ---- the reference attention's kernels ------------------------------------------------------------------------------------
+// ---- the reference attention's kernels ------------------------------------------------------------------------------
 
 /// a row of scores to its probabilities, in place: softmax(scale * s).  grid (rows), block 256.
 __global__ void k_softmax_rows(float* s, int N, float scale) {
@@ -462,7 +468,7 @@ __global__ void k_head_out(const float* o, float* out, int t0, int B, int H, int
     out[((size_t) (t0 + b) * H + head) * D + d] = o[(size_t) b * kHeadPad + d];
 }
 
-// ---- the adapters' kernels ---------------------------------------------------------------------------------------------------
+// ---- the adapters' kernels ------------------------------------------------------------------------------------------
 
 /// Hy4: each 2x2 group's four patch rows as one row, for the `T` cells from `cell0` on: g[t][(ky * 2 + kx) * E + c] =
 /// x[(2 oy + ky) * pw + 2 ox + kx][c] of the cell cell0 + t = oy * ow + ox (the convolution's matrix is laid out to
@@ -475,7 +481,7 @@ __global__ void k_gather_2x2(const float* x, float* g, int pw, int ow, int cell0
     g[i] = x[((size_t) (2 * oy + (k >> 1)) * pw + 2 * ox + (k & 1)) * E + c];
 }
 
-// ---- the encoder -----------------------------------------------------------------------------------------------------------
+// ---- the encoder ----------------------------------------------------------------------------------------------------
 
 /// A matrix [n_out][n_in] on the device: FP16 values, FP32 values, or Q8_0 blocks (with a zeroed tail: MMQ's steps
 /// read past a matrix's end).
@@ -486,8 +492,8 @@ struct Mat {
     bool fp16 = false;   ///< a Q8_0 matrix whose products are FP16 ones: its values through a scratch a product
 };
 
-constexpr int kChunk = 1024;       // rows a product at most: its input and output buffers are this many rows
-constexpr size_t kMmqTail = 4096;  // bytes after a Q8_0 matrix
+constexpr int kChunk = 1024;        // rows a product at most: its input and output buffers are this many rows
+constexpr size_t kMmqTail = 4096;   // bytes after a Q8_0 matrix
 
 class CudaEncoder final : public Encoder {
 public:
@@ -520,7 +526,8 @@ public:
         proj_.open(p);
         int n_dev = 0;
         if (cudaGetDeviceCount(&n_dev) != cudaSuccess || p.device < 0 || p.device >= n_dev)
-            throw std::runtime_error("no GPU " + std::to_string(p.device) + " (CUDA sees " + std::to_string(n_dev) + ")");
+            throw std::runtime_error("no GPU " + std::to_string(p.device) + " (CUDA sees " + std::to_string(n_dev) +
+                                     ")");
         dev_ = p.device;
         ck(cudaSetDevice(dev_), "cudaSetDevice");
         ck(cudaStreamCreateWithFlags(&st_, cudaStreamNonBlocking), "the encoder's stream");
@@ -565,7 +572,8 @@ public:
     /// the rows of the largest picture the projector's limit gives (its patches, and Inkling 2's class token): the
     /// buffers start at this size
     int64_t first_patches() const {
-        return proj_.size.max_pixels / (proj_.patch_size * proj_.patch_size) + (proj_.kind == ProjectorKind::inkling2v ? 1 : 0);
+        return proj_.size.max_pixels / (proj_.patch_size * proj_.patch_size) +
+               (proj_.kind == ProjectorKind::inkling2v ? 1 : 0);
     }
     static uint64_t up(uint64_t bytes) { return (bytes + 255) & ~(uint64_t) 255; }
     /// LAMINA_VISION_MEM=1: the device's free memory after a step of the start, and what the step took
@@ -636,7 +644,8 @@ private:
         }
         if (measuring_) return (float*) dmalloc((size_t) n * sizeof(float));
         const std::vector<float> v = proj_.floats(name);
-        if ((int64_t) v.size() != n) throw std::runtime_error("the tensor " + name + " has another size than the tower's");
+        if ((int64_t) v.size() != n)
+            throw std::runtime_error("the tensor " + name + " has another size than the tower's");
         return upload(v);
     }
     /// The matrices' staging buffer: pinned, as large as the largest of them (the measure's count), so each is read
@@ -685,7 +694,8 @@ private:
             to_device(m.d, raw.data(), bytes);
             if (info->type == kBF16 && !measuring_) k_bf16_to_f16<<<grid1(n), kThreads, 0, st_>>>((uint16_t*) m.d, n);
         } else if (info->type == kQ8_0) {
-            if (n_in % 32 != 0) throw std::runtime_error("the tensor " + name + " is Q8_0 with rows that are no whole blocks");
+            if (n_in % 32 != 0)
+                throw std::runtime_error("the tensor " + name + " is Q8_0 with rows that are no whole blocks");
             // the blocks as they are; a matrix MMQ has no tile for here is multiplied as FP16 values too
             m.type = kQ8_0;
             m.fp16 = q8_fp16_ || !mmq::fits(kQ8_0, n_out);
@@ -742,8 +752,8 @@ private:
         float* ln1_b = nullptr;
         float* ln2_w = nullptr;
         float* ln2_b = nullptr;
-        Mat qkv;         // Qwen: one matrix [3 E][E]
-        Mat q, k, v;     // Hy4: three
+        Mat qkv;                  // Qwen: one matrix [3 E][E]
+        Mat q, k, v;              // Hy4: three
         float* qkv_b = nullptr;   // [3 E]: one bias, or the three one after the other
         Mat o, up, down;
         float* o_b = nullptr;
@@ -767,7 +777,8 @@ private:
                 throw std::runtime_error("its patch kernel has another shape than the tower's");
             if (qwen) {
                 const std::vector<float> w1 = proj_.floats("v.patch_embd.weight.1");
-                if (w1.size() != w.size()) throw std::runtime_error("its second patch kernel has another shape than the first");
+                if (w1.size() != w.size())
+                    throw std::runtime_error("its second patch kernel has another shape than the first");
                 for (size_t i = 0; i < w.size(); ++i) w[i] += w1[i];
             }
             patch_ = mat_f32(w, E, in);
@@ -875,7 +886,8 @@ private:
             pre_norm_w_ = vec("mm.pre_norm.weight", E);
             if (!measuring_) {   // the host's: a row after each row of cells
                 newline_ = proj_.floats("v.image_newline");
-                if ((int) newline_.size() != proj) throw std::runtime_error("its newline row is not its projection_dim wide");
+                if ((int) newline_.size() != proj)
+                    throw std::runtime_error("its newline row is not its projection_dim wide");
             }
         }
         if (qwen && (mm1_.n_out != proj || mm0_.n_out != 4 * E))
@@ -932,7 +944,8 @@ private:
         void* const cs = work((size_t) n_max * kRopeFreqs * 2 * 4);
         void* const xq = any_mmq_ ? work(mmq::q8_bytes(chunk, wide)) : nullptr;
         void* const w16 = q8_elems_ > 0 ? work((size_t) q8_elems_ * 2) : nullptr;
-        const int64_t ref_b = std::max<int64_t>(1, std::min<int64_t>(n_max, ((int64_t) 1 << 26) / std::max<int64_t>(1, n_max)));
+        const int64_t ref_b =
+            std::max<int64_t>(1, std::min<int64_t>(n_max, ((int64_t) 1 << 26) / std::max<int64_t>(1, n_max)));
         void* const ref_s = ref_attn_ ? work((size_t) ref_b * n_max * 4) : nullptr;
         void* const ref_v = ref_attn_ ? work((size_t) n_max * kHeadPad * 4) : nullptr;
         void* const ref_o = ref_attn_ ? work((size_t) ref_b * kHeadPad * 4) : nullptr;
@@ -1003,8 +1016,8 @@ private:
         const int H = proj_.n_head, D = proj_.d_head();
         const float scale = 1.0f / sqrtf((float) D);
         if (!ref_attn_) {
-            va::k_vit_attn<<<dim3((unsigned) ((N + va::kRows - 1) / va::kRows), (unsigned) H), 256, sizeof(va::Smem), st_>>>(
-                q16_, k16_, v16_, h_, N, H, D, scale);
+            va::k_vit_attn<<<dim3((unsigned) ((N + va::kRows - 1) / va::kRows), (unsigned) H), 256, sizeof(va::Smem),
+                             st_>>>(q16_, k16_, v16_, h_, N, H, D, scale);
             return;
         }
         // the reference: a head's scores S = Q K^T (FP16 in, FP32 out), a softmax over each row, O = P V in FP32
@@ -1012,8 +1025,8 @@ private:
         for (int head = 0; head < H; ++head) {
             const __half* kh = k16_ + (size_t) head * N * kHeadPad;
             // V's transpose [80][N]: the value product's rows of weights
-            k_f16_to_f32_t<<<grid1((int64_t) N * kHeadPad), kThreads, 0, st_>>>(v16_ + (size_t) head * N * kHeadPad, ref_v_, N,
-                                                                               kHeadPad);
+            k_f16_to_f32_t<<<grid1((int64_t) N * kHeadPad), kThreads, 0, st_>>>(v16_ + (size_t) head * N * kHeadPad,
+                                                                                ref_v_, N, kHeadPad);
             for (int64_t t0 = 0; t0 < N; t0 += B) {
                 const int64_t b = std::min<int64_t>(B, N - t0);
                 lamina::kernels::Gemm16 sp;   // S [b][N] = Q (its rows H * 80 apart) K^T
@@ -1186,8 +1199,10 @@ private:
             // the patches' rows (not the class token's) into h_, then the projector between the two buffers: each
             // group's four rows side by side through its first matrix into x_, the exact GELU, its second into h_
             const int ow = pw / 2, oh = ph / 2, cells = ow * oh;
-            if (post_w_ != nullptr) k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, post_w_, post_b_, x_, E, proj_.eps, false);
-            ck(cudaMemcpyAsync(h_, x_ + E, (size_t) n_patch * E * 4, cudaMemcpyDeviceToDevice, st_), "the patches' rows");
+            if (post_w_ != nullptr)
+                k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, post_w_, post_b_, x_, E, proj_.eps, false);
+            ck(cudaMemcpyAsync(h_, x_ + E, (size_t) n_patch * E * 4, cudaMemcpyDeviceToDevice, st_),
+               "the patches' rows");
             for (int64_t t0 = 0; t0 < cells; t0 += chunk_) {
                 const int64_t T = std::min<int64_t>(chunk_, cells - t0);
                 k_gather_2x2<<<grid1(T * 4 * E), kThreads, 0, st_>>>(h_, c32_, pw, ow, (int) t0, (int) T, E);
@@ -1204,9 +1219,11 @@ private:
             out.ny = 1;
             out.n_embd = proj;
             out.data.resize((size_t) n_rows * proj);
-            ck(cudaMemcpyAsync(out.data.data(), h_, out.data.size() * 4, cudaMemcpyDeviceToHost, st_), "the rows' copy");
+            ck(cudaMemcpyAsync(out.data.data(), h_, out.data.size() * 4, cudaMemcpyDeviceToHost, st_),
+               "the rows' copy");
         } else if (qwen) {
-            if (post_w_ != nullptr) k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, post_w_, post_b_, x_, E, proj_.eps, false);
+            if (post_w_ != nullptr)
+                k_norm<<<(unsigned) N, 128, 0, st_>>>(x_, post_w_, post_b_, x_, E, proj_.eps, false);
             // the rows into h_, free since the last block (alloc sizes it for them)
             n_rows = N / 4;
             for (int64_t t0 = 0; t0 < n_rows; t0 += chunk_) {
@@ -1221,7 +1238,8 @@ private:
             out.ny = ph / 2;
             out.n_embd = proj;
             out.data.resize((size_t) n_rows * proj);
-            ck(cudaMemcpyAsync(out.data.data(), h_, out.data.size() * 4, cudaMemcpyDeviceToHost, st_), "the rows' copy");
+            ck(cudaMemcpyAsync(out.data.data(), h_, out.data.size() * 4, cudaMemcpyDeviceToHost, st_),
+               "the rows' copy");
         } else {
             // the adapter between the two free buffers: the cells' rows [cells][n_mid] in x_, [cells][proj] in h_
             // (alloc sizes them for these)
@@ -1247,7 +1265,8 @@ private:
             out.data.resize((size_t) n_rows * proj);
             for (int y = 0; y < oh; ++y) {
                 float* row = out.data.data() + (size_t) y * (ow + 1) * proj;
-                ck(cudaMemcpyAsync(row, h_ + (size_t) y * ow * proj, (size_t) ow * proj * 4, cudaMemcpyDeviceToHost, st_),
+                ck(cudaMemcpyAsync(row, h_ + (size_t) y * ow * proj, (size_t) ow * proj * 4, cudaMemcpyDeviceToHost,
+                                   st_),
                    "the rows' copy");
                 std::copy(newline_.begin(), newline_.end(), row + (size_t) ow * proj);
             }
@@ -1284,12 +1303,12 @@ private:
     Projector proj_;
     int dev_ = -1;
     cudaStream_t st_ = nullptr;
-    void* arena_ = nullptr;       // the weights' block
+    void* arena_ = nullptr;   // the weights' block
     size_t arena_bytes_ = 0, arena_used_ = 0;
-    void* stage_ = nullptr;       // load(): the matrices' pinned staging buffer
-    size_t stage_need_ = 0;       // the largest matrix's bytes
+    void* stage_ = nullptr;   // load(): the matrices' pinned staging buffer
+    size_t stage_need_ = 0;   // the largest matrix's bytes
     std::vector<uint8_t> stage_pageable_;
-    bool lent_ = false;           // the caller's memory (EncoderParams::gpu_arena): the weights, then the buffers
+    bool lent_ = false;   // the caller's memory (EncoderParams::gpu_arena): the weights, then the buffers
     uint8_t* lent_work_ = nullptr;
     uint64_t lent_work_bytes_ = 0;
     bool measuring_ = false;      // load() counts the block's bytes
@@ -1297,16 +1316,16 @@ private:
     std::vector<void*> work_;     // the buffers (alloc)
     size_t work_bytes_ = 0;
     bool ref_attn_ = false, q8_fp16_ = false;
-    bool any_mmq_ = false;        // a Q8_0 matrix goes through MMQ
-    int64_t q8_elems_ = 0;        // the largest Q8_0 matrix multiplied as FP16 values: its values (0: none)
+    bool any_mmq_ = false;   // a Q8_0 matrix goes through MMQ
+    int64_t q8_elems_ = 0;   // the largest Q8_0 matrix multiplied as FP16 values: its values (0: none)
     // the weights
     Mat patch_, mm0_, mm1_;
     float* patch_b_ = nullptr;
     float* post_w_ = nullptr;
     float* post_b_ = nullptr;
-    float* pre_w_ = nullptr;    // Inkling 2: the norm before the blocks
+    float* pre_w_ = nullptr;   // Inkling 2: the norm before the blocks
     float* pre_b_ = nullptr;
-    std::vector<float> cls_;    // its class token's row (the host's)
+    std::vector<float> cls_;   // its class token's row (the host's)
     float* mm0_b_ = nullptr;
     float* mm1_b_ = nullptr;
     float* pre_norm_w_ = nullptr;
@@ -1316,11 +1335,11 @@ private:
     int n_side_ = 0, n_ff_ = 0, n_mid_ = 0;
     // the buffers
     int64_t n_max_ = 0, chunk_ = 0, ref_b_ = 0;
-    float* x_ = nullptr;      // [n_max][E] the residual stream
-    float* h_ = nullptr;      // [n_max][E] a norm's output, the attention's
-    float* c32_ = nullptr;    // [chunk][wide] a product's output
+    float* x_ = nullptr;                 // [n_max][E] the residual stream
+    float* h_ = nullptr;                 // [n_max][E] a norm's output, the attention's
+    float* c32_ = nullptr;               // [chunk][wide] a product's output
     lamina::kernels::GemmScratch gsc_;   // the products' scratch (a K split's partial sums)
-    __half* x16_ = nullptr;   // [chunk][wide] a product's input
+    __half* x16_ = nullptr;              // [chunk][wide] a product's input
     __half* q16_ = nullptr;
     __half* k16_ = nullptr;
     __half* v16_ = nullptr;
@@ -1334,7 +1353,7 @@ private:
     std::vector<float> host_;
 };
 
-}  // namespace
+}   // namespace
 
 uint64_t gpu_free_bytes(int device) {
     size_t fr = 0, total = 0;
@@ -1365,4 +1384,4 @@ std::unique_ptr<Encoder> open_cuda_encoder(const EncoderParams& params, std::str
     return enc;
 }
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

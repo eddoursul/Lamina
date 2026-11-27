@@ -15,9 +15,7 @@ namespace lamina::kernels {
 
 constexpr float kHalfMax = 65504.0f;
 
-__device__ __forceinline__ float q8_1_finite(const float v) {
-    return fabsf(v) > kHalfMax ? copysignf(kHalfMax, v) : v;
-}
+__device__ __forceinline__ float q8_1_finite(const float v) { return fabsf(v) > kHalfMax ? copysignf(kHalfMax, v) : v; }
 
 /// The block's quantized value of `xi` for the (finite) scale `d`; `amax` = 0 is an all-zero block.
 __device__ __forceinline__ int8_t q8_1_quant(const float xi, const float d, const float amax) {
@@ -30,4 +28,4 @@ __device__ __forceinline__ half2 q8_1_ds(const float d, const float sum) {
     return make_half2(__float2half(q8_1_finite(d)), __float2half(q8_1_finite(sum)));
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

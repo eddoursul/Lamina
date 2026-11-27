@@ -68,18 +68,15 @@ std::string absolute_path(const std::string& p) {
 
 std::string str_of(const json& v) { return v.is_string() ? v.get<std::string>() : py_dumps(v); }
 
-
 const GpuInfo* gpu_by_index(const std::vector<GpuInfo>& gpus, int index) {
     for (const GpuInfo& g : gpus)
         if (g.index == index) return &g;
     return nullptr;
 }
 
-std::string gpu_line(const GpuInfo& g) {
-    return "GPU " + std::to_string(g.index) + " (" + g.name + ")";
-}
+std::string gpu_line(const GpuInfo& g) { return "GPU " + std::to_string(g.index) + " (" + g.name + ")"; }
 
-}  // namespace
+}   // namespace
 
 GgufRole gguf_role(const std::string& path) {
     GgufRole r;
@@ -117,10 +114,12 @@ GgufRole gguf_role(const std::string& path) {
             // an Engram (per-layer embedding) table alone, a model's own shard or a table to swap in
             const TensorInfo& t = g.tensors().front();
             r.kind = "engram";
-            r.what = std::string("an Engram table of ") + t.type_name() + " rows of " +
-                     std::to_string(t.shape.empty() ? 0 : t.shape[0]) + " values" +
-                     (no != nullptr && count != nullptr && count->u > 1
-                          ? ", shard " + std::to_string(no->u + 1) + " of " + std::to_string(count->u) + " of a split model" : "");
+            r.what =
+                std::string("an Engram table of ") + t.type_name() + " rows of " +
+                std::to_string(t.shape.empty() ? 0 : t.shape[0]) + " values" +
+                (no != nullptr && count != nullptr && count->u > 1
+                     ? ", shard " + std::to_string(no->u + 1) + " of " + std::to_string(count->u) + " of a split model"
+                     : "");
             r.problem = core::ple_table_problem(path);
             if (r.problem.empty()) r.use = "--ple-gguf, Qwen3.8-Flash-Next's PLE table";
         } else if (type == "imatrix" || g.get("imatrix.chunk_count") != nullptr) {
@@ -142,10 +141,15 @@ GgufRole gguf_role(const std::string& path) {
 }
 
 std::string role_refusal(const GgufRole& r) {
-    static const std::map<std::string, std::string> noun = {
-        {"projector", "an image projector"}, {"drafter", "a drafter"},         {"LoRA", "a LoRA adapter"},
-        {"adapter", "an adapter"},           {"control vector", "a control vector"}, {"engram", "an Engram table"},
-        {"shard", "a split model's later shard"}, {"imatrix", "an importance matrix"}, {"other", "a GGUF"}};
+    static const std::map<std::string, std::string> noun = {{"projector", "an image projector"},
+                                                            {"drafter", "a drafter"},
+                                                            {"LoRA", "a LoRA adapter"},
+                                                            {"adapter", "an adapter"},
+                                                            {"control vector", "a control vector"},
+                                                            {"engram", "an Engram table"},
+                                                            {"shard", "a split model's later shard"},
+                                                            {"imatrix", "an importance matrix"},
+                                                            {"other", "a GGUF"}};
     const auto it = noun.find(r.kind);
     return (it != noun.end() ? it->second : "a " + r.kind) + ", not a model: " + r.what +
            (!r.problem.empty() ? "; Lamina does not read it (" + r.problem + ")"
@@ -156,7 +160,8 @@ std::string role_refusal(const GgufRole& r) {
 ModelFacts read_model(const std::string& path) {
     ModelFacts m;
     std::optional<inkling2::Geometry> ink;   // (Inkling 2's, read from the first shard)
-    for (const std::string& s : gguf_split_paths(path)) m.shards.push_back(absolute_path(s));   // a missing shard throws
+    for (const std::string& s : gguf_split_paths(path))
+        m.shards.push_back(absolute_path(s));   // a missing shard throws
     m.path = m.shards.front();
     for (const std::string& s : m.shards) {
         const GgufFile f(s);
@@ -168,8 +173,7 @@ ModelFacts read_model(const std::string& path) {
             m.mtp_layers = meta_int(f, m.arch + ".nextn_predict_layers");
             if (const GgufRole role = gguf_role(s); !role.kind.empty())   // (a drafter, an adapter ...: no model)
                 m.unsupported = role_refusal(role);
-            else
-                m.unsupported = check_architecture(f);
+            else m.unsupported = check_architecture(f);
         }
         m.bytes += f.file_size();
         for (const TensorInfo& t : f.tensors()) {
@@ -224,12 +228,14 @@ int pick_main_gpu(const std::vector<GpuInfo>& gpus, const std::vector<int>& allo
     for (size_t i = 0; i < gpus.size(); ++i) {
         const GpuInfo& g = gpus[i];
         // 0: nvidia-smi does not say, and the engine's own check decides
-        if ((g.cc != 0 && g.cc < 80) || (!allowed.empty() && std::find(allowed.begin(), allowed.end(), g.index) == allowed.end()))
+        if ((g.cc != 0 && g.cc < 80) ||
+            (!allowed.empty() && std::find(allowed.begin(), allowed.end(), g.index) == allowed.end()))
             continue;
         if (best >= 0) {
             const GpuInfo& b = gpus[(size_t) best];
-            if (g.display != b.display ? g.display
-                : g.memory_mib != b.memory_mib ? g.memory_mib < b.memory_mib : g.index > b.index)
+            if (g.display != b.display         ? g.display
+                : g.memory_mib != b.memory_mib ? g.memory_mib < b.memory_mib
+                                               : g.index > b.index)
                 continue;
         }
         best = (int) i;
@@ -242,8 +248,8 @@ int pick_vision_gpu(const std::vector<GpuInfo>& gpus, int main) {
     for (const bool any : {false, true}) {   // the cards that drive no display first
         for (const GpuInfo& g : gpus) {
             if (g.index == main || (g.cc != 0 && g.cc < 80) || (!any && g.display)) continue;
-            if (best != nullptr && (g.memory_mib > best->memory_mib ||
-                                    (g.memory_mib == best->memory_mib && g.index < best->index)))
+            if (best != nullptr &&
+                (g.memory_mib > best->memory_mib || (g.memory_mib == best->memory_mib && g.index < best->index)))
                 continue;
             best = &g;
         }
@@ -306,11 +312,13 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
         throw ConfigError(o.model + ": " + e.what());
     }
     const ModelFacts& m = mc.model;
-    if (const GgufRole role = gguf_role(m.path); !role.kind.empty()) throw ConfigError(m.path + ": " + role_refusal(role));
+    if (const GgufRole role = gguf_role(m.path); !role.kind.empty())
+        throw ConfigError(m.path + ": " + role_refusal(role));
     mc.preset = preset_name(m.arch, m.quantized_by);
     if (mc.preset.empty())
-        throw ConfigError(m.path + ": not a model Lamina runs: its architecture is " + (m.arch.empty() ? "not named" : m.arch) +
-                          ", and Lamina runs Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B, Hy4-flash and Inkling 2 Mini");
+        throw ConfigError(
+            m.path + ": not a model Lamina runs: its architecture is " + (m.arch.empty() ? "not named" : m.arch) +
+            ", and Lamina runs Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B, Hy4-flash and Inkling 2 Mini");
     if (!m.unsupported.empty()) throw ConfigError(m.path + ": " + m.unsupported);
     json p;
     try {
@@ -324,9 +332,10 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
 
     const int main_gpu = pick_main_gpu(gpus, o.allowed_gpus);
     if (main_gpu < 0)
-        mc.notes.push_back(gpus.empty() ? "[lamina] nvidia-smi lists no GPU: the engine starts on its GPU 0"
-                                        : "[lamina] no GPU of compute capability 8.0 or newer: the engine starts on its "
-                                          "GPU 0");
+        mc.notes.push_back(gpus.empty()
+                               ? "[lamina] nvidia-smi lists no GPU: the engine starts on its GPU 0"
+                               : "[lamina] no GPU of compute capability 8.0 or newer: the engine starts on its "
+                                 "GPU 0");
 
     // pictures: the projector (named, else the one beside the model), in a build with the image encoder
     std::string mmproj, why_not;
@@ -372,8 +381,8 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
             args.push_back(m.path);
             ++i;
         } else if ((a == "--expert-profile" || is_drafter_flag(a, v)) && i + 1 < pa.size()) {
-            // the preset's drafter (--drafter, or an earlier name of it) is found beside the model (resolve_draft_layer,
-            // resolve_drafter), its profile is the engine's own
+            // the preset's drafter (--drafter, or an earlier name of it) is found beside the model
+            // (resolve_draft_layer, resolve_drafter), its profile is the engine's own
             ++i;
         } else if (a == "--main-gpu" && i + 1 < pa.size()) {
             if (main_gpu >= 0) {
@@ -438,8 +447,10 @@ ModelConfig config_from_model(const ModelOptions& o, const std::vector<GpuInfo>&
             for (auto vt = it->begin(); vt != it->end(); ++vt) {
                 const std::string& vk = vt.key();
                 if (vk == "exe" || vk == "cuda_device") continue;
-                v[vk] = vk == "mmproj" ? json(mmproj) : vk == "model" ? json(m.path)
-                      : vk == "threads" ? json((int) std::max(1u, std::thread::hardware_concurrency())) : *vt;
+                v[vk] = vk == "mmproj"    ? json(mmproj)
+                        : vk == "model"   ? json(m.path)
+                        : vk == "threads" ? json((int) std::max(1u, std::thread::hardware_concurrency()))
+                                          : *vt;
             }
             for (const char* need : {"mmproj", "model"})
                 if (!v.contains(need)) v[need] = std::string(need) == "mmproj" ? mmproj : m.path;
@@ -487,8 +498,11 @@ std::vector<std::string> check_pc(const std::vector<GpuInfo>& gpus, bool show) {
     say("CPU: arm64, " + std::to_string(cores) + " logical cores");
 #else
     const bool avx512 = kernels::cpu::cpu_avx512_ok(), avx2 = kernels::cpu::cpu_avx2_ok();
-    say(std::string("CPU: ") + (avx512 ? "AVX-512" : avx2 ? "AVX2 (no AVX-512)" : "no AVX2") + ", " +
-        std::to_string(cores) + " logical cores");
+    say(std::string("CPU: ") +
+        (avx512 ? "AVX-512"
+         : avx2 ? "AVX2 (no AVX-512)"
+                : "no AVX2") +
+        ", " + std::to_string(cores) + " logical cores");
     if (const char* missing = kernels::cpu::cpu_floor_missing())   // the start refuses before this (cpu_floor.cpp)
         stops.push_back(std::string("the CPU has no ") + missing + ", which the engine's CPU kernels need");
 #endif
@@ -505,7 +519,8 @@ std::vector<std::string> check_pc(const std::vector<GpuInfo>& gpus, bool show) {
                 (g.cc ? ", compute capability " + std::to_string(g.cc / 10) + "." + std::to_string(g.cc % 10) : "") +
                 (g.display ? ", drives a display" : "") +
                 (g.cc != 0 && g.cc < 80 ? " (older than the RTX 30 series: the engine leaves it out)" : ""));
-        if (pick_main_gpu(gpus, {}) < 0) stops.push_back("no GPU of compute capability 8.0 or newer (the RTX 30 series)");
+        if (pick_main_gpu(gpus, {}) < 0)
+            stops.push_back("no GPU of compute capability 8.0 or newer (the RTX 30 series)");
     }
     return stops;
 }
@@ -526,7 +541,8 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
             say("Model: " + m.path);
             say("  " + (m.name.empty() ? std::string("(no name)") : m.name) + ", architecture " + m.arch +
                 (m.quantized_by.empty() ? "" : ", quantized by " + m.quantized_by) + ": " +
-                std::to_string(m.shards.size()) + (m.shards.size() == 1 ? " file, " : " shards, ") + gb((double) m.bytes));
+                std::to_string(m.shards.size()) + (m.shards.size() == 1 ? " file, " : " shards, ") +
+                gb((double) m.bytes));
             if (m.unsupported.empty()) {
                 // what the engine's load refuses of the file, read from its headers as it reads them: the options the
                 // start would give it, the drafter found beside the model among them
@@ -574,26 +590,31 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
             const GpuInfo* x_card = xgpu < 0 ? nullptr : gpu_by_index(gpus, xgpu);
             std::vector<std::string> others_on;   // (the cards after the first but those named above)
             for (size_t i = 1; i < on.size(); ++i)
-                if (const GpuInfo* g = gpu_by_index(gpus, on[i]); g != nullptr && g->index != xgpu && g->index != split_gpu)
+                if (const GpuInfo* g = gpu_by_index(gpus, on[i]);
+                    g != nullptr && g->index != xgpu && g->index != split_gpu)
                     others_on.push_back(gpu_line(*g));
             std::string more;   // "A", "A and B", "A, B and C"
             for (size_t i = 0; i < others_on.size(); ++i)
                 more += (i == 0 ? "" : i + 1 == others_on.size() ? " and " : ", ") + others_on[i];
             const bool flash = m.arch == "qwen4exp";
-            const bool hy4 = model_family_from_arch(m.arch) == ModelFamily::HyV4Flash;   // (its later cards: expert tiers)
+            const bool hy4 = model_family_from_arch(m.arch) == ModelFamily::HyV4Flash;   // (its later cards:
+                                                                                         // expert tiers)
             if (main != nullptr)
                 say("  runs on " + gpu_line(*main) +
                     (split_card != nullptr ? ", layers " + split_layers + " on " + gpu_line(*split_card) : "") +
-                    (more.empty() ? "" : flash || hy4 ? ", the experts used most also on " + more
-                                       : inkling ? ", the context also on " + more
-                                                 : ", its layers also on " + more + " where one card does not hold them") +
+                    (more.empty()   ? ""
+                     : flash || hy4 ? ", the experts used most also on " + more
+                     : inkling      ? ", the context also on " + more
+                                    : ", its layers also on " + more + " where one card does not hold them") +
                     (x_card != nullptr ? ", copies of the experts in RAM on " + gpu_line(*x_card) : ""));
             // what it takes
             if (flash) {
                 const platform::RamFit ram = platform::ram_fit(m.expert_bytes);
                 say("  RAM: its experts take " + gib((double) m.expert_bytes) + ", pinned");
-                if (ram.too_much()) stops.push_back(ram.say("the model's experts", "a smaller quant of the model takes less"));
-                else if (ram.tight()) say("  note: " + ram.say("the model's experts", "close other programs, or use a smaller quant"));
+                if (ram.too_much())
+                    stops.push_back(ram.say("the model's experts", "a smaller quant of the model takes less"));
+                else if (ram.tight())
+                    say("  note: " + ram.say("the model's experts", "close other programs, or use a smaller quant"));
                 json probe = c;   // the draft layer as the start finds it
                 const std::string line = resolve_draft_layer(probe, m.arch);
                 const std::vector<std::string> pa = engine_args(probe);
@@ -604,7 +625,8 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 // The whole file and ~1.5 GiB beside it (the window layers' cells, a prompt chunk's buffers, the
                 // graphs) on the first card; K and V of the 8 full-attention layer applications in what is left of it
                 // and on the other cards (which keep ~1 GiB for their own buffers and the reserve).
-                json probe = c;   // the drafter as the start finds it: its file, its rings at its reach, ~0.16 GiB beside
+                json probe = c;   // the drafter as the start finds it: its file,
+                                  // its rings at its reach, ~0.16 GiB beside
                 const std::string line = resolve_drafter(probe, m.arch);
                 const std::vector<std::string> pa = engine_args(probe);
                 auto arg = [&](const char* flag) {
@@ -614,7 +636,8 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 const bool q8 = arg("--kv") == "q8_0";
                 const double per = (q8 ? 17.0 : 32.0) * 1024.0, gibi = 1073741824.0;
                 // (its reach over the context: 131,072 cells, 32,768 with experts in RAM, no more than a set context)
-                const int64_t reach_set = arg("--dspark-reach").empty() ? -1 : std::atoll(arg("--dspark-reach").c_str()),
+                const int64_t reach_set =
+                                  arg("--dspark-reach").empty() ? -1 : std::atoll(arg("--dspark-reach").c_str()),
                               ctx_set = std::atoll(arg("--max-context").c_str());
                 const std::string named = drafter_arg(pa);   // (--drafter, or an earlier name of it)
                 auto drafter_at = [&, ds = named](bool in_ram) {
@@ -627,8 +650,7 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                     uint64_t rings = 0;
                     try {
                         rings = inkling2::drafter_file_rings_bytes(ds, reach, q8);
-                    } catch (const std::exception&) {
-                    }
+                    } catch (const std::exception&) {}
                     // (the checkpoint's mtp.safetensors: its matrices as the engine makes them, Q8_0)
                     return (double) inkling2::drafter_weights_bytes(ds, size) + (double) rings + 0.16 * gibi;
                 };
@@ -642,7 +664,8 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 for (const std::string& card : engine_cards(c)) {
                     program::GpuCard gc;
                     std::string e;
-                    if (program::parse_gpu_card(card.c_str(), gc, e) && gc.reserve) kept.emplace_back(gc.name, (double) *gc.reserve);
+                    if (program::parse_gpu_card(card.c_str(), gc, e) && gc.reserve)
+                        kept.emplace_back(gc.name, (double) *gc.reserve);
                 }
                 auto keeps = [&](const GpuInfo& g, double by_use) {
                     for (const auto& [name, bytes] : kept)
@@ -652,8 +675,8 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 // (the image encoder where it stays on a card: its projector's bytes and a little beside them)
                 double enc = 0;
                 int enc_gpu = -1;
-                if (const json& v = jget(c, "vision"); v.is_object() && truthy(jget(v, "gpu")) && !truthy(jget(v, "lend")) &&
-                                                       !jget(v, "cuda_device").is_null()) {
+                if (const json& v = jget(c, "vision"); v.is_object() && truthy(jget(v, "gpu")) &&
+                                                       !truthy(jget(v, "lend")) && !jget(v, "cuda_device").is_null()) {
                     std::error_code ec;
                     const auto size = std::filesystem::file_size(u8_path(jstr(v, "mmproj")), ec);
                     enc_gpu = find_gpu(str_of(v["cuda_device"]), gpus);
@@ -663,16 +686,19 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 double room = 0, others = 0;
                 std::vector<std::pair<const GpuInfo*, double>> rooms;   // the other cards' room for K and V
                 if (main != nullptr)
-                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi - beside_it(*main) -
-                           keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
+                    room = (double) main->memory_mib * 1048576.0 - (double) m.bytes - drafter - 1.5 * gibi -
+                           beside_it(*main) - keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
                 for (size_t i = 1; i < on.size(); ++i)
-                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]); g != nullptr && g->index != split_gpu && g->index != xgpu) {
-                        rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi - beside_it(*g) -
-                                                            keeps(*g, (g->display ? 1.5 : 0.7) * gibi)));
+                    if (const GpuInfo* g = gpu_by_index(gpus, on[i]);
+                        g != nullptr && g->index != split_gpu && g->index != xgpu) {
+                        rooms.emplace_back(g, std::max(0.0, (double) g->memory_mib * 1048576.0 - 1.0 * gibi -
+                                                                beside_it(*g) -
+                                                                keeps(*g, (g->display ? 1.5 : 0.7) * gibi)));
                         others += rooms.back().second;
                     }
                 // The context said plainly: how many of the model's 1,048,576 tokens the cards have room for, in
-                // thousands, and where; "kv": "q8_0" stores a token in 17 KiB where FP16 takes 32 (its room: 32/17 more)
+                // thousands, and where; "kv": "q8_0" stores a token in
+                // 17 KiB where FP16 takes 32 (its room: 32/17 more)
                 const double whole = 1048576.0;
                 auto kt = [](double tokens) {   // "1,762K"
                     std::string d = std::to_string((long long) (std::max(0.0, tokens) / 1000.0));
@@ -682,20 +708,22 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 auto no = [](const GpuInfo& g) { return "GPU " + std::to_string(g.index); };
                 auto on_others = [&] {   // "439K on GPU 0, 730K on GPU 2"
                     std::string s;
-                    for (const auto& [g, bytes] : rooms) s += (s.empty() ? "" : ", ") + kt(bytes / per) + " on " + no(*g);
+                    for (const auto& [g, bytes] : rooms)
+                        s += (s.empty() ? "" : ", ") + kt(bytes / per) + " on " + no(*g);
                     return s;
                 };
                 auto context = [&](double tokens, const std::string& where) {
                     if (tokens >= whole) {
-                        say("  context: the model's whole context, 1,048,576 tokens, fits" + (where.empty() ? "" : " (room for " +
-                            kt(tokens) + ": " + where + ")"));
+                        say("  context: the model's whole context, 1,048,576 tokens, fits" +
+                            (where.empty() ? "" : " (room for " + kt(tokens) + ": " + where + ")"));
                         return;
                     }
                     say("  context: about " + kt(tokens) + " of the model's 1,048,576 tokens fit" +
                         (where.empty() ? "" : " (" + where + ")") +
-                        (q8 ? "" : "; with \"kv\": \"q8_0\", which stores a token in about half the memory, " +
-                                       (tokens * 32.0 / 17.0 >= whole ? std::string("all of them")
-                                                                      : "about " + kt(tokens * 32.0 / 17.0))));
+                        (q8 ? ""
+                            : "; with \"kv\": \"q8_0\", which stores a token in about half the memory, " +
+                                  (tokens * 32.0 / 17.0 >= whole ? std::string("all of them")
+                                                                 : "about " + kt(tokens * 32.0 / 17.0))));
                 };
                 // A layer split's two shares: the layers' weights (the file's other tensors with the first card's) and
                 // their full-attention applications' K and V a token; ~2.3 GiB beside the first card's (a second set
@@ -718,18 +746,23 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                     // cards after them hold more.
                     double w2 = 0, kv1 = 0, kv2 = 0;
                     if (main != nullptr && shares(split_lo, split_hi, w2, kv1, kv2)) {
-                        const double r1 = (double) main->memory_mib * 1048576.0 - ((double) m.bytes - w2) - drafter - 2.3 * gibi -
-                                          beside_it(*main) - keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
+                        const double r1 = (double) main->memory_mib * 1048576.0 - ((double) m.bytes - w2) - drafter -
+                                          2.3 * gibi - beside_it(*main) -
+                                          keeps(*main, (main->display ? 1.5 : 0.7) * gibi);
                         // (a card that draws the desktop and has a reserve= keeps that free beside the desktop's own)
                         bool reserved = false;
-                        for (const auto& [name, bytes] : kept) reserved = reserved || (name != "auto" && find_gpu(name, gpus) == g->index);
+                        for (const auto& [name, bytes] : kept)
+                            reserved = reserved || (name != "auto" && find_gpu(name, gpus) == g->index);
                         const double r2 = (double) g->memory_mib * 1048576.0 - w2 - 1.9 * gibi - beside_it(*g) -
-                                          keeps(*g, (g->display ? 1.5 : 0.7) * gibi) - (g->display && reserved ? 0.5 * gibi : 0.0);
+                                          keeps(*g, (g->display ? 1.5 : 0.7) * gibi) -
+                                          (g->display && reserved ? 0.5 * gibi : 0.0);
                         const double near_ = std::max(0.0, std::min(r1 / kv1, r2 / kv2));
                         const bool first_spare = r1 - near_ * kv1 >= r2 - near_ * kv2;
-                        const double spare = std::max(0.0, (first_spare ? r1 - near_ * kv1 : r2 - near_ * kv2) - 2.6 * gibi) / per;
-                        say("  VRAM: layers " + split_layers + " on " + no(*g) + " (" + gib(w2) + "), the other layers on " +
-                            no(*main) + " (" + gib((double) m.bytes - w2) + "), each card with the context of its own layers");
+                        const double spare =
+                            std::max(0.0, (first_spare ? r1 - near_ * kv1 : r2 - near_ * kv2) - 2.6 * gibi) / per;
+                        say("  VRAM: layers " + split_layers + " on " + no(*g) + " (" + gib(w2) +
+                            "), the other layers on " + no(*main) + " (" + gib((double) m.bytes - w2) +
+                            "), each card with the context of its own layers");
                         context(near_ + spare + others / per, "");
                     } else {
                         say("  VRAM: layers " + split_layers + " on " + no(*g) + ", the other layers on " +
@@ -741,36 +774,48 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                     // A card smaller than the model and the least context: the experts in RAM, the card's VRAM for
                     // those used most (fewer as the context grows); the ones RAM has no room for stay on the card.
                     const double experts = (double) m.expert_bytes, dense = (double) m.bytes - experts;
-                    const double beside =
-                        (double) main->memory_mib * 1048576.0 - dense - drafter_at(true) - (main->display ? 3.0 : 2.2) * gibi;
+                    const double beside = (double) main->memory_mib * 1048576.0 - dense - drafter_at(true) -
+                                          (main->display ? 3.0 : 2.2) * gibi;
                     uint64_t ram_free = 0;
-                    const double ram = platform::available_ram(ram_free) ? std::max(0.0, (double) ram_free - 6.0 * gibi) : experts;
+                    const double ram =
+                        platform::available_ram(ram_free) ? std::max(0.0, (double) ram_free - 6.0 * gibi) : experts;
                     const double alone = std::max(0.0, experts - ram);
-                    const double first = std::max(0.0, std::min(experts, beside - (on.size() > 1 ? 16384.0 : 32768.0) * per));
-                    say("  VRAM: the model does not fit " + no(*main) + " beside a context, so the card keeps its dense weights (" +
-                        gib(dense) + ") and the experts used most: about " + gib(first) +
-                        " of the " + gib(experts) + " of experts with a short context, fewer as the context grows");
-                    say("  RAM: " + (alone > 0 ? gib(ram) + " of the experts (no more is free above the 6 GiB left to the system: "
-                                                 "\"ram-reserve-mib\"), the other " + gib(alone) + " on " + no(*main) + " alone"
-                                               : "all " + gib(experts) + " of experts, pinned") +
+                    const double first =
+                        std::max(0.0, std::min(experts, beside - (on.size() > 1 ? 16384.0 : 32768.0) * per));
+                    say("  VRAM: the model does not fit " + no(*main) +
+                        " beside a context, so the card keeps its dense weights (" + gib(dense) +
+                        ") and the experts used most: about " + gib(first) + " of the " + gib(experts) +
+                        " of experts with a short context, fewer as the context grows");
+                    say("  RAM: " +
+                        (alone > 0 ? gib(ram) +
+                                         " of the experts (no more is free above the 6 GiB left to the system: "
+                                         "\"ram-reserve-mib\"), the other " +
+                                         gib(alone) + " on " + no(*main) + " alone"
+                                   : "all " + gib(experts) + " of experts, pinned") +
                         "; the CPU computes the experts a token needs that the GPU does not hold");
                     context((std::max(0.0, beside - alone) + others) / per,
                             (rooms.empty() ? std::string() : on_others() + ", ") + "up to " +
                                 kt(std::max(0.0, beside - alone) / per) + " on " + no(*main) + " in place of experts");
                     // (the start's own split: the looped layers on a card after it - the fastest link of those that
-                    // hold their share - where the first would keep under four fifths of the experts and both cards hold
-                    // their shares of the fewest cells: 32,768 tokens', a few units' where cards after them take cells)
+                    // hold their share - where the first would keep under four fifths of the experts and both cards
+                    // hold their shares of the fewest cells: 32,768 tokens',
+                    // a few units' where cards after them take cells)
                     double w2 = 0, kv1 = 0, kv2 = 0;
                     const GpuInfo* next = on.size() > 1 ? gpu_by_index(gpus, on[1]) : nullptr;
                     const double least = on.size() > 2 ? 16384.0 : 32768.0;
                     if (next != nullptr && first < 0.8 * experts && shares(m.loop_first, m.loop_last, w2, kv1, kv2) &&
-                        (double) next->memory_mib * 1048576.0 - w2 - 1.9 * gibi - keeps(*next, (next->display ? 1.5 : 0.7) * gibi) > least * kv2 &&
+                        (double) next->memory_mib * 1048576.0 - w2 - 1.9 * gibi -
+                                keeps(*next, (next->display ? 1.5 : 0.7) * gibi) >
+                            least * kv2 &&
                         (double) main->memory_mib * 1048576.0 - ((double) m.bytes - w2) - drafter - 2.3 * gibi -
-                                keeps(*main, (main->display ? 1.5 : 0.7) * gibi) > least * kv1)
-                        say("  note: with about " + std::to_string((long long) (100.0 * first / std::max(1.0, experts))) +
+                                keeps(*main, (main->display ? 1.5 : 0.7) * gibi) >
+                            least * kv1)
+                        say("  note: with about " +
+                            std::to_string((long long) (100.0 * first / std::max(1.0, experts))) +
                             "% of the experts on " + no(*main) + " (under 80%), the engine's start moves layers " +
-                            std::to_string(m.loop_first) + "-" + std::to_string(m.loop_last) + " (" + gib(w2) + ") to " +
-                            gpu_line(*next) + " instead and keeps every expert on a GPU; its start says which it chose "
+                            std::to_string(m.loop_first) + "-" + std::to_string(m.loop_last) + " (" + gib(w2) +
+                            ") to " + gpu_line(*next) +
+                            " instead and keeps every expert on a GPU; its start says which it chose "
                             "(\"layer-split\": 0 keeps the experts in RAM)");
                     if (alone > first)
                         stops.push_back("the model's " + gib(experts) + " of experts fit neither " + gpu_line(*main) +
@@ -788,21 +833,27 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 for (const int i : on)
                     if (const GpuInfo* g = gpu_by_index(gpus, i)) vram += (double) g->memory_mib * 1048576.0;
                 const bool fits = (double) m.bytes <= vram;
-                const std::string lead = main != nullptr ? "GPU " + std::to_string(main->index) : std::string("its first GPU");
+                const std::string lead =
+                    main != nullptr ? "GPU " + std::to_string(main->index) : std::string("its first GPU");
                 if (hy4)
-                    say("  VRAM: " + lead + " holds the dense weights and the context, the GPUs' other memory the experts used "
-                        "most (the model is " + gib((double) m.bytes) + ", its GPUs " + gib(vram) + " in all)");
+                    say("  VRAM: " + lead +
+                        " holds the dense weights and the context, the GPUs' other memory the experts used "
+                        "most (the model is " +
+                        gib((double) m.bytes) + ", its GPUs " + gib(vram) + " in all)");
                 else
-                    say("  VRAM: the model (" + gib((double) m.bytes) + (fits ? ") fits its GPUs (" : ") is larger than its GPUs (") +
-                        gib(vram) + " in all)" +
-                        (fits ? ": its layers go to as few of them as hold them with the context"
-                              : m.expert_bytes > 0 ? ": the experts they cannot hold stay in RAM" : ""));
+                    say("  VRAM: the model (" + gib((double) m.bytes) +
+                        (fits ? ") fits its GPUs (" : ") is larger than its GPUs (") + gib(vram) + " in all)" +
+                        (fits                 ? ": its layers go to as few of them as hold them with the context"
+                         : m.expert_bytes > 0 ? ": the experts they cannot hold stay in RAM"
+                                              : ""));
                 if (m.expert_bytes > 0 && !fits) {
                     const platform::RamFit ram = platform::ram_fit(m.expert_bytes);
                     say("  RAM: up to " + gib((double) m.expert_bytes) + " of experts, those the GPUs do not hold");
-                    if (ram.too_much()) stops.push_back(ram.say("the model's experts", "a smaller quant of the model takes less"));
+                    if (ram.too_much())
+                        stops.push_back(ram.say("the model's experts", "a smaller quant of the model takes less"));
                 }
-                if (hy4) {   // its drafts as the start takes them: DFly2 named or found beside the model, else its MTP block
+                if (hy4) {   // its drafts as the start takes them: DFly2 named
+                             // or found beside the model, else its MTP block
                     json probe = c;
                     const std::string line = resolve_drafter(probe, m.arch);
                     const std::vector<std::string> pa = engine_args(probe);
@@ -814,12 +865,14 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                     if (per_step.empty() || per_step == "0")
                         say("  drafts: none (--drafts-per-step N: up to N a window)");
                     else if (!dfly.empty())
-                        say("  drafts: DFly2 (" + dfly + "), up to " + per_step + " a window, in place of the file's MTP "
+                        say("  drafts: DFly2 (" + dfly + "), up to " + per_step +
+                            " a window, in place of the file's MTP "
                             "block (its 3.6 GiB of RAM not loaded; ~0.8 GiB of the first GPU)");
                     else if (std::find(pa.begin(), pa.end(), "--no-mtp") != pa.end())
                         say("  drafts: none (--no-mtp, and no DFly2 beside the model)");
                     else
-                        say("  drafts: the file's MTP block, up to " + per_step + " a window (no DFly2 beside the model: "
+                        say("  drafts: the file's MTP block, up to " + per_step +
+                            " a window (no DFly2 beside the model: "
                             "its shard and config.json there, or in a folder inside the model's, draft in its place)");
                 } else {   // Qwen3.6 / Qwen3.8-27B: the file's MTP block drafts for greedy requests, where it holds one
                     const std::vector<std::string> pa = engine_args(c);
@@ -831,8 +884,7 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                             "step)");
                     else if (per_step.empty() || per_step == "0")
                         say("  drafts: none (--drafts-per-step N: up to N a window from the file's MTP block)");
-                    else
-                        say("  drafts: the file's MTP block, up to " + per_step + " a window (greedy requests)");
+                    else say("  drafts: the file's MTP block, up to " + per_step + " a window (greedy requests)");
                 }
             }
             // pictures
@@ -848,9 +900,11 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 } else {
                     std::error_code ec;
                     bool usable = false;
-                    for (fs::directory_iterator it(u8_path(m.path).parent_path(), ec), end; !ec && it != end; it.increment(ec)) {
+                    for (fs::directory_iterator it(u8_path(m.path).parent_path(), ec), end; !ec && it != end;
+                         it.increment(ec)) {
                         const std::string name = u8_str(it->path().filename());
-                        if (!starts_with(lower(name), "mmproj") || !ends_with(lower(name), ".gguf") || !it->is_regular_file(ec))
+                        if (!starts_with(lower(name), "mmproj") || !ends_with(lower(name), ".gguf") ||
+                            !it->is_regular_file(ec))
                             continue;
                         if (const std::string p = projector_problem(u8_str(it->path()), m); p.empty()) usable = true;
                         else why += (why.empty() ? "" : "; ") + name + ": " + p;
@@ -870,12 +924,14 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                 if (const int i = jget(v, "cuda_device").is_null() ? -1 : find_gpu(card, gpus); i >= 0)
                     if (const GpuInfo* g = gpu_by_index(gpus, i)) card = gpu_line(*g);
                 say("  pictures: " + mmproj + ", encoded " +
-                    (truthy(jget(v, "gpu")) ? "on " + card +
-                                                  (truthy(jget(v, "lend")) ? ", in VRAM borrowed from the engine for each "
-                                                                             "new picture where it can lend" : "")
-                                            : "on the CPU (" + (jget(v, "threads").is_null() ? std::string("its default")
-                                                                                              : str_of(v["threads"])) +
-                                                  " threads)"));
+                    (truthy(jget(v, "gpu"))
+                         ? "on " + card +
+                               (truthy(jget(v, "lend")) ? ", in VRAM borrowed from the engine for each "
+                                                          "new picture where it can lend"
+                                                        : "")
+                         : "on the CPU (" +
+                               (jget(v, "threads").is_null() ? std::string("its default") : str_of(v["threads"])) +
+                               " threads)"));
             }
         }
     }
@@ -900,4 +956,4 @@ bool check_report(const json* cfg, const std::vector<GpuInfo>& gpus, const std::
     return false;
 }
 
-}  // namespace lamina
+}   // namespace lamina

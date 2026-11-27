@@ -41,4 +41,4 @@ private:
     std::shared_ptr<Impl> impl_;   // shared with the sampler thread, which may outlive a close() made from extra()
 };
 
-}  // namespace lamina
+}   // namespace lamina

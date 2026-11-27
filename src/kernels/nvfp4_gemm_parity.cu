@@ -18,9 +18,12 @@
 namespace {
 
 void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
-template<class T> T* dev(const std::vector<T>& h) {
+template <class T> T* dev(const std::vector<T>& h) {
     T* d = nullptr;
     check(cudaMalloc(&d, h.size() * sizeof(T) + 16), "alloc");
     check(cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice), "upload");
@@ -37,7 +40,7 @@ double scale_half(uint8_t x) {   // ggml_ue4m3_to_fp32, halved
     return e ? std::ldexp(1.0 + m / 8.0, e - 8) : m * 0.0009765625;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     using namespace lamina::kernels;
@@ -53,7 +56,9 @@ int main() {
                 for (int i = 0; i < 4; ++i) {
                     const uint64_t u = rng();
                     blobs[(size_t) g * stride + off + (size_t) r * row_bytes + (size_t) b * 36 + i] =
-                        u % 16 == 0 ? (uint8_t) (u >> 8 & 7) : u % 64 == 1 ? 0x7F : (uint8_t) (((1 + (u >> 8) % 12) << 3) | (u >> 16 & 7));
+                        u % 16 == 0   ? (uint8_t) (u >> 8 & 7)
+                        : u % 64 == 1 ? 0x7F
+                                      : (uint8_t) (((1 + (u >> 8) % 12) << 3) | (u >> 16 & 7));
                 }
     std::vector<int32_t> bounds{0}, tiles;
     for (int g = 0; g < G; ++g) {
@@ -138,7 +143,8 @@ int main() {
                         const int sb = (k % 64) / 16, i16 = k % 16;
                         const uint8_t byte = blk[4 + 8 * sb + (i16 & 7)];
                         const double wv = kv[i16 < 8 ? byte & 15 : byte >> 4] * scale_half(blk[sb]);
-                        const double xv = half_value(xh[(size_t) e * K + (k / 16) * 16 + ((i16 & 7) << 1 | (i16 >> 3))]);
+                        const double xv =
+                            half_value(xh[(size_t) e * K + (k / 16) * 16 + ((i16 & 7) << 1 | (i16 >> 3))]);
                         sum += wv * xv;
                         mag += std::fabs(wv * xv);
                     }
@@ -149,9 +155,11 @@ int main() {
                     ++n_sum;
                 }
             }
-        std::printf("%s: %lld sums (rms %.3g), the largest difference %.2g of a sum's magnitudes, %lld past the bound; %lld "
-                    "halves off; %lld values written where no tile stands\n", pass == 0 ? "with a row map" : "rows in place",
-                    n_sum, std::sqrt(rms / (double) n_sum), worst, wrong, halves_off, touched);
+        std::printf(
+            "%s: %lld sums (rms %.3g), the largest difference %.2g of a sum's magnitudes, %lld past the bound; %lld "
+            "halves off; %lld values written where no tile stands\n",
+            pass == 0 ? "with a row map" : "rows in place", n_sum, std::sqrt(rms / (double) n_sum), worst, wrong,
+            halves_off, touched);
         bad += wrong != 0 || halves_off != 0 || touched != 0;
     }
     std::printf("nvfp4_gemm_parity: %s\n", bad ? "FAIL" : "PASS");

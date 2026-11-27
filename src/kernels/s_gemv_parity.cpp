@@ -23,12 +23,12 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <algorithm>
-#include <chrono>
 #include <random>
 #include <string>
 #include <vector>
@@ -44,7 +44,7 @@ const uint16_t kScales[] = {0x3E00, 0x3555, 0x3C01, 0x4248, 0x4123, 0x2AAA, 0x4A
 struct Case {
     const char* name;
     lamina::kernels::SForm form;
-    int raw_bytes;        // one block
+    int raw_bytes;   // one block
     // Reconstruct the raw GGUF block for one group from the canonical codes/scales, and return the number of
     // elements the block decodes to (which may exceed group_elems: Q8_0's block IS one group, Q2_0's too).
     int (*to_raw)(const uint8_t* codes, size_t code_off, const uint16_t* scale_bits, size_t scale_off, uint8_t* raw);
@@ -174,7 +174,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     for (long long o = 0; o < n_out; ++o) {
         const Row& r = rows[(size_t) o];
         float acc = 0.0f;
-        double sum_abs = 0.0;      // the natural scale of this row's dot product (see the metric below)
+        double sum_abs = 0.0;          // the natural scale of this row's dot product (see the metric below)
         double plane_ref_diff = 0.0;   // (a) vs (b): planes against the raw block, both on the CPU
         for (long long sb = 0; sb < n_in / 256; ++sb) {
             // ONE 144-byte block per 256-element SUPERBLOCK, with all four steps' qs bytes filled BEFORE the
@@ -187,24 +187,23 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
             blk[1] = (uint8_t) (r.d >> 8);
             blk[2] = (uint8_t) (r.dmin & 0xFF);
             blk[3] = (uint8_t) (r.dmin >> 8);
-            for (int j = 0; j < 4; ++j) {          // the exact inverse of get_scale_min_k4
+            for (int j = 0; j < 4; ++j) {   // the exact inverse of get_scale_min_k4
                 blk[4 + j] = (uint8_t) ((r.sc[j] & 0x3F) | ((r.sc[j + 4] >> 4) << 6));
                 blk[8 + j] = (uint8_t) ((r.m[j] & 0x3F) | ((r.m[j + 4] >> 4) << 6));
                 blk[12 + j] = (uint8_t) ((r.sc[j + 4] & 0x0F) | ((r.m[j + 4] & 0x0F) << 4));
             }
             for (int step = 0; step < 4; ++step) {
-                for (int l = 0; l < 32; ++l) {     // elements 0..31 LOW nibbles, 32..63 HIGH
+                for (int l = 0; l < 32; ++l) {   // elements 0..31 LOW nibbles, 32..63 HIGH
                     const long long e0 = o * n_in + sb * 256 + step * 64 + l;
                     const long long e1 = e0 + 32;
-                    blk[16 + step * 32 + l] =
-                        (uint8_t) ((codes_el[(size_t) e0] & 0x0F) | (codes_el[(size_t) e1] << 4));
+                    blk[16 + step * 32 + l] = (uint8_t) ((codes_el[(size_t) e0] & 0x0F) | (codes_el[(size_t) e1] << 4));
                 }
             }
             lamina::dequantize_q4_K(blk.data(), dec.data());
             for (int j = 0; j < 256; ++j) {
                 const float term = dec[(size_t) j] * lamina::fp16_to_fp32(x[(size_t) (sb * 256 + j)]);
                 acc += term;
-                sum_abs += std::fabs((double) term);      // the CONDITION of this dot product
+                sum_abs += std::fabs((double) term);   // the CONDITION of this dot product
 
                 // THE THIRD DECODE.  (a) the raw block through the scalar dequantizer, (b) the canonical
                 // PLANES through `code*scale + offset`, (c) the GPU.  If (a) != (b) then this test built
@@ -213,8 +212,8 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
                 const long long elem = sb * 256 + j;
                 const long long g = elem / 32;
                 const int code = (int) codes_el[(size_t) (o * n_in + elem)];
-                const float b_dec = (float) code * scales[(size_t) (o * n_groups + g)] +
-                                    offsets[(size_t) (o * n_groups + g)];
+                const float b_dec =
+                    (float) code * scales[(size_t) (o * n_groups + g)] + offsets[(size_t) (o * n_groups + g)];
                 if (std::fabs((double) (b_dec - dec[(size_t) j])) > plane_ref_diff) {
                     plane_ref_diff = std::fabs((double) (b_dec - dec[(size_t) j]));
                 }
@@ -235,8 +234,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     check(cudaMalloc(&d_y, (size_t) n_out * sizeof(float)), "cudaMalloc y");
     check(cudaMemcpy(d_x, x.data(), x.size() * sizeof(uint16_t), cudaMemcpyHostToDevice), "copy x");
     check(cudaMemcpy(d_codes, codes.data(), codes.size(), cudaMemcpyHostToDevice), "copy codes");
-    check(cudaMemcpy(d_scales, scales.data(), scales.size() * sizeof(float), cudaMemcpyHostToDevice),
-          "copy scales");
+    check(cudaMemcpy(d_scales, scales.data(), scales.size() * sizeof(float), cudaMemcpyHostToDevice), "copy scales");
     check(cudaMemcpy(d_offsets, offsets.data(), offsets.size() * sizeof(float), cudaMemcpyHostToDevice),
           "copy offsets");
     lamina::kernels::s_gemv(d_x, d_codes, d_scales, d_offsets, d_y, n_in, n_out, form);
@@ -264,8 +262,8 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
         lo = std::fmin(lo, v);
         hi = std::fmax(hi, v);
     }
-    std::printf("  %-10s %lld rows, %lld over tol, worst rel-to-terms %.3e (rel-to-result %.3e)\n",
-                "S4/Q4_K", n_out, bad, worst, worst_res);
+    std::printf("  %-10s %lld rows, %lld over tol, worst rel-to-terms %.3e (rel-to-result %.3e)\n", "S4/Q4_K", n_out,
+                bad, worst, worst_res);
     std::printf("             ref spread [%.4g, %.4g], condition (sum|term|) up to %.4g\n", lo, hi,
                 *std::max_element(cond.begin(), cond.end()));
     std::printf("             CPU planes vs CPU raw block: max |diff| = %.3e -> %s\n", worst_plane_ref,
@@ -284,8 +282,7 @@ void test_q4k(long long n_in, long long n_out, double tol, int* total_bad) {
     cudaFree(d_y);
 }
 
-}  // namespace
-
+}   // namespace
 
 // ------------------------------------------------------------------ benchmark
 //
@@ -302,7 +299,7 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
 
     std::vector<uint8_t> codes((size_t) n_out * codes_per_row, 0xA5);
     std::vector<float> scales((size_t) n_out * n_groups, 0.001f);
-    std::vector<uint16_t> x((size_t) n_in, 0x3C00);            // 1.0 in fp16
+    std::vector<uint16_t> x((size_t) n_in, 0x3C00);   // 1.0 in fp16
 
     uint16_t* d_x = nullptr;
     uint8_t* d_codes = nullptr;
@@ -342,8 +339,8 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
     // the KV/attention work are separate and are NOT included.
     const double roles_per_token = 48.0 * 10.0 * 3.0;
     const double tok_ms = roles_per_token * ms.front();
-    std::printf("  per token: %.0f roles x %.4f ms = %.1f ms  ->  %.1f tok/s (expert matvec only)\n",
-                roles_per_token, ms.front(), tok_ms, tok_ms > 0 ? 1000.0 / tok_ms : 0.0);
+    std::printf("  per token: %.0f roles x %.4f ms = %.1f ms  ->  %.1f tok/s (expert matvec only)\n", roles_per_token,
+                ms.front(), tok_ms, tok_ms > 0 ? 1000.0 / tok_ms : 0.0);
     std::printf("  NOTE: expert matvec ONLY. No attention, no KV, no norm, no router, no sampling, and it\n"
                 "        assumes every expert is already resident in VRAM at zero cost.\n");
 
@@ -366,15 +363,13 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
         for (int i = 0; i < iters; ++i) {
             const auto t0 = std::chrono::steady_clock::now();
             lamina::kernels::s_gemv_split(d_x, d_codes, d_scales, nullptr, d_y, n_in, n_out, form, tpr);
-            sms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-                              .count());
+            sms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         }
         std::sort(sms.begin(), sms.end());
 
         // correctness of the thing being timed
         std::vector<float> got((size_t) n_out);
-        check(cudaMemcpy(got.data(), d_y, got.size() * sizeof(float), cudaMemcpyDeviceToHost),
-              "copy split result");
+        check(cudaMemcpy(got.data(), d_y, got.size() * sizeof(float), cudaMemcpyDeviceToHost), "copy split result");
         long long bad = 0;
         double worst = 0.0;
         for (long long o = 0; o < n_out; ++o) {
@@ -384,14 +379,14 @@ void bench_s2_gemv(long long n_in, long long n_out, int iters, int* split_bad) {
             if (!(rel <= 1e-4)) ++bad;
         }
         if (bad) {
-            std::printf("  split tpr=%-4d *** WRONG *** %lld of %lld rows differ, worst rel %.3e\n", tpr,
-                        bad, n_out, worst);
+            std::printf("  split tpr=%-4d *** WRONG *** %lld of %lld rows differ, worst rel %.3e\n", tpr, bad, n_out,
+                        worst);
             *split_bad += (int) bad;
         }
 
         const double sp = ms.front() / sms.front();
-        std::printf("  split tpr=%-4d min %.4f ms  -> %6.1f G weights/s   speedup vs naive %.2fx\n", tpr,
-                    sms.front(), weights / sms.front() / 1e6, sp);
+        std::printf("  split tpr=%-4d min %.4f ms  -> %6.1f G weights/s   speedup vs naive %.2fx\n", tpr, sms.front(),
+                    weights / sms.front() / 1e6, sp);
     }
 
     cudaFree(d_x);
@@ -460,8 +455,7 @@ int main(int argc, char** argv) {
         for (long long o = 0; o < n_out; ++o) {
             for (long long i = 0; i < n_in; ++i) {
                 const long long byi = o * codes_per_row + i / per_byte;
-                codes[(size_t) byi] |= (uint8_t) (codes_el[(size_t) (o * n_in + i)]
-                                                  << ((i % per_byte) * bits));
+                codes[(size_t) byi] |= (uint8_t) (codes_el[(size_t) (o * n_in + i)] << ((i % per_byte) * bits));
             }
         }
         std::vector<float> scales((size_t) n_out * n_groups);
@@ -521,8 +515,8 @@ int main(int argc, char** argv) {
             lo = std::fmin(lo, v);
             hi = std::fmax(hi, v);
         }
-        std::printf("  %-10s %lld rows, %lld over tol, worst rel %.3e   ref spread [%.4g, %.4g]\n", tc.name,
-                    n_out, bad, worst, lo, hi);
+        std::printf("  %-10s %lld rows, %lld over tol, worst rel %.3e   ref spread [%.4g, %.4g]\n", tc.name, n_out, bad,
+                    worst, lo, hi);
         if (hi - lo <= 0.0) {
             std::fprintf(stderr, "VACUOUS: %s reference is constant\n", tc.name);
             return 1;

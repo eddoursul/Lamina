@@ -17,10 +17,10 @@
 // sign and stride bugs, which are the failure modes a dequantizer actually has. It is deliberately
 // not a correctness-vs-ggml test - that needs ggml linked, which is P1.S3's next step.
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <cmath>
 #include <string>
 #include <vector>
 
@@ -31,11 +31,10 @@ namespace lamina {
 
 // ---- fp16/bf16 -> fp32. Both handle subnormals and infinities; naive shifts do not.
 inline float fp16_to_fp32(uint16_t h) {
-    const uint32_t sign = (uint32_t)(h >> 15) & 1u;
+    const uint32_t sign = (uint32_t) (h >> 15) & 1u;
     uint32_t exp = (h >> 10) & 0x1Fu, man = h & 0x3FFu, f;
     if (exp == 0) {
-        if (man == 0)
-            f = sign << 31;
+        if (man == 0) f = sign << 31;
         else {
             exp = 127 - 15 + 1;
             while (!(man & 0x400u)) {
@@ -45,25 +44,21 @@ inline float fp16_to_fp32(uint16_t h) {
             man &= 0x3FFu;
             f = (sign << 31) | (exp << 23) | (man << 13);
         }
-    } else if (exp == 31)
-        f = (sign << 31) | 0x7F800000u | (man << 13);
-    else
-        f = (sign << 31) | ((exp - 15 + 127) << 23) | (man << 13);
+    } else if (exp == 31) f = (sign << 31) | 0x7F800000u | (man << 13);
+    else f = (sign << 31) | ((exp - 15 + 127) << 23) | (man << 13);
     float out;
     std::memcpy(&out, &f, 4);
     return out;
 }
 
 inline float bf16_to_fp32(uint16_t h) {
-    const uint32_t f = (uint32_t)h << 16;
+    const uint32_t f = (uint32_t) h << 16;
     float out;
     std::memcpy(&out, &f, 4);
     return out;
 }
 
-inline uint16_t read_u16(const uint8_t* p) {
-    return (uint16_t)(p[0] | (p[1] << 8));
-}
+inline uint16_t read_u16(const uint8_t* p) { return (uint16_t) (p[0] | (p[1] << 8)); }
 
 // ---- Q2_0: 64 elements from an 18-byte block. Mirrors dequantize_row_q2_0 (ggml master 3cf03257).
 inline void dequantize_q2_0(const uint8_t* block, float* out) {
@@ -73,15 +68,15 @@ inline void dequantize_q2_0(const uint8_t* block, float* out) {
         const int byte_index = j / 4;
         const int bit_offset = (j % 4) * 2;
         const int code = (qs[byte_index] >> bit_offset) & 0x03;
-        out[j] = (float)(code - 1) * d; // code {0,1,2,3} -> symbol {-1,0,+1,+2}
+        out[j] = (float) (code - 1) * d;   // code {0,1,2,3} -> symbol {-1,0,+1,+2}
     }
 }
 
 // ---- Q8_0: 32 elements from a 34-byte block.
 inline void dequantize_q8_0(const uint8_t* block, float* out) {
     const float d = fp16_to_fp32(read_u16(block));
-    const int8_t* qs = (const int8_t*)(block + 2);
-    for (int j = 0; j < 32; ++j) out[j] = (float)qs[j] * d;
+    const int8_t* qs = (const int8_t*) (block + 2);
+    for (int j = 0; j < 32; ++j) out[j] = (float) qs[j] * d;
 }
 
 // ---- Q4_0: 32 elements from an 18-byte block. Low nibble is element j, high nibble is j+16.
@@ -89,8 +84,8 @@ inline void dequantize_q4_0(const uint8_t* block, float* out) {
     const float d = fp16_to_fp32(read_u16(block));
     const uint8_t* qs = block + 2;
     for (int j = 0; j < 16; ++j) {
-        out[j] = (float)((int)(qs[j] & 0x0F) - 8) * d;
-        out[j + 16] = (float)((int)(qs[j] >> 4) - 8) * d;
+        out[j] = (float) ((int) (qs[j] & 0x0F) - 8) * d;
+        out[j + 16] = (float) ((int) (qs[j] >> 4) - 8) * d;
     }
 }
 
@@ -100,13 +95,12 @@ inline void dequantize_q5_0(const uint8_t* block, float* out) {
     const float d = fp16_to_fp32(read_u16(block));
     const uint8_t* qh = block + 2;
     const uint8_t* qs = block + 6;
-    const uint32_t h =
-        (uint32_t)qh[0] | ((uint32_t)qh[1] << 8) | ((uint32_t)qh[2] << 16) | ((uint32_t)qh[3] << 24);
+    const uint32_t h = (uint32_t) qh[0] | ((uint32_t) qh[1] << 8) | ((uint32_t) qh[2] << 16) | ((uint32_t) qh[3] << 24);
     for (int j = 0; j < 16; ++j) {
-        const int x0 = (int)(qs[j] & 0x0F) | (int)(((h >> j) & 1u) << 4);
-        const int x1 = (int)(qs[j] >> 4) | (int)(((h >> (j + 16)) & 1u) << 4);
-        out[j] = (float)(x0 - 16) * d;
-        out[j + 16] = (float)(x1 - 16) * d;
+        const int x0 = (int) (qs[j] & 0x0F) | (int) (((h >> j) & 1u) << 4);
+        const int x1 = (int) (qs[j] >> 4) | (int) (((h >> (j + 16)) & 1u) << 4);
+        out[j] = (float) (x0 - 16) * d;
+        out[j + 16] = (float) (x1 - 16) * d;
     }
 }
 // ---- Q5_1: 32 elements from a 24-byte block: fp16 d, fp16 m, then Q5_0's qh[4] and qs[16]. The 5-bit codes are
@@ -116,28 +110,26 @@ inline void dequantize_q5_1(const uint8_t* block, float* out) {
     const float m = fp16_to_fp32(read_u16(block + 2));
     const uint8_t* qh = block + 4;
     const uint8_t* qs = block + 8;
-    const uint32_t h =
-        (uint32_t)qh[0] | ((uint32_t)qh[1] << 8) | ((uint32_t)qh[2] << 16) | ((uint32_t)qh[3] << 24);
+    const uint32_t h = (uint32_t) qh[0] | ((uint32_t) qh[1] << 8) | ((uint32_t) qh[2] << 16) | ((uint32_t) qh[3] << 24);
     for (int j = 0; j < 16; ++j) {
-        const int x0 = (int)(qs[j] & 0x0F) | (int)(((h >> j) & 1u) << 4);
-        const int x1 = (int)(qs[j] >> 4) | (int)(((h >> (j + 16)) & 1u) << 4);
-        out[j] = (float)x0 * d + m;
-        out[j + 16] = (float)x1 * d + m;
+        const int x0 = (int) (qs[j] & 0x0F) | (int) (((h >> j) & 1u) << 4);
+        const int x1 = (int) (qs[j] >> 4) | (int) (((h >> (j + 16)) & 1u) << 4);
+        out[j] = (float) x0 * d + m;
+        out[j + 16] = (float) x1 * d + m;
     }
 }
 // ---- IQ4_NL: 32 elements from an 18-byte block. Non-linear 4-bit codebook, NOT a linear grid, so
 // the table must be exact. Copied verbatim from ggml-common.h `kvalues_iq4nl` at 3cf03257:
 //     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
 // Layout matches dequantize_row_iq4_nl (ggml-quants.c): low nibble is element j, high nibble j+16.
-static const int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
-                                         1,    13,   25,  38,  53,  69,  89,  113};
+static const int8_t kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
 inline void dequantize_iq4_nl(const uint8_t* block, float* out) {
     const float d = fp16_to_fp32(read_u16(block));
     const uint8_t* qs = block + 2;
     for (int j = 0; j < 16; ++j) {
-        out[j] = d * (float)kvalues_iq4nl[qs[j] & 0x0F];
-        out[j + 16] = d * (float)kvalues_iq4nl[qs[j] >> 4];
+        out[j] = d * (float) kvalues_iq4nl[qs[j] & 0x0F];
+        out[j + 16] = d * (float) kvalues_iq4nl[qs[j] >> 4];
     }
 }
 // ---- Q6_K: 256 elements from a 210-byte super-block, transcribed from dequantize_row_q6_K
@@ -147,22 +139,22 @@ inline void dequantize_iq4_nl(const uint8_t* block, float* out) {
 // scales, and the four output positions within a 32-group use different scales. Easy to get subtly
 // wrong, which is why it is transcribed rather than recalled.
 inline void dequantize_q6_K(const uint8_t* block, float* out) {
-    const uint8_t* ql = block;                       // 128 bytes
-    const uint8_t* qh = block + 128;                 // 64
-    const int8_t* sc = (const int8_t*)(block + 192); // 16
+    const uint8_t* ql = block;                          // 128 bytes
+    const uint8_t* qh = block + 128;                    // 64
+    const int8_t* sc = (const int8_t*) (block + 192);   // 16
     const float d = fp16_to_fp32(read_u16(block + 208));
     float* y = out;
     for (int n = 0; n < 256; n += 128) {
         for (int l = 0; l < 32; ++l) {
             const int is = l / 16;
-            const int q1 = (int)((ql[l + 0] & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
-            const int q2 = (int)((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
-            const int q3 = (int)((ql[l + 0] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
-            const int q4 = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
-            y[l + 0] = d * (float)sc[is + 0] * (float)q1;
-            y[l + 32] = d * (float)sc[is + 2] * (float)q2;
-            y[l + 64] = d * (float)sc[is + 4] * (float)q3;
-            y[l + 96] = d * (float)sc[is + 6] * (float)q4;
+            const int q1 = (int) ((ql[l + 0] & 0x0F) | (((qh[l] >> 0) & 3) << 4)) - 32;
+            const int q2 = (int) ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
+            const int q3 = (int) ((ql[l + 0] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+            const int q4 = (int) ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+            y[l + 0] = d * (float) sc[is + 0] * (float) q1;
+            y[l + 32] = d * (float) sc[is + 2] * (float) q2;
+            y[l + 64] = d * (float) sc[is + 4] * (float) q3;
+            y[l + 96] = d * (float) sc[is + 6] * (float) q4;
         }
         y += 128;
         ql += 64;
@@ -186,20 +178,20 @@ static inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t
 }
 
 inline void dequantize_q4_K(const uint8_t* block, float* out) {
-    const float d = fp16_to_fp32(read_u16(block));      // d
-    const float mn = fp16_to_fp32(read_u16(block + 2)); // dmin
-    const uint8_t* scales = block + 4;                  // 12 bytes
-    const uint8_t* q = block + 16;                      // 128 bytes
+    const float d = fp16_to_fp32(read_u16(block));        // d
+    const float mn = fp16_to_fp32(read_u16(block + 2));   // dmin
+    const uint8_t* scales = block + 4;                    // 12 bytes
+    const uint8_t* q = block + 16;                        // 128 bytes
     float* y = out;
     int is = 0;
     for (int j = 0; j < 256; j += 64) {
         uint8_t sc, m;
         get_scale_min_k4(is + 0, scales, sc, m);
-        const float d1 = d * (float)sc, m1 = mn * (float)m;
+        const float d1 = d * (float) sc, m1 = mn * (float) m;
         get_scale_min_k4(is + 1, scales, sc, m);
-        const float d2 = d * (float)sc, m2 = mn * (float)m;
-        for (int l = 0; l < 32; ++l) *y++ = d1 * (float)(q[l] & 0x0F) - m1;
-        for (int l = 0; l < 32; ++l) *y++ = d2 * (float)(q[l] >> 4) - m2;
+        const float d2 = d * (float) sc, m2 = mn * (float) m;
+        for (int l = 0; l < 32; ++l) *y++ = d1 * (float) (q[l] & 0x0F) - m1;
+        for (int l = 0; l < 32; ++l) *y++ = d2 * (float) (q[l] >> 4) - m2;
         q += 32;
         is += 2;
     }
@@ -212,24 +204,24 @@ inline void dequantize_q4_K(const uint8_t* block, float* out) {
 inline void dequantize_q5_K(const uint8_t* block, float* out) {
     const float d = fp16_to_fp32(read_u16(block));
     const float mn = fp16_to_fp32(read_u16(block + 2));
-    const uint8_t* scales = block + 4; // 12
-    const uint8_t* qh = block + 16;    // 32
-    const uint8_t* ql = block + 48;    // 128
+    const uint8_t* scales = block + 4;   // 12
+    const uint8_t* qh = block + 16;      // 32
+    const uint8_t* ql = block + 48;      // 128
     float* y = out;
     int is = 0;
     uint8_t u1 = 1, u2 = 2;
     for (int j = 0; j < 256; j += 64) {
         uint8_t sc, m;
         get_scale_min_k4(is + 0, scales, sc, m);
-        const float d1 = d * (float)sc, m1 = mn * (float)m;
+        const float d1 = d * (float) sc, m1 = mn * (float) m;
         get_scale_min_k4(is + 1, scales, sc, m);
-        const float d2 = d * (float)sc, m2 = mn * (float)m;
-        for (int l = 0; l < 32; ++l) *y++ = d1 * (float)((ql[l] & 0x0F) + ((qh[l] & u1) ? 16 : 0)) - m1;
-        for (int l = 0; l < 32; ++l) *y++ = d2 * (float)((ql[l] >> 4) + ((qh[l] & u2) ? 16 : 0)) - m2;
+        const float d2 = d * (float) sc, m2 = mn * (float) m;
+        for (int l = 0; l < 32; ++l) *y++ = d1 * (float) ((ql[l] & 0x0F) + ((qh[l] & u1) ? 16 : 0)) - m1;
+        for (int l = 0; l < 32; ++l) *y++ = d2 * (float) ((ql[l] >> 4) + ((qh[l] & u2) ? 16 : 0)) - m2;
         ql += 32;
         is += 2;
-        u1 = (uint8_t)(u1 << 2);
-        u2 = (uint8_t)(u2 << 2);
+        u1 = (uint8_t) (u1 << 2);
+        u2 = (uint8_t) (u2 << 2);
     }
 }
 // ---- Q3_K: 256 elements from a 110-byte super-block: `hmask[32]`, `qs[64]`, `scales[12]`, `fp16 d`
@@ -240,8 +232,8 @@ inline void dequantize_q5_K(const uint8_t* block, float* out) {
 //     because 16 six-bit scales do not fit in 12 bytes linearly;
 //   * the low 2 bits are offset by -4 when the high bit is CLEAR, i.e. the correction is NEGATIVE.
 inline void dequantize_q3_K(const uint8_t* block, float* out) {
-    const uint8_t* hm = block;     // 32
-    const uint8_t* q = block + 32; // 64
+    const uint8_t* hm = block;       // 32
+    const uint8_t* q = block + 32;   // 64
     const float d_all = fp16_to_fp32(read_u16(block + 108));
 
     const uint32_t kmask1 = 0x03030303u, kmask2 = 0x0f0f0f0fu;
@@ -252,22 +244,22 @@ inline void dequantize_q3_K(const uint8_t* block, float* out) {
     aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
     aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
     aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
-    const int8_t* scales = (const int8_t*)aux;
+    const int8_t* scales = (const int8_t*) aux;
 
     float* y = out;
     int is = 0;
-    uint8_t m = 1; // hoisted: ggml declares this BEFORE the n loop, so it does not reset between halves
+    uint8_t m = 1;   // hoisted: ggml declares this BEFORE the n loop, so it does not reset between halves
     for (int n = 0; n < 256; n += 128) {
         int shift = 0;
         for (int j = 0; j < 4; ++j) {
-            float dl = d_all * (float)(scales[is++] - 32);
+            float dl = d_all * (float) (scales[is++] - 32);
             for (int l = 0; l < 16; ++l)
-                *y++ = dl * (float)((int8_t)((q[l + 0] >> shift) & 3) - ((hm[l + 0] & m) ? 0 : 4));
-            dl = d_all * (float)(scales[is++] - 32);
+                *y++ = dl * (float) ((int8_t) ((q[l + 0] >> shift) & 3) - ((hm[l + 0] & m) ? 0 : 4));
+            dl = d_all * (float) (scales[is++] - 32);
             for (int l = 0; l < 16; ++l)
-                *y++ = dl * (float)((int8_t)((q[l + 16] >> shift) & 3) - ((hm[l + 16] & m) ? 0 : 4));
+                *y++ = dl * (float) ((int8_t) ((q[l + 16] >> shift) & 3) - ((hm[l + 16] & m) ? 0 : 4));
             shift += 2;
-            m = (uint8_t)(m << 1);
+            m = (uint8_t) (m << 1);
         }
         q += 32;
     }
@@ -280,24 +272,22 @@ inline void dequantize_q3_K(const uint8_t* block, float* out) {
 inline void dequantize_iq4_xs(const uint8_t* block, float* out) {
     const float d = fp16_to_fp32(read_u16(block));
     const uint16_t scales_h = read_u16(block + 2);
-    const uint8_t* scales_l = block + 4; // 4
-    const uint8_t* qs = block + 8;       // 128
+    const uint8_t* scales_l = block + 4;   // 4
+    const uint8_t* qs = block + 8;         // 128
     float* y = out;
     for (int ib = 0; ib < 8; ++ib) {
         const int ls = ((scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) | (((scales_h >> (2 * ib)) & 3) << 4);
-        const float dl = d * (float)(ls - 32);
+        const float dl = d * (float) (ls - 32);
         for (int j = 0; j < 16; ++j) {
-            y[j + 0] = dl * (float)kvalues_iq4nl[qs[j] & 0x0F];
-            y[j + 16] = dl * (float)kvalues_iq4nl[qs[j] >> 4];
+            y[j + 0] = dl * (float) kvalues_iq4nl[qs[j] & 0x0F];
+            y[j + 16] = dl * (float) kvalues_iq4nl[qs[j] >> 4];
         }
         y += 32;
         qs += 16;
     }
 }
 // ---- element types
-inline void dequantize_f32(const uint8_t* p, float* out, int n) {
-    std::memcpy(out, p, (size_t)n * 4);
-}
+inline void dequantize_f32(const uint8_t* p, float* out, int n) { std::memcpy(out, p, (size_t) n * 4); }
 inline void dequantize_f16(const uint8_t* p, float* out, int n) {
     for (int i = 0; i < n; ++i) out[i] = fp16_to_fp32(read_u16(p + 2 * i));
 }
@@ -305,4 +295,4 @@ inline void dequantize_bf16(const uint8_t* p, float* out, int n) {
     for (int i = 0; i < n; ++i) out[i] = bf16_to_fp32(read_u16(p + 2 * i));
 }
 
-} // namespace lamina
+}   // namespace lamina

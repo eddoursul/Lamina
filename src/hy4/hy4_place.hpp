@@ -12,4 +12,4 @@ namespace lamina::hy4 {
 /// ones (under 85% of the 90th percentile) a second time (the better of two).  `cut` gets that bound.
 std::vector<float> time_places(const std::vector<const uint8_t*>& places, uint64_t bytes, float* cut);
 
-}  // namespace lamina::hy4
+}   // namespace lamina::hy4

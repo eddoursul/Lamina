@@ -1,6 +1,6 @@
 // src/qwen35/q36_attn.cuh - the Qwen3.6 path's prompt attention on the tensor cores (flash attention, causal, the cache
-// in FP16 or q8_0 rows): a block takes 64 query rows, its tokens' G query heads of one KV head (row r: token r / G, head
-// r % G), and walks the cells its last token sees in tiles of 32, double-buffered through cp.async (q8_0: through
+// in FP16 or q8_0 rows): a block takes 64 query rows, its tokens' G query heads of one KV head (row r: token r / G,
+// head r % G), and walks the cells its last token sees in tiles of 32, double-buffered through cp.async (q8_0: through
 // registers, scaled into FP16 tiles).  Per tile:
 //   scores   warp w: rows of m-tile w & 3, cells (w >> 2) * 16 .. +16; Q's FP16 fragments in registers, K through
 //            ldmatrix; mma m16n8k16, FP32 sums;
@@ -27,9 +27,9 @@ using lamina::kernels::ldsm4;
 using lamina::kernels::ldsm4t;
 using lamina::kernels::mma16816;
 
-constexpr int kHD = 256;     // the head size
-constexpr int kBc = 32;      // cells a tile
-constexpr int kRows = 64;    // query rows a block
+constexpr int kHD = 256;    // the head size
+constexpr int kBc = 32;     // cells a tile
+constexpr int kRows = 64;   // query rows a block
 
 // a K or V tile's cell c, 16-byte chunk j, in halves
 __device__ __forceinline__ int kv_at(int c, int j) { return c * kHD + ((j ^ (c & 7)) << 3); }
@@ -89,9 +89,9 @@ __device__ __forceinline__ void q8_store(__half* dst, const Q8Stage& s) {
 /// holding every cell up to p0 + T - 1, queries q and gates [T][H][256] (FP32).  grid (ceil(T / (64 / G)), HKV), block
 /// 256, shared sizeof(FaSmem).  With Q8 the next tile waits in registers through the current one's products.
 template <int G, bool Q8>
-__global__ void __launch_bounds__(256) k_fa_prompt(const float* __restrict__ q, const __half* __restrict__ kc,
-                                                   const __half* __restrict__ vc, const float* __restrict__ gate,
-                                                   float* __restrict__ out, int T, int H, int ctx, int p0, float scale) {
+__global__ void __launch_bounds__(256)
+k_fa_prompt(const float* __restrict__ q, const __half* __restrict__ kc, const __half* __restrict__ vc,
+            const float* __restrict__ gate, float* __restrict__ out, int T, int H, int ctx, int p0, float scale) {
     constexpr int TT = kRows / G;   // tokens a block
     extern __shared__ __align__(16) unsigned char fa_raw[];
     FaSmem& sm = *reinterpret_cast<FaSmem*>(fa_raw);
@@ -245,7 +245,8 @@ __global__ void __launch_bounds__(256) k_fa_prompt(const float* __restrict__ q, 
                 mma16816(o[2 * n2 + 1], a, b[2], b[3]);
             }
         }
-        if constexpr (Q8) {   // the next tile, into the stage the last iteration read (all done since the barrier above)
+        if constexpr (Q8) {   // the next tile, into the stage the last iteration
+                              // read (all done since the barrier above)
             if (it + 1 < n_tiles) {
                 q8_store(sm.k[st ^ 1], sk);
                 q8_store(sm.v[st ^ 1], sv);
@@ -271,4 +272,4 @@ __global__ void __launch_bounds__(256) k_fa_prompt(const float* __restrict__ q, 
     }
 }
 
-}  // namespace q36a
+}   // namespace q36a

@@ -50,16 +50,16 @@ public:
 /// rather than inferred here.  The four cases are distinguishable in the manifest only by combining
 /// `source_type` with `values_fp16`, and getting that combination wrong yields a plausible tensor.
 enum class WeightKind : int {
-    Verbatim = 0,   ///< quantized planes, or F16 already stored as 2 bytes: copy straight through
-    Bf16InF32 = 1,  ///< the pack holds the bf16 value promoted to f32: take the HIGH 16 BITS (exact)
-    F32 = 2,        ///< copy 4 bytes per element
-    F16InF32 = 3,   ///< an f16 value promoted to f32: a real f32->f16 conversion, not a truncation
+    Verbatim = 0,    ///< quantized planes, or F16 already stored as 2 bytes: copy straight through
+    Bf16InF32 = 1,   ///< the pack holds the bf16 value promoted to f32: take the HIGH 16 BITS (exact)
+    F32 = 2,         ///< copy 4 bytes per element
+    F16InF32 = 3,    ///< an f16 value promoted to f32: a real f32->f16 conversion, not a truncation
 };
 
 struct WeightRef {
     const void* data = nullptr;   ///< device pointer inside the arena
     uint64_t bytes = 0;
-    int64_t ne0 = 0;              ///< the manifest's own shape, ne0 the CONTIGUOUS axis
+    int64_t ne0 = 0;   ///< the manifest's own shape, ne0 the CONTIGUOUS axis
     int64_t ne1 = 0;
     int64_t elements = 0;
     WeightKind kind = WeightKind::Verbatim;
@@ -76,8 +76,8 @@ struct WeightRef {
     /// only reason that was not a silent wrong answer is that the re-derivation checked itself and refused.
     /// Two places computing one layout is two places to disagree.
     uint64_t codes_bytes = 0;
-    uint64_t scales_bytes = 0;    ///< always 4 B per scale in the arena, whatever the pack held
-    uint64_t offset_bytes = 0;    ///< 0 when the form has no offset plane
+    uint64_t scales_bytes = 0;   ///< always 4 B per scale in the arena, whatever the pack held
+    uint64_t offset_bytes = 0;   ///< 0 when the form has no offset plane
 
     /// WHERE THIS TENSOR CAME FROM, so a caller can check the loader's work against the pack's own bytes
     /// instead of against the loader's opinion of them.  Without `src_off` a test can only compare two
@@ -86,7 +86,7 @@ struct WeightRef {
     uint64_t src_off = 0;
     uint64_t src_bytes = 0;
     int file_id = 0;
-    bool scales_fp16 = false;     ///< the PACK's width, before the loader widened it
+    bool scales_fp16 = false;   ///< the PACK's width, before the loader widened it
 
     /// WHICH ACTIVATION THIS WEIGHT WANTS - 0 for Q8_0, 1 for Q8_K.  Decided by the pack from
     /// source_type and carried here, because **the S-form CANNOT express it**: Q5_0 and Q5_K are both 8-bit
@@ -113,8 +113,8 @@ struct WeightRef {
 struct LoadReport {
     size_t tensors = 0;
     uint64_t arena_bytes = 0;
-    size_t re_rounded = 0;        ///< tensors written as 16 bits out of a 32-bit container
-    uint64_t bytes_saved = 0;     ///< what those conversions saved against the pack
+    size_t re_rounded = 0;      ///< tensors written as 16 bits out of a 32-bit container
+    uint64_t bytes_saved = 0;   ///< what those conversions saved against the pack
     double read_ms = 0.0;
     double upload_ms = 0.0;
 };
@@ -150,4 +150,4 @@ private:
     LoadReport report_;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

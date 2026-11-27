@@ -5,7 +5,8 @@
 namespace lamina {
 
 inline constexpr const char* kDraftLayerArch = "qwen4exp-mtp";   ///< its general.architecture
-inline constexpr unsigned kDraftLayerVersion = 1;                 ///< its lamina.mtp.version: the layout the engine reads
+inline constexpr unsigned kDraftLayerVersion = 1;                ///< its lamina.mtp.version: the
+                                                                 ///< layout the engine reads
 inline constexpr const char* kDraftLayerFile = "Lamina-Qwen3.8-Flash-Next-MTP.gguf";
 inline constexpr const char* kDraftLayerUrl = "https://huggingface.co/eddoursul/Lamina-Qwen3.8-Flash-Next-MTP";
 /// this platform's script that downloads it into a folder
@@ -15,4 +16,4 @@ inline constexpr const char* kDraftLayerScript = "download-draft-layer.bat";
 inline constexpr const char* kDraftLayerScript = "download-draft-layer.sh";
 #endif
 
-}  // namespace lamina
+}   // namespace lamina

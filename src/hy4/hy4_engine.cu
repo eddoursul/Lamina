@@ -10,8 +10,8 @@
 //     the sparse layers, over the cells the indexer picks, the dense FFN of layer 0, the latent MoE elsewhere; the
 //     head after the streams' reduce;
 //   * generate mode: --tokens IDS [--n N] [--force IDS] [--dump-full-logits F] (parity runs against llama.cpp).
-#include "hy4_kernels.cuh"
 #include "hy4_dfly_file.hpp"
+#include "hy4_kernels.cuh"
 #include "hy4_place.hpp"
 #include "hy4_prompt.cuh"
 
@@ -83,7 +83,7 @@ using Clock = std::chrono::steady_clock;
     do {                                                                                                               \
         cudaError_t e_ = (x);                                                                                          \
         if (e_ != cudaSuccess) {                                                                                       \
-            std::fprintf(stderr, "lamina: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
+            std::fprintf(stderr, "lamina: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__);   \
             throw Fatal{1};                                                                                            \
         }                                                                                                              \
     } while (0)
@@ -113,7 +113,7 @@ struct Owned {
     }
 };
 Owned* g_owned = nullptr;
-template <class V, class T> void own(std::vector<V> Owned::*list, T v) {
+template <class V, class T> void own(std::vector<V> Owned::* list, T v) {
     if (g_owned == nullptr) return;
     std::lock_guard<std::mutex> lk(g_owned->mu);
     (g_owned->*list).push_back((V) v);
@@ -145,11 +145,11 @@ void* heap_new(size_t n) {
     return h;
 }
 
-constexpr int kMaxT = 8;              // rows a forward takes at most (native_mmvq's columns)
-constexpr int kTail = 16;             // the indexer's per-cell value / gate rows kept (four groups of 4)
-constexpr int kScoreBlocks = 128;     // the indexer scores' grid (a grid-stride loop over the groups)
+constexpr int kMaxT = 8;                       // rows a forward takes at most (native_mmvq's columns)
+constexpr int kTail = 16;                      // the indexer's per-cell value / gate rows kept (four groups of 4)
+constexpr int kScoreBlocks = 128;              // the indexer scores' grid (a grid-stride loop over the groups)
 constexpr float kEngramEps = 1.1920929e-07f;   // the reference's unset RMSNorm eps: FLT_EPSILON
-constexpr size_t kWeightPad = 4096;   // zero bytes after each dense weight
+constexpr size_t kWeightPad = 4096;            // zero bytes after each dense weight
 
 // ------------------------------------------------------------------------------------------------ the model
 struct Mat {
@@ -160,11 +160,11 @@ struct Mat {
 
 /// A GPU's slots of one MoE layer
 struct SlotSet {
-    uint8_t* slots = nullptr;          // n blobs, the layer's stride apart (device)
+    uint8_t* slots = nullptr;   // n blobs, the layer's stride apart (device)
     int n = 0;
-    std::vector<int32_t> slot_of;      // [n_expert]: its slot or -1 (host)
-    std::vector<int32_t> slot_expert;  // [n]: its expert or -1
-    int32_t* slot_of_d = nullptr;      // slot_of on that GPU
+    std::vector<int32_t> slot_of;       // [n_expert]: its slot or -1 (host)
+    std::vector<int32_t> slot_expert;   // [n]: its expert or -1
+    int32_t* slot_of_d = nullptr;       // slot_of on that GPU
 };
 
 struct Layer {
@@ -173,8 +173,8 @@ struct Layer {
     int eng = -1;   // its Engram module, or -1
     int H = 0;
     float theta = 0;   // rope theta_scale = base^(-2 / n_rot)
-    const float *attn_norm = nullptr, *sinks = nullptr, *q_a_norm = nullptr, *kv_a_norm = nullptr,
-                *post_attn = nullptr, *ffn_norm = nullptr, *post_ffw = nullptr;
+    const float *attn_norm = nullptr, *sinks = nullptr, *q_a_norm = nullptr, *kv_a_norm = nullptr, *post_attn = nullptr,
+                *ffn_norm = nullptr, *post_ffw = nullptr;
     Mat q_a, q_b, kv_a, k_b, v_b, wo, gate;
     const float *hca_fn = nullptr, *hca_base = nullptr, *hca_scale = nullptr;
     const float *hcf_fn = nullptr, *hcf_base = nullptr, *hcf_scale = nullptr;
@@ -200,21 +200,21 @@ struct Layer {
     std::vector<char> blob_pinned;
     size_t stride = 0;
     // the experts in VRAM: each GPU's slots (Engine::gpus: [0] the main GPU, then the expert tiers)
-    K::NativeExpertLayout gl;          // the GPUs' view of a blob
+    K::NativeExpertLayout gl;   // the GPUs' view of a blob
     std::vector<SlotSet> held;
-    std::vector<float> use;            // routing counts, halved at each rebalance
-    std::vector<char> moving;          // [n_expert]: a copy into some GPU's slot in flight (Engine::issue)
-    std::vector<float> total;          // the run's routing counts (the learned profile's)
-    std::vector<float> start;          // the start profile's shares (empty: none)
+    std::vector<float> use;     // routing counts, halved at each rebalance
+    std::vector<char> moving;   // [n_expert]: a copy into some GPU's slot in flight (Engine::issue)
+    std::vector<float> total;   // the run's routing counts (the learned profile's)
+    std::vector<float> start;   // the start profile's shares (empty: none)
     // caches
-    uint8_t* kv = nullptr;      // latent rows: the context's cells (sparse) or the window's ring
+    uint8_t* kv = nullptr;   // latent rows: the context's cells (sparse) or the window's ring
     int64_t kv_cells = 0;
-    bool kv_q8 = false;         // its rows in q8_0 (--kv q8_0: the sparse layers'), else halves
+    bool kv_q8 = false;   // its rows in q8_0 (--kv q8_0: the sparse layers'), else halves
     size_t kv_row() const { return kv_q8 ? (size_t) hy4k::kKvQ8Row : (size_t) hy4k::kKvRow * sizeof(__half); }
     // the K/V grown with the context (Engine::ensure): the sparse layer's cells and pooled keys; the main GPU's slots
     std::shared_ptr<lamina::core::VmmRange> kv_vm, pooled_vm, slot_vm;
-    float* pooled = nullptr;    // the indexer's pooled keys [ctx / pool][idx_dim]
-    float* tail = nullptr;      // the indexer's last kTail cells' value and gate rows [kTail][2][idx_dim]
+    float* pooled = nullptr;   // the indexer's pooled keys [ctx / pool][idx_dim]
+    float* tail = nullptr;     // the indexer's last kTail cells' value and gate rows [kTail][2][idx_dim]
 };
 
 struct Model {
@@ -225,9 +225,9 @@ struct Model {
     Layer mtp;
     Mat eh_proj;
     const float *mtp_enorm = nullptr, *mtp_hnorm = nullptr, *mtp_shnorm = nullptr;
-    // DFly2 (--drafter FILE; the MTP block is then not loaded): layers as the trunk's sparse ones with dense FFNs, each on
-    // the K/V and the index picks of its trunk layer (target); the block's first row fused with the trunk's state, each
-    // draft's state corrected with the last draft's embedding
+    // DFly2 (--drafter FILE; the MTP block is then not loaded): layers as the trunk's sparse ones with dense FFNs, each
+    // on the K/V and the index picks of its trunk layer (target); the block's first row fused with the trunk's state,
+    // each draft's state corrected with the last draft's embedding
     struct DFly {
         bool on = false;
         std::vector<Layer> layers;
@@ -246,9 +246,10 @@ struct Model {
     std::string table_path;
     uint64_t table_off = 0;
     double arena_gib = 0;
-    size_t pinned = 0;   // the arena's bytes in pinned memory
-    int32_t eos = -1;   // tokenizer.ggml.eos_token_id: the end of an answer
-    int32_t image_pad = -1;   // <｜hy_image▁pad｜>: a picture's cells in a prompt (the template writes one, the server n)
+    size_t pinned = 0;        // the arena's bytes in pinned memory
+    int32_t eos = -1;         // tokenizer.ggml.eos_token_id: the end of an answer
+    int32_t image_pad = -1;   // <｜hy_image▁pad｜>: a picture's cells in a
+                              // prompt (the template writes one, the server n)
 };
 
 /// Rows of floats as a Q8_0 matrix on the device (ggml's quantizer; kWeightPad zero bytes after it)
@@ -277,8 +278,8 @@ struct Loader {
     std::string err;
     std::map<const lamina::TensorInfo*, const uint8_t*> pre;   // tensors read ahead (read_ahead), else the mapping's
     std::unique_ptr<uint8_t[]> pre_buf;
-    /// Every tensor `want` takes, read in large pieces into host memory: a copy out of the mapping faults its pages in a
-    /// few at a time
+    /// Every tensor `want` takes, read in large pieces into host memory: a copy out of the mapping faults its pages in
+    /// a few at a time
     bool read_ahead(const std::function<bool(const std::string&)>& want, int threads, bool uncached, std::string& e) {
         std::vector<lamina::platform::SliceRun> runs;
         std::vector<std::pair<const lamina::TensorInfo*, uint64_t>> at;
@@ -294,7 +295,8 @@ struct Loader {
         pre_buf.reset(new (std::nothrow) uint8_t[std::max<uint64_t>(total, 64)]);
         if (!pre_buf) return true;   // the mapping's, then
         uint8_t* b = pre_buf.get();
-        if (!lamina::platform::read_slices(runs, threads, uncached, (uint64_t) 32 << 20, [b](int) { return b; }, e)) return false;
+        if (!lamina::platform::read_slices(runs, threads, uncached, (uint64_t) 32 << 20, [b](int) { return b; }, e))
+            return false;
         for (const auto& [t, o] : at) pre[t] = b + o;
         return true;
     }
@@ -344,8 +346,10 @@ struct Loader {
             return m;
         }
         if ((t->type != 30 && t->type != 0) || m.n_in % 32 != 0) {
-            std::fprintf(stderr, "lamina: %s is %s; this path reads its dense matrices as Q8_0 (or BF16 / F32 made "
-                         "Q8_0)\n", name.c_str(), t->type_name());
+            std::fprintf(stderr,
+                         "lamina: %s is %s; this path reads its dense matrices as Q8_0 (or BF16 / F32 made "
+                         "Q8_0)\n",
+                         name.c_str(), t->type_name());
             throw Fatal{1};
         }
         const size_t n = (size_t) rows * (size_t) m.n_in;
@@ -383,8 +387,8 @@ void bf16_rows_q8_0(const uint8_t* bf16, uint8_t* dst, int64_t rows, int64_t col
 
 /// The start profile's order of each MoE layer's experts (the learned one first, as load_profile takes them): the most
 /// used first; empty when there is none of this model's shape
-std::vector<std::vector<int32_t>> profile_order(const std::vector<std::string>& paths, int64_t n_layers, int64_t n_dense,
-                                                int64_t n_expert) {
+std::vector<std::vector<int32_t>> profile_order(const std::vector<std::string>& paths, int64_t n_layers,
+                                                int64_t n_dense, int64_t n_expert) {
     for (const std::string& path : paths) {
         if (path.empty()) continue;
         FILE* f = std::fopen(path.c_str(), "rb");
@@ -398,7 +402,8 @@ std::vector<std::vector<int32_t>> profile_order(const std::vector<std::string>& 
             ok = std::fread(sh.data(), 4, sh.size(), f) == sh.size();
             std::vector<int32_t> order((size_t) n_expert);
             for (int64_t e = 0; e < n_expert; ++e) order[(size_t) e] = (int32_t) e;
-            std::stable_sort(order.begin(), order.end(), [&](int32_t a, int32_t b) { return sh[(size_t) a] > sh[(size_t) b]; });
+            std::stable_sort(order.begin(), order.end(),
+                             [&](int32_t a, int32_t b) { return sh[(size_t) a] > sh[(size_t) b]; });
             out.push_back(std::move(order));
         }
         std::fclose(f);
@@ -414,9 +419,15 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     {   // what the file must hold for this path, before anything is read (lamina check says the same of it)
         lamina::core::FileCheckOptions fo;
         fo.mtp = want_mtp;
-        if (std::string e = lamina::core::hy4_file_problem(gm, fo); !e.empty()) { err = e; return false; }
+        if (std::string e = lamina::core::hy4_file_problem(gm, fo); !e.empty()) {
+            err = e;
+            return false;
+        }
     }
-    if (std::string e = lamina::hy4::read_geometry(gm.meta(), m.g); !e.empty()) { err = e; return false; }
+    if (std::string e = lamina::hy4::read_geometry(gm.meta(), m.g); !e.empty()) {
+        err = e;
+        return false;
+    }
     if (const lamina::MetaValue* v = gm.meta().get("tokenizer.ggml.eos_token_id"); v && v->is_num())
         m.eos = (int32_t) v->u;
     m.image_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_image\xE2\x96\x81pad");
@@ -425,16 +436,21 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     {   // the dense tensors: all but the routed experts, the Engram table and the MTP block when it is not loaded
         const std::string mtp = "blk." + std::to_string(g.n_layers) + ".";
         const bool keep_mtp = want_mtp && g.n_mtp > 0;
-        if (!L.read_ahead([&](const std::string& n) {
-                return n.find("_exps.") == std::string::npos && n != "per_layer_token_embd.weight" &&
-                       (keep_mtp || n.rfind(mtp, 0) != 0);
-            }, threads, !file_cache, err))
+        if (!L.read_ahead(
+                [&](const std::string& n) {
+                    return n.find("_exps.") == std::string::npos && n != "per_layer_token_embd.weight" &&
+                           (keep_mtp || n.rfind(mtp, 0) != 0);
+                },
+                threads, !file_cache, err))
             return false;
     }
     {
         size_t s = 0;
         const lamina::TensorInfo* t = gm.find("per_layer_token_embd.weight", &s);
-        if (t->type != 43) { err = "per_layer_token_embd.weight is " + std::string(t->type_name()) + ", expected F8_E4M3"; return false; }
+        if (t->type != 43) {
+            err = "per_layer_token_embd.weight is " + std::string(t->type_name()) + ", expected F8_E4M3";
+            return false;
+        }
         m.table_path = gm.shard(s).path();
         m.table_off = gm.shard(s).data_start() + t->offset;
     }
@@ -442,7 +458,10 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     m.embd = L.raw("token_embd.weight", &te);
     m.embd_type = (int) te->type;
     m.embd_row = (size_t) (lamina::tensor_payload_bytes(*te) / te->shape[1]);
-    if (!K::iq_supported(m.embd_type)) { err = std::string("token_embd.weight is ") + te->type_name() + ", which iq_embed_rows does not read"; return false; }
+    if (!K::iq_supported(m.embd_type)) {
+        err = std::string("token_embd.weight is ") + te->type_name() + ", which iq_embed_rows does not read";
+        return false;
+    }
     m.out_norm = L.f32("output_norm.weight");
     m.ohc_fn = L.f32("output_hc_fn.weight");
     m.ohc_base = L.f32("output_hc_base.weight");
@@ -450,7 +469,10 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     {
         const lamina::TensorInfo* th = nullptr;
         m.head = reinterpret_cast<const uint16_t*>(L.raw("output.weight", &th));
-        if (th->type != 30) { err = std::string("output.weight is ") + th->type_name() + ", expected BF16"; return false; }
+        if (th->type != 30) {
+            err = std::string("output.weight is ") + th->type_name() + ", expected BF16";
+            return false;
+        }
     }
     m.layers.resize((size_t) g.n_layers);
     m.has_mtp = want_mtp && g.n_mtp > 0;
@@ -461,7 +483,10 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         y.il = (int) l;
         y.swa = g.swa[(size_t) l];
         y.has_idx = g.has_indexer(l);
-        if (!y.swa && !y.has_idx) { err = p + ": a sparse layer without an indexer, which this path does not run"; return false; }
+        if (!y.swa && !y.has_idx) {
+            err = p + ": a sparse layer without an indexer, which this path does not run";
+            return false;
+        }
         y.mtp = mtp;
         y.dense = !mtp && l < g.n_dense;
         y.eng = mtp ? -1 : g.engram_index(l);
@@ -537,7 +562,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         Layer* y;
         const uint8_t *g, *u, *d;
         size_t gsz, dsz;
-        bool bf16 = false;   // BF16 experts (the MTP block's): each matrix quantized to Q8_0 into the blob
+        bool bf16 = false;        // BF16 experts (the MTP block's): each matrix quantized to Q8_0 into the blob
         std::string gp, up, dp;   // the shards that hold the three tensors, and their places in them
         uint64_t go = 0, uo = 0, dof = 0;
     };
@@ -557,12 +582,20 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         if (y.dense) continue;
         const std::string p = "blk." + std::to_string(y.il) + ".";
         const lamina::TensorInfo *tg = nullptr, *tu = nullptr, *td = nullptr;
-        Src s{&y, L.host(p + "ffn_gate_exps.weight", &tg), L.host(p + "ffn_up_exps.weight", &tu),
-              L.host(p + "ffn_down_exps.weight", &td), 0, 0, false};
+        Src s{&y,
+              L.host(p + "ffn_gate_exps.weight", &tg),
+              L.host(p + "ffn_up_exps.weight", &tu),
+              L.host(p + "ffn_down_exps.weight", &td),
+              0,
+              0,
+              false};
         s.go = file_at(p + "ffn_gate_exps.weight", s.gp);
         s.uo = file_at(p + "ffn_up_exps.weight", s.up);
         s.dof = file_at(p + "ffn_down_exps.weight", s.dp);
-        if (tg->type != tu->type) { err = p + "ffn_gate_exps and ffn_up_exps differ in type"; return false; }
+        if (tg->type != tu->type) {
+            err = p + "ffn_gate_exps and ffn_up_exps differ in type";
+            return false;
+        }
         s.bf16 = tg->type == 30 && td->type == 30;   // quantized here, to Q8_0
         const int gt = s.bf16 ? 8 : (int) tg->type, dt = s.bf16 ? 8 : (int) td->type;
         if (!C::native_fmt(gt, dt, g.n_latent, g.n_ff_exp, y.fmt, err)) {
@@ -572,7 +605,10 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         y.fmt.swiglu_limit = g.swiglu_limit[(size_t) y.il];
         s.gsz = lamina::tensor_payload_bytes(*tg) / (size_t) g.n_expert;
         s.dsz = lamina::tensor_payload_bytes(*td) / (size_t) g.n_expert;
-        if (!s.bf16 && (s.gsz != y.fmt.up_off || 2 * s.gsz + s.dsz != y.fmt.bytes)) { err = p + "routed experts: unexpected blob layout"; return false; }
+        if (!s.bf16 && (s.gsz != y.fmt.up_off || 2 * s.gsz + s.dsz != y.fmt.bytes)) {
+            err = p + "routed experts: unexpected blob layout";
+            return false;
+        }
         {   // whole blocks of both types (MMQ reads expert e at e * stride), 64-byte aligned
             int be = 0, bg = 0, bd = 0;
             lamina::block_geometry((uint32_t) gt, be, bg);
@@ -652,7 +688,8 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
             for (size_t j = i + 1; j < src.size(); ++j)
                 later_cold += src[j].y->stride * (size_t) (g.n_expert - (src[j].y->mtp ? 0 : hot));
             uint8_t* hotb = n_hot && (double) (pinned + n_hot * st + later_cold) <= pin_gib * (double) (1ull << 30)
-                                ? pin(n_hot * st) : nullptr;
+                                ? pin(n_hot * st)
+                                : nullptr;
             const bool hot_pinned = hotb != nullptr;
             if (!cold) cold = (uint8_t*) heap_new(std::max<size_t>(n_cold * st, 64));
             if (n_hot && !hotb) hotb = (uint8_t*) heap_new(n_hot * st);
@@ -699,13 +736,16 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         read_bytes += (uint64_t) (2 * s.gsz + s.dsz) * (uint64_t) g.n_expert;
     }
     double read_s = 0;
-    const bool read_ok = lamina::platform::read_slices(runs, std::max(1, threads), !file_cache, (uint64_t) 32 << 20, base,
-                                                  err, &read_s);
+    const bool read_ok =
+        lamina::platform::read_slices(runs, std::max(1, threads), !file_cache, (uint64_t) 32 << 20, base, err, &read_s);
     for (size_t i = 0; i < src.size(); ++i) base((int) i);   // every block made (or the allocation's end)
     if (alloc.joinable()) alloc.join();
     if (!read_ok) return false;
     for (size_t i = 0; i < src.size(); ++i)
-        if (bases[i] == nullptr) { err = "out of host memory for the routed experts"; return false; }
+        if (bases[i] == nullptr) {
+            err = "out of host memory for the routed experts";
+            return false;
+        }
     // BF16 experts (the MTP block's): each matrix through float into Q8_0 rows, gate, up (n_ff rows of n_latent), down
     std::atomic<size_t> next{0};
     std::vector<size_t> bf;
@@ -727,14 +767,15 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         for (int i = 0; i < std::max(1, threads); ++i) th.emplace_back(convert);
         for (auto& t : th) t.join();
     }
-    std::fprintf(stderr, "lamina: Hy4-flash: %lld layers%s, dense weights on the GPU in %.1f s, the routed experts "
+    std::fprintf(stderr,
+                 "lamina: Hy4-flash: %lld layers%s, dense weights on the GPU in %.1f s, the routed experts "
                  "(%.1f GiB, %.1f of it pinned%s) in host memory in %.1f s (read %s the file cache at %.1f GiB/s; "
-                 "the blocks made in %.1f s beside)\n", (long long) g.n_layers, m.has_mtp ? " and the MTP block" : "",
-                 dense_s, m.arena_gib, (double) m.pinned / (double) (1ull << 30),
+                 "the blocks made in %.1f s beside)\n",
+                 (long long) g.n_layers, m.has_mtp ? " and the MTP block" : "", dense_s, m.arena_gib,
+                 (double) m.pinned / (double) (1ull << 30),
                  hot > 0 ? (", each layer's " + std::to_string(hot) + " most used experts pageable").c_str() : "",
-                 ms_since(t0) / 1000.0 - dense_s,
-                 file_cache ? "through" : "past", read_s > 0 ? (double) read_bytes / read_s / (double) (1ull << 30) : 0.0,
-                 alloc_s);
+                 ms_since(t0) / 1000.0 - dense_s, file_cache ? "through" : "past",
+                 read_s > 0 ? (double) read_bytes / read_s / (double) (1ull << 30) : 0.0, alloc_s);
     return true;
 }
 
@@ -841,8 +882,10 @@ bool load_dfly(const std::string& path, Model& m, std::string& err) {
     }
     CK(cudaDeviceSynchronize());
     d.on = true;
-    std::fprintf(stderr, "lamina: DFly2: %zu layers on the trunk's layers %d .. %d, its FFN %d, a block of %d rows, in "
-                 "%.1f s\n", d.layers.size(), d.target.front(), d.target.back(), d.layers[0].f_gate.n_out, d.width,
+    std::fprintf(stderr,
+                 "lamina: DFly2: %zu layers on the trunk's layers %d .. %d, its FFN %d, a block of %d rows, in "
+                 "%.1f s\n",
+                 d.layers.size(), d.target.front(), d.target.back(), d.layers[0].f_gate.n_out, d.width,
                  ms_since(t0) / 1000.0);
     return true;
 }
@@ -905,8 +948,8 @@ struct SlotMove {
     std::atomic<bool> issued{false};
     std::atomic<bool> ok{true};
 };
-/// A GPU's slot copies, issued in order on its copy stream by a thread of its own: a copy from pageable memory holds the
-/// thread that issues it until its bytes are staged, and the decode's thread must not wait for that
+/// A GPU's slot copies, issued in order on its copy stream by a thread of its own: a copy from pageable memory holds
+/// the thread that issues it until its bytes are staged, and the decode's thread must not wait for that
 struct CopyQueue {
     int dev = 0;
     cudaStream_t st = nullptr;
@@ -1014,8 +1057,8 @@ struct FileGone {
 
 struct Engine {
     Model* m = nullptr;
-    int64_t ctx = 0;     // cells of the sparse layers' caches
-    int64_t ring = 0;    // cells of a window layer's ring
+    int64_t ctx = 0;    // cells of the sparse layers' caches
+    int64_t ring = 0;   // cells of a window layer's ring
     cudaStream_t st = nullptr;
     std::unique_ptr<C::ExpertPool> pool;
     lamina::ngram::PleReader reader;
@@ -1091,12 +1134,23 @@ struct Engine {
         if (rows > 0) std::fwrite(ids_, 4, (size_t) rows * (size_t) m->g.top_k, route_dump);
         if (kind >= 2) std::fflush(route_dump);
     }
-    static constexpr const char* kPhaseNames[kPhases] = {
-        "the embedding", "Engram", "the streams' mixes and the FFN input", "q_a, q_b, kv_a and the gate",
-        "k_b and the cell", "the indexer", "the attention", "v_b, the gate and the output", "the router, routed_down "
-        "and the copies", "its routed experts", "the shared expert", "the MoE's end", "layer 0's FFN", "the head"};
+    static constexpr const char* kPhaseNames[kPhases] = {"the embedding",
+                                                         "Engram",
+                                                         "the streams' mixes and the FFN input",
+                                                         "q_a, q_b, kv_a and the gate",
+                                                         "k_b and the cell",
+                                                         "the indexer",
+                                                         "the attention",
+                                                         "v_b, the gate and the output",
+                                                         "the router, routed_down "
+                                                         "and the copies",
+                                                         "its routed experts",
+                                                         "the shared expert",
+                                                         "the MoE's end",
+                                                         "layer 0's FFN",
+                                                         "the head"};
     Clock::time_point ph_t;
-    int ph_rows = 0;      // the forward's rows (0: not a trunk forward, nothing is marked)
+    int ph_rows = 0;   // the forward's rows (0: not a trunk forward, nothing is marked)
     /// trace level 3: the stream waited for, the time since the last mark added to phase k of this forward's rows
     void ph(int k) {
         if (trace < 3 || ph_rows == 0) return;
@@ -1114,13 +1168,15 @@ struct Engine {
         Trace::Part all;
         auto line = [&](const char* rows, const Trace::Part& x) {
             const double f = 1.0 / (double) x.n, L = x.layers ? 1.0 / (double) x.layers : 0.0;
-            std::fprintf(stderr, "lamina: trace (%s): %s: %lld forwards, %.2f ms each: the table %.2f, the waits for a "
-                         "layer's routing %.2f, the holders %.2f, the tiers' launches %.2f, the pool %.2f (in %.0f%% of "
-                         "the layers, %.1f experts, %.1f entries), the tiers' rows after it %.2f (a tier in %.0f%%), the "
-                         "main GPU after them %.2f, the segments' launches %.2f\n", what, rows, (long long) x.n,
-                         x.ms * f, x.table * f, x.route * f, x.scan * f, x.tier_launch * f, x.pool * f,
-                         100.0 * (double) x.pool_layers * L, (double) x.cpu_experts * f, (double) x.cpu_entries * f,
-                         x.tier_wait * f, 100.0 * (double) x.tier_layers * L, x.main_tail * f, x.launch * f);
+            std::fprintf(
+                stderr,
+                "lamina: trace (%s): %s: %lld forwards, %.2f ms each: the table %.2f, the waits for a "
+                "layer's routing %.2f, the holders %.2f, the tiers' launches %.2f, the pool %.2f (in %.0f%% of "
+                "the layers, %.1f experts, %.1f entries), the tiers' rows after it %.2f (a tier in %.0f%%), the "
+                "main GPU after them %.2f, the segments' launches %.2f\n",
+                what, rows, (long long) x.n, x.ms * f, x.table * f, x.route * f, x.scan * f, x.tier_launch * f,
+                x.pool * f, 100.0 * (double) x.pool_layers * L, (double) x.cpu_experts * f, (double) x.cpu_entries * f,
+                x.tier_wait * f, 100.0 * (double) x.tier_layers * L, x.main_tail * f, x.launch * f);
         };
         for (int t = 1; t <= kMaxT; ++t) {
             const Trace::Part& x = tr.by[t];
@@ -1146,11 +1202,11 @@ struct Engine {
                         txt += b;
                         sum += tr.phase[t][k];
                     }
-                    std::fprintf(stderr, "lamina: trace (%s): the main GPU's ms a forward of %d row%s, %.2f: %s\n", what, t,
-                                 t == 1 ? "" : "s", sum / (double) tr.by[t].n, txt.c_str());
+                    std::fprintf(stderr, "lamina: trace (%s): the main GPU's ms a forward of %d row%s, %.2f: %s\n",
+                                 what, t, t == 1 ? "" : "s", sum / (double) tr.by[t].n, txt.c_str());
                 }
-            std::fprintf(stderr, "lamina: trace (%s): a forward's logits waited for %.2f ms, its drafts took %.2f\n", what,
-                         tr.logits / (double) all.n, tr.draft / (double) all.n);
+            std::fprintf(stderr, "lamina: trace (%s): a forward's logits waited for %.2f ms, its drafts took %.2f\n",
+                         what, tr.logits / (double) all.n, tr.draft / (double) all.n);
             std::string by_layer;
             for (int i = 0; i < 64; ++i) {
                 if (tr.l_ent[i] == 0) continue;
@@ -1172,8 +1228,8 @@ struct Engine {
     void init(Model& model, int64_t max_ctx, int threads) {
         m = &model;
         if (m->dfly.on)
-            dfly_ld = (int) ((m->g.idx_top_k + m->dfly.width + hy4k::kAttnChunk - 1) / hy4k::kAttnChunk *
-                             hy4k::kAttnChunk);
+            dfly_ld =
+                (int) ((m->g.idx_top_k + m->dfly.width + hy4k::kAttnChunk - 1) / hy4k::kAttnChunk * hy4k::kAttnChunk);
         const auto& g = m->g;
         ctx = (max_ctx + g.idx_pool - 1) / g.idx_pool * g.idx_pool;
         ring = g.n_swa + kMaxT;
@@ -1282,8 +1338,8 @@ struct Engine {
         h_miss = hmapped<int32_t>(n_ent, &h_miss_d);
         rinq = dalloc<uint8_t>(T * (size_t) g.n_latent / 32 * q81);
         escr = dalloc<uint8_t>(K::native_expert_scratch_bytes((int64_t) n_ent, g.n_ff_exp));
-        // the caches: the window layers' rings; the sparse layers' cells and pooled keys for the whole context, or (grown)
-        // address ranges for it that ensure() maps as the positions come
+        // the caches: the window layers' rings; the sparse layers' cells and pooled keys for the whole context, or
+        // (grown) address ranges for it that ensure() maps as the positions come
         elastic = elastic && lamina::core::vmm_available();
         cl.assign(m->layers.begin(), m->layers.end());
         if (m->has_mtp) cl.push_back(std::ref(m->mtp));
@@ -1383,7 +1439,8 @@ struct Engine {
     std::vector<std::reference_wrapper<Layer>> cl;   // the layers with caches: the trunk, then the MTP block
     // the drafters' input: the trunk's normed final hidden rows of the last kHRing positions; the MTP block's buffers
     static constexpr int kHRing = 16;
-    float *hring = nullptr, *mtp_cat = nullptr, *mtp_x = nullptr, *mtp_hs = nullptr, *mtp_h = nullptr, *mtp_lg = nullptr;
+    float *hring = nullptr, *mtp_cat = nullptr, *mtp_x = nullptr, *mtp_hs = nullptr, *mtp_h = nullptr,
+          *mtp_lg = nullptr;
     uint8_t* mtp_catq = nullptr;
     int32_t *mtp_src = nullptr, *h_src = nullptr;
     bool drafts_on = false;   // drafted windows: the MTP block kept up with the trunk, or DFly's inputs kept (m->dfly)
@@ -1402,9 +1459,10 @@ struct Engine {
             if (m->dfly.target[i] == il) return (int) i;
         return -1;
     }
-    float spec_min_p = 0.f;   // a window's drafts while their joint probability under the drafter's head stays >= this
+    float spec_min_p = 0.f;                           // a window's drafts while their joint probability
+                                                      // under the drafter's head stays >= this
     cudaEvent_t ev_moe = nullptr, ev_mtp = nullptr;   // the MoE block's routing event: ev (the decode's), ev_mtp
-    ~Engine() {   // (the ranges free their own chunks with the model)
+    ~Engine() {                                       // (the ranges free their own chunks with the model)
         if (route_dump) std::fclose(route_dump);
         for (const lamina::core::VmmChunk h : spare) lamina::core::vmm_chunk_free(h);
     }
@@ -1416,7 +1474,8 @@ struct Engine {
         for (const Layer& l : cl) {
             if (!l.kv_vm) continue;
             const int64_t kc = (int64_t) (((uint64_t) cells * l.kv_row() + G - 1) / G);
-            const int64_t pc = (int64_t) (((uint64_t) (cells / m->g.idx_pool) * (uint64_t) m->g.idx_dim * 4 + G - 1) / G);
+            const int64_t pc =
+                (int64_t) (((uint64_t) (cells / m->g.idx_pool) * (uint64_t) m->g.idx_dim * 4 + G - 1) / G);
             for (int64_t c = 0; c < std::min(kc, l.kv_vm->chunks()); ++c) n += l.kv_vm->mapped(c) ? 0 : 1;
             for (int64_t c = 0; c < std::min(pc, l.pooled_vm->chunks()); ++c) n += l.pooled_vm->mapped(c) ? 0 : 1;
         }
@@ -1446,7 +1505,8 @@ struct Engine {
         for (Layer& l : cl) {
             if (!l.kv_vm) continue;
             const int64_t kc = (int64_t) (((uint64_t) target * l.kv_row() + G - 1) / G);
-            const int64_t pc = (int64_t) (((uint64_t) (target / m->g.idx_pool) * (uint64_t) m->g.idx_dim * 4 + G - 1) / G);
+            const int64_t pc =
+                (int64_t) (((uint64_t) (target / m->g.idx_pool) * (uint64_t) m->g.idx_dim * 4 + G - 1) / G);
             if (!l.kv_vm->map_range(0, kc, take) || !l.pooled_vm->map_range(0, pc, take)) {
                 std::fprintf(stderr, "lamina: no VRAM for %lld cells of context\n", (long long) target);
                 throw Fatal{1};
@@ -1484,7 +1544,8 @@ struct Engine {
             std::vector<int32_t> res;   // the residents, most used first
             for (int k = 0; k < sl.n; ++k)
                 if (sl.slot_expert[(size_t) k] >= 0) res.push_back(sl.slot_expert[(size_t) k]);
-            std::stable_sort(res.begin(), res.end(), [&](int32_t a, int32_t b) { return l.use[(size_t) a] > l.use[(size_t) b]; });
+            std::stable_sort(res.begin(), res.end(),
+                             [&](int32_t a, int32_t b) { return l.use[(size_t) a] > l.use[(size_t) b]; });
             std::vector<char> keep(l.use.size(), 0);
             for (size_t i = 0; i < res.size() && (int) i < s2; ++i) keep[(size_t) res[i]] = 1;
             std::vector<int> holes;   // slots that stay, not holding a kept expert
@@ -1523,8 +1584,10 @@ struct Engine {
                 for (int64_t c = (int64_t) (((uint64_t) s2 * l.stride + G - 1) / G); c < l.slot_vm->chunks(); ++c)
                     if (l.slot_vm->mapped(c)) spare.push_back(l.slot_vm->unmap(c));
         gpus[0].S = s2;
-        std::fprintf(stderr, "lamina: the context takes the main GPU's expert slots %d -> %d a layer (%d experts moved "
-                     "down, %d gone)\n", S, s2, moved, gone);
+        std::fprintf(stderr,
+                     "lamina: the context takes the main GPU's expert slots %d -> %d a layer (%d experts moved "
+                     "down, %d gone)\n",
+                     S, s2, moved, gone);
     }
     /// the layers whose experts the main GPU's slots hold (a slot a layer given up is this many slots)
     int lent_layers() const {
@@ -1532,8 +1595,8 @@ struct Engine {
         for (const Layer& l : m->layers) n += l.slot_vm ? 1 : 0;
         return n;
     }
-    /// n chunks for a buffer the prompt path maps for a while: the spare ones, the free VRAM above kReserve (new chunks),
-    /// the rest from the main GPU's last slots (shrink_main puts theirs in spare)
+    /// n chunks for a buffer the prompt path maps for a while: the spare ones, the free VRAM above kReserve (new
+    /// chunks), the rest from the main GPU's last slots (shrink_main puts theirs in spare)
     bool lend_chunks(int64_t n) {
         if (!elastic) return false;
         if ((int64_t) spare.size() >= n) return true;
@@ -1548,13 +1611,13 @@ struct Engine {
             int64_t can = 0;
             for (const Layer& l : m->layers)
                 if (l.slot_vm)
-                    for (int64_t c = (int64_t) (((uint64_t) (gpus[0].S / 4) * l.stride + G - 1) / G); c < l.slot_vm->chunks();
-                         ++c)
+                    for (int64_t c = (int64_t) (((uint64_t) (gpus[0].S / 4) * l.stride + G - 1) / G);
+                         c < l.slot_vm->chunks(); ++c)
                         can += l.slot_vm->mapped(c) ? 1 : 0;
             if (short_by > can) return false;
         }
         CK(cudaStreamSynchronize(st));
-        settle(true);   // no copy in flight into a slot that moves or goes
+        settle(true);                             // no copy in flight into a slot that moves or goes
         lent_from.assign(m->layers.size(), {});   // the residents, for queue_restore
         for (size_t li = 0; li < m->layers.size(); ++li) {
             const Layer& l = m->layers[li];
@@ -1565,8 +1628,8 @@ struct Engine {
         shrink_main(short_by);
         return true;
     }
-    /// The main GPU's residents before a lend (lend_chunks), and the copies that put the ones it displaced back into the
-    /// slots that came back (queue_restore), served by pump ahead of the plan's
+    /// The main GPU's residents before a lend (lend_chunks), and the copies that put the ones it displaced back into
+    /// the slots that came back (queue_restore), served by pump ahead of the plan's
     std::vector<std::vector<int32_t>> lent_from;
     std::vector<Planned> restore;
     size_t restore_next = 0;
@@ -1654,7 +1717,8 @@ struct Engine {
         for (Layer& l : cl) {
             if (!l.kv_vm) continue;
             const int64_t kc = (int64_t) (((uint64_t) target * l.kv_row() + G - 1) / G);
-            const int64_t pc = (int64_t) (((uint64_t) (target / m->g.idx_pool) * (uint64_t) m->g.idx_dim * 4 + G - 1) / G);
+            const int64_t pc =
+                (int64_t) (((uint64_t) (target / m->g.idx_pool) * (uint64_t) m->g.idx_dim * 4 + G - 1) / G);
             for (int64_t c = kc; c < l.kv_vm->chunks(); ++c)
                 if (l.kv_vm->mapped(c)) spare.push_back(l.kv_vm->unmap(c));
             for (int64_t c = pc; c < l.pooled_vm->chunks(); ++c)
@@ -1711,18 +1775,22 @@ struct Engine {
         int last = 0;
         while (done < n) {
             // the prompt path: the rest in pieces as even as chunk_cap allows, a piece that crosses a multiple of
-            // kSnapEvery taking its snapshot there; the decode's forwards: a segment up to the next multiple (a snapshot
-            // there) or the end
+            // kSnapEvery taking its snapshot there; the decode's forwards: a segment up to the next multiple (a
+            // snapshot there) or the end
             const int64_t p = pos();
             const bool chunks = chunk_fn && n - done >= chunk_min;
             if (chunks && base_lent && base_fn) base_fn(false);
             const int64_t seg = chunks ? n - done : std::min<int64_t>(n - done, (p / kSnapEvery + 1) * kSnapEvery - p);
             const bool passes = chunks && pass_fn && pass_cap > chunk_cap && seg >= 2 * chunk_cap && pass_fn(true);
-            const int64_t step = passes ? pass_cap : chunks ? chunk_cap : kMaxT, pieces = (seg + step - 1) / step,
-                          size = (seg + pieces - 1) / pieces;
+            const int64_t step = passes   ? pass_cap
+                                 : chunks ? chunk_cap
+                                          : kMaxT,
+                          pieces = (seg + step - 1) / step, size = (seg + pieces - 1) / pieces;
             struct PassEnd {   // the pass's buffers back however the part ends
                 const std::function<bool(bool)>* fn;
-                ~PassEnd() { if (fn) (*fn)(false); }
+                ~PassEnd() {
+                    if (fn) (*fn)(false);
+                }
             } pass_end{passes ? &pass_fn : nullptr};
             for (int64_t sd = 0; sd < seg;) {
                 const int T = (int) std::min<int64_t>(size, seg - sd);
@@ -1771,7 +1839,6 @@ struct Engine {
         snaps.push_back(std::move(sn));
     }
 
-
     // ---- going back.  The sparse layers' cells and the pooled keys are by position: what a shorter state keeps is
     // already right.  The window layers' rings and the indexer's tail hold the last cells only: going back up to
     // kMaxT tokens leaves them whole (the ring has kMaxT cells to spare, the tail 16); further back takes a snapshot of
@@ -1783,8 +1850,8 @@ struct Engine {
         bool mark = false;            // taken at a multiple of kSnapEvery during a read (kept), else at a prompt's end
     };
     std::vector<Snap> snaps;
-    static constexpr size_t kSnaps = 8;              // prompt ends kept
-    static constexpr int64_t kSnapEvery = 8192;      // a read keeps a snapshot at each multiple of this it passes
+    static constexpr size_t kSnaps = 8;           // prompt ends kept
+    static constexpr int64_t kSnapEvery = 8192;   // a read keeps a snapshot at each multiple of this it passes
     size_t snap_bytes() const {
         size_t n = 0;
         for (const Layer& l : cl) {
@@ -1816,7 +1883,9 @@ struct Engine {
                 at += n;
             }
         }
-        if (hring) CK(cudaMemcpyAsync(s.bytes.data() + at, hring, (size_t) kHRing * m->g.n_embd * 4, cudaMemcpyDeviceToHost, st));
+        if (hring)
+            CK(cudaMemcpyAsync(s.bytes.data() + at, hring, (size_t) kHRing * m->g.n_embd * 4, cudaMemcpyDeviceToHost,
+                               st));
         CK(cudaStreamSynchronize(st));
         snaps.push_back(std::move(s));
     }
@@ -1863,7 +1932,8 @@ struct Engine {
             }
             snap_base = -1;   // DFly's picks are not a snapshot's
         }
-        snaps.erase(std::remove_if(snaps.begin(), snaps.end(), [&](const Snap& s) { return s.pos > pos(); }), snaps.end());
+        snaps.erase(std::remove_if(snaps.begin(), snaps.end(), [&](const Snap& s) { return s.pos > pos(); }),
+                    snaps.end());
         if (live_file) {   // (the file it came back from: its cells and snapshots past here are no longer its own)
             live_file->cut(pos());
             for (size_t i = live_file->slots.size(); i-- > 0;)
@@ -1894,9 +1964,9 @@ struct Engine {
         std::vector<uint8_t> cells;   // per sparse layer: K/V rows [0, pos), then pooled keys [0, pos / pool)
         std::vector<Snap> snaps;
         uint64_t used = 0;
-        File file;                    // on the disk tier: its cells and snapshots there (`cells` and `snaps` empty)
+        File file;   // on the disk tier: its cells and snapshots there (`cells` and `snaps` empty)
         std::vector<SnapRec> recs;
-        bool pin = false;             // lends its start to the live state: it stays as it is meanwhile
+        bool pin = false;        // lends its start to the live state: it stays as it is meanwhile
         size_t bytes() const {   // (its RAM)
             size_t n = cells.size();
             for (const Snap& x : snaps) n += x.bytes.size() + x.logits.size() * 4;
@@ -1908,7 +1978,8 @@ struct Engine {
     uint64_t park_clock = 0;
     size_t park_budget = (size_t) 16384 << 20, ram_reserve = (size_t) 6144 << 20;
     static constexpr int64_t kParkMin = 1024;   // shorter conversations are not parked
-    File live_file;   // the live state's, back from the disk tier: its cells up to its `cells`, its snapshots' records
+    File live_file;                             // the live state's, back from the disk tier: its
+                                                // cells up to its `cells`, its snapshots' records
     size_t parked_bytes() const {
         size_t n = 0;
         for (const Parked& c : park) n += c.bytes();
@@ -1932,7 +2003,8 @@ struct Engine {
     /// The start of the prompt `ids` that a conversation of tokens `s` and snapshots `at` continues from (rewind()'s
     /// rule): the start they share - less its last token where that is all of the prompt and no snapshot there has its
     /// logits - where `s` ends within kMaxT tokens of it, else the last snapshot at or before it
-    static int64_t reusable(const std::vector<int32_t>& s, const std::vector<SnapAt>& at, const std::vector<int32_t>& ids) {
+    static int64_t reusable(const std::vector<int32_t>& s, const std::vector<SnapAt>& at,
+                            const std::vector<int32_t>& ids) {
         const int64_t L = (int64_t) s.size(), n = (int64_t) ids.size();
         int64_t c = 0;
         while (c < L && c < n && s[(size_t) c] == ids[(size_t) c]) ++c;
@@ -1968,10 +2040,12 @@ struct Engine {
             const size_t kr = l.kv_row(), kb = (size_t) (hi - lo) * kr;
             uint8_t* const dk = l.kv + (size_t) lo * kr;
             uint8_t* const dp = reinterpret_cast<uint8_t*>(l.pooled) + (size_t) g0 * pk;
-            if (kb > 0) ok = ok && cudaMemcpyAsync(to_host ? host : dk, to_host ? dk : host, kb, kind, st) == cudaSuccess;
+            if (kb > 0)
+                ok = ok && cudaMemcpyAsync(to_host ? host : dk, to_host ? dk : host, kb, kind, st) == cudaSuccess;
             host += (size_t) (held - lo) * kr;
             if (gn > 0)
-                ok = ok && cudaMemcpyAsync(to_host ? host : dp, to_host ? dp : host, (size_t) gn * pk, kind, st) == cudaSuccess;
+                ok = ok && cudaMemcpyAsync(to_host ? host : dp, to_host ? dp : host, (size_t) gn * pk, kind, st) ==
+                               cudaSuccess;
             host += (size_t) gheld * pk;
         }
         ok = cudaStreamSynchronize(st) == cudaSuccess && ok;
@@ -1982,7 +2056,8 @@ struct Engine {
         const int64_t per = m->g.idx_pool;
         uint64_t n = 0;
         for (const Layer& l : cl)
-            if (!l.swa) n += (uint64_t) (held - lo) * l.kv_row() + (uint64_t) (held / per - lo / per) * m->g.idx_dim * 4;
+            if (!l.swa)
+                n += (uint64_t) (held - lo) * l.kv_row() + (uint64_t) (held / per - lo / per) * m->g.idx_dim * 4;
         return n;
     }
     /// Cells [lo, hi) of a park's copy of `held` cells into `out`, laid out as cells_range lays them out
@@ -2032,8 +2107,8 @@ struct Engine {
                 if (it->file && !it->pin && (lru == park.end() || it->used < lru->used)) lru = it;
             if (lru == park.end()) return false;
             const uint64_t b = disk->bytes(*lru->file);
-            std::fprintf(stderr, "lamina: a parked conversation of %zu tokens leaves the disk (%.0f MiB)\n", lru->seq.size(),
-                         (double) b / (double) (1 << 20));
+            std::fprintf(stderr, "lamina: a parked conversation of %zu tokens leaves the disk (%.0f MiB)\n",
+                         lru->seq.size(), (double) b / (double) (1 << 20));
             park.erase(lru);
             if (phys != UINT64_MAX) phys += b;
         }
@@ -2051,7 +2126,8 @@ struct Engine {
         });
         std::vector<SnapRec> recs;
         for (const Snap& x : c.snaps) {
-            ok = ok && disk->put_record(*f, x.pos, {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
+            ok = ok && disk->put_record(*f, x.pos,
+                                        {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
             recs.push_back({x.pos, x.mark, x.logits.size()});
         }
         if (!ok) return false;
@@ -2076,8 +2152,8 @@ struct Engine {
         size_t fresh = 0;
         for (const Snap& x : snaps) fresh += c.file->slot(x.pos) == nullptr;
         const uint64_t cells = disk->size_of(from, p, per, disk_bytes_of());
-        const uint64_t need = cells + (fresh > c.file->free_slots.size() ? fresh - c.file->free_slots.size() : 0) *
-                                      disk->slot_bytes();
+        const uint64_t need =
+            cells + (fresh > c.file->free_slots.size() ? fresh - c.file->free_slots.size() : 0) * disk->slot_bytes();
         bool ok = disk_room(need, had) && disk->put_cells(*c.file, from, p, per, disk_bytes_of(), disk_copy());
         for (size_t i = c.file->slots.size(); ok && i-- > 0;) {   // (records of snapshots it no longer has)
             const int64_t k = c.file->slots[i].first;
@@ -2085,12 +2161,15 @@ struct Engine {
         }
         for (const Snap& x : snaps) {
             if (ok && c.file->slot(x.pos) == nullptr)
-                ok = disk->put_record(*c.file, x.pos, {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
+                ok = disk->put_record(*c.file, x.pos,
+                                      {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
             c.recs.push_back({x.pos, x.mark, x.logits.size()});
         }
         if (!ok) {
-            std::fprintf(stderr, "lamina: a conversation of %lld tokens is not parked: the disk tier has no room for it, "
-                         "or its file could not be written\n", (long long) p);
+            std::fprintf(stderr,
+                         "lamina: a conversation of %lld tokens is not parked: the disk tier has no room for it, "
+                         "or its file could not be written\n",
+                         (long long) p);
             return;
         }
         c.seq = seq;
@@ -2099,9 +2178,10 @@ struct Engine {
             if (x.pos <= keep) kept.push_back(std::move(x));
         snaps = std::move(kept);
         c.used = ++park_clock;
-        std::fprintf(stderr, "lamina: a conversation of %lld tokens parked on the disk (%.0f MiB written in %.0f ms, its "
-                     "file %.0f MiB, from token %lld)\n", (long long) p,
-                     (double) (cells + fresh * disk->slot_bytes()) / (double) (1 << 20), ms_since(t0),
+        std::fprintf(stderr,
+                     "lamina: a conversation of %lld tokens parked on the disk (%.0f MiB written in %.0f ms, its "
+                     "file %.0f MiB, from token %lld)\n",
+                     (long long) p, (double) (cells + fresh * disk->slot_bytes()) / (double) (1 << 20), ms_since(t0),
                      (double) disk->bytes(*c.file) / (double) (1 << 20), (long long) from);
         park.push_back(std::move(c));
     }
@@ -2123,7 +2203,11 @@ struct Engine {
         size_t n = 0;
         for (const Layer& l : cl)
             if (!l.swa) n += (size_t) p * l.kv_row() + (size_t) groups * (size_t) g.idx_dim * 4;
-        const size_t need = n + [&] { size_t k = 0; for (const Snap& x : snaps) k += x.bytes.size() + x.logits.size() * 4; return k; }();
+        const size_t need = n + [&] {
+            size_t k = 0;
+            for (const Snap& x : snaps) k += x.bytes.size() + x.logits.size() * 4;
+            return k;
+        }();
         // the budget counts the snapshots too; the RAM, the cells alone (the snapshots are in RAM already)
         uint64_t avail = 0;
         const bool known = lamina::platform::available_ram(avail);
@@ -2133,7 +2217,8 @@ struct Engine {
         size_t movable = 0;
         for (const Parked& x : park)
             if (!x.file && !x.pin) movable += x.bytes();
-        const bool fits = parked_bytes() - movable + need <= park_budget && (!known || avail + movable >= n + ram_reserve);
+        const bool fits =
+            parked_bytes() - movable + need <= park_budget && (!known || avail + movable >= n + ram_reserve);
         while (fits && short_of()) {
             auto lru = park.end();
             for (auto it = park.begin(); it != park.end(); ++it)
@@ -2154,8 +2239,10 @@ struct Engine {
                 park_to_disk(keep);
                 return;
             }
-            std::fprintf(stderr, "lamina: a conversation of %lld tokens is not parked: %.0f MiB, over the park's budget "
-                         "or the RAM reserve\n", (long long) p, (double) need / (double) (1 << 20));
+            std::fprintf(stderr,
+                         "lamina: a conversation of %lld tokens is not parked: %.0f MiB, over the park's budget "
+                         "or the RAM reserve\n",
+                         (long long) p, (double) need / (double) (1 << 20));
             return;
         }
         c.cells.resize(n);
@@ -2196,11 +2283,13 @@ struct Engine {
                 s.mark = r.mark;
                 s.bytes.resize(snap_bytes());
                 s.logits.resize(r.n_logits);
-                ok = ok && disk->get_record(*c.file, r.pos, {{s.bytes.data(), s.bytes.size()}, {s.logits.data(), s.logits.size() * 4}});
+                ok = ok && disk->get_record(*c.file, r.pos,
+                                            {{s.bytes.data(), s.bytes.size()}, {s.logits.data(), s.logits.size() * 4}});
                 snaps.push_back(std::move(s));
             }
             if (!ok) {   // (the state starts over)
-                std::fprintf(stderr, "lamina: a parked conversation of %lld tokens could not be read back from the disk\n",
+                std::fprintf(stderr,
+                             "lamina: a parked conversation of %lld tokens could not be read back from the disk\n",
                              (long long) p);
                 snaps.clear();
                 seq.clear();
@@ -2251,7 +2340,8 @@ struct Engine {
                 s.mark = x.mark;
                 s.bytes.resize(snap_bytes());
                 s.logits.resize(x.n_logits);
-                ok = disk->get_record(*c.file, x.pos, {{s.bytes.data(), s.bytes.size()}, {s.logits.data(), s.logits.size() * 4}});
+                ok = disk->get_record(*c.file, x.pos,
+                                      {{s.bytes.data(), s.bytes.size()}, {s.logits.data(), s.logits.size() * 4}});
                 got.push_back(std::move(s));
             }
         } else {
@@ -2478,11 +2568,11 @@ struct Engine {
         const bool post_fused = fuse && trace < 3;
         attend(l, T, xq_made, post_fused);
         if (post_fused)   // the post-attention norm and iHC's post in one
-            hy4k::k_rms_post<<<dim3((unsigned) ((N + 255) / 256), T), 256, 0, st>>>(y, nullptr, l.post_attn, X, post, hc,
-                                                                                  N, g.eps);
-        else
-            hc_post(T);
-        if (!hc_pre(l.hcf_fn, l.hcf_scale, l.hcf_base, 2 * hc, g.hc_mag, post, l.ffn_norm, T, true)) quant(xn, T, N, xq);
+            hy4k::k_rms_post<<<dim3((unsigned) ((N + 255) / 256), T), 256, 0, st>>>(y, nullptr, l.post_attn, X, post,
+                                                                                    hc, N, g.eps);
+        else hc_post(T);
+        if (!hc_pre(l.hcf_fn, l.hcf_scale, l.hcf_base, 2 * hc, g.hc_mag, post, l.ffn_norm, T, true))
+            quant(xn, T, N, xq);
         ph(2);
     }
 
@@ -2500,7 +2590,7 @@ struct Engine {
         cudaStream_t s1 = br ? sb1 : st, s2 = br ? sb2 : st;
         if (br) fork(sb1, sb2);
         mmvq(l.kv_a, xq, kva, T, s1);
-        (l.kv_q8 ? hy4k::k_kv_store<true> : hy4k::k_kv_store<false>)<<<T, hy4k::kThreads, 0, s1>>>(
+        (l.kv_q8 ? hy4k::k_kv_store<true> : hy4k::k_kv_store<false>) <<<T, hy4k::kThreads, 0, s1>>>(
             kva, l.kv_a_norm, l.kv, pos_d, l.swa ? (int) ring : 0, 0, l.theta, g.eps);
         mmvq(l.gate, xq, gt, T, s2);
         mmvq(l.q_a, xq, qa, T);
@@ -2508,8 +2598,8 @@ struct Engine {
             hy4k::k_rms_q<<<T, 256, 0, st>>>(qa, (int) g.q_lora, l.q_a_norm, reinterpret_cast<hy4k::Q81*>(qrq),
                                              (int) g.q_lora, g.eps);
         } else {
-            hy4k::k_rms<<<T, hy4k::kThreads, 0, st>>>(qa, (int) g.q_lora, l.q_a_norm, qa, (int) g.q_lora, (int) g.q_lora,
-                                                      g.eps);
+            hy4k::k_rms<<<T, hy4k::kThreads, 0, st>>>(qa, (int) g.q_lora, l.q_a_norm, qa, (int) g.q_lora,
+                                                      (int) g.q_lora, g.eps);
             quant(qa, T, g.q_lora, qrq);
         }
         const int32_t* cells = cells_swa;
@@ -2538,8 +2628,9 @@ struct Engine {
         mmvq(l.q_b, qrq, q, T);
         ph(3);
         if (fz && g.nope() % 32 == 0 && g.n_rot <= 64) {
-            hy4k::k_qsplit_rope_q<<<dim3(H, T), 256, 0, st>>>(q, reinterpret_cast<hy4k::Q81*>(qnq), qabs, H, (int) g.k_head,
-                                                              (int) g.nope(), (int) g.n_rot, pos_d, l.theta);
+            hy4k::k_qsplit_rope_q<<<dim3(H, T), 256, 0, st>>>(q, reinterpret_cast<hy4k::Q81*>(qnq), qabs, H,
+                                                              (int) g.k_head, (int) g.nope(), (int) g.n_rot, pos_d,
+                                                              l.theta);
         } else {
             hy4k::k_q_split<<<dim3(H, T), 256, 0, st>>>(q, qnope, qabs, H, (int) g.k_head, (int) g.nope());
             hy4k::k_rope_norm<<<dim3(H, T), 32, 0, st>>>(qabs, H, hy4k::kKvRow, hy4k::kLatent, (int) g.n_rot, pos_d, 0,
@@ -2552,18 +2643,18 @@ struct Engine {
         ph(4);
         if (H % hy4p::kQRows == 0) {   // on the tensor cores, the cells in splits of `per`
             const int per = std::max(64, (ld / 16 + 31) / 32 * 32), n_split = (ld + per - 1) / per;
-            (l.kv_q8 ? hy4p::k_attn_dec<true> : hy4p::k_attn_dec<false>)<<<dim3(n_split, H / hy4p::kQRows, T), 256,
-                                                                          sizeof(hy4p::AttnSmem), st>>>(
+            (l.kv_q8
+                 ? hy4p::k_attn_dec<true>
+                 : hy4p::k_attn_dec<false>) <<<dim3(n_split, H / hy4p::kQRows, T), 256, sizeof(hy4p::AttnSmem), st>>>(
                 qabs, l.kv, cells, counts, ld, H, per, 1.0f / sqrtf((float) g.k_head), part, n_split);
             if (fz)
                 hy4k::k_mla_merge_q<<<dim3(H, T), 128, 0, st>>>(part, l.sinks, reinterpret_cast<hy4k::Q81*>(attq), H,
                                                                 n_split);
-            else
-                hy4k::k_mla_merge<<<dim3(H, T), 128, 0, st>>>(part, l.sinks, att, H, n_split);
+            else hy4k::k_mla_merge<<<dim3(H, T), 128, 0, st>>>(part, l.sinks, att, H, n_split);
         } else {
             const int n_chunks = (ld + hy4k::kAttnChunk - 1) / hy4k::kAttnChunk;
             const size_t smem = (size_t) hy4k::kAttnChunk * hy4k::kKvRowPad * sizeof(__half);
-            (l.kv_q8 ? hy4k::k_mla_chunk<true> : hy4k::k_mla_chunk<false>)<<<dim3(n_chunks, T), 256, smem, st>>>(
+            (l.kv_q8 ? hy4k::k_mla_chunk<true> : hy4k::k_mla_chunk<false>) <<<dim3(n_chunks, T), 256, smem, st>>>(
                 qabs, l.kv, cells, counts, ld, H, 1.0f / sqrtf((float) g.k_head), part, n_chunks);
             hy4k::k_mla_merge<<<dim3(H, T), 128, 0, st>>>(part, l.sinks, att, H, n_chunks);
         }
@@ -2576,7 +2667,7 @@ struct Engine {
                 o, gt, reinterpret_cast<hy4k::Q81*>(oq), (int64_t) T * H * g.v_head);
         } else {
             hy4k::k_gate_mul<<<blocks((int64_t) T * H * g.v_head), hy4k::kThreads, 0, st>>>(o, gt,
-                                                                                         (int64_t) T * H * g.v_head);
+                                                                                            (int64_t) T * H * g.v_head);
             quant(o, T, (int64_t) H * g.v_head, oq);
         }
         mmvq(l.wo, oq, y, T);
@@ -2590,7 +2681,8 @@ struct Engine {
         const auto& g = m->g;
         const int N = (int) g.n_embd, ih = (int) g.idx_heads, idd = (int) g.idx_dim, pool_n = (int) g.idx_pool;
         mmvq(l.iq_b, qrq, iq, T, is);
-        hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, is>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, pos_d, 0, l.theta);
+        hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, is>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, pos_d, 0,
+                                                      l.theta);
         mmvq(l.ik, xq, ik, T, is);
         hy4k::k_rms<<<T, 128, 0, is>>>(ik, idd, l.ik_norm, ik, idd, idd, g.eps);
         quant(ik, T, idd, ikq, is);
@@ -2601,10 +2693,10 @@ struct Engine {
                                              (int) g.n_rot, pos_d, l.pooled);
         const int reach = (int) (g.idx_top_k / pool_n - (g.idx_tail ? 1 : 0));
         hy4k::k_gemv_f32<<<dim3((unsigned) ((ih + 7) / 8), T), 256, 0, is>>>(l.iproj, xn, iw, N, ih,
-                                                                           1.0f / sqrtf((float) (idd * ih)));
+                                                                             1.0f / sqrtf((float) (idd * ih)));
         const size_t smem = ((size_t) ih * idd + ih) * sizeof(float);
         hy4k::k_index_scores_pos<<<dim3(kScoreBlocks, T), 256, smem, is>>>(iq, iw, l.pooled, pos_d, pool_n, reach, ih,
-                                                                            idd, scores, (int) (ctx / pool_n));
+                                                                           idd, scores, (int) (ctx / pool_n));
         hy4k::k_select_cells<<<T, 1024, 0, is>>>(scores, (int) (ctx / pool_n), pos_d, pool_n, reach, cells_sel,
                                                  (int) g.idx_top_k, n_sel);
     }
@@ -2621,8 +2713,8 @@ struct Engine {
         hc_post(T);
     }
 
-    /// The MoE layer's GPU work before the CPU's: the routing, the routed input to the host (an event when it is there),
-    /// the experts with a VRAM slot, the shared expert.
+    /// The MoE layer's GPU work before the CPU's: the routing, the routed input to the host (an event when it is
+    /// there), the experts with a VRAM slot, the shared expert.
     void moe_front(Layer& l, int T) {
         const auto& g = m->g;
         const int N = (int) g.n_embd, E = (int) g.n_expert, Kk = (int) g.top_k, Ld = (int) g.n_latent,
@@ -2632,11 +2724,11 @@ struct Engine {
         if (br) fork(sb1);   // the router and its picks beside routed_down
         hy4k::k_gemv_f32<<<dim3((unsigned) ((E + 7) / 8), T), 256, 0, s1>>>(l.router, xn, logits_r, N, E, 1.f);
         if (E <= 1024 && Kk <= 32)
-            hy4k::k_route_w<<<(unsigned) ((T + 7) / 8), 256, 0, s1>>>(logits_r, l.bias, E, Kk, g.w_norm, g.w_scale, T, ids,
-                                                                     wts);
+            hy4k::k_route_w<<<(unsigned) ((T + 7) / 8), 256, 0, s1>>>(logits_r, l.bias, E, Kk, g.w_norm, g.w_scale, T,
+                                                                      ids, wts);
         else
-            hy4k::k_route<<<T, std::max(32, ((E + 31) / 32) * 32), 0, s1>>>(logits_r, l.bias, E, Kk, g.w_norm, g.w_scale,
-                                                                           ids, wts);
+            hy4k::k_route<<<T, std::max(32, ((E + 31) / 32) * 32), 0, s1>>>(logits_r, l.bias, E, Kk, g.w_norm,
+                                                                            g.w_scale, ids, wts);
         mmvq(l.r_down, xq, rin, T);
         if (br) join(sb1);
         CK(cudaMemcpyAsync(h_rin, rin, (size_t) T * Ld * 4, cudaMemcpyDeviceToHost, st));
@@ -2663,8 +2755,8 @@ struct Engine {
     }
 
     /// The host's part of an MoE layer, between two segments: each entry to its holder (the main GPU's slots, which the
-    /// segment before ran; a tier's, whose share runs now on that GPU; else the CPU pool), the tiers' and the CPU's rows
-    /// into mapped memory (h_out, with h_miss), which the next segment merges.
+    /// segment before ran; a tier's, whose share runs now on that GPU; else the CPU pool), the tiers' and the CPU's
+    /// rows into mapped memory (h_out, with h_miss), which the next segment merges.
     void cpu_part(Layer& l, int T) {
         const auto& g = m->g;
         const int Kk = (int) g.top_k, Ld = (int) g.n_latent;
@@ -2763,8 +2855,7 @@ struct Engine {
         if (post_fused)   // y + the shared expert's, the FFN's norm and iHC's post in one
             hy4k::k_rms_post<<<dim3((unsigned) ((m->g.n_embd + 255) / 256), T), 256, 0, st>>>(
                 y, sy, l.post_ffw, X, post, (int) m->g.hc, (int) m->g.n_embd, m->g.eps);
-        else
-            hc_post(T);
+        else hc_post(T);
     }
     /// iHC's pre-mix of the decode's T rows from X into xh (and xn with `wn`), `m_mix` mixes (2 hc for a layer: post
     /// weights into `post_out`; hc for the head), over many blocks
@@ -2775,14 +2866,14 @@ struct Engine {
         const int N = (int) g.n_embd, hc = (int) g.hc;
         const bool fq = with_q && fuse_pre && wn != nullptr && N % 256 == 0;
         hy4k::k_hc_pre1<<<dim3(hy4k::kHcSlices, T), 256, 0, st>>>(X, fn, hc * N, m_mix, hc_part);
-        hy4k::k_hc_pre2<<<T, 256, 0, st>>>(X, hc_part, scale, base, hc, N, m_mix, g.eps, g.hc_eps, mag, post_out, xh, wn,
-                                           xn, g.eps, fq ? (void*) xq : nullptr);
+        hy4k::k_hc_pre2<<<T, 256, 0, st>>>(X, hc_part, scale, base, hc, N, m_mix, g.eps, g.hc_eps, mag, post_out, xh,
+                                           wn, xn, g.eps, fq ? (void*) xq : nullptr);
         return fq;
     }
     /// The entries the slots hold grouped by expert (k_group_slots_p, or the one-thread form for more experts)
-    static void group_slots(const int32_t* ids_, int n_ent, int K_, int E_, const int32_t* slot_of, const uint8_t* slots,
-                            size_t stride, unsigned long long* gptr, int32_t* gstart, int32_t* ngroups, int32_t* edst,
-                            int32_t* etok, cudaStream_t s_) {
+    static void group_slots(const int32_t* ids_, int n_ent, int K_, int E_, const int32_t* slot_of,
+                            const uint8_t* slots, size_t stride, unsigned long long* gptr, int32_t* gstart,
+                            int32_t* ngroups, int32_t* edst, int32_t* etok, cudaStream_t s_) {
         if (E_ <= 512 && n_ent <= 128)
             hy4k::k_group_slots_p<<<1, 512, 0, s_>>>(ids_, n_ent, K_, E_, slot_of, slots, stride, gptr, gstart, ngroups,
                                                      edst, etok);
@@ -2795,14 +2886,14 @@ struct Engine {
         const int N = (int) m->g.n_embd;
         hy4k::k_hc_post_c<<<dim3((unsigned) ((N + 255) / 256), T), 256, 0, st>>>(X, y, post, (int) m->g.hc, N);
     }
-    /// The MoE layer's output in y: the CPU's rows merged, the weighted sum, routed_up, the shared expert added, the norm
-    /// `post_fused`: y left as routed_up's (the caller adds the shared expert's and norms it with iHC's post)
+    /// The MoE layer's output in y: the CPU's rows merged, the weighted sum, routed_up, the shared expert added, the
+    /// norm `post_fused`: y left as routed_up's (the caller adds the shared expert's and norms it with iHC's post)
     void moe_out(Layer& l, int T, bool post_fused = false) {
         const auto& g = m->g;
         const int N = (int) g.n_embd, Kk = (int) g.top_k, Ld = (int) g.n_latent;
         if (fuse && trace < 3 && Ld % 256 == 0) {
-            hy4k::k_moe_end_q<<<dim3((unsigned) (Ld / 256), T), 256, 0, st>>>(parts, h_out_d, h_miss_d, wts,
-                                                                             reinterpret_cast<hy4k::Q81*>(moeq), Kk, Ld);
+            hy4k::k_moe_end_q<<<dim3((unsigned) (Ld / 256), T), 256, 0, st>>>(
+                parts, h_out_d, h_miss_d, wts, reinterpret_cast<hy4k::Q81*>(moeq), Kk, Ld);
         } else {
             hy4k::k_merge_cpu<<<T * Kk, hy4k::kThreads, 0, st>>>(parts, h_out_d, h_miss_d, Ld);
             hy4k::k_moe_sum_c<<<dim3((unsigned) ((Ld + 255) / 256), T), 256, 0, st>>>(parts, wts, moe, Kk, Ld);
@@ -2814,11 +2905,11 @@ struct Engine {
         hy4k::k_rms_inplace<<<T, hy4k::kThreads, 0, st>>>(y, l.post_ffw, N, g.eps);
     }
 
-    // ---- the MTP block (blk.<n_layers>): row t takes token toks[t] at position p0 + t and the state src[t] (the ring's
-    // slot of the position before, -1 - k for row k of the block's own last output, kNoState for zeros); eh_proj of
-    // [enorm(embedding) | hnorm(state)] is its residual, a sparse layer's attention and latent MoE on it (no iHC), the
-    // shared head's norm, the trunk's head.  Its attention runs over every row (their K/V, pooled keys and tail); the
-    // FFN and the head over the last row alone (`head`: its logits into mtp_lg, its output state into mtp_h row 0).
+    // ---- the MTP block (blk.<n_layers>): row t takes token toks[t] at position p0 + t and the state src[t] (the
+    // ring's slot of the position before, -1 - k for row k of the block's own last output, kNoState for zeros); eh_proj
+    // of [enorm(embedding) | hnorm(state)] is its residual, a sparse layer's attention and latent MoE on it (no iHC),
+    // the shared head's norm, the trunk's head.  Its attention runs over every row (their K/V, pooled keys and tail);
+    // the FFN and the head over the last row alone (`head`: its logits into mtp_lg, its output state into mtp_h row 0).
     void mtp_forward(const int32_t* toks, const int32_t* src, int T, int64_t p0, bool head) {
         const auto& g = m->g;
         const int N = (int) g.n_embd;
@@ -2993,8 +3084,18 @@ struct Engine {
         std::FILE* f = std::fopen(dfly_dump_path, "wb");
         dfly_dump_path = nullptr;
         if (!f) return;
-        const int32_t head[12] = {N, W, (int32_t) d.layers.size(), d.layers[0].H, (int32_t) g.nope(), (int32_t) g.n_rot,
-                                  (int32_t) g.v_head, hy4k::kLatent, (int32_t) anchor, bonus, d.mask, hy4k::kKvRow};
+        const int32_t head[12] = {N,
+                                  W,
+                                  (int32_t) d.layers.size(),
+                                  d.layers[0].H,
+                                  (int32_t) g.nope(),
+                                  (int32_t) g.n_rot,
+                                  (int32_t) g.v_head,
+                                  hy4k::kLatent,
+                                  (int32_t) anchor,
+                                  bonus,
+                                  d.mask,
+                                  hy4k::kKvRow};
         std::fwrite(head, 4, 12, f);
         std::vector<float> h((size_t) N);
         CK(cudaMemcpy(h.data(), hring + (size_t) ((anchor - 1) % kHRing) * N, (size_t) N * 4, cudaMemcpyDeviceToHost));
@@ -3010,7 +3111,8 @@ struct Engine {
             const size_t cells = (size_t) (anchor + W);
             std::vector<uint8_t> raw(cells * dl.kv_row());
             CK(cudaMemcpy(raw.data(), dl.kv, raw.size(), cudaMemcpyDeviceToHost));
-            std::vector<__half> kv(cells * hy4k::kKvRow);   // the rows as halves (q8_0 ones widened as the attention does)
+            std::vector<__half> kv(cells * hy4k::kKvRow);   // the rows as halves (q8_0 ones
+                                                            // widened as the attention does)
             if (!dl.kv_q8) std::memcpy(kv.data(), raw.data(), raw.size());
             else
                 for (size_t c = 0; c < cells; ++c) {
@@ -3038,7 +3140,8 @@ struct Engine {
 
     /// The state source of position p's MTP row: the ring's slot of p - 1, zeros at 0
     static int32_t ring_src(int64_t p) { return p == 0 ? hy4k::kNoState : (int32_t) ((p - 1) % kHRing); }
-    /// The MTP block caught up with the trunk over n tokens at positions p0 .. (their states in the ring): its attention
+    /// The MTP block caught up with the trunk over n tokens at
+    /// positions p0 .. (their states in the ring): its attention
     void mtp_catch_up(const int32_t* toks, int64_t n, int64_t p0) {
         std::vector<int32_t> src;
         for (int64_t i = 0; i < n; i += kMaxT) {
@@ -3048,13 +3151,13 @@ struct Engine {
             mtp_forward(toks + i, src.data(), T, p0 + i, false);
         }
     }
-    /// One drafted window after x, the token at pos() (`rows`: the tokens the MTP block has not caught up with, x last):
-    /// up to n drafts (the MTP block's or DFly's), the window [x, drafts] through the trunk, row k's target token from
-    /// `pick` (its logits; the history of the tokens kept so far) while it matches draft k; the state then ends after
-    /// the kept drafts.
+    /// One drafted window after x, the token at pos() (`rows`: the tokens the MTP block has not caught up with, x
+    /// last): up to n drafts (the MTP block's or DFly's), the window [x, drafts] through the trunk, row k's target
+    /// token from `pick` (its logits; the history of the tokens kept so far) while it matches draft k; the state then
+    /// ends after the kept drafts.
     /// `rows` becomes the window's kept tokens (x and the drafts kept), `next` the first target token not a draft (or
-    /// -1: sample it from `lg`, the window's last row's logits), and `kept` the drafts kept, each passed to `keep` first
-    /// (false: stop there, the state up to it).
+    /// -1: sample it from `lg`, the window's last row's logits), and `kept` the drafts kept, each passed to `keep`
+    /// first (false: stop there, the state up to it).
     struct Window {
         std::vector<int32_t> drafts;
         int kept = 0;
@@ -3159,8 +3262,8 @@ struct Engine {
 
     // ---- the routed experts in VRAM: the main GPU's slots (holder 0) and the expert tiers' (the other GPUs, holders
     // 1..), every MoE layer the same count a GPU.  One ranking of a layer's experts by its routing counts places them:
-    // the most used on the main GPU, the next on the first tier and so on, the rest on the CPU; an expert is held by one
-    // GPU at most.
+    // the most used on the main GPU, the next on the first tier and so on, the rest on the CPU; an expert is held by
+    // one GPU at most.
     struct Gpu {
         int dev = 0;
         std::string name;
@@ -3188,11 +3291,13 @@ struct Engine {
         std::deque<SlotMove> moves;
         std::vector<cudaEvent_t> free_ev;
         std::unique_ptr<CopyQueue> mover;
-        double h2d_gbps = 6.0;   // its copies from the arena (the slots' first fill), for the copies kept in flight
-        std::vector<Planned> backlog;   // the last plan's moves for it, the largest gain first; `next` the first not started
+        double h2d_gbps = 6.0;          // its copies from the arena (the slots'
+                                        // first fill), for the copies kept in flight
+        std::vector<Planned> backlog;   // the last plan's moves for it, the largest
+                                        // gain first; `next` the first not started
         size_t next = 0;
     };
-    std::vector<Gpu> gpus;   // [0]: the main GPU
+    std::vector<Gpu> gpus;                    // [0]: the main GPU
     static constexpr int32_t kPending = -2;   // slot_expert of a slot whose copy is in flight
     // the moves: when an answer starts, the slots toward the ranking with the prompt's routing counted, every copy it
     // takes (LAMINA_HY4_ANSWER_MOVE=0: none); every 128 generated tokens up to move_budget copies
@@ -3210,8 +3315,8 @@ struct Engine {
     int main_dev = 0;
     std::vector<char> tier_used;   // a forward's layer: the tiers given entries
 
-    /// The main GPU's slots (as many a layer as `main_gib` GiB hold; negative: its free VRAM less a reserve) and each of
-    /// `tier_devs`' (its free VRAM less a reserve), filled by the profile's ranking (else experts in order).
+    /// The main GPU's slots (as many a layer as `main_gib` GiB hold; negative: its free VRAM less a reserve) and each
+    /// of `tier_devs`' (its free VRAM less a reserve), filled by the profile's ranking (else experts in order).
     void place_slots(double main_gib, const std::vector<int>& tier_devs) {
         const auto& g = m->g;
         CK(cudaGetDevice(&main_dev));
@@ -3342,19 +3447,23 @@ struct Engine {
         tier_used.assign(gpus.size(), 0);
         s_max = gpus.empty() ? 0 : std::max(gpus[0].S, 0);
         for (size_t gi = 0; gi < gpus.size(); ++gi)
-            std::fprintf(stderr, "lamina: GPU %d, %s: %d of %lld routed experts a layer (%.2f GiB)%s\n", gpus[gi].dev,
-                         gpus[gi].name.c_str(), std::max(gpus[gi].S, 0), (long long) g.n_expert,
-                         (double) std::max(gpus[gi].S, 0) * (double) row / (double) (1ull << 30),
-                         gi == 0 ? (profile_loaded ? ", ranked by " + profile_from : std::string(", in order (no profile)")).c_str() : "");
+            std::fprintf(
+                stderr, "lamina: GPU %d, %s: %d of %lld routed experts a layer (%.2f GiB)%s\n", gpus[gi].dev,
+                gpus[gi].name.c_str(), std::max(gpus[gi].S, 0), (long long) g.n_expert,
+                (double) std::max(gpus[gi].S, 0) * (double) row / (double) (1ull << 30),
+                gi == 0
+                    ? (profile_loaded ? ", ranked by " + profile_from : std::string(", in order (no profile)")).c_str()
+                    : "");
     }
-    /// --arena-place: the pinned places of each layer's experts timed (every core reading one at a time); within a layer
-    /// the experts the CPU reads (on no GPU), the most used first, take its fast places, swapped with the slow places'
-    /// experts (those on a GPU, then the CPU's least used).  `dry`: timed and reported only.
+    /// --arena-place: the pinned places of each layer's experts timed (every core reading one at a time); within a
+    /// layer the experts the CPU reads (on no GPU), the most used first, take its fast places, swapped with the slow
+    /// places' experts (those on a GPU, then the CPU's least used).  `dry`: timed and reported only.
     void place_arena(bool dry) {
         const auto t0 = Clock::now();
         std::vector<const uint8_t*> places;
         std::vector<std::pair<int, int32_t>> owner;   // (layer, expert)
-        size_t bytes = SIZE_MAX, widest = 0;   // the places timed over the smallest blob; a swap's buffer the widest
+        size_t bytes = SIZE_MAX, widest = 0;          // the places timed over the smallest
+                                                      // blob; a swap's buffer the widest
         for (size_t li = 0; li < m->layers.size(); ++li) {
             const Layer& l = m->layers[li];
             if (l.dense || l.blob.empty()) continue;
@@ -3387,8 +3496,8 @@ struct Engine {
             cpu_slow += s && c;
             sum_gbs += gbs[pq];
         }
-        // the swaps: within a layer, its pinned places' experts by key (the CPU's, the most used first; then the GPUs'),
-        // the first as many as there are fast places into them
+        // the swaps: within a layer, its pinned places' experts by key (the CPU's, the most used first; then the
+        // GPUs'), the first as many as there are fast places into them
         size_t swaps = 0;
         if (!dry) {
             std::vector<uint8_t> tmp(widest);
@@ -3401,7 +3510,9 @@ struct Engine {
                     const std::vector<int32_t> order = ranking(l);
                     for (size_t r = 0; r < order.size(); ++r) rank_of[(size_t) order[r]] = (int32_t) r;
                 }
-                auto key = [&](int32_t e) { return on_gpu(l, e) ? (int64_t) 1 << 40 | rank_of[(size_t) e] : rank_of[(size_t) e]; };
+                auto key = [&](int32_t e) {
+                    return on_gpu(l, e) ? (int64_t) 1 << 40 | rank_of[(size_t) e] : rank_of[(size_t) e];
+                };
                 std::vector<size_t> by_key = qs;   // places by their expert's key
                 std::sort(by_key.begin(), by_key.end(),
                           [&](size_t a, size_t b) { return key(owner[a].second) < key(owner[b].second); });
@@ -3426,16 +3537,18 @@ struct Engine {
                 }
             }
         }
-        std::fprintf(stderr, "lamina: --arena-place: %zu pinned places timed in %.1f s (mean %.1f GB/s, slow under %.1f): "
-                     "%zu slow (%.1f GiB), %zu of the CPU's %zu experts in them; %zu swapped%s\n", places.size(),
-                     ms_since(t0) / 1000.0, sum_gbs / (double) places.size(), cut, slow,
+        std::fprintf(stderr,
+                     "lamina: --arena-place: %zu pinned places timed in %.1f s (mean %.1f GB/s, slow under %.1f): "
+                     "%zu slow (%.1f GiB), %zu of the CPU's %zu experts in them; %zu swapped%s\n",
+                     places.size(), ms_since(t0) / 1000.0, sum_gbs / (double) places.size(), cut, slow,
                      (double) slow * (double) bytes / (double) (1ull << 30), cpu_slow, cpu, swaps, dry ? " (dry)" : "");
     }
     /// A layer's experts, the most used first (ties by id)
     std::vector<int32_t> ranking(const Layer& l) const {
         std::vector<int32_t> order(l.use.size());
         for (size_t e = 0; e < order.size(); ++e) order[e] = (int32_t) e;
-        std::stable_sort(order.begin(), order.end(), [&](int32_t a, int32_t b) { return l.use[(size_t) a] > l.use[(size_t) b]; });
+        std::stable_sort(order.begin(), order.end(),
+                         [&](int32_t a, int32_t b) { return l.use[(size_t) a] > l.use[(size_t) b]; });
         return order;
     }
     void upload_table(Layer& l, int gi) {
@@ -3461,8 +3574,8 @@ struct Engine {
         if (s.slot_expert[(size_t) k] >= 0) s.slot_of[(size_t) s.slot_expert[(size_t) k]] = -1;
         {
             lamina::core::DeviceScope ds(gpus[(size_t) gi].dev, main_dev, gi > 0);
-            CK(cudaMemcpyAsync(s.slots + (size_t) k * l.stride, l.blob[(size_t) e], l.fmt.bytes,
-                               cudaMemcpyHostToDevice, gpus[(size_t) gi].st));
+            CK(cudaMemcpyAsync(s.slots + (size_t) k * l.stride, l.blob[(size_t) e], l.fmt.bytes, cudaMemcpyHostToDevice,
+                               gpus[(size_t) gi].st));
         }
         s.slot_expert[(size_t) k] = e;
         s.slot_of[(size_t) e] = k;
@@ -3552,8 +3665,8 @@ struct Engine {
                 size_t blob = 0;
                 for (const Layer& l : m->layers)
                     if (!l.dense) blob = std::max(blob, l.fmt.bytes);
-                const size_t cap = std::max<size_t>(8, (size_t) (gp.h2d_gbps * 1e9 * kMoveWindowMs / 1000.0 /
-                                                                 (double) std::max<size_t>(blob, 1)));
+                const size_t cap = std::max<size_t>(
+                    8, (size_t) (gp.h2d_gbps * 1e9 * kMoveWindowMs / 1000.0 / (double) std::max<size_t>(blob, 1)));
                 while (gp.moves.size() < cap && restore_next < restore.size()) {
                     const Planned c = restore[restore_next++];
                     Layer& l = m->layers[(size_t) c.li];
@@ -3574,7 +3687,8 @@ struct Engine {
             size_t blob = 0;
             for (const Layer& l : m->layers)
                 if (!l.dense) blob = std::max(blob, l.fmt.bytes);
-            const size_t cap = std::max<size_t>(8, (size_t) (gp.h2d_gbps * 1e9 * kMoveWindowMs / 1000.0 / (double) std::max<size_t>(blob, 1)));
+            const size_t cap = std::max<size_t>(
+                8, (size_t) (gp.h2d_gbps * 1e9 * kMoveWindowMs / 1000.0 / (double) std::max<size_t>(blob, 1)));
             while (gp.moves.size() < cap && gp.next < gp.backlog.size()) {
                 const Planned c = gp.backlog[gp.next++];
                 Layer& l = m->layers[(size_t) c.li];
@@ -3718,8 +3832,8 @@ struct Engine {
         }
         return out;
     }
-    /// A tier's share of an MoE layer, on its GPU (current): the routing and the routed input from the host, its entries
-    /// grouped and run, their rows into the mapped h_out (the next segment merges them as the CPU's)
+    /// A tier's share of an MoE layer, on its GPU (current): the routing and the routed input from the host, its
+    /// entries grouped and run, their rows into the mapped h_out (the next segment merges them as the CPU's)
     void tier_enqueue(Gpu& gp, int gi, Layer& l, int T, cudaEvent_t done = nullptr) {
         const auto& g = m->g;
         const int E = (int) g.n_expert, Kk = (int) g.top_k, Ld = (int) g.n_latent;
@@ -3760,7 +3874,8 @@ struct Engine {
                 CK(cudaStreamBeginCapture(gp.st, cudaStreamCaptureModeThreadLocal));
                 for (int s = 1; s < n_seg; ++s) {
                     hy4k::k_wait_flag<<<1, 1, 0, gp.st>>>(gp.door_d + s, 10000000000ull);
-                    tier_enqueue(gp, (int) gi, m->layers[(size_t) moe_layers[(size_t) s - 1]], T, gp.door_ev[(size_t) s]);
+                    tier_enqueue(gp, (int) gi, m->layers[(size_t) moe_layers[(size_t) s - 1]], T,
+                                 gp.door_ev[(size_t) s]);
                 }
                 cudaGraph_t gr = nullptr;
                 CK(cudaStreamEndCapture(gp.st, &gr));
@@ -3906,7 +4021,8 @@ struct Engine {
         const auto& g = m->g;
         const auto t0 = Clock::now();
         out.resize((size_t) g.n_vocab);
-        CK(cudaMemcpyAsync(out.data(), logits + (size_t) r * g.n_vocab, (size_t) g.n_vocab * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaMemcpyAsync(out.data(), logits + (size_t) r * g.n_vocab, (size_t) g.n_vocab * 4, cudaMemcpyDeviceToHost,
+                           st));
         CK(cudaStreamSynchronize(st));
         if (trace) tr.logits += ms_since(t0);
     }
@@ -3946,10 +4062,10 @@ struct MoeDev {
 struct Prompt {
     Engine& E;
     Model* m = nullptr;
-    int cap = 0;              // rows a chunk's dense steps take at once (a sub-chunk of a pass)
-    int pass = 0;             // rows the MoE takes at once (--prefill-pass; cap when off): a chunk's rows
-    // a sub-chunk's views of the pass's buffers (front, attend, indexer, dense_ffn): its streams, post weights, positions,
-    // Engram rows (eng_T the pass's rows: a module's stride) and their valid flags
+    int cap = 0;    // rows a chunk's dense steps take at once (a sub-chunk of a pass)
+    int pass = 0;   // rows the MoE takes at once (--prefill-pass; cap when off): a chunk's rows
+    // a sub-chunk's views of the pass's buffers (front, attend, indexer, dense_ffn): its streams, post weights,
+    // positions, Engram rows (eng_T the pass's rows: a module's stride) and their valid flags
     float *Xc = nullptr, *postc = nullptr, *evalidc = nullptr;
     int32_t* posc = nullptr;
     uint8_t* erawc = nullptr;
@@ -3964,7 +4080,8 @@ struct Prompt {
     };
     Bufs base, lent;
     // fr: the prompt path's own buffers on the main GPU, one VMM range (lend_base: --prefill-lend), planned by lalloc
-    // while init runs, made by base_commit; base_give lends its chunks to the main GPU's slots, base_take maps them back
+    // while init runs, made by base_commit; base_give lends its
+    // chunks to the main GPU's slots, base_take maps them back
     bool lend_base = false;
     std::vector<std::pair<void**, size_t>> lend_plan;
     std::unique_ptr<lamina::core::VmmRange> base_vm;
@@ -3981,7 +4098,8 @@ struct Prompt {
         size_t total = 0;
         for (const auto& [pp, z] : lend_plan) total += z;
         base_vm = std::make_unique<lamina::core::VmmRange>();
-        if (!base_vm->reserve(total) || !base_vm->map_range(0, base_vm->chunks(), [] { return (lamina::core::VmmChunk) 0; })) {
+        if (!base_vm->reserve(total) ||
+            !base_vm->map_range(0, base_vm->chunks(), [] { return (lamina::core::VmmChunk) 0; })) {
             std::fprintf(stderr, "lamina: the prompt path's buffers could not be mapped\n");
             throw Fatal{1};
         }
@@ -4001,7 +4119,8 @@ struct Prompt {
         base_mapped = false;
         E.base_lent = true;
         E.slots_back();
-        if (E.adapt) E.plan_moves(512, false);   // the new slots filled by the ranking now, not 32 copies per 128 tokens
+        if (E.adapt)
+            E.plan_moves(512, false);   // the new slots filled by the ranking now, not 32 copies per 128 tokens
     }
     /// A prompt part: the buffers mapped again, the slots past what is left giving way
     void base_take() {
@@ -4025,27 +4144,29 @@ struct Prompt {
         base_mapped = true;
     }
     bool lent_live = false;
-    int rows_now = 0;   // the running set's rows
-    int64_t pass_p0 = 0;      // the running pass's first position
-    int min_rows = 32;        // a shorter part goes through the decode's forwards
+    int rows_now = 0;                         // the running set's rows
+    int64_t pass_p0 = 0;                      // the running pass's first position
+    int min_rows = 32;                        // a shorter part goes through the decode's forwards
     static constexpr int kG = hy4p::kQRows;   // heads a pass
     static constexpr int kEmax = 4096;        // a group's entries at most
     static constexpr int kStage = 32;         // experts a staging buffer
     static constexpr int kSub = 512;          // rows a pass of Engram's and the dense FFN's products
-    int R = 0;                // the indexer's rows a pass
-    int streamer = 0;         // the devs index that runs the experts no GPU holds
-    uint8_t* gsc = nullptr;   // the router product's scratch (a K split's partial sums: few rows fill the card that way)
+    int R = 0;                                // the indexer's rows a pass
+    int streamer = 0;                         // the devs index that runs the experts no GPU holds
+    uint8_t* gsc = nullptr;                   // the router product's scratch (a K split's
+                                              // partial sums: few rows fill the card that way)
     size_t gsc_bytes = 0;
     cudaStream_t st = nullptr;
     cudaEvent_t routed = nullptr, routed2 = nullptr;   // a half's routing on the host (routed2: the second half's)
     // the main GPU's rows
     float *X = nullptr, *xh = nullptr, *xn = nullptr, *y = nullptr, *sy = nullptr, *emb = nullptr, *post = nullptr;
-    uint8_t *xq = nullptr, *qrq = nullptr, *hdq = nullptr, *oq = nullptr, *ikq = nullptr, *subq = nullptr, *fhq = nullptr,
-            *shq = nullptr, *mq = nullptr, *eraw = nullptr;
+    uint8_t *xq = nullptr, *qrq = nullptr, *hdq = nullptr, *oq = nullptr, *ikq = nullptr, *subq = nullptr,
+            *fhq = nullptr, *shq = nullptr, *mq = nullptr, *eraw = nullptr;
     float *qa = nullptr, *kva = nullptr, *qg = nullptr, *ql = nullptr, *gt = nullptr;
     float *iq = nullptr, *ik = nullptr, *iv = nullptr, *ig = nullptr, *iw = nullptr, *scores = nullptr;
     float *erows = nullptr, *ekv = nullptr, *evalid = nullptr, *fg = nullptr, *fu = nullptr, *fh = nullptr;
-    float *logits_r = nullptr, *wts = nullptr, *rin = nullptr, *sg = nullptr, *su = nullptr, *sh = nullptr, *tmp = nullptr;
+    float *logits_r = nullptr, *wts = nullptr, *rin = nullptr, *sg = nullptr, *su = nullptr, *sh = nullptr,
+          *tmp = nullptr;
     // the tiers' sums cross the links as halves (LAMINA_HY4_SUM_F16=0: floats): half the bytes, an error well under
     // the q8_1 rounding of routed_up's input
     bool sum_f16 = true;
@@ -4061,9 +4182,9 @@ struct Prompt {
     uint8_t *tq_h = nullptr, *tq_h2 = nullptr, *h_raw = nullptr;   // tq_h2: the second half's tiers' input
     uint32_t* h_rows = nullptr;
     std::vector<MoeDev> devs;   // [0] the main GPU, then the tiers in Engine::gpus' order
-    // the snapshots inside a chunk (Engine::chunk_snaps, one buffer each): their bytes on the main GPU as snapshot() lays
-    // them out, each window layer's ring at ring_off[il], each indexer layer's tail at tail_off[il] (of the cache layers,
-    // the MTP block's at [n_layers]), the drafters' ring at hring_off
+    // the snapshots inside a chunk (Engine::chunk_snaps, one buffer each): their bytes on the main GPU as snapshot()
+    // lays them out, each window layer's ring at ring_off[il], each indexer layer's tail at tail_off[il] (of the cache
+    // layers, the MTP block's at [n_layers]), the drafters' ring at hring_off
     std::vector<uint8_t*> snap_devs;
     std::vector<size_t> ring_off, tail_off;
     size_t hring_off = 0, snap_size = 0;
@@ -4105,8 +4226,8 @@ struct Prompt {
         for (const Layer* lp : checked) {
             const Layer& l = *lp;
             // every product's (type, rows) as the chunk runs it: the head-group slices, the per-head matrices
-            std::vector<std::pair<int, int64_t>> need{{l.q_a.type, l.q_a.n_out}, {l.q_b.type, kG * g.k_head},
-                                                      {l.kv_a.type, l.kv_a.n_out}, {l.wo.type, l.wo.n_out},
+            std::vector<std::pair<int, int64_t>> need{{l.q_a.type, l.q_a.n_out},    {l.q_b.type, kG * g.k_head},
+                                                      {l.kv_a.type, l.kv_a.n_out},  {l.wo.type, l.wo.n_out},
                                                       {l.gate.type, kG * g.v_head}, {l.k_b.type, hy4k::kLatent},
                                                       {l.v_b.type, g.v_head}};
             for (const Mat* w : {&l.iq_b, &l.ik, &l.icv, &l.icg, &l.e_kv, &l.f_gate, &l.f_up, &l.f_down, &l.r_down,
@@ -4114,13 +4235,17 @@ struct Prompt {
                 if (w->d) need.emplace_back(w->type, w->n_out);
             for (const auto& [t, r] : need)
                 if (!MMQ::fits(t, r)) {
-                    std::fprintf(stderr, "lamina: no MMQ for a [%lld rows] product of type %d: prompts read %d rows a "
-                                 "forward\n", (long long) r, t, kMaxT);
+                    std::fprintf(stderr,
+                                 "lamina: no MMQ for a [%lld rows] product of type %d: prompts read %d rows a "
+                                 "forward\n",
+                                 (long long) r, t, kMaxT);
                     return false;
                 }
             if (!l.dense && (!MMQ::fits(l.fmt.gu_type, 2 * g.n_ff_exp) || !MMQ::fits(l.fmt.d_type, g.n_latent))) {
-                std::fprintf(stderr, "lamina: no MMQ for the routed experts' types (%d, %d): prompts read %d rows a "
-                             "forward\n", l.fmt.gu_type, l.fmt.d_type, kMaxT);
+                std::fprintf(stderr,
+                             "lamina: no MMQ for the routed experts' types (%d, %d): prompts read %d rows a "
+                             "forward\n",
+                             l.fmt.gu_type, l.fmt.d_type, kMaxT);
                 return false;
             }
         }
@@ -4134,8 +4259,8 @@ struct Prompt {
                      F = (size_t) g.n_ff_exp, Ex = (size_t) g.n_expert, K = (size_t) g.top_k;
         const size_t PR = (size_t) pass;   // a pass's rows: the streams' buffers and the MoE pass's
         // a tier's rows at once: a half's (Prompt::run's halves, one after the other on its stream), else the pass's
-        const size_t TR = pass > cap && halves_on && !trace
-                              ? (size_t) (((pass + cap - 1) / cap + 1) / 2) * (size_t) cap : PR;
+        const size_t TR =
+            pass > cap && halves_on && !trace ? (size_t) (((pass + cap - 1) / cap + 1) / 2) * (size_t) cap : PR;
         size_t hmax = 0;
         for (const Layer& l : m->layers) hmax = std::max<size_t>(hmax, (size_t) l.H);
         lalloc(X, T * hc * N);
@@ -4308,12 +4433,12 @@ struct Prompt {
         if (pass > cap && !lent_vm) pass = cap;   // no VMM: no passes
         char lend_note[192] = "";
         if (pass > cap)
-            std::snprintf(lend_note, sizeof lend_note, " (a part of two or more: of up to %d, the experts' pass over them "
-                          "all, %.2f GiB of the main GPU's slots lent to it)", pass,
-                          (double) lent_total() / (double) (1ull << 30));
-        std::fprintf(stderr, "lamina: prompts in chunks of up to %d rows%s; the experts no GPU holds on GPU %d%s\n", cap,
-                     lend_note,
-                     devs[(size_t) streamer].dev,
+            std::snprintf(lend_note, sizeof lend_note,
+                          " (a part of two or more: of up to %d, the experts' pass over them "
+                          "all, %.2f GiB of the main GPU's slots lent to it)",
+                          pass, (double) lent_total() / (double) (1ull << 30));
+        std::fprintf(stderr, "lamina: prompts in chunks of up to %d rows%s; the experts no GPU holds on GPU %d%s\n",
+                     cap, lend_note, devs[(size_t) streamer].dev,
                      devs.size() > 1 ? (" (" + std::to_string((int) best) + " GB/s from pinned memory)").c_str() : "");
         ok = true;
         return true;
@@ -4363,10 +4488,23 @@ struct Prompt {
     std::vector<size_t> lent_sizes() const {
         const auto& g = m->g;
         const size_t Rp = (size_t) pass, N = (size_t) g.n_embd, hc = (size_t) g.hc, Ld = (size_t) g.n_latent,
-                     K = (size_t) g.top_k, n_mod = g.eng_layers.size(), eh = (size_t) g.eng_heads(), ed = (size_t) g.eng_dim;
-        return {Rp * hc * N * 4, Rp * N * 4, Rp * N * 4, Rp * hc * 4, Rp * 4, Rp * K * 4, Rp * Ld * 4, Rp * Ld * 4,
-                Rp * Ld * 4, n_mod * Rp * eh * ed, MMQ::q8_bytes((int64_t) Rp, (int64_t) Ld),
-                MMQ::q8_bytes((int64_t) Rp, (int64_t) Ld), Rp * K * 4, Rp * 4, Rp * 4};
+                     K = (size_t) g.top_k, n_mod = g.eng_layers.size(), eh = (size_t) g.eng_heads(),
+                     ed = (size_t) g.eng_dim;
+        return {Rp * hc * N * 4,
+                Rp * N * 4,
+                Rp * N * 4,
+                Rp * hc * 4,
+                Rp * 4,
+                Rp * K * 4,
+                Rp * Ld * 4,
+                Rp * Ld * 4,
+                Rp * Ld * 4,
+                n_mod * Rp * eh * ed,
+                MMQ::q8_bytes((int64_t) Rp, (int64_t) Ld),
+                MMQ::q8_bytes((int64_t) Rp, (int64_t) Ld),
+                Rp * K * 4,
+                Rp * 4,
+                Rp * 4};
     }
     size_t lent_total() const {
         size_t t = 0;
@@ -4420,7 +4558,8 @@ struct Prompt {
         lend_ms = ms_since(t0);
         return true;
     }
-    /// The pass's buffers' chunks back to the main GPU's slots after a part (they come back empty, the mover fills them)
+    /// The pass's buffers' chunks back to the main GPU's slots
+    /// after a part (they come back empty, the mover fills them)
     void pass_end() {
         if (!lent_live) return;
         CK(cudaStreamSynchronize(st));
@@ -4431,9 +4570,10 @@ struct Prompt {
         lent_live = false;
         E.slots_back();
         const int q = E.queue_restore();
-        std::fprintf(stderr, "lamina: the prompt's pass buffers %.2f GiB lent by the main GPU's slots (%.0f ms, back %.0f "
-                     "ms, %d residents queued back)\n", (double) lent_total() / (double) (1ull << 30), lend_ms,
-                     ms_since(t0), q);
+        std::fprintf(stderr,
+                     "lamina: the prompt's pass buffers %.2f GiB lent by the main GPU's slots (%.0f ms, back %.0f "
+                     "ms, %d residents queued back)\n",
+                     (double) lent_total() / (double) (1ull << 30), lend_ms, ms_since(t0), q);
     }
 
     unsigned blocks(int64_t n) const { return (unsigned) ((n + hy4k::kThreads - 1) / hy4k::kThreads); }
@@ -4447,7 +4587,8 @@ struct Prompt {
         MMQ::quantize(x, map, out, type, cols, ld ? ld : cols, rows, st);
     }
 
-    /// T rows (tokens toks at positions pos() ..) through the model; the last row's logits into the engine's logits row 0.
+    /// T rows (tokens toks at positions pos() ..) through the
+    /// model; the last row's logits into the engine's logits row 0.
     void run(const int32_t* toks, int T) {
         const auto& g = m->g;
         if (T > rows_now) {
@@ -4480,11 +4621,14 @@ struct Prompt {
             if (E.img)   // a picture's cells: its rows, a copy a run
                 for (int t = 0; t < ts;) {
                     const int32_t row = E.img->row(p0 + r0 + t);
-                    if (row < 0) { ++t; continue; }
+                    if (row < 0) {
+                        ++t;
+                        continue;
+                    }
                     int len = 1;
                     while (t + len < ts && E.img->row(p0 + r0 + t + len) == row + len) ++len;
-                    CK(cudaMemcpyAsync(emb + (size_t) t * N, E.img->rows.data() + (size_t) row * N, (size_t) len * N * 4,
-                                       cudaMemcpyHostToDevice, st));
+                    CK(cudaMemcpyAsync(emb + (size_t) t * N, E.img->rows.data() + (size_t) row * N,
+                                       (size_t) len * N * 4, cudaMemcpyHostToDevice, st));
                     t += len;
                 }
             hy4k::k_streams_init<<<ts, hy4k::kThreads, 0, st>>>(emb, X + (size_t) r0 * hc * N, hc, N);
@@ -4608,8 +4752,10 @@ struct Prompt {
                 CK(cudaMemcpyAsync(sd + tail_off[li], l.tail, (size_t) kTail * 2 * (size_t) g.idx_dim * 4,
                                    cudaMemcpyDeviceToDevice, st));
             }
-            if (E.hring && !(E.drafts_on && m->has_mtp))   // DFly's: it re-anchors after a restore (the MTP block's above)
-                CK(cudaMemcpyAsync(sd + hring_off, E.hring, (size_t) Engine::kHRing * N * 4, cudaMemcpyDeviceToDevice, st));
+            if (E.hring && !(E.drafts_on && m->has_mtp))   // DFly's: it re-anchors after a
+                                                           // restore (the MTP block's above)
+                CK(cudaMemcpyAsync(sd + hring_off, E.hring, (size_t) Engine::kHRing * N * 4, cudaMemcpyDeviceToDevice,
+                                   st));
             std::vector<uint8_t> bytes(snap_size);
             CK(cudaMemcpyAsync(bytes.data(), sd, snap_size, cudaMemcpyDeviceToHost, st));
             CK(cudaStreamSynchronize(st));
@@ -4618,9 +4764,10 @@ struct Prompt {
         ++E.forwards;
         if (trace) {
             mark(5);
-            std::fprintf(stderr, "lamina: chunk of %d rows at %lld: %.0f ms; attention and indexer %.0f, routing %.0f, plan "
-                         "%.0f, experts %.0f, the rest %.0f\n", T, (long long) p0, ms_since(c0), ph[0], ph[1], ph[2], ph[3],
-                         ph[5]);
+            std::fprintf(stderr,
+                         "lamina: chunk of %d rows at %lld: %.0f ms; attention and indexer %.0f, routing %.0f, plan "
+                         "%.0f, experts %.0f, the rest %.0f\n",
+                         T, (long long) p0, ms_since(c0), ph[0], ph[1], ph[2], ph[3], ph[5]);
         }
     }
 
@@ -4653,8 +4800,8 @@ struct Prompt {
         const int N = (int) g.n_embd, hc = (int) g.hc;
         if (l.eng >= 0) {
             const int ehn = (int) g.eng_heads(), edn = (int) g.eng_dim, w = ehn * edn;
-            hy4k::k_engram_rows<<<dim3(ehn, T), 128, 0, st>>>(erawc + (size_t) l.eng * eng_T * w, l.e_lnorm, evalidc, erows, ehn,
-                                                               edn, kEngramEps);
+            hy4k::k_engram_rows<<<dim3(ehn, T), 128, 0, st>>>(erawc + (size_t) l.eng * eng_T * w, l.e_lnorm, evalidc,
+                                                              erows, ehn, edn, kEngramEps);
             for (int r0 = 0; r0 < T; r0 += kSub) {
                 const int n = std::min(kSub, T - r0);
                 q8(erows + (size_t) r0 * w, n, w, subq);
@@ -4678,14 +4825,16 @@ struct Prompt {
         const int N = (int) g.n_embd, H = l.H;
         q8(xn, T, N, xq);
         dense(l.q_a, xq, T, qa);
-        hy4k::k_rms<<<T, hy4k::kThreads, 0, st>>>(qa, (int) g.q_lora, l.q_a_norm, qa, (int) g.q_lora, (int) g.q_lora, g.eps);
+        hy4k::k_rms<<<T, hy4k::kThreads, 0, st>>>(qa, (int) g.q_lora, l.q_a_norm, qa, (int) g.q_lora, (int) g.q_lora,
+                                                  g.eps);
         q8(qa, T, g.q_lora, qrq);
         dense(l.kv_a, xq, T, kva);
         const int64_t p_end = p0 + T;
         const int ring = (int) E.ring, n_swa = (int) g.n_swa;
         int lin0 = 0;
         if (l.swa) {
-            // the window's cells in position order: the ring's before the chunk, then the chunk's; the ring keeps the last
+            // the window's cells in position order: the ring's before
+            // the chunk, then the chunk's; the ring keeps the last
             lin0 = (int) std::max<int64_t>(0, p0 - n_swa + 1);
             __half* rh = reinterpret_cast<__half*>(l.kv);   // a ring's rows are halves
             if (p0 > lin0) hy4p::k_copy_cells<<<(unsigned) (p0 - lin0), 64, 0, st>>>(rh, ring, lin, 0, lin0, lin0);
@@ -4703,7 +4852,7 @@ struct Prompt {
             const int64_t pa = std::max<int64_t>(p0, p_end - ring);
             hy4p::k_copy_cells<<<(unsigned) (p_end - pa), 64, 0, st>>>(lin, 0, rh, ring, (int) pa, lin0);
         } else {
-            (l.kv_q8 ? hy4k::k_kv_store<true> : hy4k::k_kv_store<false>)<<<T, hy4k::kThreads, 0, st>>>(
+            (l.kv_q8 ? hy4k::k_kv_store<true> : hy4k::k_kv_store<false>) <<<T, hy4k::kThreads, 0, st>>>(
                 kva, l.kv_a_norm, l.kv, posc, 0, 0, l.theta, g.eps);
             indexer(l, T, p0);
             if (const int sl = m->dfly.on ? E.dfly_slot(l.il) : -1; sl >= 0) {   // DFly reads it: the last row's picks
@@ -4718,8 +4867,8 @@ struct Prompt {
         const size_t vb_bytes = (size_t) g.v_head * ((size_t) hy4k::kLatent / 32 * 34);
         for (int h0 = 0; h0 < H; h0 += kG) {
             dense(l.q_b, qrq, T, qg, kG * g.k_head, (size_t) h0 * g.k_head);
-            hy4k::k_rope_norm<<<dim3(kG, T), 32, 0, st>>>(qg, kG, (int) g.k_head, (int) g.nope(), (int) g.n_rot, posc, 0,
-                                                          l.theta);
+            hy4k::k_rope_norm<<<dim3(kG, T), 32, 0, st>>>(qg, kG, (int) g.k_head, (int) g.nope(), (int) g.n_rot, posc,
+                                                          0, l.theta);
             q8(qg, (int64_t) kG * T, g.nope(), hdq, 8, hids, g.k_head);
             MMQ::Product kb;
             kb.w = l.k_b.d + (size_t) h0 * kb_bytes;
@@ -4738,12 +4887,12 @@ struct Prompt {
             kb.ld_dst = hy4k::kLatent;
             devs[0].mmq->run(kb, st);
             if (l.swa)
-                hy4p::k_attn_prompt<false><<<T, 256, sizeof(hy4p::AttnSmem), st>>>(ql, qg, lin, nullptr, nullptr, 0, posc,
-                                                                                  n_swa, lin0, l.sinks + h0, scale);
+                hy4p::k_attn_prompt<false><<<T, 256, sizeof(hy4p::AttnSmem), st>>>(
+                    ql, qg, lin, nullptr, nullptr, 0, posc, n_swa, lin0, l.sinks + h0, scale);
             else
-                (l.kv_q8 ? hy4p::k_attn_prompt<true, true> : hy4p::k_attn_prompt<true, false>)<<<
-                    T, 256, sizeof(hy4p::AttnSmem), st>>>(ql, qg, l.kv, cells, ncells, (int) g.idx_top_k, posc, 0, 0,
-                                                          l.sinks + h0, scale);
+                (l.kv_q8 ? hy4p::k_attn_prompt<true, true>
+                         : hy4p::k_attn_prompt<true, false>) <<<T, 256, sizeof(hy4p::AttnSmem), st>>>(
+                    ql, qg, l.kv, cells, ncells, (int) g.idx_top_k, posc, 0, 0, l.sinks + h0, scale);
             q8(ql, (int64_t) kG * T, hy4k::kLatent, hdq, 8, hids);
             MMQ::Product vb = kb;
             vb.w = l.v_b.d + (size_t) h0 * vb_bytes;
@@ -4771,7 +4920,8 @@ struct Prompt {
         const auto& g = m->g;
         const int N = (int) g.n_embd, ih = (int) g.idx_heads, idd = (int) g.idx_dim, pool_n = (int) g.idx_pool;
         dense(l.iq_b, qrq, T, iq);
-        hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, st>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, posc, 0, l.theta);
+        hy4k::k_rope_norm<<<dim3(ih, T), 32, 0, st>>>(iq, ih, idd, idd - (int) g.n_rot, (int) g.n_rot, posc, 0,
+                                                      l.theta);
         dense(l.ik, xq, T, ik);
         hy4k::k_rms<<<T, 128, 0, st>>>(ik, idd, l.ik_norm, ik, idd, idd, g.eps);
         q8(ik, T, idd, ikq);
@@ -4781,13 +4931,13 @@ struct Prompt {
         const int64_t g_a = (p0 + pool_n) / pool_n - 1, g_b = p_end / pool_n;   // the groups the chunk completes
         if (g_b > g_a)
             hy4p::k_pool_chunk<<<(unsigned) (g_b - g_a), idd, 0, st>>>(iv, ig, l.tail, kTail, (int) p0, (int) g_a, idd,
-                                                                      pool_n, l.ape, l.ipool_norm, g.eps, l.theta,
-                                                                      (int) g.n_rot, l.pooled);
+                                                                       pool_n, l.ape, l.ipool_norm, g.eps, l.theta,
+                                                                       (int) g.n_rot, l.pooled);
         const int keep = std::min(T, kTail);
         hy4k::k_tail_store<<<keep, 128, 0, st>>>(iv + (size_t) (T - keep) * idd, ig + (size_t) (T - keep) * idd, l.tail,
                                                  posc + (T - keep), kTail, idd);
         hy4k::k_gemv_f32<<<dim3((unsigned) ((ih + 7) / 8), T), 256, 0, st>>>(l.iproj, xn, iw, N, ih,
-                                                                           1.0f / sqrtf((float) (idd * ih)));
+                                                                             1.0f / sqrtf((float) (idd * ih)));
         const int reach = (int) (g.idx_top_k / pool_n - (g.idx_tail ? 1 : 0));
         const int ld = (int) (E.ctx / pool_n);
         for (int r0 = 0; r0 < T; r0 += R) {
@@ -4806,7 +4956,8 @@ struct Prompt {
                     iq, iw, l.pooled, posc, pool_n, reach, r0, rr, per, scores, ld);
             }
             hy4k::k_select_cells<<<rr, 1024, 0, st>>>(scores, ld, posc + r0, pool_n, reach,
-                                                      cells + (size_t) r0 * g.idx_top_k, (int) g.idx_top_k, ncells + r0);
+                                                      cells + (size_t) r0 * g.idx_top_k, (int) g.idx_top_k,
+                                                      ncells + r0);
         }
     }
 
@@ -4826,21 +4977,21 @@ struct Prompt {
         hy4k::k_hc_post<<<T, hy4k::kThreads, 0, st>>>(Xc, y, postc, hc, N);
     }
 
-    // ---- the routed experts.  The host takes each layer's routing, hands every entry to a GPU (its expert's slot, else
-    // the streamer, which copies the expert from the arena) and plans each GPU's groups: experts of consecutive blobs
-    // whose entries (up to kEmax) run as one MMQ product, their rows summed into the tokens' sums in pick order.
+    // ---- the routed experts.  The host takes each layer's routing, hands every entry to a GPU (its expert's slot,
+    // else the streamer, which copies the expert from the arena) and plans each GPU's groups: experts of consecutive
+    // blobs whose entries (up to kEmax) run as one MMQ product, their rows summed into the tokens' sums in pick order.
     struct Group {
         const uint8_t* w = nullptr;   // the first expert's blob on its GPU
         int n = 0, n_ent = 0, max_rows = 0, n_runs = 0;
         int o_bounds = 0, o_tok = 0, o_rtok = 0, o_rstart = 0, o_rent = 0, o_rw = 0;   // into the plan (int32)
     };
-    struct Batch {                    // the streamer's experts copied into one staging buffer, and its groups
+    struct Batch {   // the streamer's experts copied into one staging buffer, and its groups
         std::vector<int32_t> experts;
         int g0 = 0, g1 = 0;
     };
     struct DevPlan {
         std::vector<int32_t> P;
-        std::vector<Group> groups;    // the batches' groups first, then the slots'
+        std::vector<Group> groups;   // the batches' groups first, then the slots'
         std::vector<Batch> batches;
         int n_slot_groups = 0;
     };
@@ -4983,8 +5134,9 @@ struct Prompt {
     void run_group(MoeDev& d, Layer& l, int T, const Group& gr, float* acc) {
         const auto& g = m->g;
         const int Ld = (int) g.n_latent, F = (int) g.n_ff_exp;
-        hy4p::k_gather_q8<<<gr.n_ent, 128, 0, d.st>>>(reinterpret_cast<const uint4*>(d.tq), reinterpret_cast<uint4*>(d.eq),
-                                                      d.plan + gr.o_tok, gr.n_ent, T, Ld / 128);
+        hy4p::k_gather_q8<<<gr.n_ent, 128, 0, d.st>>>(reinterpret_cast<const uint4*>(d.tq),
+                                                      reinterpret_cast<uint4*>(d.eq), d.plan + gr.o_tok, gr.n_ent, T,
+                                                      Ld / 128);
         MMQ::Product gu;
         gu.w = gr.w;
         gu.type = l.fmt.gu_type;
@@ -5013,7 +5165,8 @@ struct Prompt {
         dn.dst = d.rows;
         dn.ld_dst = Ld;
         d.mmq->run(dn, d.st);
-        hy4p::k_accum_runs<<<gr.n_runs, 256, 0, d.st>>>(d.rows, d.plan + gr.o_rtok, d.plan + gr.o_rstart, d.plan + gr.o_rent,
+        hy4p::k_accum_runs<<<gr.n_runs, 256, 0, d.st>>>(d.rows, d.plan + gr.o_rtok, d.plan + gr.o_rstart,
+                                                        d.plan + gr.o_rent,
                                                         reinterpret_cast<const float*>(d.plan + gr.o_rw), acc, Ld);
     }
 
@@ -5071,7 +5224,7 @@ struct Prompt {
         rp.K = N;
         lamina::kernels::gemm32(rp, {gsc, gsc_bytes}, st);
         hy4k::k_route<<<ts, std::max(32, ((nE + 31) / 32) * 32), 0, st>>>(logits_r, l.bias, nE, K, g.w_norm, g.w_scale,
-                                                                           ids + (size_t) r0 * K, wts + (size_t) r0 * K);
+                                                                          ids + (size_t) r0 * K, wts + (size_t) r0 * K);
         dense(l.r_down, xq, ts, rin + (size_t) r0 * Ld);
         if (shared) shared_expert(l, ts, sy + (size_t) r0 * N);
     }
@@ -5090,8 +5243,10 @@ struct Prompt {
         const int K = (int) g.top_k, Ld = (int) g.n_latent;
         MoeDev& d0 = devs[0];
         q8(rin + (size_t) r0 * Ld, T, Ld, d0.tq, l.fmt.gu_type);
-        CK(cudaMemcpyAsync(h_ids + (size_t) r0 * K, ids + (size_t) r0 * K, (size_t) T * K * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaMemcpyAsync(h_wts + (size_t) r0 * K, wts + (size_t) r0 * K, (size_t) T * K * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaMemcpyAsync(h_ids + (size_t) r0 * K, ids + (size_t) r0 * K, (size_t) T * K * 4, cudaMemcpyDeviceToHost,
+                           st));
+        CK(cudaMemcpyAsync(h_wts + (size_t) r0 * K, wts + (size_t) r0 * K, (size_t) T * K * 4, cudaMemcpyDeviceToHost,
+                           st));
         if (devs.size() > 1)
             CK(cudaMemcpyAsync(hf ? tq_h2 : tq_h, d0.tq, MMQ::q8_bytes(T, Ld), cudaMemcpyDeviceToHost, st));
         CK(cudaEventRecord(hf ? routed2 : routed, st));
@@ -5125,8 +5280,8 @@ struct Prompt {
                 hy4p::k_add_half<<<blocks((int64_t) T * Ld), hy4k::kThreads, 0, st>>>(
                     acc, reinterpret_cast<const __half*>(dst), (int64_t) T * Ld);
             else
-                hy4k::k_add<<<blocks((int64_t) T * Ld), hy4k::kThreads, 0, st>>>(acc, reinterpret_cast<const float*>(dst),
-                                                                                (int64_t) T * Ld);
+                hy4k::k_add<<<blocks((int64_t) T * Ld), hy4k::kThreads, 0, st>>>(
+                    acc, reinterpret_cast<const float*>(dst), (int64_t) T * Ld);
         }
         mark(3);
         float* yr = y + (size_t) r0 * N;
@@ -5136,9 +5291,9 @@ struct Prompt {
         hy4k::k_rms_inplace<<<T, hy4k::kThreads, 0, st>>>(yr, l.post_ffw, N, g.eps);
         hy4k::k_hc_post<<<T, hy4k::kThreads, 0, st>>>(X + (size_t) r0 * hc * N, yr, post + (size_t) r0 * hc, hc, N);
     }
-    /// The chunk's MoE over its T rows in one piece: the plan, every GPU's experts (the ones no GPU holds streamed once),
-    /// the sums, routed_up, the shared expert's rows added, the norm, iHC's post.  `shared_done`: the sub-chunks made the
-    /// shared expert's rows; else (one sub-chunk) it runs here, beside the experts.
+    /// The chunk's MoE over its T rows in one piece: the plan, every GPU's experts (the ones no GPU holds streamed
+    /// once), the sums, routed_up, the shared expert's rows added, the norm, iHC's post.  `shared_done`: the sub-chunks
+    /// made the shared expert's rows; else (one sub-chunk) it runs here, beside the experts.
     void moe_b(Layer& l, int T, bool shared_done) {
         route_out(l, T, 0, 0);
         const auto t0 = Clock::now();
@@ -5151,9 +5306,9 @@ struct Prompt {
 
 // ------------------------------------------------------------------------------------------------ serve
 /// lamina's engine protocol, one request at a time: GEN <max_new> [key=value ...] <ids>, or with --vision GENI
-/// <max_new> [keys] <file> <ids> (the file lamina-vision's rows of the prompt's pictures) -> RESUME (the tokens the state
-/// already held), PP lines while the prompt is read, a T line a token, DONE; STOP ends a request at its next step, QUIT
-/// the loop.
+/// <max_new> [keys] <file> <ids> (the file lamina-vision's rows of the prompt's pictures) -> RESUME (the tokens the
+/// state already held), PP lines while the prompt is read, a T line a token, DONE; STOP ends a request at its next
+/// step, QUIT the loop.
 struct Serve {
     Engine& E;
     int32_t eos = -1;
@@ -5179,7 +5334,8 @@ struct Serve {
         enc_vm.reset();
         E.slots_back();
         const int q = E.queue_restore();
-        std::fprintf(stderr, "lamina: the image encoder's loan back to the main GPU's slots (%d residents queued back)\n", q);
+        std::fprintf(stderr,
+                     "lamina: the image encoder's loan back to the main GPU's slots (%d residents queued back)\n", q);
     }
     void lend(const std::string& line, bool in_process) {
         long long dev = -1;
@@ -5235,7 +5391,7 @@ struct Serve {
             std::fprintf(stderr, "lamina: a request came while the image encoder's loan was out: taken back\n");
             enc_back();
         }
-        E.warm_up();   // a request after a pause: the cards brought up beside its first work
+        E.warm_up();     // a request after a pause: the cards brought up beside its first work
         struct Ended {   // the request's end, for the next one's pause
             Engine& e;
             ~Ended() {
@@ -5256,12 +5412,18 @@ struct Serve {
             while (*p && *p != ' ') ++p;
             const std::string tk(st0, (size_t) (p - st0));
             const size_t eq = tk.find('=');
-            if (tk.empty() || eq == std::string::npos) { p = const_cast<char*>(st0); break; }
+            if (tk.empty() || eq == std::string::npos) {
+                p = const_cast<char*>(st0);
+                break;
+            }
             if (tk.compare(0, eq, "img_keys") == 0) {
                 for (const char* q = tk.c_str() + eq + 1; *q;) {
                     char* qe = nullptr;
                     const unsigned long long x = std::strtoull(q, &qe, 16);
-                    if (qe == q || (*qe != ',' && *qe != '\0')) { img_keys.clear(); break; }
+                    if (qe == q || (*qe != ',' && *qe != '\0')) {
+                        img_keys.clear();
+                        break;
+                    }
                     img_keys.push_back((uint64_t) x);
                     q = *qe == ',' ? qe + 1 : qe;
                 }
@@ -5282,10 +5444,16 @@ struct Serve {
             return;
         }
         for (const int32_t t : ids)
-            if (t < 0 || t >= g.n_vocab) { serve_print("ERR a token id is outside the vocabulary\n"); return; }
+            if (t < 0 || t >= g.n_vocab) {
+                serve_print("ERR a token id is outside the vocabulary\n");
+                return;
+            }
         ImgReq ir;
         if (geni) {
-            if (!E.vision) { serve_print("ERR this engine was started without --vision\n"); return; }
+            if (!E.vision) {
+                serve_print("ERR this engine was started without --vision\n");
+                return;
+            }
             if (const std::string ve = lamina::program::image_cells(emb, ids, E.m->image_pad, g.n_embd, img_keys, ir);
                 !ve.empty()) {
                 serve_print("ERR %s\n", ve.c_str());
@@ -5328,7 +5496,8 @@ struct Serve {
             } else {
                 c.pin = true;
                 E.park_live(0);   // (the park may move: the lender found again)
-                const auto lender = std::find_if(E.park.begin(), E.park.end(), [](const Engine::Parked& x) { return x.pin; });
+                const auto lender =
+                    std::find_if(E.park.begin(), E.park.end(), [](const Engine::Parked& x) { return x.pin; });
                 E.borrow(*lender, best_r);
                 lender->pin = false;
             }
@@ -5374,7 +5543,10 @@ struct Serve {
         }
         E.settle(false);
         const int64_t landed0 = E.moves_landed;
-        const int moved_at_start = E.move_at_start > 0 ? E.plan_moves(E.move_at_start, false) : 0;   // the slots toward the prompt's routing, beside the answer
+        const int moved_at_start = E.move_at_start > 0 ? E.plan_moves(E.move_at_start, false) : 0;   // the slots toward
+                                                                                                     // the prompt's
+                                                                                                     // routing, beside
+                                                                                                     // the answer
         std::mt19937_64 rng(smp.seed);
         std::vector<int32_t> hist;   // the penalties' history: the prompt's text (as llama.cpp's sampler, no picture)
         for (const int32_t t : ids)
@@ -5392,16 +5564,28 @@ struct Serve {
             serve_print("T %d\n", t);
             ++produced;
             hist.push_back(t);
-            if (t == eos) { finish = "stop"; return false; }
-            if (stop.load()) { finish = "cancel"; return false; }
-            if (produced >= max_new || E.pos() + kMaxT + 1 >= E.ctx - kMaxT) { finish = "length"; return false; }
+            if (t == eos) {
+                finish = "stop";
+                return false;
+            }
+            if (stop.load()) {
+                finish = "cancel";
+                return false;
+            }
+            if (produced >= max_new || E.pos() + kMaxT + 1 >= E.ctx - kMaxT) {
+                finish = "length";
+                return false;
+            }
             return true;
         };
         while (true) {
             E.step_moves();
             const int nx = pre >= 0 ? pre : lamina::program::sample(lg, smp, hist, rng);
             pre = -1;
-            if (nx < 0) { finish = "nonfinite"; break; }
+            if (nx < 0) {
+                finish = "nonfinite";
+                break;
+            }
             if (!emit(nx)) break;
             const long long before = produced;
             if (E.drafts_on) {
@@ -5435,12 +5619,17 @@ struct Serve {
         E.relax();
         const int queued = E.adapt ? E.plan_moves(512, true) : 0;
         E.save_profile(false);
-        std::fprintf(stderr, "lamina: expert copies: %d planned at the answer's start, %lld landed during it, %d planned "
-                     "after it; MiB of VRAM free: %s\n", moved_at_start, landed, queued, E.vram_free().c_str());
-        std::fprintf(stderr, "lamina: %zu prompt tokens (%zu reused) in %.1f ms, %lld generated in %.1f ms (%.2f tok/s), "
-                     "%s%s\n", ids.size(), reuse, prompt_ms, produced, decode_ms,
+        std::fprintf(stderr,
+                     "lamina: expert copies: %d planned at the answer's start, %lld landed during it, %d planned "
+                     "after it; MiB of VRAM free: %s\n",
+                     moved_at_start, landed, queued, E.vram_free().c_str());
+        std::fprintf(stderr,
+                     "lamina: %zu prompt tokens (%zu reused) in %.1f ms, %lld generated in %.1f ms (%.2f tok/s), "
+                     "%s%s\n",
+                     ids.size(), reuse, prompt_ms, produced, decode_ms,
                      decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, finish,
-                     offered > 0 ? (", drafts " + std::to_string(kept) + " of " + std::to_string(offered)).c_str() : "");
+                     offered > 0 ? (", drafts " + std::to_string(kept) + " of " + std::to_string(offered)).c_str()
+                                 : "");
     }
 
     int run() {
@@ -5450,7 +5639,10 @@ struct Serve {
             std::string l;
             while (io.read_line(l)) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") { stop.store(true); continue; }
+                if (l == "STOP") {
+                    stop.store(true);
+                    continue;
+                }
                 std::lock_guard<std::mutex> lk(mu);
                 lines.push_back(l);
                 cv.notify_one();
@@ -5512,8 +5704,8 @@ int run_engine(int argc, char** argv, bool check_only) {
     int prefill = 4096, prefill_min = 24, prefill_pass = 16384;
     double arena_pin = 72;
     double park_mib = 16384, reserve_mib = 6144;
-    std::string spill_dir;     // --conversation-spill-dir: the park's disk tier (empty: none)
-    int64_t spill_mib = -1;    // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
+    std::string spill_dir;    // --conversation-spill-dir: the park's disk tier (empty: none)
+    int64_t spill_mib = -1;   // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
     bool kv_grow = true;
     bool file_cache = true;   // the model file read through the OS file cache (--no-file-cache: past it)
     bool arena_place = false;
@@ -5543,7 +5735,10 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--tokens-file") {
             const char* f = next();
             FILE* fp = std::fopen(f, "rb");
-            if (!fp) { std::fprintf(stderr, "lamina: cannot open %s\n", f); return 2; }
+            if (!fp) {
+                std::fprintf(stderr, "lamina: cannot open %s\n", f);
+                return 2;
+            }
             char buf[1 << 16];
             size_t n;
             while ((n = std::fread(buf, 1, sizeof buf, fp)) > 0) tokens.append(buf, n);
@@ -5558,20 +5753,23 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--expert-profile-save") profile_save = next();
         else if (a == "--expert-profile-save-every") save_every = std::atof(next());
         else if (a == "--no-graph") graphs = false;
-        else if (a == "--prefill") prefill = std::atoi(next());            // rows a prompt chunk (0: the decode's forwards)
-        else if (a == "--prefill-min") prefill_min = std::atoi(next());    // a shorter prompt part: the decode's forwards
-        else if (a == "--prefill-pass") prefill_pass = std::atoi(next());  // rows of a long part's chunks (0: none)
-        else if (a == "--arena-pin") arena_pin = std::atof(next());        // GiB of the arena in pinned memory at most
+        else if (a == "--prefill") prefill = std::atoi(next());   // rows a prompt chunk (0: the decode's forwards)
+        else if (a == "--prefill-min")
+            prefill_min = std::atoi(next());                                // a shorter prompt part:
+                                                                            // the decode's forwards
+        else if (a == "--prefill-pass") prefill_pass = std::atoi(next());   // rows of a long part's chunks (0: none)
+        else if (a == "--arena-pin") arena_pin = std::atof(next());         // GiB of the arena in pinned memory at most
         else if (a == "--park-mib" || a == "--conversation-cache-mib") park_mib = std::atof(next());
         else if (a == "--ram-reserve-mib") reserve_mib = std::atof(next());
         else if (a == "--conversation-spill-dir") spill_dir = next();
         else if (a == "--conversation-spill-mib") spill_mib = std::max<int64_t>(0, std::atoll(next()));
         else if (a == "--no-kv-grow") kv_grow = false;
         else if (a == "--file-cache") file_cache = true;
-        else if (a == "--arena-place") arena_place = true;   // the pinned places timed, the CPU's experts in the fast ones
+        else if (a == "--arena-place")
+            arena_place = true;   // the pinned places timed, the CPU's experts in the fast ones
         else if (a == "--no-arena-place") arena_place = false;
         else if (a == "--no-file-cache") file_cache = false;
-        else if (a == "--kv") kv = next();   // the sparse layers' K / V: fp16 or q8_0
+        else if (a == "--kv") kv = next();           // the sparse layers' K / V: fp16 or q8_0
         else if (a == "--no-mtp") use_mtp = false;   // the MTP block not loaded (no drafts)
         else if (a == "--drafter" || a == "--dfly" || a == "--mtp" || a == "--dspark") {
             // DFly2's drafts (the checkpoint's last shard) in place of the MTP block; --mtp N, a number, is the earlier
@@ -5579,33 +5777,42 @@ int run_engine(int argc, char** argv, bool check_only) {
             const std::string v = next();
             if (!lamina::is_drafter_flag(a, v)) {
                 drafts = std::max(0, std::min(kMaxT - 1, std::atoi(v.c_str())));
-                std::fprintf(stderr, "lamina: --mtp %s is --drafts-per-step %s on this path (--drafter names a drafter "
-                                     "file)\n", v.c_str(), v.c_str());
+                std::fprintf(stderr,
+                             "lamina: --mtp %s is --drafts-per-step %s on this path (--drafter names a drafter "
+                             "file)\n",
+                             v.c_str(), v.c_str());
             } else {
                 dfly_flag = a;
                 dfly_path = v;
             }
-        }
-        else if (a == "--drafts-per-step") drafts = std::max(0, std::min(kMaxT - 1, std::atoi(next())));
+        } else if (a == "--drafts-per-step") drafts = std::max(0, std::min(kMaxT - 1, std::atoi(next())));
         else if (a == "--spec-min-p") spec_min_p = (float) std::atof(next());
         else if (a == "--spec-lookup") lookup = std::max(0, std::atoi(next()));   // prompt lookup's match (0: none)
-        else if (a == "--warm-ms") warm_ms = std::max(0, std::atoi(next()));   // a request after a pause: the cards kept running
-        else if (a == "--prefill-lend") prefill_lend = std::max(0, std::atoi(next()));   // the prompt buffers lent after N tokens
-        else if (a == "--adapt-every") adapt = std::atoi(next()) != 0;   // 0: the start's placement stays (Engine::adapt)
+        else if (a == "--warm-ms")
+            warm_ms = std::max(0, std::atoi(next()));   // a request after a pause: the cards kept running
+        else if (a == "--prefill-lend")
+            prefill_lend = std::max(0, std::atoi(next()));   // the prompt buffers lent after N tokens
+        else if (a == "--adapt-every")
+            adapt = std::atoi(next()) != 0;                      // 0: the start's placement stays (Engine::adapt)
         else if (a == "--tier-doorbell") tier_doorbell = true;   // the tiers' shares queued behind doorbells
         else if (a == "--kv-grow") kv_grow = true;
         else if (a == "--vision") vision = true;    // pictures: GENI requests, --emb (the rows lamina-vision's)
         else if (a == "--emb") emb_file = next();   // generate mode: --tokens' pictures, a lamina-vision file
-        else if (a == "--tier-gpus") {   // the expert tiers' GPUs (CUDA ordinals, the family switch's)
+        else if (a == "--tier-gpus") {              // the expert tiers' GPUs (CUDA ordinals, the family switch's)
             for (const int32_t d : lamina::program::parse_ids(next())) tier_devs.push_back((int) d);
-        }
-        else {
+        } else {
             std::fprintf(stderr, "lamina: Hy4-flash's path does not take %s\n", a.c_str());
             return 2;
         }
     }
-    if (model.empty()) { std::fprintf(stderr, "lamina: --native MODEL is required\n"); return 2; }
-    if (kv != "fp16" && kv != "q8_0") { std::fprintf(stderr, "lamina: --kv takes fp16 or q8_0 on this path\n"); return 2; }
+    if (model.empty()) {
+        std::fprintf(stderr, "lamina: --native MODEL is required\n");
+        return 2;
+    }
+    if (kv != "fp16" && kv != "q8_0") {
+        std::fprintf(stderr, "lamina: --kv takes fp16 or q8_0 on this path\n");
+        return 2;
+    }
     std::string err;
     if (!dfly_path.empty()) {   // DFly's file read now: its config and the shard's header
         if (const std::string e = lamina::drafter_mismatch(
@@ -5650,14 +5857,15 @@ int run_engine(int argc, char** argv, bool check_only) {
         E.sfx = std::make_unique<lamina::spec::SuffixDrafter>(lookup, 32, (size_t) std::max<int64_t>(4096, max_ctx));
     E.vision = vision || !emb_file.empty();
     if (E.vision && m.image_pad < 0) {
-        std::fprintf(stderr, "lamina: the model's vocabulary has no image pad token, so --vision has no cells to fill\n");
+        std::fprintf(stderr,
+                     "lamina: the model's vocabulary has no image pad token, so --vision has no cells to fill\n");
         return 2;
     }
     E.init(m, max_ctx, threads);
     E.park_budget = (size_t) (std::max(0.0, park_mib) * (double) (1 << 20));
     E.ram_reserve = (size_t) (std::max(0.0, reserve_mib) * (double) (1 << 20));
     E.open_disk(spill_dir, spill_mib);   // the park's disk tier
-    Prompt P(E);   // its buffers before the slots take the GPUs' free memory
+    Prompt P(E);                         // its buffers before the slots take the GPUs' free memory
     // the MTP block kept up catches up over a chunk's rows at once: no passes past --prefill's
     const bool mtp_kept = E.drafts_on && m.has_mtp;
     if (prefill > 0 && P.init(prefill, tier_devs, mtp_kept ? 0 : prefill_pass)) {
@@ -5689,17 +5897,21 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     std::vector<int32_t> prompt = lamina::program::parse_ids(tokens.c_str());
     const std::vector<int32_t> forced = lamina::program::parse_ids(force.c_str());
-    if (prompt.empty()) { std::fprintf(stderr, "lamina: --tokens is required\n"); return 2; }
+    if (prompt.empty()) {
+        std::fprintf(stderr, "lamina: --tokens is required\n");
+        return 2;
+    }
     if (!forced.empty()) n_gen = (int) forced.size() + 1;
     for (const std::vector<int32_t>* v : {(const std::vector<int32_t>*) &prompt, &forced})
         for (const int32_t t : *v)
             if (t < 0 || t >= m.g.n_vocab) {
-                std::fprintf(stderr, "lamina: the token %d is outside the vocabulary (%lld)\n", (int) t, (long long) m.g.n_vocab);
+                std::fprintf(stderr, "lamina: the token %d is outside the vocabulary (%lld)\n", (int) t,
+                             (long long) m.g.n_vocab);
                 return 2;
             }
     if ((int64_t) prompt.size() + n_gen + kMaxT > E.ctx) {
-        std::fprintf(stderr, "lamina: the prompt (%zu tokens) and %d generated exceed the context (%lld)\n", prompt.size(),
-                     n_gen, (long long) E.ctx);
+        std::fprintf(stderr, "lamina: the prompt (%zu tokens) and %d generated exceed the context (%lld)\n",
+                     prompt.size(), n_gen, (long long) E.ctx);
         return 2;
     }
     ImgReq ir;
@@ -5741,12 +5953,13 @@ int run_engine(int argc, char** argv, bool check_only) {
             rows.push_back(x);
             const int n = std::min(drafts, n_gen - (int) gen.size());
             const size_t before = gen.size();
-            const Engine::Window w = E.drafted(rows, n, lg, [](const std::vector<float>& l) { return argmax(l); },
-                                               [&](int32_t t) {
-                                                   gen.push_back(t);
-                                                   if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
-                                                   return (int) gen.size() < n_gen;
-                                               });
+            const Engine::Window w = E.drafted(
+                rows, n, lg, [](const std::vector<float>& l) { return argmax(l); },
+                [&](int32_t t) {
+                    gen.push_back(t);
+                    if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
+                    return (int) gen.size() < n_gen;
+                });
             ++windows;
             offered += (int64_t) w.drafts.size();
             kept += w.kept;
@@ -5774,23 +5987,27 @@ int run_engine(int argc, char** argv, bool check_only) {
     serve_print("gen:");
     for (int t : gen) serve_print(" %d", t);
     serve_print("\n");
-    std::fprintf(stderr, "lamina: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.2f tok/s); "
-                 "the CPU's experts %.1f ms, the table %.1f ms while generating; VRAM hits %.1f%%\n", prompt.size(), pp_ms,
-                 prompt.size() / (pp_ms / 1000.0), gen.size(), tg_ms, gen.size() / (tg_ms / 1000.0), E.cpu_ms - cpu0,
-                 E.table_ms - tab0, E.lookups ? 100.0 * (double) E.hits / (double) E.lookups : 0.0);
+    std::fprintf(stderr,
+                 "lamina: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.2f tok/s); "
+                 "the CPU's experts %.1f ms, the table %.1f ms while generating; VRAM hits %.1f%%\n",
+                 prompt.size(), pp_ms, prompt.size() / (pp_ms / 1000.0), gen.size(), tg_ms,
+                 gen.size() / (tg_ms / 1000.0), E.cpu_ms - cpu0, E.table_ms - tab0,
+                 E.lookups ? 100.0 * (double) E.hits / (double) E.lookups : 0.0);
     for (const Engine::Gpu& gp : E.gpus)
         std::fprintf(stderr, "lamina: GPU %d, %s: %.1f%% of the routed entries\n", gp.dev, gp.name.c_str(),
                      E.lookups ? 100.0 * (double) gp.hits / (double) E.lookups : 0.0);
     std::fprintf(stderr, "lamina: MiB of VRAM free: %s\n", E.vram_free().c_str());
     if (windows > 0)
-        std::fprintf(stderr, "lamina: %lld windows (%lld looked up), %lld drafts offered, %lld kept (%.1f%%), %.2f tokens "
-                     "a window\n", (long long) windows, (long long) E.looked_windows, (long long) offered, (long long) kept,
+        std::fprintf(stderr,
+                     "lamina: %lld windows (%lld looked up), %lld drafts offered, %lld kept (%.1f%%), %.2f tokens "
+                     "a window\n",
+                     (long long) windows, (long long) E.looked_windows, (long long) offered, (long long) kept,
                      offered ? 100.0 * (double) kept / (double) offered : 0.0, (double) gen.size() / (double) windows);
     E.save_profile(true);
     return 0;
 }
 
-}  // namespace
+}   // namespace
 
 int lamina::hy4::run(int argc, char** argv) {
     Owned owned;

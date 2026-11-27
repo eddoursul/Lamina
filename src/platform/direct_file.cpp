@@ -65,7 +65,7 @@ int io_threads(int dflt) {
     const int n = v ? std::atoi(v) : dflt;
     return std::clamp(n, 1, 64);
 }
-}  // namespace
+}   // namespace
 
 #if defined(_WIN32)
 // ------------------------------------------------------------------------------------------------ Windows
@@ -76,13 +76,13 @@ struct Req {
     OVERLAPPED ov;
     uint64_t tag;
 };
-}  // namespace
+}   // namespace
 
 struct DirectFile::Impl {
     HANDLE file = INVALID_HANDLE_VALUE;
     HANDLE port = nullptr;
     uint64_t size = 0;
-    std::mutex mu;                      // everything below
+    std::mutex mu;   // everything below
     std::deque<Req*> free_reqs;
     std::vector<Req*> all_reqs;
     std::deque<Completion> immediate;   // requests that completed without a port packet (EOF) or failed
@@ -185,7 +185,11 @@ bool DirectFile::open(const std::string& path, std::string& err) {
     // Completions of reads that finish synchronously are still queued to the port, so every issued read
     // produces exactly one packet; `wait` is the only completion path.
     const int n = io_threads(4);
-    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { lamina::aux_cpus::pin_current_thread(); impl_->worker(); });
+    for (int i = 0; i < n; ++i)
+        impl_->pool.emplace_back([this] {
+            lamina::aux_cpus::pin_current_thread();
+            impl_->worker();
+        });
     return true;
 }
 
@@ -204,7 +208,10 @@ bool DirectFile::is_open() const { return impl_->file != INVALID_HANDLE_VALUE; }
 uint64_t DirectFile::size() const { return impl_->size; }
 
 bool DirectFile::submit(uint64_t offset, void* buffer, uint32_t length, uint64_t tag, std::string& err) {
-    if (!is_open()) { err = "DirectFile: not open"; return false; }
+    if (!is_open()) {
+        err = "DirectFile: not open";
+        return false;
+    }
     if (offset % alignment() || length % alignment() || ((uintptr_t) buffer) % alignment() || length == 0) {
         err = "DirectFile: unaligned request";
         return false;
@@ -234,7 +241,7 @@ int DirectFile::wait(Completion* out, int max, int timeout_ms) {
     if (!GetQueuedCompletionStatusEx(impl_->port, entries, want, &got, n > 0 ? 0 : t, FALSE)) return n;
     std::lock_guard<std::mutex> lk(impl_->mu);
     for (ULONG i = 0; i < got; ++i) {
-        if (entries[i].lpOverlapped == nullptr) {          // a wake() packet (or an immediate completion's nudge)
+        if (entries[i].lpOverlapped == nullptr) {   // a wake() packet (or an immediate completion's nudge)
             // the batch's later entries are off the port and go out now: room for them first (an immediate
             // completion pushed after the drain above, its nudge among 63 reads, made 65 of 64); the rest wait
             const int room = max - (int) (got - i - 1);
@@ -305,17 +312,31 @@ struct DirectFile::Impl {
 };
 
 DirectFile::DirectFile() : impl_(new Impl) {}
-DirectFile::~DirectFile() { close(); delete impl_; }
+DirectFile::~DirectFile() {
+    close();
+    delete impl_;
+}
 
 bool DirectFile::open(const std::string& path, std::string& err) {
     close();
     impl_->fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
-    if (impl_->fd < 0) { err = "DirectFile: cannot open " + path; return false; }
+    if (impl_->fd < 0) {
+        err = "DirectFile: cannot open " + path;
+        return false;
+    }
     struct stat st;
-    if (fstat(impl_->fd, &st) != 0) { err = "DirectFile: cannot size " + path; close(); return false; }
+    if (fstat(impl_->fd, &st) != 0) {
+        err = "DirectFile: cannot size " + path;
+        close();
+        return false;
+    }
     impl_->size = (uint64_t) st.st_size;
     const int n = io_threads(16);
-    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { lamina::aux_cpus::pin_current_thread(); impl_->worker(); });
+    for (int i = 0; i < n; ++i)
+        impl_->pool.emplace_back([this] {
+            lamina::aux_cpus::pin_current_thread();
+            impl_->worker();
+        });
     return true;
 }
 
@@ -366,4 +387,4 @@ int DirectFile::wait(Completion* out, int max, int timeout_ms) {
 }
 #endif
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

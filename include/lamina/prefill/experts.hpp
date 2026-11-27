@@ -14,9 +14,9 @@
 // streams at 6.4 GB/s (~0.65 GB (IQ3_XXS) to ~1.4 GB (UD-Q4_K_XL) a layer); the second GPU sits on x16.  The first GPU
 // copies the chunk's MoE input (FP16) to pinned host memory; the second copies it in, computes the experts the first
 // one's cache lacks - from its own cache when it holds them - and returns their sums (FP16: they stay below ~20) the
-// same way, while the first computes the experts its cache holds.  Neither GPU reads the other's memory: Windows gives GeForce cards no
-// peer access.  A remote runner without staging (`streams` false) is a later tier's: it takes the experts its cache
-// holds alone, from the same host copy of the input (set_host_input), so the second GPU streams fewer
+// same way, while the first computes the experts its cache holds.  Neither GPU reads the other's memory: Windows gives
+// GeForce cards no peer access.  A remote runner without staging (`streams` false) is a later tier's: it takes the
+// experts its cache holds alone, from the same host copy of the input (set_host_input), so the second GPU streams fewer
 // (Prefill::set_helpers); on a card behind an x4 link its rows cross two such links, which pays where the experts it
 // spares the second GPU are large (UD-Q4_K_XL's: a 2-4K-token part 15% sooner; IQ3_S's 4-10% later).
 #pragma once
@@ -64,7 +64,8 @@ public:
     void set_fast_link(bool on);
     /// The buffers for chunks of up to `chunk` tokens, carved from `region` (`bytes` long, e.g. lent cache slots), or
     /// with a null region from its own allocation (made once, for `max_chunk` tokens).  Before the first layer of
-    /// every prompt that uses a region, and of the next one.  `area`: device memory for the prefetched blobs; null: what the region has left.
+    /// every prompt that uses a region, and of the next one.  `area`: device
+    /// memory for the prefetched blobs; null: what the region has left.
     bool bind(void* region, uint64_t bytes, int64_t chunk, std::string& err, void* area = nullptr,
               uint64_t area_bytes = 0);
     /// Bytes of prefetch area that hold a layer's streamed experts: the largest layer's experts that neither its
@@ -122,15 +123,15 @@ public:
     /// Called after each batch's work is queued (Prefill::set_pacing; false: stop, the caller's error), or null.
     void set_pace(std::function<bool()> f);
 
-    int64_t experts_resident = 0;   ///< expert-layer groups served from its cache
-    int64_t experts_streamed = 0;   ///< expert blobs copied from the arena
-    int64_t experts_prefetched = 0; ///< ...of which ahead of the routing
-    double ms_host = 0;             ///< host time queuing its work
-    double ms_gpu = 0;              ///< remote: its GPU time from the input's arrival (all layers but the last)
+    int64_t experts_resident = 0;     ///< expert-layer groups served from its cache
+    int64_t experts_streamed = 0;     ///< expert blobs copied from the arena
+    int64_t experts_prefetched = 0;   ///< ...of which ahead of the routing
+    double ms_host = 0;               ///< host time queuing its work
+    double ms_gpu = 0;                ///< remote: its GPU time from the input's arrival (all layers but the last)
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

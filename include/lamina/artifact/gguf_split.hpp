@@ -49,4 +49,4 @@ inline std::vector<std::string> gguf_split_paths(const std::string& any) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

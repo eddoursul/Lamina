@@ -13,12 +13,12 @@
 #define NOMINMAX
 #include <windows.h>
 #else
-#include <cerrno>
-#include <cstdlib>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #endif
 
 namespace fs = std::filesystem;
@@ -86,7 +86,7 @@ bool aligned(uint64_t offset, const void* buf, uint64_t bytes) {
     return offset % kSpillAlign == 0 && bytes % kSpillAlign == 0 && (uintptr_t) buf % kSpillAlign == 0;
 }
 
-}  // namespace
+}   // namespace
 
 void* spill_alloc(uint64_t bytes) {
 #if defined(_WIN32)
@@ -193,8 +193,8 @@ bool SpillFile::write(uint64_t offset, const void* buf, uint64_t bytes, std::str
         return false;
     }
     for (uint64_t at = 0; at < bytes;) {
-        const ssize_t n = ::pwrite(fd_, (const uint8_t*) buf + at, (size_t) std::min(kPiece, bytes - at),
-                                   (off_t) (offset + at));
+        const ssize_t n =
+            ::pwrite(fd_, (const uint8_t*) buf + at, (size_t) std::min(kPiece, bytes - at), (off_t) (offset + at));
         if (n <= 0) {
             err = std::string("a write failed (") + (n < 0 ? std::strerror(errno) : "no progress") + ")";
             return false;
@@ -210,7 +210,8 @@ bool SpillFile::read(uint64_t offset, void* buf, uint64_t bytes, std::string& er
         return false;
     }
     for (uint64_t at = 0; at < bytes;) {
-        const ssize_t n = ::pread(fd_, (uint8_t*) buf + at, (size_t) std::min(kPiece, bytes - at), (off_t) (offset + at));
+        const ssize_t n =
+            ::pread(fd_, (uint8_t*) buf + at, (size_t) std::min(kPiece, bytes - at), (off_t) (offset + at));
         if (n <= 0) {
             err = std::string("a read failed (") + (n < 0 ? std::strerror(errno) : "the file ends") + ")";
             return false;
@@ -284,4 +285,4 @@ uint64_t SpillDir::free_bytes() const {
     return ec ? 0 : (uint64_t) s.available;
 }
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

@@ -37,4 +37,4 @@ void fused_gdn_step_norm_silu(float* state, const float* q, const float* k, cons
                               const float* beta, const float* z, const float* gamma, float eps, float* y, int h_k,
                               int h_v, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

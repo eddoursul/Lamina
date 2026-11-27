@@ -27,4 +27,4 @@ inline std::string kernel_limits(const Geometry& g) {
     return {};
 }
 
-}  // namespace lamina::inkling2
+}   // namespace lamina::inkling2

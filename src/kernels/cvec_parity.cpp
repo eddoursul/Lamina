@@ -114,7 +114,7 @@ double row_error(const std::vector<float>& got, const std::vector<double>& want)
     return worst;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "--selftest") != 0) {
@@ -130,7 +130,10 @@ int main(int argc, char** argv) {
     {
         double nv = 0.0;
         std::vector<double> v(N);
-        for (double& x : v) { x = nd(rng); nv += x * x; }
+        for (double& x : v) {
+            x = nd(rng);
+            nv += x * x;
+        }
         for (int d = 0; d < N; ++d) {
             const float a = 0.25f * nd(rng), u = (float) (std::sqrt(1.78) * v[(size_t) d] / std::sqrt(nv));
             add[(size_t) d] = a;
@@ -161,16 +164,30 @@ int main(int argc, char** argv) {
         };
         auto rows = [&](float* R, bool write, bool partial, bool norm, float* rs, uint16_t* xn) {
             CvecRows r;
-            r.R = R; r.T = T; r.n_embd = N; r.hc = HC;
-            if (write) { r.bo = bo; r.inj = inj; r.inj_ld = HC; r.partial = partial ? part : nullptr; }
-            if (norm) { r.w_norm = wn; r.eps = EPS; r.rs = rs; r.xn16 = xn; }
+            r.R = R;
+            r.T = T;
+            r.n_embd = N;
+            r.hc = HC;
+            if (write) {
+                r.bo = bo;
+                r.inj = inj;
+                r.inj_ld = HC;
+                r.partial = partial ? part : nullptr;
+            }
+            if (norm) {
+                r.w_norm = wn;
+                r.eps = EPS;
+                r.rs = rs;
+                r.xn16 = xn;
+            }
             return r;
         };
 
         // ---- 1. zero vectors: the writes it stands in for
         lamina::prefill::gr_write_norm_rs(R1, bo, inj, HC, wn, EPS, rs1, xn1, T, nullptr, part);
         lamina::kernels::cvec_apply(rows(R2, true, true, true, rs2, xn2), d_zero, nullptr);
-        expect(same(down(R1, c.R.size()), down(R2, c.R.size())) && same(down(rs1, (size_t) T * HC), down(rs2, (size_t) T * HC)) &&
+        expect(same(down(R1, c.R.size()), down(R2, c.R.size())) &&
+                   same(down(rs1, (size_t) T * HC), down(rs2, (size_t) T * HC)) &&
                    same(down(xn1, (size_t) T * D), down(xn2, (size_t) T * D)),
                "zero vector, write + FP16 sums + norm = gr_write_norm_rs (R, rs, xn16)");
         reset();
@@ -195,16 +212,27 @@ int main(int argc, char** argv) {
             lamina::kernels::FusedGrArgs fa[lamina::kernels::kFusedGrMaxT];
             for (int t = 0; t < T; ++t) {
                 lamina::kernels::FusedGrArgs& a = fa[t];
-                a.R = R1 + (size_t) t * D; a.R_out = R1 + (size_t) t * D; a.apply = true;
-                a.bo_prev = bo + (size_t) t * N; a.inj_prev = inj + t * HC;
-                a.w_norm = wn; a.w_down = dd; a.w_up = du; a.w_inject = di; a.eps = EPS;
-                a.lo = lo + (size_t) t * LR; a.rs = rsw + t * HC; a.inject_out = io + t * HC; a.mixed = mixed + (size_t) t * N;
+                a.R = R1 + (size_t) t * D;
+                a.R_out = R1 + (size_t) t * D;
+                a.apply = true;
+                a.bo_prev = bo + (size_t) t * N;
+                a.inj_prev = inj + t * HC;
+                a.w_norm = wn;
+                a.w_down = dd;
+                a.w_up = du;
+                a.w_inject = di;
+                a.eps = EPS;
+                a.lo = lo + (size_t) t * LR;
+                a.rs = rsw + t * HC;
+                a.inject_out = io + t * HC;
+                a.mixed = mixed + (size_t) t * N;
             }
             lamina::kernels::fused_gr_read_multi(fa, T, scratch, nullptr);
             lamina::kernels::cvec_apply(rows(R2, true, false, false, nullptr, nullptr), d_zero, nullptr);
             expect(same(down(R1, c.R.size()), down(R2, c.R.size())),
                    "zero vector, write = the verify read's folded write (fused_gr_read_multi)");
-            for (void* p : {(void*) dd, (void*) du, (void*) di, (void*) lo, (void*) rsw, (void*) io, (void*) mixed, (void*) scratch})
+            for (void* p : {(void*) dd, (void*) du, (void*) di, (void*) lo, (void*) rsw, (void*) io, (void*) mixed,
+                            (void*) scratch})
                 cudaFree(p);
             reset();
         }
@@ -214,13 +242,17 @@ int main(int argc, char** argv) {
         lamina::kernels::cvec_apply(rows(R1, true, true, true, rs1, xn1), d_both, nullptr);
         lamina::kernels::cvec_apply(rows(R2, true, true, false, nullptr, nullptr), d_both, nullptr);
         lamina::prefill::gr_norm_rs(R2, wn, EPS, rs2, xn2, T, nullptr);
-        expect(same(down(R1, c.R.size()), down(R2, c.R.size())) && same(down(rs1, (size_t) T * HC), down(rs2, (size_t) T * HC)) &&
+        expect(same(down(R1, c.R.size()), down(R2, c.R.size())) &&
+                   same(down(rs1, (size_t) T * HC), down(rs2, (size_t) T * HC)) &&
                    same(down(xn1, (size_t) T * D), down(xn2, (size_t) T * D)),
                "write + vector + norm in one pass = the pass, then gr_norm_rs");
         reset();
 
         // ---- 3. against FP64
-        const struct { const char* name; const std::vector<float>* cv; } modes[] = {{"add", &add}, {"project", &proj}, {"both", &both}};
+        const struct {
+            const char* name;
+            const std::vector<float>* cv;
+        } modes[] = {{"add", &add}, {"project", &proj}, {"both", &both}};
         for (const auto& m : modes) {
             const float* d_cv = up(*m.cv);
             for (const bool write : {false, true}) {
@@ -229,7 +261,8 @@ int main(int argc, char** argv) {
                 lamina::kernels::cvec_apply(rows(R1, write, write, true, rs1, xn1), d_cv, nullptr);
                 const std::vector<float> got = down(R1, c.R.size()), got_rs = down(rs1, (size_t) T * HC);
                 double e_rs = 0.0;
-                for (size_t i = 0; i < got_rs.size(); ++i) e_rs = std::max(e_rs, std::fabs(got_rs[i] / want_rs[i] - 1.0));
+                for (size_t i = 0; i < got_rs.size(); ++i)
+                    e_rs = std::max(e_rs, std::fabs(got_rs[i] / want_rs[i] - 1.0));
                 const double e = row_error(got, want);
                 char what[160];
                 std::snprintf(what, sizeof what, "%s%s vs FP64: rows %.2e of their RMS, row scales %.2e", m.name,

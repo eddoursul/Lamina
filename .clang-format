@@ -1,0 +1,55 @@
+# The C, C++ and CUDA style: LLVM's, with the code's own habits (4 spaces, 120 columns, pointers and references on
+# the type, a space after a C cast, short ifs, loops, functions and case labels on one line, three spaces before a
+# trailing comment). clang-format 23.1.5 (requirements.txt) formats it: python tools/format.py, --check in CI; Visual
+# Studio's clang-format 19 reads this file too. Vendored code keeps its own layout: its folders' .clang-format turns
+# formatting off.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+ColumnLimit: 120
+# a long trailing comment goes on below itself rather than splitting the code before it
+PenaltyBreakComment: 20
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+IndentCaseLabels: true
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+DerivePointerAlignment: false
+SpaceAfterCStyleCast: true
+SpacesBeforeTrailingComments: 3
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+AllowShortLambdasOnASingleLine: All
+BreakTemplateDeclarations: MultiLine
+# a message stays one literal, as it is searched for
+BreakStringLiterals: false
+FixNamespaceComments: true
+# sorted within each block, the blocks kept: the file's own header, the project's, <winsock2.h> and <windows.h> (the
+# Windows headers after them need them first), C's, CUDA's and libraries' <*.h>, then C++'s
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+IncludeCategories:
+  - Regex: '^"'
+    Priority: 1
+  - Regex: '^<winsock2\.h>$'
+    Priority: 2
+  - Regex: '^<windows\.h>$'
+    Priority: 3
+  - Regex: '^<.*\.(h|hpp|cuh)>$'
+    Priority: 4
+  - Regex: '^<'
+    Priority: 5
+KeepEmptyLines:
+  AtEndOfFile: false
+  AtStartOfBlock: false
+  AtStartOfFile: false
+InsertNewlineAtEOF: true
+# CUDA's qualifiers are attributes, not types
+AttributeMacros: [__host__, __device__, __global__, __forceinline__, __noinline__, __launch_bounds__]
+...

@@ -51,7 +51,8 @@ public:
     /// the next stage's first, the last stage's to the model's end, on `device` with its cache `cache` and residency
     /// `res` (n_layers x n_expert).  `offload`: a runner on another GPU for the experts its cache lacks (initialized by
     /// the caller with `device` as its caller's, bound before each prompt), or null: they stream to it over its own
-    /// link, an x16 one (ExpertRunner::set_fast_link), and its GPU's queue is kept short (it runs other stages' shares).
+    /// link, an x16 one (ExpertRunner::set_fast_link), and its
+    /// GPU's queue is kept short (it runs other stages' shares).
     struct Stage {
         int64_t first = 0;
         int device = -1;
@@ -105,14 +106,14 @@ public:
     /// A stage's prompt path (its stats, the --prefill-profile sections of its layers).
     const PrefillStats& stats(int stage = 0) const;
     void set_profile(bool on);
-    double ms_first_waited = 0;    ///< host time the first stage waited to hand a chunk on
-    double ms_finish = 0;          ///< host time `finish` waited for the stages and the state's copies
-    double ms_copy_in = 0;         ///< the prefix state's copies to the stages' GPUs (their threads)
-    uint64_t weight_bytes = 0;     ///< the dense weights the stages copy in at each `begin`
+    double ms_first_waited = 0;   ///< host time the first stage waited to hand a chunk on
+    double ms_finish = 0;         ///< host time `finish` waited for the stages and the state's copies
+    double ms_copy_in = 0;        ///< the prefix state's copies to the stages' GPUs (their threads)
+    uint64_t weight_bytes = 0;    ///< the dense weights the stages copy in at each `begin`
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

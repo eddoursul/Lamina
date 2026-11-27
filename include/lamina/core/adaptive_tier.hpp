@@ -32,10 +32,8 @@ public:
     /// per call.  `device`: the cache's GPU (its stream and copies), `main_device` current again afterwards.
     /// `deterministic_adapt` settles the prior epoch, submits the next one as a full batch, and orders equal gains
     /// by tuple; false preserves the asynchronous gain-only policy.
-    bool init(ExpertCache& cache, ExpertSource& src,
-              std::vector<int32_t>& host_res, int64_t n_layers, int64_t n_expert,
-              int max_moves, std::string& err, int device = -1, int main_device = 0,
-              bool deterministic_adapt = false);
+    bool init(ExpertCache& cache, ExpertSource& src, std::vector<int32_t>& host_res, int64_t n_layers, int64_t n_expert,
+              int max_moves, std::string& err, int device = -1, int main_device = 0, bool deterministic_adapt = false);
     bool on() const { return res_ != nullptr; }
     /// The source has layers in pageable memory: their copies go through a pinned staging ring, at most kMaxFlying
     /// batches fly, and the mid-window pump waits for the second GPU's rows (`Verifier::set_rows_in`).  A copy from a
@@ -48,7 +46,10 @@ public:
     void drop_free_slots(int64_t lo, int64_t hi) {
         for (auto& f : free_)
             for (size_t i = 0; i < f.size();)
-                if (f[i] >= lo && f[i] < hi) { f[i] = f.back(); f.pop_back(); } else ++i;
+                if (f[i] >= lo && f[i] < hi) {
+                    f[i] = f.back();
+                    f.pop_back();
+                } else ++i;
     }
     int64_t free_slots() const;
     /// The slots [0, n) hold experts that live only in VRAM (--vram-pin-gib): never evicted.  And an expert the RAM
@@ -85,7 +86,10 @@ public:
     /// Paced (the second GPU's tier, its copies between windows): whole moves, each resident evicted as its copy goes
     /// out.  `pump` submits them in order while they fit `budget` bytes, `sent` the bytes submitted, after `ev` (on
     /// the cache's GPU: the last work that may read the slots they overwrite).
-    void set_paced(cudaEvent_t ev) { paced_ = true; after_ = ev; }
+    void set_paced(cudaEvent_t ev) {
+        paced_ = true;
+        after_ = ev;
+    }
     /// Unpaced: the copies still wait for `ev` (the work that may read their slots), as paced ones do.
     void set_after(cudaEvent_t ev) { after_ = ev; }
     bool pump(uint64_t budget, uint64_t& sent, std::string& err);
@@ -106,7 +110,9 @@ public:
     double ms = 0;                  ///< host time in `adapt`
 
 private:
-    struct Move { int32_t layer, in, out, slot; };   // out: the evicted expert, < 0 for an empty slot
+    struct Move {
+        int32_t layer, in, out, slot;
+    };   // out: the evicted expert, < 0 for an empty slot
     ExpertCache* cache_ = nullptr;
     ExpertSource* src_ = nullptr;
     std::vector<int32_t>* res_ = nullptr;
@@ -120,10 +126,10 @@ private:
     bool asleep_ = false;
     bool deterministic_ = false;
     int64_t frozen_ = 0;
-    std::vector<uint8_t> blocked_;                        // per (layer, expert): not a candidate, rebuilt each call
-    std::vector<uint8_t> upper_has_;                      // per (layer, expert), rebuilt each call
-    std::vector<uint8_t> lower_has_;                      // per (layer, expert), rebuilt each call
-    std::vector<std::vector<int32_t>> free_;              // per layer
+    std::vector<uint8_t> blocked_;             // per (layer, expert): not a candidate, rebuilt each call
+    std::vector<uint8_t> upper_has_;           // per (layer, expert), rebuilt each call
+    std::vector<uint8_t> lower_has_;           // per (layer, expert), rebuilt each call
+    std::vector<std::vector<int32_t>> free_;   // per layer
     // The queued moves in order and their (residency index, slot) once landed: [0, admitted_) admitted, up to sent_
     // sent (and off_ bytes of the next), up to staged_ with their residents evicted.
     std::vector<Move> queued_;
@@ -137,11 +143,12 @@ private:
     cudaEvent_t t0_ = nullptr, t1_ = nullptr;   // around the last timed copies, whose `timed_` bytes have not landed
     uint64_t timed_ = 0;
     double rate_ = 0;
-    std::string failed_;                        // a copy apply_pending could not submit
+    std::string failed_;   // a copy apply_pending could not submit
     cudaStream_t stream_ = nullptr;
     // the batches in flight, oldest first: a ring of events, each with the moves sent when it was recorded
     static constexpr int kBatches = 64;
-    // bounds outstanding copy batches so the enqueue can never block the host thread that launches the second GPU's graphs
+    // bounds outstanding copy batches so the enqueue can never
+    // block the host thread that launches the second GPU's graphs
     static constexpr size_t kMaxFlying = 2;
     cudaEvent_t evs_[kBatches] = {};
     size_t batch_sent_[kBatches] = {};
@@ -170,4 +177,4 @@ private:
     void retire();
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

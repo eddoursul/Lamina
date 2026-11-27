@@ -34,7 +34,7 @@ std::string u8(const fs::path& p) {
     return std::string(u.begin(), u.end());
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     std::printf("platform_spill_test\n");
@@ -43,9 +43,9 @@ int main() {
     fs::remove_all(root, ec);
     fs::create_directories(root / "123-0123456789abcdef", ec);   // an ended engine's folder: no lock held
     std::ofstream(root / "123-0123456789abcdef" / "1.kv") << "old";
-    fs::create_directories(root / "keep-me", ec);                  // not an engine's
-    fs::create_directories(root / "77-0123456789ABCDEF", ec);      // not of that form (upper-case hex)
-    {   // 1-2. the folders
+    fs::create_directories(root / "keep-me", ec);               // not an engine's
+    fs::create_directories(root / "77-0123456789ABCDEF", ec);   // not of that form (upper-case hex)
+    {                                                           // 1-2. the folders
         SpillDir a;
         std::string err;
         int cleaned = -1;
@@ -92,7 +92,8 @@ int main() {
             check(!f.read(8 * kSpillAlign, back, kSpillAlign, err), "a read past its end fails");
         }
         check(fs::file_size(fs::path(std::u8string(reinterpret_cast<const char8_t*>(path.data()), path.size())), ec) ==
-                  6 * kSpillAlign, "its size: whole pages");
+                  6 * kSpillAlign,
+              "its size: whole pages");
         lamina::platform::spill_remove(path);
         check(!fs::exists(pa / "1.kv"), "spill_remove removes it");
         lamina::platform::spill_free(buf);

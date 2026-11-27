@@ -54,20 +54,36 @@ public:
 
     /// Plan v0.3 P5: whether `blob(layer, expert)` lies in page-locked, CUDA-registered memory, so an
     /// asynchronous host-to-device copy can DMA it directly (no staging copy on the CPU).
-    virtual bool pinned(int64_t layer, int64_t expert) const { (void) layer; (void) expert; return false; }
+    virtual bool pinned(int64_t layer, int64_t expert) const {
+        (void) layer;
+        (void) expert;
+        return false;
+    }
 
     /// Called once before the first expert of a layer.  A source that reads from disk wants to start the read
     /// here so it overlaps the quantisation, and a prefetching source in Phase 3 wants the ids.
-    virtual void begin_layer(int64_t layer, const int32_t* ids, int64_t k) { (void) layer; (void) ids; (void) k; }
+    virtual void begin_layer(int64_t layer, const int32_t* ids, int64_t k) {
+        (void) layer;
+        (void) ids;
+        (void) k;
+    }
     /// Plan v0.3 P6: the DEVICE address of a pinned, mapped blob (the GPU can read it over PCIe), or null.
-    virtual const uint8_t* device_alias(int64_t layer, int64_t expert) const { (void) layer; (void) expert; return nullptr; }
+    virtual const uint8_t* device_alias(int64_t layer, int64_t expert) const {
+        (void) layer;
+        (void) expert;
+        return nullptr;
+    }
     /// Whether `layer`'s blobs in RAM have device aliases (the PCIe share can read them).  Not device_alias(layer, 0):
     /// that expert may live only in VRAM.
     virtual bool layer_mapped(int64_t layer) const { return device_alias(layer, 0) != nullptr; }
 
     /// Whether `blob(layer, expert)` exists.  False for an expert that lives only in VRAM (--vram-pin-gib): a GPU
     /// holds it for good and computes it, so no path may ask the RAM for it.
-    virtual bool in_ram(int64_t layer, int64_t expert) const { (void) layer; (void) expert; return true; }
+    virtual bool in_ram(int64_t layer, int64_t expert) const {
+        (void) layer;
+        (void) expert;
+        return true;
+    }
 };
 
 /// Plan v0.3 P6: the PCIe share of a verify window's layer - missed experts the main GPU reads over PCIe - written by
@@ -77,10 +93,10 @@ public:
 /// [start2[q], start2[q + 1]).  counts[1] = entries, counts[2] = groups.
 struct GpuPlanSink {
     int32_t* counts = nullptr;
-    int32_t* dst = nullptr;                ///< cap: the entry's row of parts (token * k + j)
-    int32_t* tok = nullptr;                ///< cap: the entry's token
-    unsigned long long* ptr2 = nullptr;    ///< cap
-    int32_t* start2 = nullptr;             ///< cap + 1
+    int32_t* dst = nullptr;               ///< cap: the entry's row of parts (token * k + j)
+    int32_t* tok = nullptr;               ///< cap: the entry's token
+    unsigned long long* ptr2 = nullptr;   ///< cap
+    int32_t* start2 = nullptr;            ///< cap + 1
     unsigned long long staging = 0;
     int64_t staging_cap = 0;
     int64_t cap = 0;
@@ -104,8 +120,8 @@ struct GpuPlanSink {
     uint32_t* tier_flag[kMaxGpuTiers] = {};
     uint32_t ring = 0, tier_ring[kMaxGpuTiers] = {};
     /// This token group's activations as the window's router wrote them (mapped): the rows the pool takes, `xk_stride`
-    /// bytes apart, when it takes them so: ggml's Q8_K rows (`pool_takes_q8k`) or the q8_1 rows (`pool_takes_q8_1`), else
-    /// null (the pool quantizes the floats); and the q8_1 rows (n_embd / 32 blocks each) the GPU tiers take.
+    /// bytes apart, when it takes them so: ggml's Q8_K rows (`pool_takes_q8k`) or the q8_1 rows (`pool_takes_q8_1`),
+    /// else null (the pool quantizes the floats); and the q8_1 rows (n_embd / 32 blocks each) the GPU tiers take.
     const uint8_t* xk = nullptr;
     int64_t xk_stride = 0;
     const uint8_t* x1 = nullptr;
@@ -145,13 +161,14 @@ struct ExpertDispatch {
     /// ones in routing order) are read by the GPU over PCIe.
     GpuPlanSink* plan = nullptr;
     int pcie_num = 0;
-    int64_t pcie_experts = 0;      ///< distinct experts the GPU read over PCIe in verify windows
+    int64_t pcie_experts = 0;                                   ///< distinct experts the GPU read
+                                                                ///< over PCIe in verify windows
     double ms_plan = 0, ms_actq = 0, ms_jobs = 0, ms_run = 0;   ///< verify-window dispatch sections
     /// Plan v0.3 P6: decayed routing counts per (layer, expert) during decode (sized by the caller; empty = off),
     /// which the driver uses to swap the most-routed missing experts into the VRAM tier between rounds.
     std::vector<float> usage;
-    int64_t multi_misses = 0;      ///< distinct (layer, expert) pairs the CPU computed in verify windows
-    int64_t multi_entries = 0;     ///< routed (token, expert) entries the CPU served in verify windows
+    int64_t multi_misses = 0;    ///< distinct (layer, expert) pairs the CPU computed in verify windows
+    int64_t multi_entries = 0;   ///< routed (token, expert) entries the CPU served in verify windows
     /// Routed (token, expert) entries per (layer, expert) in verify windows, when the caller sizes it: how many of
     /// the entries a cache of the N most-routed experts would serve.
     std::vector<uint32_t> routed;
@@ -166,8 +183,8 @@ struct ExpertDispatch {
         /// Left out for now (--second-gpu-sleep-us: its GPU sleeps, or its clocks' lock is still on its way): the
         /// experts it holds go to the tiers after it or to the CPU, but for one that only its VRAM holds.
         bool asleep = false;
-        int64_t groups = 0;            ///< distinct (layer, expert) pairs it computed
-        int64_t slept = 0;             ///< ... it holds and left to others while asleep
+        int64_t groups = 0;   ///< distinct (layer, expert) pairs it computed
+        int64_t slept = 0;    ///< ... it holds and left to others while asleep
     };
     GpuTier tiers[kMaxGpuTiers];
     int n_tiers = 0;
@@ -201,7 +218,6 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
 /// predicted routing (`Verifier::set_predict`).
 void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids, const float* w, int64_t n_tok,
                            int64_t k);
-
 
 // ================================ THE RESIDENT ARENA (R2.1) ================================
 //
@@ -273,10 +289,10 @@ public:
     double load_gib_per_second() const { return gib_per_s_; }
 
 private:
-    std::vector<uint8_t*> layer_base_;       ///< each layer's experts: a pinned block, or a part of `tail_`
-    std::vector<const uint8_t*> layer_dev_;  ///< the device alias of each pinned layer (null for the others)
-    std::vector<uint8_t*> blocks_;           ///< the pinned blocks, owned (layers [0, blocks_.size()))
-    void* tail_ = nullptr;                   ///< the layers past the pinning budget, locked resident, owned
+    std::vector<uint8_t*> layer_base_;        ///< each layer's experts: a pinned block, or a part of `tail_`
+    std::vector<const uint8_t*> layer_dev_;   ///< the device alias of each pinned layer (null for the others)
+    std::vector<uint8_t*> blocks_;            ///< the pinned blocks, owned (layers [0, blocks_.size()))
+    void* tail_ = nullptr;                    ///< the layers past the pinning budget, locked resident, owned
     uint64_t tail_bytes_ = 0;
     uint64_t tail_locked_ = 0;   // of it, what lock_resident locked
     /// Linux (LAMINA_PIN_AFTER_COPY, default on): the arena as one anonymous range the load's threads write into,
@@ -287,7 +303,7 @@ private:
     std::vector<std::pair<uint8_t*, uint64_t>> registered_;
     uint8_t* anon_lock_ = nullptr;
     uint64_t anon_lock_bytes_ = 0;
-    int64_t pinned_layers_ = 0;              ///< layers [0, pinned_layers_) are page-locked and mapped
+    int64_t pinned_layers_ = 0;   ///< layers [0, pinned_layers_) are page-locked and mapped
     int64_t blobs_ = 0;
     int64_t n_expert_ = 0;
     std::atomic<int64_t> reads_{0};   ///< (a counter only; two threads can read blobs at once)
@@ -317,7 +333,7 @@ private:
                                                       const std::vector<uint8_t>& on_gpu) const;
     uint64_t vram_only_bytes_ = 0;
     std::vector<std::pair<size_t, uint64_t>> spans_;   ///< per (layer, role): its shard and the tensor's offset
-    std::vector<int> fds_;                              ///< the shards, open for read_file_blob
+    std::vector<int> fds_;                             ///< the shards, open for read_file_blob
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

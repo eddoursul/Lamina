@@ -20,7 +20,7 @@ bool failed(const std::string& why) {
     std::fprintf(stderr, "lamina serve: prompt cache: the disk tier: %s\n", why.c_str());
     return false;
 }
-}  // namespace
+}   // namespace
 
 DiskTier::~DiskTier() {
     for (int h = 0; h < 2; ++h) {
@@ -182,7 +182,9 @@ bool DiskTier::get_cells(const DiskFile& f, int64_t cells, const Copy& copy) {
         if (io.valid() && !io.get()) ok = false;
     }
     if (io.valid()) (void) io.get();
-    if (!ok) return copied ? failed(io_err.empty() ? "a block could not be read" : io_err) : failed("a copy to the GPU failed");
+    if (!ok)
+        return copied ? failed(io_err.empty() ? "a block could not be read" : io_err)
+                      : failed("a copy to the GPU failed");
     return true;
 }
 
@@ -199,7 +201,7 @@ bool DiskTier::put_record(DiskFile& f, int64_t key, const std::vector<Piece>& pi
     bool ok = true;
     if (pieces.size() == 1 && pieces[0].fits && (uintptr_t) pieces[0].p % kSpillAlign == 0) {
         ok = file.write(at, pieces[0].p, len, err);   // (a buffer of whole pages: as it is)
-    } else {   // through the stage, a half at a time
+    } else {                                          // through the stage, a half at a time
         size_t pi = 0;
         uint64_t in_piece = 0;
         for (uint64_t w0 = 0; ok && w0 < len; w0 += half_) {
@@ -260,4 +262,4 @@ bool DiskTier::get_record(const DiskFile& f, int64_t key, const std::vector<Into
     return ok || failed(err);
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

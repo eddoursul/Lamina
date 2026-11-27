@@ -19,11 +19,11 @@ namespace lamina::kernels {
 enum class Codebook : int { Affine = 0, Iq4Nl = 1 };
 
 struct SForm {
-    int code_bits = 2;              // 2, 4 or 8
-    int code_bias = -1;             // subtracted from the code IN THE INTEGER DOMAIN before the multiply
-    int group_elems = 64;           // elements per scale (and per offset, when present)
+    int code_bits = 2;      // 2, 4 or 8
+    int code_bias = -1;     // subtracted from the code IN THE INTEGER DOMAIN before the multiply
+    int group_elems = 64;   // elements per scale (and per offset, when present)
     Codebook codebook = Codebook::Affine;
-    bool has_offset = false;        // only the K-quants with a min (Q4_K, Q5_K) have one
+    bool has_offset = false;   // only the K-quants with a min (Q4_K, Q5_K) have one
 
     /// WHICH ACTIVATION THIS WEIGHT'S `vec_dot_type` IS: 0 = Q8_0, 1 = Q8_K.
     ///
@@ -42,8 +42,8 @@ struct SForm {
 // `scales` n_out * (n_in / group_elems) floats
 // `offset` the same count as scales, or nullptr when `has_offset` is false
 // `y`      n_out floats
-void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset, float* y,
-            int64_t n_in, int64_t n_out, const SForm& form);
+void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset, float* y, int64_t n_in,
+            int64_t n_out, const SForm& form);
 
 // The same computation with the ROW SPLIT ACROSS THREADS: one block of `threads_per_row` threads per output
 // row, each accumulating a strided subset, reduced through shared memory.
@@ -56,9 +56,8 @@ void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const 
 // It is NOT bit-identical to `s_gemv`: the partial sums are added in a different order, so the parity test
 // carries a tolerance for exactly this reason.  Both are kept and both are tested, because the naive one is
 // the reference the split one is checked against.
-void s_gemv_split(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset,
-                  float* y, int64_t n_in, int64_t n_out, const SForm& form, int threads_per_row);
-
+void s_gemv_split(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                  int64_t n_in, int64_t n_out, const SForm& form, int threads_per_row);
 
 /// THE SAME GEMV OVER **Q8_K** ACTIVATIONS, which is the contract for every K-quant and IQ-quant weight.
 ///
@@ -74,8 +73,8 @@ void s_gemv_split(const uint16_t* x, const uint8_t* codes, const float* scales, 
 /// The activation is dequantized on the fly (`d * qs[i]`), one multiply per element, exactly as the fp16 path
 /// does one `__half2float` per element.  The weight decode is the SAME code as `s_gemv` - one implementation,
 /// because a second decode of the canonical form is a second thing to get wrong.
-void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset,
-                float* y, int64_t n_in, int64_t n_out, const SForm& form, void* stream);
+void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                int64_t n_in, int64_t n_out, const SForm& form, void* stream);
 
 /// The row-split form, for output widths too small to fill the machine.
 ///
@@ -88,8 +87,8 @@ void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales,
 /// This form is WARP per output row, which is what the shape wants, and the parameter is gone from the
 /// interface so that no one can believe otherwise.  `s_gemv_split`/`s_gemv_split_async` DO take threads_per_row
 /// and DO use it, if a caller wants to tune that shape.
-void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset,
-                      float* y, int64_t n_in, int64_t n_out, const SForm& form, void* stream);
+void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                      int64_t n_in, int64_t n_out, const SForm& form, void* stream);
 
 /// THE SAME, OVER A **Q8_0** ACTIVATION - `block_q8_0`, 34 bytes per 32 elements, from `quantize_q8_0`.
 ///
@@ -105,7 +104,7 @@ void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* s
 ///
 /// `n_in` must be a multiple of 32.  `group_elems` must be a power of two and a multiple of four, the same two
 /// requirements `s_gemv_q8k_split` has and for the same reasons.
-void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float* scales, const float* offset,
-                       float* y, int64_t n_in, int64_t n_out, const SForm& form, void* stream);
+void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                       int64_t n_in, int64_t n_out, const SForm& form, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

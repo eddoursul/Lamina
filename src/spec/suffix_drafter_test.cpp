@@ -26,20 +26,26 @@ using lamina::spec::SuffixDrafter;
 namespace {
 int g_fail = 0;
 void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fail; }
+    if (!ok) {
+        std::fprintf(stderr, "FAIL: %s\n", what);
+        ++g_fail;
+    }
 }
 
 std::vector<int32_t> read_ids(const char* path) {
     std::ifstream f(path);
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    for (char& c : text) if (c == ',') c = ' ';
+    for (char& c : text)
+        if (c == ',') c = ' ';
     std::istringstream in(text);
     std::vector<int32_t> ids;
     for (int32_t v; in >> v;) ids.push_back(v);
     return ids;
 }
 
-struct Sim { long steps = 0, tokens = 0, proposals = 0, accepted = 0; };
+struct Sim {
+    long steps = 0, tokens = 0, proposals = 0, accepted = 0;
+};
 
 Sim simulate(const std::vector<int32_t>& history, const std::vector<int32_t>& target, int K) {
     SuffixDrafter d(3, 32, history.size() + target.size() + 16);
@@ -51,7 +57,10 @@ Sim simulate(const std::vector<int32_t>& history, const std::vector<int32_t>& ta
         const int n = d.propose(K, draft.data());
         int a = 0;
         while (a < n && i + a < target.size() && draft[a] == target[i + a]) ++a;
-        if (n > 0) { ++s.proposals; s.accepted += a; }
+        if (n > 0) {
+            ++s.proposals;
+            s.accepted += a;
+        }
         const size_t commit = std::min(target.size() - i, (size_t) a + 1);
         d.append(&target[i], commit);
         i += commit;
@@ -139,7 +148,10 @@ void unit_tests() {
     {   // proposals depend on the history alone: after assign undid a longer text and the table grew, as a fresh
         // drafter's (a 6-token alphabet: every trigram recurs, more often than WAYS)
         uint32_t rng = 12345;
-        auto next = [&] { rng = rng * 1664525u + 1013904223u; return (int32_t) ((rng >> 16) % 6); };
+        auto next = [&] {
+            rng = rng * 1664525u + 1013904223u;
+            return (int32_t) ((rng >> 16) % 6);
+        };
         std::vector<int32_t> a(3000), b;
         for (int32_t& t : a) t = next();
         b.assign(a.begin(), a.begin() + 1700);
@@ -162,12 +174,15 @@ void unit_tests() {
     }
     std::printf("suffix_drafter unit tests: %s\n", g_fail ? "FAILED" : "OK");
 }
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--simulate") == 0) {
         int K = 8, first = 2;
-        if (argc > 3 && std::strcmp(argv[2], "--k") == 0) { K = std::atoi(argv[3]); first = 4; }
+        if (argc > 3 && std::strcmp(argv[2], "--k") == 0) {
+            K = std::atoi(argv[3]);
+            first = 4;
+        }
         std::printf("%-28s %8s | %-44s | %-44s\n", "prompt", "tokens", "continue: tok/step  proposals  acc/proposal",
                     "copy: tok/step  proposals  acc/proposal");
         for (int f = first; f < argc; ++f) {

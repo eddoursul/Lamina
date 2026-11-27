@@ -141,13 +141,13 @@ public:
     /// The cache's state: the live conversation, the park's contents, its budgets and its evictions (the CACHE line,
     /// which the Monitor shows).
     struct State {
-        int64_t live_cells = 0;     ///< in every session
-        size_t checkpoints = 0;     ///< of the sessions' conversations
-        size_t held = 0;            ///< sessions that hold a conversation
-        size_t parked = 0;          ///< in RAM and on the disk tier
+        int64_t live_cells = 0;                         ///< in every session
+        size_t checkpoints = 0;                         ///< of the sessions' conversations
+        size_t held = 0;                                ///< sessions that hold a conversation
+        size_t parked = 0;                              ///< in RAM and on the disk tier
         uint64_t parked_bytes = 0, parked_budget = 0;   ///< RAM
         size_t slots = 0, evictions = 0;
-        size_t disk = 0;            ///< of the parked, those on the disk tier
+        size_t disk = 0;   ///< of the parked, those on the disk tier
         uint64_t disk_bytes = 0, disk_budget = 0;
     };
     State state() const;
@@ -291,8 +291,8 @@ private:
     int pinned_ = 0;
     void* prepared_ = nullptr;   // prepare()'s, until checkpoint() takes it
     void drop_prepared();
-    void drop_end();             // the live conversation's checkpoint of a prompt's end, if it has one (keep_ends:
-                                 // it stays, a checkpoint as the others)
+    void drop_end();   // the live conversation's checkpoint of a prompt's end, if it has one (keep_ends:
+                       // it stays, a checkpoint as the others)
 };
 
 /// Qwen3.8-Flash-Next's: the session state and the cells of `kv`.
@@ -338,4 +338,4 @@ private:
     void* stream_;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

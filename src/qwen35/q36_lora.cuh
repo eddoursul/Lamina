@@ -19,13 +19,13 @@
 
 namespace q36lora {
 
-constexpr int kRows = 8;        // the decode rows a launch takes (the engine's kVerify)
-constexpr int kMaxSeg = 24;     // segments a launch takes (a site with more runs in several)
-constexpr int kMaxR = 512;      // their ranks summed, at most
-constexpr int kGroup = 8;       // rank rows a block of the A stage computes (a warp each)
-constexpr int kChunk = 256;     // input elements a warp covers at once (8 a lane)
-constexpr int kSliceMax = 1024; // a K split's input elements at most (the A stage's staging buffer)
-constexpr int kPre = 4;         // 16-byte words of B a thread loads ahead (a rank-32 F16 row)
+constexpr int kRows = 8;          // the decode rows a launch takes (the engine's kVerify)
+constexpr int kMaxSeg = 24;       // segments a launch takes (a site with more runs in several)
+constexpr int kMaxR = 512;        // their ranks summed, at most
+constexpr int kGroup = 8;         // rank rows a block of the A stage computes (a warp each)
+constexpr int kChunk = 256;       // input elements a warp covers at once (8 a lane)
+constexpr int kSliceMax = 1024;   // a K split's input elements at most (the A stage's staging buffer)
+constexpr int kPre = 4;           // 16-byte words of B a thread loads ahead (a rank-32 F16 row)
 
 struct Seg {
     const void* a = nullptr;   // [rank][n_in] row-major (ggml's lora_a [n_in, rank])
@@ -85,8 +85,14 @@ __device__ __forceinline__ void load8(const void* p, int f32, size_t off, float 
     if (f32) {
         const float4* q = (const float4*) ((const float*) p + off);
         const float4 a = q[0], b = q[1];
-        w[0] = a.x; w[1] = a.y; w[2] = a.z; w[3] = a.w;
-        w[4] = b.x; w[5] = b.y; w[6] = b.z; w[7] = b.w;
+        w[0] = a.x;
+        w[1] = a.y;
+        w[2] = a.z;
+        w[3] = a.w;
+        w[4] = b.x;
+        w[5] = b.y;
+        w[6] = b.z;
+        w[7] = b.w;
     } else {
         half8(*(const uint4*) ((const __half*) p + off), w);
     }
@@ -194,7 +200,8 @@ __global__ void __launch_bounds__(256, 2) k_lora_b(const Site s) {
     const int npre = col ? min(kPre, wpr) : 0;
     uint4 pre[kPre];
 #pragma unroll
-    for (int q = 0; q < kPre; ++q) pre[q] = q < npre ? ((const uint4*) f.b)[(size_t) j * wpr + q] : make_uint4(0, 0, 0, 0);
+    for (int q = 0; q < kPre; ++q)
+        pre[q] = q < npre ? ((const uint4*) f.b)[(size_t) j * wpr + q] : make_uint4(0, 0, 0, 0);
     float o[kRows];
 #pragma unroll
     for (int row = 0; row < kRows; ++row) o[row] = col && row < s.T ? s.out[m][(size_t) row * s.ld_out[m] + j] : 0.f;
@@ -208,8 +215,8 @@ __global__ void __launch_bounds__(256, 2) k_lora_b(const Site s) {
             float v = 0.f;   // the K splits in order, their loads four at a time
             int k = 0;
             for (; k + 4 <= s.ks; k += 4) {
-                const float a = __ldcg(pp + k * step), b = __ldcg(pp + (k + 1) * step), c2 = __ldcg(pp + (k + 2) * step),
-                            d = __ldcg(pp + (k + 3) * step);
+                const float a = __ldcg(pp + k * step), b = __ldcg(pp + (k + 1) * step),
+                            c2 = __ldcg(pp + (k + 2) * step), d = __ldcg(pp + (k + 3) * step);
                 v += a;
                 v += b;
                 v += c2;
@@ -244,10 +251,14 @@ __global__ void __launch_bounds__(256, 2) k_lora_b(const Site s) {
                     half8(pre[q], w);
                 } else {
                     if (q % 2 == 1 || q + 1 >= npre) continue;
-                    w[0] = __uint_as_float(pre[q].x); w[1] = __uint_as_float(pre[q].y);
-                    w[2] = __uint_as_float(pre[q].z); w[3] = __uint_as_float(pre[q].w);
-                    w[4] = __uint_as_float(pre[q + 1].x); w[5] = __uint_as_float(pre[q + 1].y);
-                    w[6] = __uint_as_float(pre[q + 1].z); w[7] = __uint_as_float(pre[q + 1].w);
+                    w[0] = __uint_as_float(pre[q].x);
+                    w[1] = __uint_as_float(pre[q].y);
+                    w[2] = __uint_as_float(pre[q].z);
+                    w[3] = __uint_as_float(pre[q].w);
+                    w[4] = __uint_as_float(pre[q + 1].x);
+                    w[5] = __uint_as_float(pre[q + 1].y);
+                    w[6] = __uint_as_float(pre[q + 1].z);
+                    w[7] = __uint_as_float(pre[q + 1].w);
                 }
                 dot8_rows(w, &ts[sg.r0 + k], s.R, s.T, d);
                 k += 8;
@@ -281,4 +292,4 @@ __global__ void k_lora_f16(const float* __restrict__ x, int ldx, __half* __restr
     h[i] = __float2half(x[row * ldx + col]);
 }
 
-}  // namespace q36lora
+}   // namespace q36lora

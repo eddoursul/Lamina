@@ -58,7 +58,8 @@ void copy_indexed(float* dst, const float* src, int64_t stride, const int32_t* i
 /// Plan v0.3 P6: copy *n (device memory) blobs of `blob_bytes` from mapped host memory (src[k], device aliases)
 /// into dst + k * blob_bytes with coalesced 16-byte loads - the PCIe share of a layer's missed experts, staged
 /// into VRAM before the grouped expert kernel reads them.  Launched for a capacity of `cap` blobs.
-void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream);
+void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap,
+                 void* stream);
 /// A list in mapped host memory, [n, end of part 0, of part 1, of part 2, rows...]: each listed row of `src` (mapped,
 /// n_embd floats, a multiple of 4) to the same row of `dst`, and the list to `list_dev` (device, the same layout; its
 /// words 1-3 unwritten).  At most `cap` rows; rows outside [0, cap) are not copied.  `part` >= 0 takes only that
@@ -117,4 +118,4 @@ void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int3
 /// last `window` cells: ids[q * ids_stride + j] = max(0, n_kv - window) + j and the record's width = the count.
 void window_ids(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_stride, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

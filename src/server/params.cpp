@@ -2,8 +2,8 @@
 #include "params.hpp"
 
 #include "config.hpp"
-#include "remote_model.hpp"
 #include "lamina/program/options.hpp"
+#include "remote_model.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -28,7 +28,8 @@ const std::vector<Param> kParams = {
     {"--mmproj", "", "vision.mmproj", K::Path, "FILE",
      "pictures: the image projector (with -m by default the mmproj*.gguf made for the model beside it)"},
     {"--no-mmproj", "", "vision", K::Off, "", "no pictures"},
-    {"--vision-model", "", "vision.model", K::Path, "GGUF", "taken and not read: the image encoder needs no model file "
+    {"--vision-model", "", "vision.model", K::Path, "GGUF",
+     "taken and not read: the image encoder needs no model file "
      "(earlier versions read its vocabulary)"},
     {"--vision-gpu", "", "vision.gpu", K::Bool, "",
      "the image encoder on a GPU, not the CPU (with -m: on, with --vision-lend; --no-vision-gpu: the CPU)"},
@@ -49,7 +50,8 @@ const std::vector<Param> kParams = {
     {"--lora-models", "", "lora_models", K::Value, "JSON",
      "model names that run with the engine's LoRA adapters, {\"NAME\": [{\"id\": 0, \"scale\": 1}], ...}: a request "
      "naming one (and no \"lora\" of its own) takes those scales, the other adapters at 0"},
-    {"--arch", "", "arch", K::Str, "ARCH", "the architecture whose model card gives the sampling a request leaves out "
+    {"--arch", "", "arch", K::Str, "ARCH",
+     "the architecture whose model card gives the sampling a request leaves out "
      "(default: the file's)"},
     {"--chat-template-file", "", "chat_template_file", K::Path, "FILE", "a chat template in place of the model file's"},
 
@@ -73,7 +75,8 @@ const std::vector<Param> kParams = {
     {"--log", "--log-file", "log", K::Path, "FILE", "the engine's log (with -m: beside the program)"},
     {"--cwd", "", "cwd", K::Path, "DIR", "the folder the engine runs in, which the config's relative paths start from"},
     {"--env", "", "env", K::Pairs, "NAME=VALUE", "a variable of the engine's environment (again for more)"},
-    {"--lib-dirs", "", "lib_dirs", K::List, "D1,D2", "taken and not read: the engine runs in this process, which "
+    {"--lib-dirs", "", "lib_dirs", K::List, "D1,D2",
+     "taken and not read: the engine runs in this process, which "
      "loads the CUDA libraries as it starts (earlier versions started the engine as a program of its own)"},
 
     {"", "", "", K::Str, "", "The network and access"},
@@ -88,11 +91,13 @@ const std::vector<Param> kParams = {
     {"--allowed-hosts", "", "allowed_hosts", K::List, "H1,H2",
      "other host names it answers to (*: any; also $LAMINA_ALLOWED_HOSTS)"},
     {"--offline", "", "offline", K::Bool, "", "no image URLs fetched, no MCP servers or before_load commands"},
-    {"--api-monitor", "", "api_monitor", K::Bool, "", "the request monitor at /api-monitor (the last 100 requests in "
+    {"--api-monitor", "", "api_monitor", K::Bool, "",
+     "the request monitor at /api-monitor (the last 100 requests in "
      "memory)"},
     {"--mcp-servers", "", "mcp_servers", K::Value, "JSON",
      "MCP servers for the web app's chat, in Claude Desktop's form ({\"name\": {\"command\": ...}})"},
-    {"--mcp-config", "", "mcp_config", K::Path, "FILE", "MCP servers from a file in Claude Desktop's form "
+    {"--mcp-config", "", "mcp_config", K::Path, "FILE",
+     "MCP servers from a file in Claude Desktop's form "
      "({\"mcpServers\": {...}})"},
     {"--mcp-timeout-s", "", "mcp.timeout_s", K::Num, "S", "an MCP tool call's time limit"},
     {"--mcp-start-timeout-s", "", "mcp.start_timeout_s", K::Num, "S", "an MCP server's time to start"},
@@ -111,14 +116,16 @@ const std::vector<Param> kParams = {
     {"--before-load-ignore-failure", "", "before_load_ignore_failure", K::Bool, "",
      "load the model even when that command fails"},
     {"--before-load-strict", "", "before_load_strict", K::Bool, "", "answer 503 when that command fails"},
-    {"--max-queue", "", "max_queue", K::Int, "N", "inference calls that may wait beyond the slots (0: refuse overload)"},
+    {"--max-queue", "", "max_queue", K::Int, "N",
+     "inference calls that may wait beyond the slots (0: refuse overload)"},
     {"--queue-timeout", "", "queue_timeout", K::Num, "S",
      "the longest wait for the first engine turn, 0.1..600 (needs max_queue)"},
     {"--shutdown-timeout", "", "shutdown_timeout", K::Num, "S",
      "on a stop, running requests may finish for up to S seconds (0..300)"},
     {"--ready-file", "", "ready_file", K::Str, "FILE",
      "a JSON record of this instance, once it serves (an absolute path, a new file)"},
-    {"--open-browser", "--open", "open_browser", K::Bool, "", "open the web app in the browser once the model is ready"},
+    {"--open-browser", "--open", "open_browser", K::Bool, "",
+     "open the web app in the browser once the model is ready"},
     {"--prevent-sleep", "", "prevent_sleep", K::Bool, "", "Windows: the PC stays awake while a request runs or waits"},
 
     {"", "", "", K::Str, "", "Requests (the defaults of those that leave a setting out)"},
@@ -142,7 +149,8 @@ const std::vector<Param> kParams = {
      "max_tokens shortened to the context left (default on; off: a 400, as llama.cpp answers)"},
     {"--anthropic-thinking", "", "anthropic_thinking", K::Str, "model|on_request",
      "an Anthropic request that asks for no thinking: thinks as the model does, or not"},
-    {"--tool-call-recovery", "", "tool_call_recovery", K::Bool, "", "also read tool calls written in a few other forms"},
+    {"--tool-call-recovery", "", "tool_call_recovery", K::Bool, "",
+     "also read tool calls written in a few other forms"},
     {"--repeat-stop-tokens", "", "repeat_stop_tokens", K::Int, "N",
      "a reply repeating one token this many times ends (default 256; 0: off)"},
     {"--reasoning-close-retry", "", "reasoning_close_retry", K::Bool, "",
@@ -225,8 +233,7 @@ json parse_value(const Param& p, const std::string& flag, const std::string& v) 
                 size_t used = 0;
                 const long long n = std::stoll(v, &used);
                 if (used == v.size()) return json((int64_t) n);
-            } catch (const std::exception&) {
-            }
+            } catch (const std::exception&) {}
             bad(flag, "expected a whole number, not '" + v + "'");
         }
         case K::Num: {
@@ -237,8 +244,7 @@ json parse_value(const Param& p, const std::string& flag, const std::string& v) 
                     if (v.find_first_of(".eEnN") == std::string::npos) return json((int64_t) std::stoll(v));
                     return json(d);
                 }
-            } catch (const std::exception&) {
-            }
+            } catch (const std::exception&) {}
             bad(flag, "expected a number, not '" + v + "'");
         }
         case K::Bool: {
@@ -269,14 +275,16 @@ json parse_value(const Param& p, const std::string& flag, const std::string& v) 
             if (py_loads(v, j) && !j.is_string()) return j;
             return v;
         }
-        case K::Path: return is_url(v) ? v : u8_str(std::filesystem::absolute(u8_path(v)).lexically_normal());   // (-m URL: check reads it)
+        case K::Path:
+            return is_url(v) ? v : u8_str(std::filesystem::absolute(u8_path(v)).lexically_normal());   // (-m URL: check
+                                                                                                       // reads it)
         case K::Str:
         case K::Off: break;
     }
     return v;
 }
 
-}  // namespace
+}   // namespace
 
 const Param* find_param(std::string_view flag, bool* negated) {
     if (negated != nullptr) *negated = false;
@@ -315,7 +323,7 @@ json* setting_at(json& cfg, std::string_view key) {
     return dot == std::string_view::npos ? &v : setting_at(v, key.substr(dot + 1));
 }
 
-}  // namespace
+}   // namespace
 
 const std::vector<Command> kCommands = {
     {"serve", "the OpenAI, Anthropic and Responses APIs and the web app in front of a model"},
@@ -368,7 +376,7 @@ CommandLine parse_command_line(int argc, char** argv) {
             cl.verbose = true;
             continue;
         }
-        static const char* const bench_flags[] = {"--url",  "--runs", "--clients", "--long",
+        static const char* const bench_flags[] = {"--url",   "--runs", "--clients", "--long",
                                                   "--think", "--out",  "--compare"};
         if (bench && std::find(std::begin(bench_flags), std::end(bench_flags), o) != std::end(bench_flags)) {
             // the benchmark's (src/server/bench.hpp): command-line options, no config keys
@@ -378,11 +386,13 @@ CommandLine parse_command_line(int argc, char** argv) {
                     size_t used = 0;
                     const long long n = std::stoll(v, &used);
                     if (used == v.size() && n >= lo && n <= hi) return (int) n;
-                } catch (const std::exception&) {
-                }
-                bad(o, "expected a whole number in " + std::to_string(lo) + ".." + std::to_string(hi) + ", not '" + v + "'");
+                } catch (const std::exception&) {}
+                bad(o, "expected a whole number in " + std::to_string(lo) + ".." + std::to_string(hi) + ", not '" + v +
+                           "'");
             };
-            auto absolute = [](const std::string& p) { return u8_str(std::filesystem::absolute(u8_path(p)).lexically_normal()); };
+            auto absolute = [](const std::string& p) {
+                return u8_str(std::filesystem::absolute(u8_path(p)).lexically_normal());
+            };
             if (o == "--long" || o == "--think") {
                 if (inline_value) bad(o, "takes no value");
                 (o == "--long" ? cl.bench_long : cl.bench_think) = true;
@@ -405,7 +415,8 @@ CommandLine parse_command_line(int argc, char** argv) {
             }
             if (o == "--compare") {   // OLD, and NEW when the next word is no option
                 cl.bench_compare.push_back(absolute(value()));
-                if (!inline_value && i + 1 < argc && !starts_with(argv[i + 1], "--")) cl.bench_compare.push_back(absolute(argv[++i]));
+                if (!inline_value && i + 1 < argc && !starts_with(argv[i + 1], "--"))
+                    cl.bench_compare.push_back(absolute(argv[++i]));
                 if (cl.bench_compare.size() > 2) bad(o, "takes one report (OLD) or two (OLD NEW)");
                 continue;
             }
@@ -417,7 +428,10 @@ CommandLine parse_command_line(int argc, char** argv) {
                 set_setting(cl.settings, p->key, false);
             } else if (p->kind == K::Bool) {
                 if (negated && inline_value) bad(o, "takes no value");
-                set_setting(cl.settings, p->key, negated ? json(false) : inline_value ? parse_value(*p, o, v) : json(true));
+                set_setting(cl.settings, p->key,
+                            negated        ? json(false)
+                            : inline_value ? parse_value(*p, o, v)
+                                           : json(true));
             } else {
                 json x = parse_value(*p, o, value());
                 json* now = setting_at(cl.settings, p->key);
@@ -499,7 +513,7 @@ std::string other_help(std::string_view what, std::initializer_list<const char*>
                             0, kWidth, 0);
 }
 
-}  // namespace
+}   // namespace
 
 std::string command_usage(std::string_view command) {
     if (command == "serve") return "lamina serve -m MODEL.gguf | --config FILE [options] [engine options]";
@@ -512,31 +526,32 @@ std::string command_usage(std::string_view command) {
 }
 
 std::string commands_help() {
-    std::string out =
-        "Lamina v" LAMINA_VERSION ", an inference engine\n"
-        "\n"
-        "  lamina <command> [options]\n"
-        "\n"
-        "Commands\n";
+    std::string out = "Lamina v" LAMINA_VERSION ", an inference engine\n"
+                      "\n"
+                      "  lamina <command> [options]\n"
+                      "\n"
+                      "Commands\n";
     for (const Command& c : kCommands) out += program::help_line(c.name, c.what, kWidth, 16);
     return out + "\n" +
-           program::wrapped("lamina <command> --help lists a command's options; docs/PARAMETERS.md describes every one.",
-                            0, kWidth, 0);
+           program::wrapped(
+               "lamina <command> --help lists a command's options; docs/PARAMETERS.md describes every one.", 0, kWidth,
+               0);
 }
 
 std::string command_help(std::string_view command) {
     using program::help_line;
     using program::wrapped;
     if (command == "check")
-        return other_help("lamina check: what this PC has and, for a model, what it needs, how it would run and whether "
-                          "it would start (exit code 1: it would not). Nothing is loaded. Without a model, this PC "
-                          "alone; with -m URL, a model before it is downloaded: a Hugging Face repository's URL, a "
-                          "folder's or a file's in it, or a GGUF file's (its files' headers alone are read; several "
-                          "models: a table).",
-                          {"lamina check", "lamina check -m MODEL.gguf [options] [engine options]",
-                           "lamina check --config FILE [options] [engine options]", "lamina check -m URL [options]"},
-                          {{"--verbose", "with a URL that holds several files: what each one is and why it cannot "
-                                         "start or is not read, under its row"}});
+        return other_help(
+            "lamina check: what this PC has and, for a model, what it needs, how it would run and whether "
+            "it would start (exit code 1: it would not). Nothing is loaded. Without a model, this PC "
+            "alone; with -m URL, a model before it is downloaded: a Hugging Face repository's URL, a "
+            "folder's or a file's in it, or a GGUF file's (its files' headers alone are read; several "
+            "models: a table).",
+            {"lamina check", "lamina check -m MODEL.gguf [options] [engine options]",
+             "lamina check --config FILE [options] [engine options]", "lamina check -m URL [options]"},
+            {{"--verbose", "with a URL that holds several files: what each one is and why it cannot "
+                           "start or is not read, under its row"}});
     if (command == "bench")
         return other_help(
             "lamina bench: a model measured the way it is used: loaded, a fixed suite sent through the server's own "
@@ -601,4 +616,4 @@ std::string command_help(std::string_view command) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

@@ -23,7 +23,7 @@ void expect(const std::string& what, const std::vector<int32_t>& got, const std:
     ++failures;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     // the GPT-2 byte alphabet: bytes 33..126, 161..172 and 174..255 as themselves, the others as 256 + n (below 0x800)
@@ -43,14 +43,16 @@ int main() {
         const std::filesystem::path path = dir / ("lamina_tokenizer_test_" + pre + ".gguf");
         fixture::write(path,
                        {fixture::str("tokenizer.ggml.model", "gpt2"), fixture::str("tokenizer.ggml.pre", pre),
-                        fixture::strs("tokenizer.ggml.tokens", tokens), fixture::strs("tokenizer.ggml.merges", {"a b"})},
+                        fixture::strs("tokenizer.ggml.tokens", tokens),
+                        fixture::strs("tokenizer.ggml.merges", {"a b"})},
                        {});
         const auto tok = lamina::Tokenizer::from_gguf(path.string());
         std::filesystem::remove(path);
         const bool whole = pre == "inkling2";
         expect(pre + " \"ab\"", tok->encode("ab"), {ab});
         expect(pre + " \"abc\"", tok->encode("abc"), whole ? std::vector<int32_t>{abc} : std::vector<int32_t>{ab, c});
-        expect(pre + " \"abc\" again", tok->encode("abc"), whole ? std::vector<int32_t>{abc} : std::vector<int32_t>{ab, c});
+        expect(pre + " \"abc\" again", tok->encode("abc"),
+               whole ? std::vector<int32_t>{abc} : std::vector<int32_t>{ab, c});
         expect(pre + " \"abcd\"", tok->encode("abcd"), {ab, c, d});
         expect(pre + " \"a abc abc\"", tok->encode("a abc abc"),
                whole ? std::vector<int32_t>{a, space, ab, c, space, ab, c}

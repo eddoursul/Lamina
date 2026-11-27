@@ -59,7 +59,7 @@ Seq conv(int64_t cells, std::vector<int64_t> pos) {
 
 std::vector<int64_t> prompt(int64_t cells) { return std::vector<int64_t>((size_t) cells, 7); }
 
-}  // namespace
+}   // namespace
 
 int main() {
     std::printf("conversation_cache_test\n");
@@ -93,8 +93,8 @@ int main() {
         evicted.clear();
         check(open.make_room(10000, evicted) && evicted.empty(), "slots 0: no limit but the budget");
         ConversationCache budget(40000, 0, 0, kCkpt);
-        budget.park(conv(1000, {500, 1000}));    // 10,000 + 200
-        budget.park(conv(2000, {2000}));         // 20,000 + 100
+        budget.park(conv(1000, {500, 1000}));        // 10,000 + 200
+        budget.park(conv(2000, {2000}));             // 20,000 + 100
         budget.entries()[0].stamp = budget.tick();   // the first one used since (it lent its start)
         evicted.clear();
         check(budget.make_room(15000, evicted) && evicted.size() == 1 && evicted[0].kv_cells == 2000,
@@ -135,11 +135,14 @@ int main() {
         ended.ckpts[1].end = true;
         check(reusable(ended, prompt(5000), {}, false) == 4000 && reusable(ended, prompt(5000), {}, true) == 4000,
               "the same prompt again: a token is left to process without `ends`");
-        check(reusable(ended, prompt(5000), {}, false, true) == 5000 && reusable(ended, prompt(5000), {}, true, true) == 5000,
+        check(reusable(ended, prompt(5000), {}, false, true) == 5000 &&
+                  reusable(ended, prompt(5000), {}, true, true) == 5000,
               "... and none with it: the checkpoint of its end");
-        check(reusable(ended, prompt(5200), {}, false, true) == 5000 && reusable(ended, prompt(5200), {}, true, true) == 5000,
+        check(reusable(ended, prompt(5200), {}, false, true) == 5000 &&
+                  reusable(ended, prompt(5200), {}, true, true) == 5000,
               "a checkpoint that is no prompt's end does not serve a whole prompt");
-        check(reusable(ended, prompt(6000), {}, false, true) == 5200 && reusable(ended, prompt(6000), {}, true, true) == 5200,
+        check(reusable(ended, prompt(6000), {}, false, true) == 5200 &&
+                  reusable(ended, prompt(6000), {}, true, true) == 5200,
               "a longer prompt continues past it as before");
     }
     {   // 4. the RAM
@@ -153,7 +156,8 @@ int main() {
         ConversationCache open = two();
         check(open.make_room(50000, evicted) && evicted.empty(), "no RAM limit given: only the budget counts");
         ConversationCache room = two();
-        check(room.make_room(5000, evicted, 5000) && evicted.empty(), "a conversation the spare RAM holds evicts nothing");
+        check(room.make_room(5000, evicted, 5000) && evicted.empty(),
+              "a conversation the spare RAM holds evicts nothing");
         ConversationCache tight = two();
         check(tight.make_room(15000, evicted, 6000) && evicted.size() == 1 && evicted[0].kv_cells == 1000 &&
                   tight.size() == 1,
@@ -203,8 +207,10 @@ int main() {
         std::vector<int64_t> next(own.tokens.begin(), own.tokens.begin() + 16100);
         for (int i = 0; i < 2000; ++i) next.push_back(100 + i);
         for (int i = 0; i < 300; ++i) next.push_back(9);
-        check(superseded(own, next, 16000), "the answer sent back without its reasoning: the conversation's own request");
-        std::vector<int64_t> cut = next;   // ... its last two tokens not sent back (a draft or two past the client's text)
+        check(superseded(own, next, 16000),
+              "the answer sent back without its reasoning: the conversation's own request");
+        std::vector<int64_t> cut = next;   // ... its last two tokens not sent back
+                                           // (a draft or two past the client's text)
         cut.erase(cut.begin() + 16100 + 1998, cut.begin() + 16100 + 2000);
         check(superseded(own, cut, 16000), "... with the answer's last tokens missing");
         std::vector<int64_t> again(own.tokens.begin(), own.tokens.begin() + 16100);
@@ -270,7 +276,8 @@ int main() {
         check(st.kind == Start::kContinue && st.cells == 4000 && !st.park_rest,
               "one session: its own next request in another rendering parks no copy of what it drops");
         st = choose_start(one, 0, none, stranger, {}, 0, false);
-        check(st.kind == Start::kFresh && st.session == 0, "one session: a conversation that shares nothing starts empty");
+        check(st.kind == Start::kFresh && st.session == 0,
+              "one session: a conversation that shares nothing starts empty");
         st = choose_start(one, 1, none, stranger, {}, 0, false);
         check(st.session < 0, "one session that decodes: no place for a request");
         std::vector<Seq> parked = seqs(talk(2000, 1));
@@ -334,7 +341,7 @@ int main() {
         st = choose_start(gap, 0, parked, sibling, {}, 0, false);
         check(st.kind == Start::kBorrowSession && st.from == 0, "of equal starts a session's lends before the park's");
     }
-    {   // 7. the disk tier
+    {                                                                                // 7. the disk tier
         auto filed = [](int64_t cells, std::vector<int64_t> pos, uint64_t bytes) {   // parked in a file of `bytes`
             Seq s = conv(cells, std::move(pos));
             s.disk_bytes = bytes;
@@ -342,7 +349,7 @@ int main() {
         };
         std::vector<Seq> evicted;
         ConversationCache c(40000, 2, 0, kCkpt);
-        c.park(conv(1000, {1000}));              // RAM: 10,100
+        c.park(conv(1000, {1000}));   // RAM: 10,100
         c.park(filed(3000, {3000}, 50000));
         c.park(filed(4000, {4000}, 60000));
         check(c.size() == 3 && c.bytes() == 10100 && c.disk_size() == 2 && c.disk_bytes() == 110000,

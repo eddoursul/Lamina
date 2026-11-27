@@ -33,11 +33,10 @@ struct Want1 {
     bool gdn_only;
 };
 
-bool fail(std::string& err, const LayerView& v, const char* suffix, const char* what, int64_t got,
-          int64_t want) {
+bool fail(std::string& err, const LayerView& v, const char* suffix, const char* what, int64_t got, int64_t want) {
     char buf[512];
-    std::snprintf(buf, sizeof buf, "layer %lld: %s %s is %lld, the kernels require %lld",
-                  (long long) v.layer(), v.name(suffix).c_str(), what, (long long) got, (long long) want);
+    std::snprintf(buf, sizeof buf, "layer %lld: %s %s is %lld, the kernels require %lld", (long long) v.layer(),
+                  v.name(suffix).c_str(), what, (long long) got, (long long) want);
     err = buf;
     return false;
 }
@@ -118,13 +117,12 @@ bool check_one(const WeightTable& t, const ModelGeometry& g, int64_t layer, std:
             // The byte count is what makes this a REAL check and not a label: a 4 B/elem tensor holds
             // `elements * 4`, a 2 B/elem one holds `elements * 2`, and a consumer reading it as the wrong one
             // walks off the end.
-            const uint64_t want_bytes = (uint64_t) w.elements *
-                                        (w.kind == WeightKind::Bf16InF32 ? 2u : 4u);
+            const uint64_t want_bytes = (uint64_t) w.elements * (w.kind == WeightKind::Bf16InF32 ? 2u : 4u);
             char buf[512];
             std::snprintf(buf, sizeof buf,
                           "layer %lld: %s is engine form %d (%llu B), the kernels read it as form %d (%llu B)",
-                          (long long) layer, v.name(w.suffix).c_str(), (int) r->kind,
-                          (unsigned long long) r->bytes, (int) w.kind, (unsigned long long) want_bytes);
+                          (long long) layer, v.name(w.suffix).c_str(), (int) r->kind, (unsigned long long) r->bytes,
+                          (int) w.kind, (unsigned long long) want_bytes);
             err = buf;
             return false;
         }
@@ -132,11 +130,9 @@ bool check_one(const WeightTable& t, const ModelGeometry& g, int64_t layer, std:
     return true;
 }
 
-}  // namespace
+}   // namespace
 
-std::string LayerView::name(const char* suffix) const {
-    return "blk." + std::to_string(layer_) + "." + suffix;
-}
+std::string LayerView::name(const char* suffix) const { return "blk." + std::to_string(layer_) + "." + suffix; }
 
 bool check_layer(const WeightTable& table, const ModelGeometry& g, int64_t layer, std::string& err) {
     if (layer < 0 || layer >= g.n_layers) {
@@ -162,12 +158,11 @@ bool check_all(const WeightTable& table, const ModelGeometry& g, std::string& er
     if (n_qsa != g.n_qsa_layers() || n_gdn != g.n_gdn_layers()) {
         char buf[256];
         std::snprintf(buf, sizeof buf, "layer split is %lld QSA / %lld GDN, the geometry says %lld / %lld",
-                      (long long) n_qsa, (long long) n_gdn, (long long) g.n_qsa_layers(),
-                      (long long) g.n_gdn_layers());
+                      (long long) n_qsa, (long long) n_gdn, (long long) g.n_qsa_layers(), (long long) g.n_gdn_layers());
         err = buf;
         return false;
     }
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

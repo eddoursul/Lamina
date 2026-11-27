@@ -92,6 +92,7 @@ std::vector<float> qwen_position_table(const std::vector<float>& table, int n_em
 
 /// Hy4's position table at out_w x out_h (mtmd's encode, HunyuanVL's): bilinear between the table's cells, a sample's
 /// place by the scale (target + 0.1) / n_grid, pixel centres.  dst[(y * out_w + x) * n_embd + c].
-std::vector<float> hy4_position_table(const std::vector<float>& table, int64_t n_embd, int n_grid, int out_w, int out_h);
+std::vector<float> hy4_position_table(const std::vector<float>& table, int64_t n_embd, int n_grid, int out_w,
+                                      int out_h);
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

@@ -1,9 +1,9 @@
 // src/server/config.cpp - the run config as the server reads it (config.hpp).
 #include "config.hpp"
 
-#include "lamina/artifact/model_family.hpp"
 #include "lamina/artifact/draft_layer.hpp"
 #include "lamina/artifact/drafter.hpp"
+#include "lamina/artifact/model_family.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -43,7 +43,9 @@ std::vector<std::string> args_of(const json& cfg) {
     return out;
 }
 
-bool has(const std::vector<std::string>& args, const char* flag) { return std::find(args.begin(), args.end(), flag) != args.end(); }
+bool has(const std::vector<std::string>& args, const char* flag) {
+    return std::find(args.begin(), args.end(), flag) != args.end();
+}
 
 /// an expert profile's (layers, experts per layer) from its header (tools/make_profile.py's format)
 std::optional<std::pair<uint32_t, uint32_t>> profile_shape(const std::string& path) {
@@ -57,7 +59,10 @@ std::optional<std::pair<uint32_t, uint32_t>> profile_shape(const std::string& pa
     unsigned char head[24];
     if (bytes.size() < sizeof head || std::memcmp(bytes.data(), "STRP", 4) != 0) return std::nullopt;
     std::memcpy(head, bytes.data(), sizeof head);
-    auto u32 = [&](int i) { return (uint32_t) head[4 + 4 * i] | (uint32_t) head[5 + 4 * i] << 8 | (uint32_t) head[6 + 4 * i] << 16 | (uint32_t) head[7 + 4 * i] << 24; };
+    auto u32 = [&](int i) {
+        return (uint32_t) head[4 + 4 * i] | (uint32_t) head[5 + 4 * i] << 8 | (uint32_t) head[6 + 4 * i] << 16 |
+               (uint32_t) head[7 + 4 * i] << 24;
+    };
     const uint32_t nl = u32(1), ne = u32(2), n = u32(4);
     if (size < 24 + 4 * (std::streamoff) n) return std::nullopt;
     return std::make_pair(nl, ne);
@@ -70,7 +75,7 @@ std::string here_path(const json& cfg, const std::string& p) {
     return u8_str(u8_path(cwd.empty() ? "." : cwd) / x);
 }
 
-}  // namespace
+}   // namespace
 
 json read_config(const std::string& path) {
     std::ifstream f(u8_path(path), std::ios::binary);
@@ -80,9 +85,11 @@ json read_config(const std::string& path) {
     json cfg;
     std::string err;
     if (!py_loads(text, cfg, &err))
-        throw ConfigError(path + " is not valid JSON: " + err + ". Check the commas between the entries of \"args\" (each "
-                          "option and each value is its own quoted entry, e.g. \"--ple-io\", \"mmap\",) and that no entry is "
-                          "followed by a comma at the end of a list.");
+        throw ConfigError(
+            path + " is not valid JSON: " + err +
+            ". Check the commas between the entries of \"args\" (each "
+            "option and each value is its own quoted entry, e.g. \"--ple-io\", \"mmap\",) and that no entry is "
+            "followed by a comma at the end of a list.");
     if (!cfg.is_object()) throw ConfigError(path + " is not a JSON object");
     args_to_list(cfg);
     return cfg;
@@ -102,8 +109,7 @@ json args_as_list(const json& args) {
         out.push_back("--" + it.key());
         if (v.is_array())
             for (const json& x : v) out.push_back(arg_str(x));
-        else
-            out.push_back(arg_str(v));
+        else out.push_back(arg_str(v));
     }
     return out;
 }
@@ -156,7 +162,8 @@ void split_joined_args(json& cfg) {
     for (const auto& a : cfg["args"]) {
         std::smatch m;
         const std::string s = a.is_string() ? a.get<std::string>() : "";
-        const bool value_place = !out.empty() && out.back().is_string() && std::regex_match(out.back().get_ref<const std::string&>(), flag);
+        const bool value_place =
+            !out.empty() && out.back().is_string() && std::regex_match(out.back().get_ref<const std::string&>(), flag);
         if (!a.is_string() || !std::regex_match(s, m, joined) || value_place) {
             out.push_back(a);
             continue;
@@ -169,7 +176,8 @@ void split_joined_args(json& cfg) {
     cfg["args"] = out;
     std::string list;
     for (const auto& c : changed) list += (list.empty() ? "" : ", ") + py_repr_value(json(c));
-    say("[lamina] the config's args hold " + list + " as one element each: split into the flag and its value (write them "
+    say("[lamina] the config's args hold " + list +
+        " as one element each: split into the flag and its value (write them "
         "as two elements, e.g. \"--ple-io\", \"mmap\")");
 }
 
@@ -194,7 +202,8 @@ void lift_reasoning_effort_arg(json& cfg) {
     cfg["args"] = out;
     if (jget(cfg, "reasoning_effort").is_null()) cfg["reasoning_effort"] = value;
     say("[lamina] '--reasoning-effort' in the config's args is not an engine option: taken out of them. The thinking level "
-        "is the config's 'reasoning_effort' key (outside 'args'); it is used as " + py_repr_value(cfg["reasoning_effort"]));
+        "is the config's 'reasoning_effort' key (outside 'args'); it is used as " +
+        py_repr_value(cfg["reasoning_effort"]));
 }
 
 namespace {
@@ -207,7 +216,8 @@ std::string shell_word(const std::string& s) { return s.find(' ') == std::string
 std::string draft_layer_script(const json& cfg) {
     const std::filesystem::path self = u8_path(self_dir());
     std::error_code ec;
-    for (const std::filesystem::path& dir : {self, std::filesystem::absolute(u8_path(here_path(cfg, ".")), ec), self.parent_path()}) {
+    for (const std::filesystem::path& dir :
+         {self, std::filesystem::absolute(u8_path(here_path(cfg, ".")), ec), self.parent_path()}) {
         const std::filesystem::path script = dir / kDraftLayerScript;
         if (std::filesystem::is_regular_file(script, ec)) return shell_word(u8_str(script.lexically_normal()));
     }
@@ -223,7 +233,8 @@ std::string draft_layer_script(const json& cfg) {
 ptrdiff_t last_drafter(json& args) {
     std::vector<size_t> at;
     for (size_t i = 0; i + 1 < args.size(); ++i)
-        if (args[i].is_string() && lamina::is_drafter_flag(args[i].get<std::string>(), arg_str(args[i + 1]))) at.push_back(i++);
+        if (args[i].is_string() && lamina::is_drafter_flag(args[i].get<std::string>(), arg_str(args[i + 1])))
+            at.push_back(i++);
     if (at.empty()) return -1;
     for (size_t k = at.size() - 1; k-- > 0;) {   // the earlier ones, from the back: the indices before them hold
         args.erase(at[k]);
@@ -253,7 +264,8 @@ std::filesystem::path find_dspark(const std::filesystem::path& model_dir) {
         }
         if (!best.empty()) return best;
     }
-    if (const fs::path mtp = model_dir / "mtp.safetensors"; fs::is_regular_file(mtp, ec) && lamina::inkling2::mtp_file(u8_str(mtp)))
+    if (const fs::path mtp = model_dir / "mtp.safetensors";
+        fs::is_regular_file(mtp, ec) && lamina::inkling2::mtp_file(u8_str(mtp)))
         return mtp;
     return {};
 }
@@ -292,7 +304,7 @@ std::filesystem::path find_dfly(const std::filesystem::path& model_dir) {
     return {};
 }
 
-}  // namespace
+}   // namespace
 
 std::string resolve_draft_layer(json& cfg, const std::string& arch) {
     if (arch != "qwen4exp" || !jget(cfg, "args").is_array()) return "";
@@ -313,12 +325,14 @@ std::string resolve_draft_layer(json& cfg, const std::string& arch) {
             if (folder && !fs::is_regular_file(at / f, ec)) gone += (gone.empty() ? "" : ", ") + std::string(f);
         if (folder && gone.empty()) return "";
         named = true;
-        why = flag + " " + name + (folder ? " is a folder without " + gone + " (the layer's earlier layout)" : " is not there");
+        why = flag + " " + name +
+              (folder ? " is a folder without " + gone + " (the layer's earlier layout)" : " is not there");
         if (!folder && at.filename() == kDraftLayerFile) {   // download it where the config names it
             into = shell_word(u8_str(at.parent_path()));
             then.clear();
         } else {
-            then = ",\n         then take \"" + flag + "\", \"" + name + "\" out of the config's \"args\": the server takes "
+            then = ",\n         then take \"" + flag + "\", \"" + name +
+                   "\" out of the config's \"args\": the server takes "
                    "the file from beside the model";
         }
         args.erase((size_t) i);   // the engine stops at a file it cannot read
@@ -333,12 +347,14 @@ std::string resolve_draft_layer(json& cfg, const std::string& arch) {
                 return "[lamina] draft layer: " + u8_str(at);
             }
         }
-        why = std::string("no ") + kDraftLayerFile + " beside the model or the program, and the config's \"args\" name no "
+        why = std::string("no ") + kDraftLayerFile +
+              " beside the model or the program, and the config's \"args\" name no "
               "--drafter";
     }
-    return "[lamina] WARNING: no draft layer (" + why + "): generation runs without its drafts, a verify window a "
-           "token, and is slower.\n         Download it (0.8 GB) with  " + draft_layer_script(cfg) + " " + into +
-           "  (or from\n         " + kDraftLayerUrl + ")" + then;
+    return "[lamina] WARNING: no draft layer (" + why +
+           "): generation runs without its drafts, a verify window a "
+           "token, and is slower.\n         Download it (0.8 GB) with  " +
+           draft_layer_script(cfg) + " " + into + "  (or from\n         " + kDraftLayerUrl + ")" + then;
 }
 
 std::string resolve_drafter(json& cfg, const std::string& arch) {
@@ -360,7 +376,8 @@ std::string resolve_drafter(json& cfg, const std::string& arch) {
         args.erase((size_t) i);
         if (!drafts) return "";
         return "[lamina] WARNING: no drafter (" + flag + " " + name + " is not there): " +
-               (hy4 ? "the model file's MTP block drafts instead (none with --no-mtp)" : "generation runs without its drafts");
+               (hy4 ? "the model file's MTP block drafts instead (none with --no-mtp)"
+                    : "generation runs without its drafts");
     }
     if (!drafts) return "";
     const fs::path model_dir = fs::absolute(u8_path(model_file(cfg)), ec).parent_path().lexically_normal();
@@ -385,8 +402,7 @@ std::vector<json> gpu_items(const json& g) {
             if (py_loads(s, j)) {
                 if (j.is_array())
                     for (const json& x : j) out.push_back(x);
-                else
-                    out.push_back(j);
+                else out.push_back(j);
                 return;
             }
         }
@@ -421,7 +437,7 @@ bool numbers_only(const std::vector<json>& items) {
 /// a JSON value as a card setting's text: text as it is, a number as JSON writes it
 std::string card_value(const json& v) { return v.is_string() ? v.get<std::string>() : py_dumps(v); }
 
-}  // namespace
+}   // namespace
 
 std::vector<int> gpu_list(const json& cfg) {
     const std::vector<json> items = gpu_items(jget(cfg, "gpu"));
@@ -439,7 +455,8 @@ std::optional<std::vector<std::string>> gpu_cards(const json& cfg) {
         std::string text;
         if (x.is_object()) {
             const json& id = jget(x, "id");
-            if (id.is_null()) throw ConfigError("\"gpu\": " + py_repr_value(x) + " names no card: {\"id\": \"RTX 3090\", ...}");
+            if (id.is_null())
+                throw ConfigError("\"gpu\": " + py_repr_value(x) + " names no card: {\"id\": \"RTX 3090\", ...}");
             text = card_value(id);
             for (auto it = x.begin(); it != x.end(); ++it)
                 if (it.key() != "id") text += "," + it.key() + "=" + card_value(it.value());
@@ -464,7 +481,8 @@ std::optional<std::vector<json>> card_objects(const json& cfg) {
         for (size_t i = 1; i < items.size(); ++i) {
             const std::string item(strip(items[i]));
             const size_t eq = item.find('=');
-            if (eq != std::string::npos) c[lower(std::string(strip(item.substr(0, eq))))] = std::string(strip(item.substr(eq + 1)));
+            if (eq != std::string::npos)
+                c[lower(std::string(strip(item.substr(0, eq))))] = std::string(strip(item.substr(eq + 1)));
         }
         out.push_back(std::move(c));
     }
@@ -519,8 +537,10 @@ std::vector<GpuInfo> nvidia_gpus() {
     std::vector<GpuInfo> out;
     try {
         SpawnOptions o;
-        o.args = {"nvidia-smi", "--query-gpu=index,name,pci.bus_id,uuid,memory.total,compute_cap,display_active,"
-                  "driver_version", "--format=csv,noheader,nounits"};
+        o.args = {"nvidia-smi",
+                  "--query-gpu=index,name,pci.bus_id,uuid,memory.total,compute_cap,display_active,"
+                  "driver_version",
+                  "--format=csv,noheader,nounits"};
         o.in = SpawnOptions::null;
         o.out = SpawnOptions::pipe;
         o.err = SpawnOptions::null;
@@ -540,8 +560,7 @@ std::vector<GpuInfo> nvidia_gpus() {
             out.push_back(std::move(g));
         }
         p.wait(30);
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
     return out;
 }
 
@@ -577,7 +596,8 @@ int find_gpu(const std::string& spec_in, const std::vector<GpuInfo>& gpus, std::
                 if (num) {   // a number as a word of a name: not a part of a longer number or word
                     for (size_t at = name.find(low); at != std::string::npos; at = name.find(low, at + 1)) {
                         const bool left = at == 0 || !std::isalnum((unsigned char) name[at - 1]);
-                        const bool right = at + low.size() >= name.size() || !std::isalnum((unsigned char) name[at + low.size()]);
+                        const bool right =
+                            at + low.size() >= name.size() || !std::isalnum((unsigned char) name[at + low.size()]);
                         if (left && right) {
                             hits.push_back(&g);
                             break;
@@ -630,8 +650,9 @@ std::vector<int> engine_gpus(const json& cfg, const std::vector<GpuInfo>& gpus, 
         main_gpu = index(m, &w);
         if (main_gpu < 0) {   // the engine stops at it; said with what named it
             const std::vector<std::string> args = args_of(cfg);
-            const char* by = gpu_cards(cfg) ? "\"gpu\"" : std::find(args.begin(), args.end(), "--gpu") != args.end()
-                                                              ? "--gpu" : "--main-gpu";
+            const char* by = gpu_cards(cfg)                                               ? "\"gpu\""
+                             : std::find(args.begin(), args.end(), "--gpu") != args.end() ? "--gpu"
+                                                                                          : "--main-gpu";
             if (why != nullptr) *why = std::string(by) + " " + m + ": " + w;
             return {};
         }
@@ -645,7 +666,8 @@ std::vector<int> engine_gpus(const json& cfg, const std::vector<GpuInfo>& gpus, 
     }
     for (const auto& t : tiers) {   // one no card matches the engine leaves out
         const int i = index(t, nullptr);
-        if (i >= 0 && std::find(out.begin(), out.end(), i) == out.end() && out.size() <= 3) out.push_back(i);   // kMaxGpuTiers
+        if (i >= 0 && std::find(out.begin(), out.end(), i) == out.end() && out.size() <= 3)
+            out.push_back(i);   // kMaxGpuTiers
     }
     return out;
 }
@@ -670,7 +692,8 @@ double engine_silence_s(const json& cfg) {
     const json& v = jget(cfg, "engine_silence_s");
     if (v.is_null()) return 300.0;
     if (v.is_boolean() || !v.is_number() || v.get<double>() < 0)
-        throw ConfigError("\"engine_silence_s\" must be a number of seconds >= 0 (0 = no limit), not " + py_repr_value(v));
+        throw ConfigError("\"engine_silence_s\" must be a number of seconds >= 0 (0 = no limit), not " +
+                          py_repr_value(v));
     return v.get<double>();
 }
 
@@ -684,7 +707,8 @@ std::vector<std::string> engine_args(const json& cfg) {
         std::vector<std::string> kept;
         for (size_t i = 0; i < args.size(); ++i) {
             const std::string& a = args[i];
-            if ((a == "--main-gpu" || a == "--second-gpu" || a == "--tier-gpus" || a == "--gpu") && i + 1 < args.size()) {
+            if ((a == "--main-gpu" || a == "--second-gpu" || a == "--tier-gpus" || a == "--gpu") &&
+                i + 1 < args.size()) {
                 ++i;
                 continue;
             }
@@ -700,11 +724,12 @@ std::vector<std::string> engine_args(const json& cfg) {
     const json& n = jget(cfg, "parallel");
     if (!has(args, "--batch") && !has(args, "--slots") && !n.is_null() && n != false) {
         if (n.is_boolean() || !n.is_number_integer()) {
-            say("[lamina] \"parallel\" must be a whole number of requests (2.." + std::to_string(kParallelMax) + "), not " +
-                py_repr_value(n) + ": ignored");
+            say("[lamina] \"parallel\" must be a whole number of requests (2.." + std::to_string(kParallelMax) +
+                "), not " + py_repr_value(n) + ": ignored");
         } else if (n.get<int64_t>() > 1) {
             const char* mtp = std::getenv("LAMINA_BATCH_MTP");
-            if (n.get<int64_t>() > kParallelMax && !has(args, "--batch-mtp") && (mtp == nullptr || !*mtp || std::string(mtp) == "0"))
+            if (n.get<int64_t>() > kParallelMax && !has(args, "--batch-mtp") &&
+                (mtp == nullptr || !*mtp || std::string(mtp) == "0"))
                 say("[lamina] \"parallel\": " + std::to_string(n.get<int64_t>()) + " - the engine runs at most " +
                     std::to_string(kParallelMax) + " requests together; it will use " + std::to_string(kParallelMax));
             args.insert(args.end(), {"--batch", std::to_string(n.get<int64_t>())});
@@ -717,8 +742,9 @@ std::vector<std::string> engine_args(const json& cfg) {
     args.insert(args.end(), {"--expert-profile-save", save.get<std::string>()});
     const json& every = jget(cfg, "expert_profile_save_every");
     if (every.is_number() && every.get<double>() >= 0)
-        args.insert(args.end(), {"--expert-profile-save-every", every.is_number_integer() ? std::to_string(every.get<int64_t>())
-                                                                                           : py_repr(every.get<double>())});
+        args.insert(args.end(),
+                    {"--expert-profile-save-every",
+                     every.is_number_integer() ? std::to_string(every.get<int64_t>()) : py_repr(every.get<double>())});
     // the profile the engine would start from: the args' --expert-profile, else (--serve) the built-in one of the
     // model's shape (the one a config's earlier path to the clone's data/expert-profile.bin stands for too)
     auto at = std::find(args.begin(), args.end(), "--expert-profile");
@@ -727,8 +753,9 @@ std::vector<std::string> engine_args(const json& cfg) {
     const bool builtin = !named || *(at + 1) == core::kBuiltinExpertProfile ||
                          core::legacy_expert_profile_path(here_path(cfg, *(at + 1)));
     const auto base = !builtin ? profile_shape(here_path(cfg, *(at + 1)))
-                      : learned && !core::builtin_expert_profile(learned->first, learned->second).empty() ? learned
-                      : std::nullopt;
+                      : learned && !core::builtin_expert_profile(learned->first, learned->second).empty()
+                          ? learned
+                          : std::nullopt;
     if (learned && learned == base) {
         if (named) *(at + 1) = save.get<std::string>();
         else args.insert(args.end(), {"--expert-profile", save.get<std::string>()});
@@ -795,10 +822,19 @@ std::string model_file(const json& cfg) {
 
 const std::vector<std::pair<std::string, std::string>>& offline_env() {
     // what the common runtimes honour (Hugging Face, Transformers, pip, the proxies): an accidental call fails fast
-    static const std::vector<std::pair<std::string, std::string>> env = {
-        {"HF_HUB_OFFLINE", "1"}, {"TRANSFORMERS_OFFLINE", "1"}, {"HF_HUB_DISABLE_TELEMETRY", "1"}, {"DO_NOT_TRACK", "1"},
-        {"PIP_NO_INDEX", "1"}, {"PIP_DISABLE_PIP_VERSION_CHECK", "1"}, {"NO_PROXY", "*"}, {"no_proxy", "*"},
-        {"HTTP_PROXY", ""}, {"HTTPS_PROXY", ""}, {"http_proxy", ""}, {"https_proxy", ""}, {"LAMINA_OFFLINE", "1"}};
+    static const std::vector<std::pair<std::string, std::string>> env = {{"HF_HUB_OFFLINE", "1"},
+                                                                         {"TRANSFORMERS_OFFLINE", "1"},
+                                                                         {"HF_HUB_DISABLE_TELEMETRY", "1"},
+                                                                         {"DO_NOT_TRACK", "1"},
+                                                                         {"PIP_NO_INDEX", "1"},
+                                                                         {"PIP_DISABLE_PIP_VERSION_CHECK", "1"},
+                                                                         {"NO_PROXY", "*"},
+                                                                         {"no_proxy", "*"},
+                                                                         {"HTTP_PROXY", ""},
+                                                                         {"HTTPS_PROXY", ""},
+                                                                         {"http_proxy", ""},
+                                                                         {"https_proxy", ""},
+                                                                         {"LAMINA_OFFLINE", "1"}};
     return env;
 }
 
@@ -839,11 +875,13 @@ std::vector<std::string> offline_blockers(const json& cfg) {
     std::vector<std::string> needs;
     const json& servers = truthy(jget(cfg, "mcp_servers")) ? cfg["mcp_servers"] : jget(cfg, "mcpServers");
     if (truthy(servers))
-        needs.push_back("the config declares " + std::to_string(servers.is_object() || servers.is_array() ? servers.size() : 1) +
+        needs.push_back("the config declares " +
+                        std::to_string(servers.is_object() || servers.is_array() ? servers.size() : 1) +
                         " MCP server(s), which are started as subprocesses and may fetch tools");
     for (const char* key : {"before_load", "beforeLoad"})
         if (truthy(jget(cfg, key)))
-            needs.push_back(std::string("the config declares a ") + key + " command, which runs before the model loads");
+            needs.push_back(std::string("the config declares a ") + key +
+                            " command, which runs before the model loads");
     for (const char* key : {"images", "vision"}) {
         const json& section = jget(cfg, key);
         if (!section.is_object()) continue;
@@ -880,11 +918,12 @@ void rename_older(std::vector<std::string>& a) {
             if (a[i] != r.from) continue;
             a[i] = r.to;
             if (r.unit != nullptr && i + 1 < a.size() && !is_flag(a[i + 1]))
-                a[i + 1] = std::string(r.unit) == "s" && std::atof(a[i + 1].c_str()) < 0 ? "off" : with_unit(a[i + 1], r.unit);
+                a[i + 1] =
+                    std::string(r.unit) == "s" && std::atof(a[i + 1].c_str()) < 0 ? "off" : with_unit(a[i + 1], r.unit);
         }
 }
 
-}  // namespace
+}   // namespace
 
 json modern_config(json cfg, bool flash) {
     std::vector<std::string> a = args_of(cfg);
@@ -924,8 +963,8 @@ json modern_config(json cfg, bool flash) {
                    sleep = list("--second-gpu-sleep-us");
         const auto pin = value("--second-gpu-pin-gib");
         const auto cache = value("--expert-cache"), keep = value("--vram-reserve-mib"), only = value("--vram-pin-gib");
-        const bool per_tier = !gib.empty() || !reserve.empty() || !prefetch.empty() || !clocks.empty() ||
-                              !sleep.empty() || pin;
+        const bool per_tier =
+            !gib.empty() || !reserve.empty() || !prefetch.empty() || !clocks.empty() || !sleep.empty() || pin;
         std::optional<std::vector<json>> cards = card_objects(cfg);
         const bool given = cards.has_value();
         bool named = given;   // a card named: "gpu"'s, --main-gpu's or a tier
@@ -954,7 +993,8 @@ json modern_config(json cfg, bool flash) {
             };
             json& m = cards->front();
             if (cache && *cache != program::option_default("--expert-cache")) set(m, "cache", *cache);
-            if (keep && *keep != program::option_default("--vram-reserve-mib")) set(m, "reserve", with_unit(*keep, "M"));
+            if (keep && *keep != program::option_default("--vram-reserve-mib"))
+                set(m, "reserve", with_unit(*keep, "M"));
             if (only && std::atof(only->c_str()) > 0) set(m, "vram-only", with_unit(*only, "G"));
             for (size_t t = 0; t + 1 < cards->size(); ++t) {
                 json& c = (*cards)[t + 1];
@@ -969,10 +1009,10 @@ json modern_config(json cfg, bool flash) {
             if (changed || (!given && named)) cfg["gpu"] = cards_json(*cards);
             // the rest: at their default, a card's own in their place, per-tier lists without a tier, or (beside
             // "gpu"'s cards) the names, which the engine reads no more
-            for (const char* f : {"--main-gpu", "--second-gpu", "--tier-gpus", "--expert-cache", "--vram-reserve-mib",
-                                  "--vram-pin-gib", "--second-gpu-gib", "--second-gpu-reserve-mib",
-                                  "--second-gpu-prefetch-mb", "--second-gpu-clocks", "--second-gpu-sleep-us",
-                                  "--second-gpu-pin-gib"})
+            for (const char* f :
+                 {"--main-gpu", "--second-gpu", "--tier-gpus", "--expert-cache", "--vram-reserve-mib", "--vram-pin-gib",
+                  "--second-gpu-gib", "--second-gpu-reserve-mib", "--second-gpu-prefetch-mb", "--second-gpu-clocks",
+                  "--second-gpu-sleep-us", "--second-gpu-pin-gib"})
                 erase(f);
         }
     }
@@ -1003,7 +1043,8 @@ json modern_config(json cfg, bool flash) {
     }
     if (jget(cfg, "vision").is_object()) {
         erase("--vision");
-        if (!jstr(cfg, "model").empty() && jstr(cfg["vision"], "model") == jstr(cfg, "model")) cfg["vision"].erase("model");
+        if (!jstr(cfg, "model").empty() && jstr(cfg["vision"], "model") == jstr(cfg, "model"))
+            cfg["vision"].erase("model");
     }
     cfg.erase("lib_dirs");   // taken and not read: the engine runs in the server's process
     json list = json::array();
@@ -1018,4 +1059,4 @@ json modern_config(json cfg, bool flash) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

@@ -23,7 +23,7 @@ bool is_json_text(const std::string& text) {
     return py_loads(text, v);
 }
 
-}  // namespace
+}   // namespace
 
 json prompt_progress(Service& svc) {
     // llama.cpp's prompt_progress, so a client written for llama.cpp reads both servers: `processed` counts from token
@@ -45,7 +45,10 @@ void openai_chunks(Service& svc, const json& req, const std::vector<int32_t>& id
     // llama.cpp's flag and its default: a client that wants prompt progress asks for it
     const bool want_progress = truthy(jget(req, "return_progress"));
     auto chunk = [&](json delta, const json& finish = nullptr) {
-        return json{{"id", cid}, {"object", "chat.completion.chunk"}, {"created", created}, {"model", model},
+        return json{{"id", cid},
+                    {"object", "chat.completion.chunk"},
+                    {"created", created},
+                    {"model", model},
                     {"choices", json::array({{{"index", 0}, {"delta", std::move(delta)}, {"finish_reason", finish}}})}};
     };
     {
@@ -79,9 +82,11 @@ void openai_chunks(Service& svc, const json& req, const std::vector<int32_t>& id
             }
             if (ev->kind == "tool_start") {
                 streamed[ev->call->id] = calls++;
-                const json c = chunk({{"tool_calls", json::array({{{"index", streamed[ev->call->id]}, {"id", ev->call->id},
-                                                                   {"type", "function"},
-                                                                   {"function", {{"name", ev->call->name}, {"arguments", ""}}}}})}});
+                const json c = chunk(
+                    {{"tool_calls", json::array({{{"index", streamed[ev->call->id]},
+                                                  {"id", ev->call->id},
+                                                  {"type", "function"},
+                                                  {"function", {{"name", ev->call->name}, {"arguments", ""}}}}})}});
                 return out(&c);
             }
             if (ev->kind == "tool_args") {
@@ -94,9 +99,13 @@ void openai_chunks(Service& svc, const json& req, const std::vector<int32_t>& id
                 return true;
             }
             if (ev->kind == "tool_call") {
-                const json c = chunk({{"tool_calls", json::array({{{"index", calls}, {"id", ev->call->id}, {"type", "function"},
-                                                                   {"function", {{"name", ev->call->name},
-                                                                                 {"arguments", py_dumps(ev->call->arguments, false)}}}}})}});
+                const json c =
+                    chunk({{"tool_calls", json::array({{{"index", calls},
+                                                        {"id", ev->call->id},
+                                                        {"type", "function"},
+                                                        {"function",
+                                                         {{"name", ev->call->name},
+                                                          {"arguments", py_dumps(ev->call->arguments, false)}}}}})}});
                 ++calls;
                 return out(&c);
             }
@@ -108,12 +117,17 @@ void openai_chunks(Service& svc, const json& req, const std::vector<int32_t>& id
         const std::string f = jstr(x, "finish");
         const std::string finish = whole && f == "stop" ? "tool_calls" : f == "cancel" ? "stop" : f;
         json last = chunk(json::object(), finish);
-        const int64_t pt = jget(x, "prompt_tokens").is_number() ? x["prompt_tokens"].get<int64_t>() : (int64_t) ids.size();
+        const int64_t pt =
+            jget(x, "prompt_tokens").is_number() ? x["prompt_tokens"].get<int64_t>() : (int64_t) ids.size();
         const int64_t ct = x["completion_tokens"].get<int64_t>();
         // cached_tokens: the part of the prompt the conversation cache already held (OpenAI's field)
-        last["usage"] = {{"prompt_tokens", pt}, {"completion_tokens", ct}, {"total_tokens", pt + ct},
-                         {"prompt_tokens_details", {{"cached_tokens", truthy(jget(x, "reused")) ? x["reused"] : json(0)}}}};
-        if (truthy(jget(x, "timings"))) last["timings"] = x["timings"];   // llama.cpp's field: the speed its clients show
+        last["usage"] = {
+            {"prompt_tokens", pt},
+            {"completion_tokens", ct},
+            {"total_tokens", pt + ct},
+            {"prompt_tokens_details", {{"cached_tokens", truthy(jget(x, "reused")) ? x["reused"] : json(0)}}}};
+        if (truthy(jget(x, "timings")))
+            last["timings"] = x["timings"];   // llama.cpp's field: the speed its clients show
         return out(&last);
     };
     if (run != nullptr) (*run)(sink);
@@ -132,16 +146,20 @@ json openai_collect(const std::vector<json>& chunks) {
         if (jget(d, "reasoning_content").is_string()) reasoning += d["reasoning_content"].get<std::string>();
         if (jget(d, "tool_calls").is_array())
             for (const json& tc : d["tool_calls"]) {   // streamed calls arrive in pieces: merged by index
-                const int64_t i = jget(tc, "index").is_number() ? tc["index"].get<int64_t>() : (int64_t) by_index.size();
+                const int64_t i =
+                    jget(tc, "index").is_number() ? tc["index"].get<int64_t>() : (int64_t) by_index.size();
                 if (!by_index.count(i))
-                    by_index[i] = {{"id", nullptr}, {"type", "function"}, {"function", {{"name", ""}, {"arguments", ""}}}};
+                    by_index[i] = {
+                        {"id", nullptr}, {"type", "function"}, {"function", {{"name", ""}, {"arguments", ""}}}};
                 json& cur = by_index[i];
                 if (truthy(jget(tc, "id"))) cur["id"] = tc["id"];
                 const json& fn = jget(tc, "function");
                 if (jget(fn, "name").is_string())
-                    cur["function"]["name"] = cur["function"]["name"].get<std::string>() + fn["name"].get<std::string>();
+                    cur["function"]["name"] =
+                        cur["function"]["name"].get<std::string>() + fn["name"].get<std::string>();
                 if (jget(fn, "arguments").is_string())
-                    cur["function"]["arguments"] = cur["function"]["arguments"].get<std::string>() + fn["arguments"].get<std::string>();
+                    cur["function"]["arguments"] =
+                        cur["function"]["arguments"].get<std::string>() + fn["arguments"].get<std::string>();
             }
         last = &c;
     }
@@ -153,10 +171,14 @@ json openai_collect(const std::vector<json>& chunks) {
     if (!reasoning.empty()) msg["reasoning_content"] = reasoning;
     if (!calls.empty()) msg["tool_calls"] = calls;
     if (!mcp.empty()) msg["lamina_mcp"] = mcp;
-    json result = {{"id", (*last)["id"]}, {"object", "chat.completion"}, {"created", (*last)["created"]},
-                   {"model", (*last)["model"]},
-                   {"choices", json::array({{{"index", 0}, {"message", msg}, {"finish_reason", (*last)["choices"][0]["finish_reason"]}}})},
-                   {"usage", jget(*last, "usage")}};
+    json result = {
+        {"id", (*last)["id"]},
+        {"object", "chat.completion"},
+        {"created", (*last)["created"]},
+        {"model", (*last)["model"]},
+        {"choices",
+         json::array({{{"index", 0}, {"message", msg}, {"finish_reason", (*last)["choices"][0]["finish_reason"]}}})},
+        {"usage", jget(*last, "usage")}};
     if (truthy(jget(*last, "timings"))) result["timings"] = (*last)["timings"];
     return result;
 }
@@ -182,7 +204,8 @@ bool StructuredBuffer::finish() {
                                              jstr(choice, "finish_reason"));
     if (!out_(&buffered_.front())) return false;
     json delta = {{"content", valid}};
-    if (truthy(jget(choice["message"], "reasoning_content"))) delta["reasoning_content"] = choice["message"]["reasoning_content"];
+    if (truthy(jget(choice["message"], "reasoning_content")))
+        delta["reasoning_content"] = choice["message"]["reasoning_content"];
     json c = buffered_.front();
     c["choices"] = json::array({{{"index", 0}, {"delta", delta}, {"finish_reason", nullptr}}});
     if (!out_(&c)) return false;
@@ -197,9 +220,15 @@ void anthropic_events(Service& svc, const json& req, const std::vector<int32_t>&
         return out(&n, &e);
     };
     if (!send("message_start", {{"type", "message_start"},
-                                {"message", {{"id", mid}, {"type", "message"}, {"role", "assistant"}, {"model", svc.model_for(req)},
-                                             {"content", json::array()}, {"stop_reason", nullptr}, {"stop_sequence", nullptr},
-                                             {"usage", {{"input_tokens", ids.size()}, {"output_tokens", 0}}}}}}))
+                                {"message",
+                                 {{"id", mid},
+                                  {"type", "message"},
+                                  {"role", "assistant"},
+                                  {"model", svc.model_for(req)},
+                                  {"content", json::array()},
+                                  {"stop_reason", nullptr},
+                                  {"stop_sequence", nullptr},
+                                  {"usage", {{"input_tokens", ids.size()}, {"output_tokens", 0}}}}}}))
         return;
     int64_t index = -1;
     std::string open_kind;
@@ -210,8 +239,10 @@ void anthropic_events(Service& svc, const json& req, const std::vector<int32_t>&
         if (kind == "ping") return out(nullptr, nullptr);
         if (kind == "event") {
             if (ev->kind == "tool_args")
-                return send("content_block_delta", {{"type", "content_block_delta"}, {"index", index},
-                                                    {"delta", {{"type", "input_json_delta"}, {"partial_json", ev->text}}}});
+                return send("content_block_delta",
+                            {{"type", "content_block_delta"},
+                             {"index", index},
+                             {"delta", {{"type", "input_json_delta"}, {"partial_json", ev->text}}}});
             if (ev->kind == "tool_call" && streamed.count(ev->call->id)) {
                 finished.insert(ev->call->id);
                 return true;
@@ -229,22 +260,30 @@ void anthropic_events(Service& svc, const json& req, const std::vector<int32_t>&
                 json block;
                 if (want == "thinking") block = {{"type", "thinking"}, {"thinking", ""}, {"signature", ""}};
                 else if (want == "text") block = {{"type", "text"}, {"text", ""}};
-                else block = {{"type", "tool_use"}, {"id", ev->call ? ev->call->id : ""}, {"name", ev->call ? ev->call->name : ""},
-                              {"input", json::object()}};
-                if (!send("content_block_start", {{"type", "content_block_start"}, {"index", index}, {"content_block", block}}))
+                else
+                    block = {{"type", "tool_use"},
+                             {"id", ev->call ? ev->call->id : ""},
+                             {"name", ev->call ? ev->call->name : ""},
+                             {"input", json::object()}};
+                if (!send("content_block_start",
+                          {{"type", "content_block_start"}, {"index", index}, {"content_block", block}}))
                     return false;
             }
             if (want == "thinking")
-                return send("content_block_delta", {{"type", "content_block_delta"}, {"index", index},
+                return send("content_block_delta", {{"type", "content_block_delta"},
+                                                    {"index", index},
                                                     {"delta", {{"type", "thinking_delta"}, {"thinking", ev->text}}}});
             if (want == "text")
-                return send("content_block_delta", {{"type", "content_block_delta"}, {"index", index},
+                return send("content_block_delta", {{"type", "content_block_delta"},
+                                                    {"index", index},
                                                     {"delta", {{"type", "text_delta"}, {"text", ev->text}}}});
             if (ev->kind == "tool_start") return true;   // its input follows as tool_args pieces
             used_tool = true;
-            return send("content_block_delta", {{"type", "content_block_delta"}, {"index", index},
-                                                {"delta", {{"type", "input_json_delta"},
-                                                           {"partial_json", py_dumps(ev->call->arguments, false)}}}});
+            return send(
+                "content_block_delta",
+                {{"type", "content_block_delta"},
+                 {"index", index},
+                 {"delta", {{"type", "input_json_delta"}, {"partial_json", py_dumps(ev->call->arguments, false)}}}});
         }
         if (kind != "done") return true;
         if (!open_kind.empty() && !close()) return false;
@@ -260,11 +299,14 @@ void anthropic_events(Service& svc, const json& req, const std::vector<int32_t>&
         // Anthropic's counts: input_tokens leaves out what the conversation cache held (cache_read_input_tokens). At
         // least the last prompt token is always read: Claude Code takes input_tokens 0 as "not given" (#1013)
         const int64_t n = (int64_t) ids.size();
-        const int64_t reused = std::max<int64_t>(0, std::min<int64_t>(jget(x, "reused").is_number() ? x["reused"].get<int64_t>() : 0, n - 1));
+        const int64_t reused = std::max<int64_t>(
+            0, std::min<int64_t>(jget(x, "reused").is_number() ? x["reused"].get<int64_t>() : 0, n - 1));
         if (!send("message_delta", {{"type", "message_delta"},
                                     {"delta", {{"stop_reason", stop}, {"stop_sequence", jget(x, "stop_sequence")}}},
-                                    {"usage", {{"input_tokens", n - reused}, {"cache_read_input_tokens", reused},
-                                               {"output_tokens", x["completion_tokens"]}}}}))
+                                    {"usage",
+                                     {{"input_tokens", n - reused},
+                                      {"cache_read_input_tokens", reused},
+                                      {"output_tokens", x["completion_tokens"]}}}}))
             return false;
         return send("message_stop", {{"type", "message_stop"}});
     };
@@ -284,7 +326,8 @@ json anthropic_collect(const std::vector<std::pair<std::string, json>>& events) 
             json& b = blocks.back();
             const std::string type = jstr(d, "type");
             if (type == "text_delta") b["text"] = b["text"].get<std::string>() + d["text"].get<std::string>();
-            else if (type == "thinking_delta") b["thinking"] = b["thinking"].get<std::string>() + d["thinking"].get<std::string>();
+            else if (type == "thinking_delta")
+                b["thinking"] = b["thinking"].get<std::string>() + d["thinking"].get<std::string>();
             else b["_json"] = jstr(b, "_json") + d["partial_json"].get<std::string>();   // parsed when complete
         } else if (name == "content_block_stop" && !blocks.empty() && blocks.back().contains("_json")) {
             json& b = blocks.back();
@@ -305,7 +348,8 @@ json anthropic_collect(const std::vector<std::pair<std::string, json>>& events) 
 
 void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json messages, const json& tools, const json& kw,
                   std::vector<int32_t> ids, bool thinking, int64_t max_new, int64_t max_req, const json& sampling,
-                  const std::shared_ptr<Cancel>& cancel_owner, const std::set<std::string>& mcp_names, const Sink& sink) {
+                  const std::shared_ptr<Cancel>& cancel_owner, const std::set<std::string>& mcp_names,
+                  const Sink& sink) {
     Cancel& cancel = *cancel_owner;
     const int64_t max_rounds = hub->settings["max_rounds"].get<int64_t>();
     int64_t total = 0, rounds = 0;
@@ -324,7 +368,8 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
                     if (kind == "event") {
                         if (ev->call != nullptr && mcp_names.count(ev->call->name)) {
                             if (ev->kind == "tool_start") {   // the model has started writing a call: said at once
-                                if (!sink("mcp", {{"event", "start"}, {"id", ev->call->id}, {"name", ev->call->name}}, nullptr))
+                                if (!sink("mcp", {{"event", "start"}, {"id", ev->call->id}, {"name", ev->call->name}},
+                                          nullptr))
                                     return !(gone = true);
                             } else if (ev->kind == "tool_call") {
                                 calls.push_back(ev->call);
@@ -347,8 +392,16 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
         }
         if (!run_them) {
             for (const auto& c : calls)   // announced, never run: closed in the client's view
-                if (!sink("mcp", {{"event", "result"}, {"id", c->id}, {"ok", false}, {"skipped", true}, {"text", "not run"},
-                                  {"chars", 0}, {"truncated", false}, {"ms", 0}}, nullptr))
+                if (!sink("mcp",
+                          {{"event", "result"},
+                           {"id", c->id},
+                           {"ok", false},
+                           {"skipped", true},
+                           {"text", "not run"},
+                           {"chars", 0},
+                           {"truncated", false},
+                           {"ms", 0}},
+                          nullptr))
                     return;
             break;
         }
@@ -357,10 +410,18 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
         for (const auto& c : calls) {
             const auto routes = hub->routes();
             const auto it = routes.find(c->name);
-            const json server = it != routes.end() && it->second.first != nullptr ? json(it->second.first->name) : json(nullptr);
+            const json server =
+                it != routes.end() && it->second.first != nullptr ? json(it->second.first->name) : json(nullptr);
             const std::string tool = it != routes.end() ? it->second.second : c->name;
-            if (!sink("mcp", {{"event", "call"}, {"id", c->id}, {"name", c->name}, {"server", server}, {"tool", tool},
-                              {"arguments", c->arguments}, {"round", rounds}}, nullptr))
+            if (!sink("mcp",
+                      {{"event", "call"},
+                       {"id", c->id},
+                       {"name", c->name},
+                       {"server", server},
+                       {"tool", tool},
+                       {"arguments", c->arguments},
+                       {"round", rounds}},
+                      nullptr))
                 return;
             // the call runs on a thread while heartbeats go out: they reach the client as keep-alives, which is how a
             // client that went away (the web app's Stop) is noticed during a slow tool
@@ -410,8 +471,8 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
             std::snprintf(buf, sizeof buf, "%.1f", r["ms"].get<double>() / 1000);
             std::string chars = std::to_string(r["chars"].get<int64_t>());
             for (int i = (int) chars.size() - 3; i > 0; i -= 3) chars.insert((size_t) i, ",");
-            say("[lamina] tool " + c->name + ": " + (truthy(r["ok"]) ? "ok" : "error") + ", " + chars + " characters in " +
-                buf + " s" + (truthy(r["truncated"]) ? " (truncated for the model)" : ""));
+            say("[lamina] tool " + c->name + ": " + (truthy(r["ok"]) ? "ok" : "error") + ", " + chars +
+                " characters in " + buf + " s" + (truthy(r["truncated"]) ? " (truncated for the model)" : ""));
             results.push_back(r["text"].get<std::string>());
             json ev = {{"event", "result"}, {"id", c->id}};
             for (const char* k : {"ok", "text", "chars", "truncated", "ms"}) ev[k] = r[k];
@@ -422,7 +483,8 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
             break;
         }
         json call_list = json::array();
-        for (const auto& c : calls) call_list.push_back({{"function", {{"name", c->name}, {"arguments", c->arguments}}}});
+        for (const auto& c : calls)
+            call_list.push_back({{"function", {{"name", c->name}, {"arguments", c->arguments}}}});
         json assistant = {{"role", "assistant"}, {"content", std::string(strip(text))}};
         if (!reasoning.empty()) assistant["reasoning_content"] = std::string(strip(reasoning));
         assistant["tool_calls"] = call_list;
@@ -451,7 +513,8 @@ void debug_request(const std::string& api, const json& req, const json& messages
     std::string body;
     const json& content = jget(last, "content");
     if (content.is_array()) {
-        for (const auto& p : content) body += (body.empty() ? "" : " ") + (p.is_object() ? jstr(p, "text") : std::string());
+        for (const auto& p : content)
+            body += (body.empty() ? "" : " ") + (p.is_object() ? jstr(p, "text") : std::string());
     } else if (content.is_string()) {
         body = content.get<std::string>();
     }
@@ -465,11 +528,12 @@ void debug_request(const std::string& api, const json& req, const json& messages
     }
     preview = replace_all(preview, "\n", " ");
     say("[lamina] req " + api + ": msgs=" + std::to_string(messages.size()) +
-        " tools=" + std::to_string(tools.is_array() ? tools.size() : 0) + " max_tokens_raw=" + py_repr_value(jget(req, "max_tokens")) +
-        "/" + py_repr_value(jget(req, "max_completion_tokens")) + " max_new=" + std::to_string(max_new) +
+        " tools=" + std::to_string(tools.is_array() ? tools.size() : 0) +
+        " max_tokens_raw=" + py_repr_value(jget(req, "max_tokens")) + "/" +
+        py_repr_value(jget(req, "max_completion_tokens")) + " max_new=" + std::to_string(max_new) +
         " thinking=" + (thinking ? "True" : "False") + " stream=" + (truthy(jget(req, "stream")) ? "True" : "False") +
         " prompt_tokens=" + std::to_string(prompt_tokens) + " last=" + py_repr_value(jget(last, "role")) + ":" +
         py_repr_value(json(preview)));
 }
 
-}  // namespace lamina
+}   // namespace lamina

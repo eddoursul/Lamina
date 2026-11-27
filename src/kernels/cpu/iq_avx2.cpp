@@ -56,10 +56,8 @@ inline __m256i sgn_vec(uint32_t m) {
     const __m128i lo = _mm_shuffle_epi8(bm, _mm_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1));
     const __m128i hi = _mm_shuffle_epi8(bm, _mm_setr_epi8(2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3));
     const __m256i bits = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-    const __m256i sel = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char) 0x80,
-                                         1, 2, 4, 8, 16, 32, 64, (char) 0x80,
-                                         1, 2, 4, 8, 16, 32, 64, (char) 0x80,
-                                         1, 2, 4, 8, 16, 32, 64, (char) 0x80);
+    const __m256i sel = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char) 0x80, 1, 2, 4, 8, 16, 32, 64, (char) 0x80, 1, 2,
+                                         4, 8, 16, 32, 64, (char) 0x80, 1, 2, 4, 8, 16, 32, 64, (char) 0x80);
     const __m256i nz = _mm256_cmpeq_epi8(_mm256_and_si256(bits, sel), sel);
     return _mm256_or_si256(nz, _mm256_set1_epi8(1));
 }
@@ -69,12 +67,10 @@ inline __m256i sgn_vec(uint32_t m) {
 // pshufb + inserti128 - three uops on the single shuffle port of Haswell-class cores, one here.
 inline __m256i sgn_vec_at(const uint8_t* p) {
     const __m256i bits = _mm256_shuffle_epi8(_mm256_set1_epi32((int) u32(p)),
-                                             _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-                                                              2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3));
-    const __m256i sel = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char) 0x80,
-                                         1, 2, 4, 8, 16, 32, 64, (char) 0x80,
-                                         1, 2, 4, 8, 16, 32, 64, (char) 0x80,
-                                         1, 2, 4, 8, 16, 32, 64, (char) 0x80);
+                                             _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
+                                                              2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3));
+    const __m256i sel = _mm256_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char) 0x80, 1, 2, 4, 8, 16, 32, 64, (char) 0x80, 1, 2,
+                                         4, 8, 16, 32, 64, (char) 0x80, 1, 2, 4, 8, 16, 32, 64, (char) 0x80);
     const __m256i nz = _mm256_cmpeq_epi8(_mm256_and_si256(bits, sel), sel);
     return _mm256_or_si256(nz, _mm256_set1_epi8(1));
 }
@@ -82,12 +78,10 @@ inline __m256i sgn_vec_at(const uint8_t* p) {
 // The two 16-value scales of one 32-value half (IQ2_XS, IQ2_S): int16 lanes 0-7 = a (values 0-15),
 // 8-15 = b (values 16-31).  NOT a broadcast dword [a,b] - that would alternate the scales lane by lane.
 inline __m256i sc16(int a, int b) {
-    return _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_set1_epi16((short) a)),
-                                   _mm_set1_epi16((short) b), 1);
+    return _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_set1_epi16((short) a)), _mm_set1_epi16((short) b), 1);
 }
 // One scale for the whole 32-value half (IQ2_XXS, IQ3_XXS, IQ3_S).
 inline __m256i sc32(int s) { return _mm256_set1_epi16(s); }
-
 
 // The (2s+1) scale vectors as tables (IQ3_S: one 4-bit scale per 32-value half; IQ2_S: one scale byte holding
 // the two 16-value scales of the half) - one load instead of the shift/or/broadcast chain of sc32()/sc16().
@@ -112,8 +106,8 @@ inline __m256i scale_vec(const int16_t* lanes) { return _mm256_loadu_si256((cons
 
 // The low index bytes q[0..7] interleaved with the spread high bits: eight 16-bit grid indices in sp[].
 inline void grid_indices(const uint8_t* q, uint64_t hi, uint16_t* sp) {
-    _mm_storeu_si128((__m128i*) sp, _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(q)),
-                                                      _mm_cvtsi64_si128((long long) hi)));
+    _mm_storeu_si128((__m128i*) sp,
+                     _mm_unpacklo_epi8(_mm_cvtsi64_si128((long long) u64(q)), _mm_cvtsi64_si128((long long) hi)));
 }
 
 inline float hsum8(__m256 v) {
@@ -165,8 +159,8 @@ template <> struct Fmt32<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign byt
         // grid_indices reads 8 index bytes; only the first 4 are this half's (the rest stay inside the block)
         alignas(16) uint16_t sp[8];
         grid_indices(b + 2 + 8 * j + 4 * half, hi_spread.iq2s[b[66 + 2 * j + half]], sp);
-        g = _mm256_set_epi64x((long long) iq2s_grid[sp[3]], (long long) iq2s_grid[sp[2]],
-                              (long long) iq2s_grid[sp[1]], (long long) iq2s_grid[sp[0]]);
+        g = _mm256_set_epi64x((long long) iq2s_grid[sp[3]], (long long) iq2s_grid[sp[2]], (long long) iq2s_grid[sp[1]],
+                              (long long) iq2s_grid[sp[0]]);
         sgn = sgn_vec_at(b + 2 + 32 + 8 * j + 4 * half);
         sc = scale_vec(scale_vecs.s16[b[74 + 2 * j + half]]);
     }
@@ -177,8 +171,9 @@ template <> struct Fmt32<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 
     static constexpr float K = 0.25f;
     static inline void decode(const uint8_t* b, int j, int half, __m256i& g, __m256i& sgn, __m256i& sc) {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
-        g = _mm256_set_epi32((int) iq3xxs_grid[q[7]], (int) iq3xxs_grid[q[6]], (int) iq3xxs_grid[q[5]], (int) iq3xxs_grid[q[4]],
-                             (int) iq3xxs_grid[q[3]], (int) iq3xxs_grid[q[2]], (int) iq3xxs_grid[q[1]], (int) iq3xxs_grid[q[0]]);
+        g = _mm256_set_epi32((int) iq3xxs_grid[q[7]], (int) iq3xxs_grid[q[6]], (int) iq3xxs_grid[q[5]],
+                             (int) iq3xxs_grid[q[4]], (int) iq3xxs_grid[q[3]], (int) iq3xxs_grid[q[2]],
+                             (int) iq3xxs_grid[q[1]], (int) iq3xxs_grid[q[0]]);
         const uint32_t w = u32(b + 2 + 64 + 8 * j + 4 * half);
         sgn = _mm256_set_epi64x((long long) even_signs.v[(w >> 21) & 127], (long long) even_signs.v[(w >> 14) & 127],
                                 (long long) even_signs.v[(w >> 7) & 127], (long long) even_signs.v[w & 127]);
@@ -206,17 +201,18 @@ template <> struct Fmt32<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4
 // ---- the gathered decodes (LAMINA_IQ256_GATHER, see the top of the file): each its format's Fmt32 bit for bit
 // The 32 sign bits of a half from the j's 8 sign bytes: one broadcast and one shuffle (sgn_vec: two and an insert).
 inline __m256i sgn_half(const uint8_t* m8, int half) {
-    const __m256i sb = _mm256_shuffle_epi8(
-        _mm256_set1_epi64x((long long) u64(m8)),
-        half ? _mm256_setr_epi8(4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7)
-             : _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3));
+    const __m256i sb = _mm256_shuffle_epi8(_mm256_set1_epi64x((long long) u64(m8)),
+                                           half ? _mm256_setr_epi8(4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6,
+                                                                   6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7)
+                                                : _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2,
+                                                                   2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3));
     const __m256i sel = _mm256_set1_epi64x((long long) 0x8040201008040201ull);
     return _mm256_or_si256(_mm256_cmpeq_epi8(_mm256_and_si256(sb, sel), sel), _mm256_set1_epi8(1));
 }
 // The four 7-bit even-sign indices of a u32 (bits 0-6, 7-13, 14-20, 21-27) -> their four masks, one gather.
 inline __m256i even_signs4(uint32_t w) {
-    const __m128i idx = _mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32((int) w), _mm_setr_epi32(0, 7, 14, 21)),
-                                      _mm_set1_epi32(127));
+    const __m128i idx =
+        _mm_and_si128(_mm_srlv_epi32(_mm_set1_epi32((int) w), _mm_setr_epi32(0, 7, 14, 21)), _mm_set1_epi32(127));
     return _mm256_i32gather_epi64((const long long*) even_signs.v, idx, 8);
 }
 
@@ -230,9 +226,9 @@ template <> struct Fmt32<121> {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
         const uint32_t h = b[66 + 2 * j + half];
         const __m256i lo = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*) q));
-        const __m256i hb = _mm256_and_si256(_mm256_sllv_epi32(_mm256_set1_epi32((int) h),
-                                                              _mm256_setr_epi32(8, 7, 6, 5, 4, 3, 2, 1)),
-                                            _mm256_set1_epi32(0x100));
+        const __m256i hb =
+            _mm256_and_si256(_mm256_sllv_epi32(_mm256_set1_epi32((int) h), _mm256_setr_epi32(8, 7, 6, 5, 4, 3, 2, 1)),
+                             _mm256_set1_epi32(0x100));
         g = _mm256_i32gather_epi32((const int*) iq3s_grid, _mm256_or_si256(lo, hb), 4);
         sgn = sgn_half(b + 74 + 8 * j, half);
         const uint8_t s = b[106 + j];
@@ -247,7 +243,8 @@ template <> struct Fmt32<118> {
     static constexpr float K = 0.25f;
     static inline void decode(const uint8_t* b, int j, int half, __m256i& g, __m256i& sgn, __m256i& sc) {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
-        g = _mm256_i32gather_epi32((const int*) iq3xxs_grid, _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*) q)), 4);
+        g = _mm256_i32gather_epi32((const int*) iq3xxs_grid, _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*) q)),
+                                   4);
         const uint32_t w = u32(b + 2 + 64 + 8 * j + 4 * half);
         sgn = even_signs4(w);
         sc = sc32(2 * (int) (w >> 28) + 1);
@@ -286,11 +283,11 @@ template <> struct Fmt32<23> {   // IQ4_XS: d, scales_h, scales_l[4], qs[128] - 
         const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
         const __m128i bits = _mm_loadu_si128((const __m128i*) (b + 8 + 16 * H));
         const __m128i m4 = _mm_set1_epi8(0x0f);
-        const __m256i q4 = _mm256_inserti128_si256(
-            _mm256_castsi128_si256(_mm_shuffle_epi8(values, _mm_and_si128(bits, m4))),
-            _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4)), 1);
-        g   = _mm256_sign_epi8(q4, q4);                       // |w|, the unsigned operand of maddubs
-        sgn = _mm256_sign_epi8(_mm256_set1_epi8(1), q4);      // w's sign, applied to the activation
+        const __m256i q4 =
+            _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_shuffle_epi8(values, _mm_and_si128(bits, m4))),
+                                    _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4)), 1);
+        g = _mm256_sign_epi8(q4, q4);                      // |w|, the unsigned operand of maddubs
+        sgn = _mm256_sign_epi8(_mm256_set1_epi8(1), q4);   // w's sign, applied to the activation
         const int ls = ((b[4 + (H >> 1)] >> (4 * (H & 1))) & 0xf) | (((u16(b + 2) >> (2 * H)) & 3) << 4);
         sc = _mm256_set1_epi16((short) (ls - 32));
     }
@@ -301,18 +298,18 @@ namespace plain {
 #define LAMINA_ROWS_VNNI 0
 #define LAMINA_ROWS_FN
 #include "iq_avx2_rows.inl"
-}  // namespace plain
+}   // namespace plain
 #if LAMINA_AVXVNNI
 namespace vnni {
 #define LAMINA_ROWS_VNNI 1
 #define LAMINA_ROWS_FN LAMINA_AVXVNNI_FN
 #include "iq_avx2_rows.inl"
-}  // namespace vnni
+}   // namespace vnni
 #endif
 
 bool vnni_on() { return LAMINA_AVXVNNI && cpu_avxvnni_ok(); }
 
-}  // namespace
+}   // namespace
 
 // ggml's quantize_row_q8_K_ref (ggml-quants.c), which is also what ggml-cpu runs on x86 (no SIMD version there),
 // in AVX-2: the same per-value arithmetic - one IEEE multiply by the same iscale, the same 1.5*2^23 rounding add,
@@ -343,7 +340,8 @@ void q8k_quant_avx2(const float* x, void* vy, int64_t k) {
         float mx = 0.f;
         const __m256 va = _mm256_set1_ps(amax);
         for (int j = 0; j < QK_K; j += 8) {
-            const int msk = _mm256_movemask_ps(_mm256_cmp_ps(_mm256_and_ps(_mm256_loadu_ps(x + j), absm), va, _CMP_EQ_OQ));
+            const int msk =
+                _mm256_movemask_ps(_mm256_cmp_ps(_mm256_and_ps(_mm256_loadu_ps(x + j), absm), va, _CMP_EQ_OQ));
             if (msk) {
                 int b = 0;
                 while (!((msk >> b) & 1)) ++b;
@@ -383,8 +381,8 @@ void q8k_quant_avx2(const float* x, void* vy, int64_t k) {
     }
 }
 
-void iq256_gu_rows_exact_one(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n,
-                             const void* act, float* ff, int r0, int r1) {
+void iq256_gu_rows_exact_one(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* act,
+                             float* ff, int r0, int r1) {
     const auto* y = (const block_q8_K*) act;
 #if LAMINA_AVXVNNI
     if (vnni_on()) {
@@ -483,4 +481,4 @@ void iq4nl256_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* c
     iq4nl256_down_rows_v(vnni_on() ? kIq256Vnni : 0, w, row_bytes, n, hq, nt, out, r0, r1);
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

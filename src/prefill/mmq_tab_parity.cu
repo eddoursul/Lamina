@@ -125,11 +125,25 @@ void product_case(mmq::Context& ctx, ggml_type t, int64_t ROWS, int64_t COLS, co
     fill_nan(ref);
     fill_nan(got);
     mmq::Product p;
-    p.type = (int) t; p.w_rows = ROWS; p.w_cols = COLS; p.n = n; p.xq = xq.p; p.bounds = (const int32_t*) bd.p;
-    p.ids = (const int32_t*) ids.p; p.ids_rows = ids_rows; p.total_rows = total; p.max_rows = max_rows; p.ld_dst = ROWS;
-    p.w = grp.p; p.expert_bytes = eb; p.dst = (float*) ref.p;
+    p.type = (int) t;
+    p.w_rows = ROWS;
+    p.w_cols = COLS;
+    p.n = n;
+    p.xq = xq.p;
+    p.bounds = (const int32_t*) bd.p;
+    p.ids = (const int32_t*) ids.p;
+    p.ids_rows = ids_rows;
+    p.total_rows = total;
+    p.max_rows = max_rows;
+    p.ld_dst = ROWS;
+    p.w = grp.p;
+    p.expert_bytes = eb;
+    p.dst = (float*) ref.p;
     ctx.run(p, s);
-    p.w = nullptr; p.expert_bytes = 0; p.tab = tab.data(); p.dst = (float*) got.p;
+    p.w = nullptr;
+    p.expert_bytes = 0;
+    p.tab = tab.data();
+    p.dst = (float*) got.p;
     ctx.run(p, s);
     ck(cudaStreamSynchronize(s), "run");
     std::vector<uint8_t> ha(out), hb(out);
@@ -146,12 +160,12 @@ void product_case(mmq::Context& ctx, ggml_type t, int64_t ROWS, int64_t COLS, co
     size_t i = 0;
     while (i < out && ha[i] == hb[i]) ++i;
     std::printf("  FAIL %s n=%d rows=%lld max_rows=%lld: %s\n", ggml_type_name(t), n, (long long) total,
-                (long long) max_rows, finite ? ("first differing byte " + std::to_string(i)).c_str()
-                                              : "the gathered product is not finite");
+                (long long) max_rows,
+                finite ? ("first differing byte " + std::to_string(i)).c_str() : "the gathered product is not finite");
     ++g_fail;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     int dev = 0;
@@ -167,13 +181,13 @@ int main() {
         mmq::Context ctx;
         std::mt19937 rng(20261018);
         static const int kRows[] = {0, 1, 7, 8, 9, 31, 64, 100, 512, 1000};
-        static const int kMax[] = {1, 7, 8, 9, 16, 17, 24, 25, 32, 33, 40, 41, 48, 56, 64, 65, 72, 80, 88, 96, 100,
-                                   104, 112, 120, 128, 129, 200, 256, 512, 1000};
-        for (const ggml_type t : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS, GGML_TYPE_Q4_K,
-                                  GGML_TYPE_Q5_K, GGML_TYPE_Q2_0, GGML_TYPE_IQ4_NL, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1,
-                                  GGML_TYPE_Q8_0}) {
-            const bool down = t == GGML_TYPE_Q2_0 || t == GGML_TYPE_IQ4_NL || t == GGML_TYPE_Q5_0 || t == GGML_TYPE_Q5_1 ||
-                              t == GGML_TYPE_Q8_0;
+        static const int kMax[] = {1,  7,  8,  9,  16, 17,  24,  25,  32,  33,  40,  41,  48,  56,  64,
+                                   65, 72, 80, 88, 96, 100, 104, 112, 120, 128, 129, 200, 256, 512, 1000};
+        for (const ggml_type t :
+             {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K,
+              GGML_TYPE_Q2_0, GGML_TYPE_IQ4_NL, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0}) {
+            const bool down = t == GGML_TYPE_Q2_0 || t == GGML_TYPE_IQ4_NL || t == GGML_TYPE_Q5_0 ||
+                              t == GGML_TYPE_Q5_1 || t == GGML_TYPE_Q8_0;
             const int64_t ROWS = down ? 2560 : 1280, COLS = down ? 640 : 2560;
             if (!mmq::tab_takes((int) t, ROWS, COLS)) {
                 std::printf("FAIL %s: no pointer-table product in this build\n", ggml_type_name(t));
@@ -188,7 +202,7 @@ int main() {
                 if (*std::max_element(c.begin(), c.end()) == 0) c[0] = 1;
                 product_case(ctx, t, ROWS, COLS, c, rng, s);
             }
-            for (const int mx : kMax) {      // every tile width: one expert with mx rows, the others fewer
+            for (const int mx : kMax) {   // every tile width: one expert with mx rows, the others fewer
                 std::uniform_int_distribution<int> fewer(0, mx);
                 std::vector<int> c(5);
                 for (auto& v : c) v = fewer(rng);

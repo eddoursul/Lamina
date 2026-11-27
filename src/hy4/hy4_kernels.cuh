@@ -141,7 +141,7 @@ __global__ void __launch_bounds__(256) k_hc_pre(const float* X, const float* fn,
 /// the mixes, then the squares); then a block a row the rest of k_hc_pre (the mixes times the rms).
 constexpr int kHcSlices = 16;
 __global__ void __launch_bounds__(256) k_hc_pre1(const float* __restrict__ X, const float* __restrict__ fn, int flat,
-                                                  int m, float* __restrict__ part) {
+                                                 int m, float* __restrict__ part) {
     __shared__ float sh[8][9];
     const int t = blockIdx.y, g = blockIdx.x;
     const int slice = (flat + kHcSlices - 1) / kHcSlices, i0 = g * slice, i1 = min(flat, i0 + slice);
@@ -170,9 +170,10 @@ __global__ void __launch_bounds__(256) k_hc_pre1(const float* __restrict__ X, co
         part[((size_t) t * kHcSlices + g) * (m + 1) + threadIdx.x] = v;
     }
 }
-__global__ void __launch_bounds__(256) k_hc_pre2(const float* X, const float* part, const float* scale, const float* base,
-                                                  int hc, int n, int m, float eps_rms, float hc_eps, float mag, float* post,
-                                                  float* xh, const float* wn, float* xn, float eps_n, void* xq = nullptr) {
+__global__ void __launch_bounds__(256) k_hc_pre2(const float* X, const float* part, const float* scale,
+                                                 const float* base, int hc, int n, int m, float eps_rms, float hc_eps,
+                                                 float mag, float* post, float* xh, const float* wn, float* xn,
+                                                 float eps_n, void* xq = nullptr) {
     __shared__ float sh[32];
     __shared__ float mix[9];
     __shared__ float wpre[8];
@@ -232,8 +233,8 @@ __global__ void k_hc_post(float* X, const float* y, const float* post, int hc, i
     }
 }
 
-/// y = rms(y) * w in place on T rows of n, then (when `add` is non-null) y += add (the routed + shared sum is made first
-/// by the caller); a block per row.
+/// y = rms(y) * w in place on T rows of n, then (when `add` is non-null) y += add (the routed + shared sum is made
+/// first by the caller); a block per row.
 __global__ void k_rms_inplace(float* y, const float* w, int n, float eps) {
     __shared__ float sh[32];
     float* yr = y + (size_t) blockIdx.x * n;
@@ -307,12 +308,12 @@ __global__ void k_head_q8_0(const uint8_t* w, const uint8_t* xq, float* y, int H
 }
 
 /// The per-head Q8_0 x q8_1 products of k_head_q8_0 for T <= 8 rows at once: a warp two output rows of one head (rows
-/// r, r + 1; grid ceil(H * n_out / 16) of 256, n_out even), the weights read once, the input shared by both; eight lanes
-/// a 32-value block, each lane's int8 sum scaled by the block's d_w d_x into its own float partial, the lanes' partials
-/// summed once at the end.
+/// r, r + 1; grid ceil(H * n_out / 16) of 256, n_out even), the weights read once, the input shared by both; eight
+/// lanes a 32-value block, each lane's int8 sum scaled by the block's d_w d_x into its own float partial, the lanes'
+/// partials summed once at the end.
 __global__ void __launch_bounds__(256) k_head_q8_0_w2(const uint8_t* __restrict__ w, const uint8_t* __restrict__ xq,
-                                                       float* __restrict__ y, int H, int n_in, int n_out, int ldy,
-                                                       int ld_head_y, int T) {
+                                                      float* __restrict__ y, int H, int n_in, int n_out, int ldy,
+                                                      int ld_head_y, int T) {
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int r = (blockIdx.x * 8 + warp) * 2;
     if (r >= H * n_out) return;
@@ -420,8 +421,8 @@ __global__ void k_swa_cells(const int32_t* pos, int n_swa, int ring, int32_t* ce
 /// cell.
 template <bool Q8>
 __global__ void __launch_bounds__(256) k_mla_chunk(const float* q, const void* cache, const int32_t* cells,
-                                                    const int32_t* n, int ld_cells, int H, float scale, float* part,
-                                                    int n_chunks) {
+                                                   const int32_t* n, int ld_cells, int H, float scale, float* part,
+                                                   int n_chunks) {
     extern __shared__ __half kt[];   // [kAttnChunk][kKvRowPad]
     const int t = blockIdx.y, ch = blockIdx.x;
     const int cnt = n[t];
@@ -430,7 +431,10 @@ __global__ void __launch_bounds__(256) k_mla_chunk(const float* q, const void* c
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, nw = blockDim.x >> 5;
     if (c0 >= cnt) {   // an empty chunk: m = -inf, l = 0 for every head
         for (int h = warp; h < H; h += nw)
-            if (lane == 0) { pt[(size_t) h * (kLatent + 2)] = -INFINITY; pt[(size_t) h * (kLatent + 2) + 1] = 0.f; }
+            if (lane == 0) {
+                pt[(size_t) h * (kLatent + 2)] = -INFINITY;
+                pt[(size_t) h * (kLatent + 2) + 1] = 0.f;
+            }
         return;
     }
     const int nc = min(kAttnChunk, cnt - c0);
@@ -454,7 +458,8 @@ __global__ void __launch_bounds__(256) k_mla_chunk(const float* q, const void* c
         for (int i = threadIdx.x; i < kAttnChunk * (kKvRow / 2); i += blockDim.x) {
             const int c = i / (kKvRow / 2), d2 = i % (kKvRow / 2);
             __half2 v = __float2half2_rn(0.f);
-            if (c < nc) v = reinterpret_cast<const __half2*>(hc + (size_t) cells[(size_t) t * ld_cells + c0 + c] * kKvRow)[d2];
+            if (c < nc)
+                v = reinterpret_cast<const __half2*>(hc + (size_t) cells[(size_t) t * ld_cells + c0 + c] * kKvRow)[d2];
             reinterpret_cast<__half2*>(kt + (size_t) c * kKvRowPad)[d2] = v;
         }
     }
@@ -479,7 +484,10 @@ __global__ void __launch_bounds__(256) k_mla_chunk(const float* q, const void* c
         const float p = lane < nc ? expf(s - m) : 0.f;
         const float l = warp_sum(p);
         float* ph = pt + (size_t) h * (kLatent + 2);
-        if (lane == 0) { ph[0] = m; ph[1] = l; }
+        if (lane == 0) {
+            ph[0] = m;
+            ph[1] = l;
+        }
         float acc[kLatent / 32];
 #pragma unroll
         for (int j = 0; j < kLatent / 32; ++j) acc[j] = 0.f;
@@ -532,8 +540,8 @@ __global__ void k_swiglu(const float* g, const float* u, float* h, int64_t n) {
 /// The MoE's end of row t in one: each entry's row (the CPU's or a tier's through the mapping where miss, else the
 /// GPU's own), weighted and summed in pick order (k_merge_cpu then k_moe_sum_c), into q8_1 rows (n a multiple of 32).
 /// Grid (n / 256, T), 256.
-__global__ void k_moe_end_q(const float* __restrict__ parts, const float* cpu, const int32_t* miss, const float* w, Q81* y,
-                            int k, int n) {
+__global__ void k_moe_end_q(const float* __restrict__ parts, const float* cpu, const int32_t* miss, const float* w,
+                            Q81* y, int k, int n) {
     const int t = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= n) return;
     auto row = [&](int j) {
@@ -562,8 +570,8 @@ __global__ void __launch_bounds__(256) k_rms_q(const float* x, int ldx, const fl
 
 /// k_q_split, k_rope_norm of the rope part and the q8_1 rows of the nope part in one: block (h, t) of 256; the nope
 /// part's 32-value blocks a warp each, the rope's pairs by the last warp
-__global__ void __launch_bounds__(256) k_qsplit_rope_q(const float* q, Q81* qnq, float* qabs, int H, int k_head, int nope,
-                                                       int n_rot, const int32_t* pos, float theta_scale) {
+__global__ void __launch_bounds__(256) k_qsplit_rope_q(const float* q, Q81* qnq, float* qabs, int H, int k_head,
+                                                       int nope, int n_rot, const int32_t* pos, float theta_scale) {
     const int t = blockIdx.y, h = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const float* src = q + ((size_t) t * H + h) * k_head;
     const int nb = nope / 32;
@@ -719,15 +727,24 @@ __global__ void k_route(const float* logits, const float* bias, int n_expert, in
         for (int o = 16; o > 0; o >>= 1) {
             const float v2 = __shfl_xor_sync(0xffffffffu, v, o);
             const int i2 = __shfl_xor_sync(0xffffffffu, id, o);
-            if (v2 > v || (v2 == v && i2 < id)) { v = v2; id = i2; }
+            if (v2 > v || (v2 == v && i2 < id)) {
+                v = v2;
+                id = i2;
+            }
         }
-        if (lane == 0) { wv[warp] = v; wi[warp] = id; }
+        if (lane == 0) {
+            wv[warp] = v;
+            wi[warp] = id;
+        }
         __syncthreads();
         if (e == 0) {
             float bv = wv[0];
             int bi = wi[0];
             for (int i = 1; i < nw; ++i)
-                if (wv[i] > bv || (wv[i] == bv && wi[i] < bi)) { bv = wv[i]; bi = wi[i]; }
+                if (wv[i] > bv || (wv[i] == bv && wi[i] < bi)) {
+                    bv = wv[i];
+                    bi = wi[i];
+                }
             pick[j] = bi;
             sel[bi] = -INFINITY;
         }
@@ -773,8 +790,8 @@ __global__ void k_moe_sum_c(const float* parts, const float* w, float* y, int k,
 }
 
 /// The routed entries (n_ent = T * K, ids[t * K + j]) whose expert holds a VRAM slot (slot_of[x] >= 0) grouped per
-/// expert in ascending id: group g's blob at slots + slot * stride, its entries [grp_start[g], grp_start[g + 1]) writing
-/// row ent_dst (the entry) from token ent_tok.  The others are the CPU pool's (k_merge_cpu).  One block of 512.
+/// expert in ascending id: group g's blob at slots + slot * stride, its entries [grp_start[g], grp_start[g + 1])
+/// writing row ent_dst (the entry) from token ent_tok.  The others are the CPU pool's (k_merge_cpu).  One block of 512.
 __global__ void k_group_slots(const int32_t* ids, int n_ent, int K_, int n_expert, const int32_t* slot_of,
                               const uint8_t* slots, unsigned long long stride, unsigned long long* grp_ptr,
                               int32_t* grp_start, int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok) {
@@ -808,9 +825,10 @@ __global__ void k_group_slots(const int32_t* ids, int n_ent, int K_, int n_exper
 /// group and its first place), each entry's place by the entries of its expert before it.  One block of 512 threads,
 /// n_expert <= 512 (else k_group_slots).
 __global__ void __launch_bounds__(512) k_group_slots_p(const int32_t* ids, int n_ent, int K_, int n_expert,
-                                                       const int32_t* slot_of, const uint8_t* slots, unsigned long long stride,
-                                                       unsigned long long* grp_ptr, int32_t* grp_start, int32_t* n_groups,
-                                                       int32_t* ent_dst, int32_t* ent_tok) {
+                                                       const int32_t* slot_of, const uint8_t* slots,
+                                                       unsigned long long stride, unsigned long long* grp_ptr,
+                                                       int32_t* grp_start, int32_t* n_groups, int32_t* ent_dst,
+                                                       int32_t* ent_tok) {
     __shared__ int cnt[512];
     __shared__ int wsum[2][16];
     __shared__ int e_ids[128];
@@ -874,7 +892,7 @@ __global__ void __launch_bounds__(512) k_group_slots_p(const int32_t* ids, int n
 /// candidates; k rounds of a warp-wide pick (the largest p + bias, ties to the lower expert), no block syncs.  The same
 /// picks, order and weights as k_route.
 __global__ void __launch_bounds__(256) k_route_w(const float* logits, const float* bias, int n_expert, int k, bool norm,
-                                                  float scale, int T, int32_t* ids, float* w) {
+                                                 float scale, int T, int32_t* ids, float* w) {
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int t = blockIdx.x * 8 + warp;
     if (t >= T) return;
@@ -1020,8 +1038,8 @@ __device__ __forceinline__ float e4m3(uint8_t x) {
 
 /// Engram's rows of row t: raw [t][heads][dim] FP8 bytes -> out[t][heads * dim]: each row RMS-normed (eps) and scaled
 /// by its head's lookup_norm [heads][dim] and the row's validity (valid[t]: 0 or 1).  A block per (head, t).
-__global__ void k_engram_rows(const uint8_t* raw, const float* lnorm, const float* valid, float* out, int heads, int dim,
-                              float eps) {
+__global__ void k_engram_rows(const uint8_t* raw, const float* lnorm, const float* valid, float* out, int heads,
+                              int dim, float eps) {
     __shared__ float sh[32];
     __shared__ float v[256];
     const int h = blockIdx.x, t = blockIdx.y;
@@ -1042,8 +1060,8 @@ __global__ void k_engram_rows(const uint8_t* raw, const float* lnorm, const floa
 /// sqrt(max(|dot_i|, 1e-6))); X_i += rms(value) * gamma * (g_i + hc_scale[i]) when the row has a valid n-gram (any[t]).
 /// rms at `eps` (the reference's FLT_EPSILON).
 __global__ void __launch_bounds__(256) k_engram_mix(float* X, const float* kv, const float* bias, const float* gate,
-                                                     const float* gamma, const float* hc_scale, const float* any,
-                                                     int hc, int n, float eps) {
+                                                    const float* gamma, const float* hc_scale, const float* any, int hc,
+                                                    int n, float eps) {
     __shared__ float sh[32];
     __shared__ float g[8];
     const int t = blockIdx.x;
@@ -1150,8 +1168,8 @@ __global__ void k_pool_rows(const float* tail, int n_tail, int dim, int pool, co
 /// row attends every cell): s_g = sum_h w[t][h] relu(q[t][h] . k_g).  A warp a group, in a grid-stride loop over
 /// `gridDim.x` blocks of 8 warps (a fixed grid, for the graphs).
 __global__ void __launch_bounds__(256) k_index_scores_pos(const float* q, const float* w, const float* pooled,
-                                                           const int32_t* pos, int pool, int reach, int heads, int dim,
-                                                           float* scores, int ld_scores) {
+                                                          const int32_t* pos, int pool, int reach, int heads, int dim,
+                                                          float* scores, int ld_scores) {
     extern __shared__ float qs[];   // [heads][dim], then w [heads]
     const int t = blockIdx.y;
     const int vis = pos[t] / pool;
@@ -1200,7 +1218,11 @@ __global__ void __launch_bounds__(1024) k_select_cells(const float* scores, int 
         return;
     }
     const float* sc = scores + (size_t) t * ld_scores;
-    if (tid == 0) { s_prefix = 0; s_mask = 0; s_need = (uint32_t) reach; }
+    if (tid == 0) {
+        s_prefix = 0;
+        s_mask = 0;
+        s_need = (uint32_t) reach;
+    }
     __syncthreads();
     for (int shift = 24; shift >= 0; shift -= 8) {
         for (int i = tid; i < 256; i += nt) hist[i] = 0;
@@ -1323,8 +1345,8 @@ __global__ void k_pool(const float* vg, int dim, int pool, const float* ape, con
 /// The indexer's scores of row t over its visible groups 0 .. ng[t]: s_g = sum_h w[t][h] relu(q[t][h] . k_g), the keys
 /// pooled [g][dim] f32.  A warp per group, 8 a block; q in shared memory.
 __global__ void __launch_bounds__(256) k_index_scores(const float* q, const float* w, const float* pooled,
-                                                       const int32_t* ng, int heads, int dim, float* scores,
-                                                       int ld_scores) {
+                                                      const int32_t* ng, int heads, int dim, float* scores,
+                                                      int ld_scores) {
     extern __shared__ float qs[];   // [heads][dim], then w [heads]
     const int t = blockIdx.y;
     const int n = ng[t];
@@ -1351,7 +1373,8 @@ __global__ void __launch_bounds__(256) k_index_scores(const float* q, const floa
 }
 
 // ------------------------------------------------------------------------------------------------ the MTP block
-/// Rows of n into a ring by position: ring[pos[t] % n_ring] = x[t] (the trunk's normed final hidden of the last positions)
+/// Rows of n into a ring by position: ring[pos[t] % n_ring] = x[t]
+/// (the trunk's normed final hidden of the last positions)
 __global__ void k_ring_store(const float* x, float* ring, const int32_t* pos, int n_ring, int n) {
     const int t = blockIdx.x;
     float* dst = ring + (size_t) (pos[t] % n_ring) * n;
@@ -1407,4 +1430,4 @@ __global__ void k_gated_add(float* x, const float* g, const float* f, int n) {
     if (i < n) x[i] = x[i] + g[i] * f[i];
 }
 
-}  // namespace hy4k
+}   // namespace hy4k

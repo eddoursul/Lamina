@@ -1,12 +1,12 @@
-// src/kernels/cpu/tq_cpu.cpp - see include/lamina/kernels/cpu/tq_cpu.hpp: the state table, the scalar reference kernel, the
-// activation scales and the run-time ISA choice.  Compiled for the baseline x86-64, so everything here runs on any CPU; the
-// AVX2 and AVX-512 kernels are in their own translation units (x86-64 only: arm64 runs the scalar kernel).
+// src/kernels/cpu/tq_cpu.cpp - see include/lamina/kernels/cpu/tq_cpu.hpp: the state table, the scalar reference kernel,
+// the activation scales and the run-time ISA choice.  Compiled for the baseline x86-64, so everything here runs on any
+// CPU; the AVX2 and AVX-512 kernels are in their own translation units (x86-64 only: arm64 runs the scalar kernel).
 #include "lamina/kernels/cpu/tq_cpu.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 
-#include "tq_states.hpp"
 #include "ggml-common-tq.h"
+#include "tq_states.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -49,7 +49,8 @@ Isa isa() {
 }
 
 template <int KB>
-void rows_scalar_t(const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out, int r0, int r1) {
+void rows_scalar_t(const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out, int r0,
+                   int r1) {
     const int nb = n / kTqBlock;
     constexpr size_t bsz = 2 + 8 * KB;
     const uint32_t* tab = tq_detail::tq_state_table();
@@ -76,8 +77,7 @@ void rows_scalar_t(const uint8_t* w, size_t row_bytes, int n, const TqAct* a, in
                     acc[t][k] = std::fma((float) s, dx * a[t].d[4 * i + k], acc[t][k]);
                 }
         }
-        for (int t = 0; t < nt; ++t)
-            out[t][r] = ((acc[t][0] + acc[t][1]) + (acc[t][2] + acc[t][3])) * (1.0f / 8192.0f);
+        for (int t = 0; t < nt; ++t) out[t][r] = ((acc[t][0] + acc[t][1]) + (acc[t][2] + acc[t][3])) * (1.0f / 8192.0f);
     }
 }
 
@@ -91,14 +91,16 @@ ActSet& unpack_all(const void* const* act, int n, int nt) {
     thread_local ActSet set;
     for (int t = 0; t < nt; ++t) {
         const uint8_t* p = (const uint8_t*) act[t];
-        for (int b = 0; b < n / 32; ++b) set.d[t][b] = tq_detail::tq_half_to_float(tq_detail::tq_ld16(p + (size_t) b * 36));
+        for (int b = 0; b < n / 32; ++b)
+            set.d[t][b] = tq_detail::tq_half_to_float(tq_detail::tq_ld16(p + (size_t) b * 36));
         set.act[t].blocks = p;
         set.act[t].d = set.d[t];
     }
     return set;
 }
 
-void rows_on(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out, int r0, int r1) {
+void rows_on(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out, int r0,
+             int r1) {
     switch (isa()) {
 #if LAMINA_X86
         case Isa::avx512: tq_detail::tq_rows_avx512(kb, w, row_bytes, n, a, nt, out, r0, r1); break;
@@ -108,7 +110,7 @@ void rows_on(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct* a, 
     }
 }
 
-}  // namespace
+}   // namespace
 
 namespace tq_detail {
 
@@ -118,17 +120,17 @@ const uint32_t* tq_state_table() {
     return g_table;
 }
 
-void tq_rows_scalar(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out, int r0,
-                    int r1) {
+void tq_rows_scalar(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out,
+                    int r0, int r1) {
     if (kb == 5) rows_scalar_t<5>(w, row_bytes, n, a, nt, out, r0, r1);
     else if (kb == 6) rows_scalar_t<6>(w, row_bytes, n, a, nt, out, r0, r1);
     else rows_scalar_t<7>(w, row_bytes, n, a, nt, out, r0, r1);
 }
 
-}  // namespace tq_detail
+}   // namespace tq_detail
 
-void tq_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
-             int r0, int r1) {
+void tq_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt,
+             float* const* out, int r0, int r1) {
     const ActSet& s = unpack_all(act, n, nt);
     rows_on(tq_kbits(ggml_type), w, row_bytes, n, s.act, nt, out, r0, r1);
 }
@@ -168,8 +170,8 @@ void tq_dequant_row(int ggml_type, const uint8_t* row, int n, float* out) {
         const uint32_t nbytes = 8u * (uint32_t) kb;
         for (int t = 0; t < 64; ++t) {
             const uint32_t off = (uint32_t) (63 - t) * (uint32_t) kb, b0 = off >> 3;
-            const uint32_t w = (uint32_t) qs[b0] | ((uint32_t) qs[(b0 + 1) % nbytes] << 8) |
-                               ((uint32_t) qs[(b0 + 2) % nbytes] << 16);
+            const uint32_t w =
+                (uint32_t) qs[b0] | ((uint32_t) qs[(b0 + 1) % nbytes] << 8) | ((uint32_t) qs[(b0 + 2) % nbytes] << 16);
             const uint32_t s = (w >> (off & 7)) & tq_detail::kTqStateMask;
             const uint32_t pt = (s * 0x9e3779b1u) >> 21;
             out[kTqBlock * i + 2 * t] = d * tq_detail::tq_half_to_float(tq_lut_f16[2 * pt]);
@@ -178,4 +180,4 @@ void tq_dequant_row(int ggml_type, const uint8_t* row, int n, float* out) {
     }
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

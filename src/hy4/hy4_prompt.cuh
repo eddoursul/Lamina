@@ -23,18 +23,17 @@ using lamina::kernels::ldsm4;
 using lamina::kernels::ldsm4t;
 using lamina::kernels::mma16816;
 
-
 // ------------------------------------------------------------------------------------------------ the attention
-constexpr int kQRows = 32;      // query rows of a block: one row's head group
-constexpr int kTileCells = 32;  // cells a tile
-constexpr int kPad = 584;       // a query or cell row in shared memory, halves (1,168 bytes)
-constexpr int kPPad = 40;       // a probability row, halves (80 bytes)
+constexpr int kQRows = 32;       // query rows of a block: one row's head group
+constexpr int kTileCells = 32;   // cells a tile
+constexpr int kPad = 584;        // a query or cell row in shared memory, halves (1,168 bytes)
+constexpr int kPPad = 40;        // a probability row, halves (80 bytes)
 
 struct __align__(16) AttnSmem {
     __half q[kQRows * kPad];
     __half k[kTileCells * kPad];
     __half p[kQRows * kPPad];
-    float red[2][4][kQRows];    // [max | sum][the cells' quarter][row]
+    float red[2][4][kQRows];   // [max | sum][the cells' quarter][row]
 };
 
 /// A chunk's latent attention: block t takes row t's head group of kQRows heads - its absorbed queries qa [T][kQRows]
@@ -46,11 +45,10 @@ struct __align__(16) AttnSmem {
 /// m-tile w & 1 x dims (w >> 1) * 128 .. +128.  The next tile waits in registers through the current one's products.
 /// Block 256, shared sizeof(AttnSmem).
 template <bool GATHER, bool Q8 = false>
-__global__ void __launch_bounds__(256, 1) k_attn_prompt(float* qa, const float* __restrict__ qg,
-                                                         const void* __restrict__ kv_, const int32_t* __restrict__ cells,
-                                                         const int32_t* __restrict__ n, int ld_cells,
-                                                         const int32_t* __restrict__ pos, int n_swa, int lin0,
-                                                         const float* __restrict__ sinks, float scale) {
+__global__ void __launch_bounds__(256, 1)
+k_attn_prompt(float* qa, const float* __restrict__ qg, const void* __restrict__ kv_, const int32_t* __restrict__ cells,
+              const int32_t* __restrict__ n, int ld_cells, const int32_t* __restrict__ pos, int n_swa, int lin0,
+              const float* __restrict__ sinks, float scale) {
     static_assert(GATHER || !Q8, "the window's linear buffer is halves");
     extern __shared__ __align__(16) unsigned char attn_raw[];
     AttnSmem& sm = *reinterpret_cast<AttnSmem*>(attn_raw);
@@ -105,7 +103,8 @@ __global__ void __launch_bounds__(256, 1) k_attn_prompt(float* qa, const float* 
             for (int j = 0; j < 9; ++j) {
                 const int i = tid + 256 * j, c = i / 72, ch = i % 72;
                 if (base + c < cnt) {
-                    const __half* row = GATHER ? kv + (size_t) cl[base + c] * kKvRow : kv + (size_t) (first + base + c) * kKvRow;
+                    const __half* row =
+                        GATHER ? kv + (size_t) cl[base + c] * kKvRow : kv + (size_t) (first + base + c) * kKvRow;
                     nx[j] = *reinterpret_cast<const uint4*>(row + ch * 8);
                 } else {
                     nx[j] = make_uint4(0, 0, 0, 0);
@@ -181,8 +180,10 @@ __global__ void __launch_bounds__(256, 1) k_attn_prompt(float* qa, const float* 
             sm.red[0][nt][rB] = xB;
         }
         __syncthreads();
-        const float nA = fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
-        const float nB = fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
+        const float nA =
+            fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
+        const float nB =
+            fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
         const float aA = expf(mA - nA), aB = expf(mB - nB);
         const float p0A = s[0] == -INFINITY ? 0.f : expf(s[0] - nA), p1A = s[1] == -INFINITY ? 0.f : expf(s[1] - nA);
         const float p0B = s[2] == -INFINITY ? 0.f : expf(s[2] - nB), p1B = s[3] == -INFINITY ? 0.f : expf(s[3] - nB);
@@ -238,15 +239,15 @@ __global__ void __launch_bounds__(256, 1) k_attn_prompt(float* qa, const float* 
 
 /// The decode's latent attention in splits (flash decoding): block (s, g, t) takes row t's head group g of kQRows heads
 /// (queries q [T][H][576]: absorbed 512 | roped 64) over cells [s * per, min((s + 1) * per, n[t])) of the row's list
-/// cells[t][..] (halves, or Q8 q8_0 rows widened as they are stashed), k_attn_prompt's tiles with the online softmax from
-/// nothing (the sink is k_mla_merge's): each head's m, l and unnormalized acc[512] into part[t][s][h] (514 floats,
+/// cells[t][..] (halves, or Q8 q8_0 rows widened as they are stashed), k_attn_prompt's tiles with the online softmax
+/// from nothing (the sink is k_mla_merge's): each head's m, l and unnormalized acc[512] into part[t][s][h] (514 floats,
 /// k_mla_chunk's layout; m = -inf for a split without cells).  Block 256, shared sizeof(AttnSmem); `per` a multiple of
 /// kTileCells.
 template <bool Q8>
 __global__ void __launch_bounds__(256, 1) k_attn_dec(const float* __restrict__ q, const void* __restrict__ kv_,
-                                                      const int32_t* __restrict__ cells, const int32_t* __restrict__ n,
-                                                      int ld_cells, int H, int per, float scale, float* __restrict__ part,
-                                                      int n_split) {
+                                                     const int32_t* __restrict__ cells, const int32_t* __restrict__ n,
+                                                     int ld_cells, int H, int per, float scale,
+                                                     float* __restrict__ part, int n_split) {
     extern __shared__ __align__(16) unsigned char attn_raw[];
     AttnSmem& sm = *reinterpret_cast<AttnSmem*>(attn_raw);
     const __half* kv = reinterpret_cast<const __half*>(kv_);
@@ -291,7 +292,8 @@ __global__ void __launch_bounds__(256, 1) k_attn_dec(const float* __restrict__ q
 #pragma unroll
             for (int j = 0; j < 9; ++j) {
                 const int i = tid + 256 * j, c = i / 72, ch = i % 72;
-                if (base + c < cnt) nx[j] = *reinterpret_cast<const uint4*>(kv + (size_t) cl[base + c] * kKvRow + ch * 8);
+                if (base + c < cnt)
+                    nx[j] = *reinterpret_cast<const uint4*>(kv + (size_t) cl[base + c] * kKvRow + ch * 8);
                 else nx[j] = make_uint4(0, 0, 0, 0);
             }
         }
@@ -364,11 +366,15 @@ __global__ void __launch_bounds__(256, 1) k_attn_dec(const float* __restrict__ q
             sm.red[0][nt][rB] = xB;
         }
         __syncthreads();
-        const float nA = fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
-        const float nB = fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
+        const float nA =
+            fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
+        const float nB =
+            fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
         const float aA = mA == -INFINITY ? 0.f : expf(mA - nA), aB = mB == -INFINITY ? 0.f : expf(mB - nB);
-        const float p0A = sc[0] == -INFINITY ? 0.f : expf(sc[0] - nA), p1A = sc[1] == -INFINITY ? 0.f : expf(sc[1] - nA);
-        const float p0B = sc[2] == -INFINITY ? 0.f : expf(sc[2] - nB), p1B = sc[3] == -INFINITY ? 0.f : expf(sc[3] - nB);
+        const float p0A = sc[0] == -INFINITY ? 0.f : expf(sc[0] - nA),
+                    p1A = sc[1] == -INFINITY ? 0.f : expf(sc[1] - nA);
+        const float p0B = sc[2] == -INFINITY ? 0.f : expf(sc[2] - nB),
+                    p1B = sc[3] == -INFINITY ? 0.f : expf(sc[3] - nB);
         const int pc = nt * 8 + 2 * tig;
         *reinterpret_cast<unsigned*>(sm.p + rA * kPPad + pc) = h2(p0A, p1A);
         *reinterpret_cast<unsigned*>(sm.p + rB * kPPad + pc) = h2(p0B, p1B);
@@ -426,17 +432,17 @@ __global__ void __launch_bounds__(256, 1) k_attn_dec(const float* __restrict__ q
 // ------------------------------------------------------------------------------------------------ the indexer
 constexpr int kIdxHeads = 16;   // the indexer's heads: one m-tile
 constexpr int kIdxDim = 128;
-constexpr int kIdxTile = 64;    // pooled keys a tile
-constexpr int kIdxPad = 136;    // a key row in shared memory, halves (272 bytes)
+constexpr int kIdxTile = 64;   // pooled keys a tile
+constexpr int kIdxPad = 136;   // a key row in shared memory, halves (272 bytes)
 
 /// The indexer's scores of the rows r0 + r (r < R) whose visible groups (pos / pool) outnumber `reach`: scores[r][g] =
 /// sum_h w[t][h] relu(q[t][h] . k_g) for g below pos / pool (the others are not written).  A warp a row (its 16 heads
 /// one m-tile, the queries as halves in registers); the block's 8 rows over blockIdx.y's share of the groups, `per`
 /// of them, in tiles of 64 keys (halves in shared memory).  Grid (ceil(R / 8), shares), block 256.
 __global__ void __launch_bounds__(256) k_index_scores_mma(const float* __restrict__ q, const float* __restrict__ w,
-                                                           const float* __restrict__ pooled, const int32_t* __restrict__ pos,
-                                                           int pool, int reach, int r0, int R, int per,
-                                                           float* __restrict__ scores, int ld) {
+                                                          const float* __restrict__ pooled,
+                                                          const int32_t* __restrict__ pos, int pool, int reach, int r0,
+                                                          int R, int per, float* __restrict__ scores, int ld) {
     __shared__ __align__(16) __half ks[kIdxTile * kIdxPad];
     __shared__ int s_vis[8];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, tig = lane & 3, g8 = lane >> 2;
@@ -512,9 +518,9 @@ __global__ void __launch_bounds__(256) k_index_scores_mma(const float* __restric
 /// and gate rows - a cell at or after p0 from the chunk's rows (val, gate [T][dim]), an earlier one from the tail
 /// ([n_tail][value | gate][dim], its slot position % n_tail) - with k_pool_rows' arithmetic, into pooled + g * dim.  A
 /// block of dim threads (pool <= 8).
-__global__ void k_pool_chunk(const float* val, const float* gate, const float* tail, int n_tail, int p0, int g0, int dim,
-                             int pool, const float* ape, const float* norm, float eps, float theta_scale, int n_rot,
-                             float* pooled) {
+__global__ void k_pool_chunk(const float* val, const float* gate, const float* tail, int n_tail, int p0, int g0,
+                             int dim, int pool, const float* ape, const float* norm, float eps, float theta_scale,
+                             int n_rot, float* pooled) {
     __shared__ float sh[32];
     __shared__ float kk[256];
     const int grp = g0 + blockIdx.x, c = threadIdx.x;
@@ -569,8 +575,8 @@ __global__ void k_copy_cells(const __half* src, int mod_s, __half* dst, int mod_
 // ------------------------------------------------------------------------------------------------ the routed experts
 /// q8_1 rows of llama.cpp's MMQ layout ([column block][row], blocks of 128 values in 144 bytes) gathered: dst row e =
 /// src row map[e] (src has src_rows rows, dst n; n_bc column blocks).  A block per row.
-__global__ void k_gather_q8(const uint4* __restrict__ src, uint4* __restrict__ dst, const int32_t* __restrict__ map, int n,
-                            int src_rows, int n_bc) {
+__global__ void k_gather_q8(const uint4* __restrict__ src, uint4* __restrict__ dst, const int32_t* __restrict__ map,
+                            int n, int src_rows, int n_bc) {
     const int e = blockIdx.x, s = map[e];
     for (int i = threadIdx.x; i < n_bc * 9; i += blockDim.x) {
         const int bc = i / 9, j = i % 9;
@@ -629,4 +635,4 @@ __global__ void k_add_half(float* __restrict__ y, const __half* __restrict__ b, 
     if (i < n) y[i] += __half2float(b[i]);
 }
 
-}  // namespace hy4p
+}   // namespace hy4p

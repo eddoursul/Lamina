@@ -62,9 +62,8 @@ const char* CpuFeatures::reason() const {
     // Named individually: "AVX-512 not supported" sends a user looking for a new CPU when the machine may have
     // AVX-512F and be missing only VNNI, which is a much narrower and more explicable gap.
     static char buf[160];
-    std::snprintf(buf, sizeof buf, "missing %s%s%s%s%s", avx512f ? "" : "AVX512F ",
-                  avx512bw ? "" : "AVX512BW ", avx512vl ? "" : "AVX512VL ",
-                  avx512_vnni ? "" : "AVX512-VNNI ", avx512_vbmi ? "" : "AVX512-VBMI");
+    std::snprintf(buf, sizeof buf, "missing %s%s%s%s%s", avx512f ? "" : "AVX512F ", avx512bw ? "" : "AVX512BW ",
+                  avx512vl ? "" : "AVX512VL ", avx512_vnni ? "" : "AVX512-VNNI ", avx512_vbmi ? "" : "AVX512-VBMI");
     return buf;
 }
 
@@ -91,7 +90,7 @@ bool cpu_avx512_ok() {
         cpuid(0, 0);
         if (r[0] < 7) return false;
         cpuid(1, 0);
-        if (!((r[2] >> 27) & 1u)) return false;             // OSXSAVE
+        if (!((r[2] >> 27) & 1u)) return false;   // OSXSAVE
 #if defined(_MSC_VER)
         const unsigned long long xcr0 = _xgetbv(0);
 #else
@@ -99,10 +98,11 @@ bool cpu_avx512_ok() {
         __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
         const unsigned long long xcr0 = ((unsigned long long) hi << 32) | lo;
 #endif
-        if ((xcr0 & 0xE6) != 0xE6) return false;          // the OS saves the AVX-512 state
+        if ((xcr0 & 0xE6) != 0xE6) return false;   // the OS saves the AVX-512 state
         cpuid(7, 0);
         const unsigned ebx = r[1], ecx = r[2];
-        return ((ebx >> 16) & 1u) && ((ebx >> 30) & 1u) && ((ebx >> 31) & 1u) && ((ecx >> 11) & 1u) && ((ecx >> 1) & 1u);
+        return ((ebx >> 16) & 1u) && ((ebx >> 30) & 1u) && ((ebx >> 31) & 1u) && ((ecx >> 11) & 1u) &&
+               ((ecx >> 1) & 1u);
     }();
     return ok;
 }
@@ -133,9 +133,9 @@ bool cpu_avx2_ok() {
         __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
         const unsigned long long xcr0 = ((unsigned long long) hi << 32) | lo;
 #endif
-        if ((xcr0 & 0x6) != 0x6) return false;            // the OS saves the SSE and AVX state
+        if ((xcr0 & 0x6) != 0x6) return false;   // the OS saves the SSE and AVX state
         cpuid(7, 0);
-        return ((r[1] >> 5) & 1u) != 0;                    // AVX2
+        return ((r[1] >> 5) & 1u) != 0;   // AVX2
     }();
     return ok;
 }
@@ -176,7 +176,7 @@ void cpuid_regs(unsigned leaf, unsigned sub, unsigned r[4]) {
     __cpuid_count(leaf, sub, r[0], r[1], r[2], r[3]);
 #endif
 }
-}  // namespace
+}   // namespace
 
 const char* cpu_floor_missing() {
     // cpu_avx2_ok's and cpu_avx1_ok's reading, without LAMINA_FORCE_ISA's cap
@@ -194,7 +194,7 @@ const char* cpu_floor_missing() {
         __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
         const unsigned long long xcr0 = ((unsigned long long) hi << 32) | lo;
 #endif
-        avx = (xcr0 & 0x6) == 0x6;                     // the OS saves the SSE and AVX state
+        avx = (xcr0 & 0x6) == 0x6;   // the OS saves the SSE and AVX state
     }
     bool avx2 = avx && ((ecx >> 12) & 1u) && ((ecx >> 29) & 1u) && max_leaf >= 7;   // FMA, F16C
     if (avx2) {
@@ -216,9 +216,9 @@ bool cpu_gather_fast() {
         if (!(r[1] == 0x756e6547u && r[3] == 0x49656e69u && r[2] == 0x6c65746eu)) return false;   // "GenuineIntel"
         if (max_leaf < 7) return false;
         cpuid_regs(7, 0, r);
-        if (r[0] < 1) return false;            // no sub-leaf 1
+        if (r[0] < 1) return false;   // no sub-leaf 1
         cpuid_regs(7, 1, r);
-        if (!((r[0] >> 4) & 1u)) return false; // AVX-VNNI: Alder Lake, Sapphire Rapids and later
+        if (!((r[0] >> 4) & 1u)) return false;   // AVX-VNNI: Alder Lake, Sapphire Rapids and later
         // The E-core-only parts with AVX-VNNI are not hybrid, so the core type below may not tell them apart: Alder
         // Lake-N / Twin Lake (6/BEh), Grand Ridge (6/B6h), Sierra Forest (6/AFh), Clearwater Forest (6/DDh).
         cpuid_regs(1, 0, r);
@@ -231,8 +231,16 @@ bool cpu_gather_fast() {
 
 bool cpu_gather_fast_here() {
     if (!cpu_gather_fast()) return false;
-    static const unsigned max_leaf = [] { unsigned r[4]; cpuid_regs(0, 0, r); return r[0]; }();
-    static const bool hybrid = [] { unsigned r[4]; cpuid_regs(7, 0, r); return ((r[3] >> 15) & 1u) != 0; }();
+    static const unsigned max_leaf = [] {
+        unsigned r[4];
+        cpuid_regs(0, 0, r);
+        return r[0];
+    }();
+    static const bool hybrid = [] {
+        unsigned r[4];
+        cpuid_regs(7, 0, r);
+        return ((r[3] >> 15) & 1u) != 0;
+    }();
     // A CPUID can cost a microsecond under a hypervisor (Windows with VBS), so once per thread.
     thread_local int here = -1;
     if (here < 0) {
@@ -256,9 +264,9 @@ bool cpu_avxvnni_ok() {
         cpuid_regs(0, 0, r);
         if (r[0] < 7) return false;
         cpuid_regs(7, 0, r);
-        if (r[0] < 1) return false;            // no sub-leaf 1
+        if (r[0] < 1) return false;   // no sub-leaf 1
         cpuid_regs(7, 1, r);
-        return ((r[0] >> 4) & 1u) != 0;        // AVX-VNNI; VEX-encoded, so the OS state is AVX's (cpu_avx2_ok)
+        return ((r[0] >> 4) & 1u) != 0;   // AVX-VNNI; VEX-encoded, so the OS state is AVX's (cpu_avx2_ok)
     }();
     return ok;
 }
@@ -270,7 +278,7 @@ bool cpu_mwaitx_ok() {
         cpuid_regs(0x80000000u, 0, r);
         if (r[0] < 0x80000001u) return false;
         cpuid_regs(0x80000001u, 0, r);
-        return ((r[2] >> 29) & 1u) != 0;       // MONITORX; a bit Intel's CPUs leave zero
+        return ((r[2] >> 29) & 1u) != 0;   // MONITORX; a bit Intel's CPUs leave zero
     }();
     return ok;
 }
@@ -354,12 +362,19 @@ void act_quant_any(const float*, int, ActQ&) { std::abort(); }
 #if !defined(LAMINA_NATIVE_EXPERTS)
 // Without ggml-cpu no native pack loads (expert_layout_load_text refuses), so these are never reached.
 bool native_experts_available() noexcept { return false; }
-bool native_fmt(int, int, int64_t, int64_t, NativeFmt&, std::string& err) { err = "built without native experts"; return false; }
+bool native_fmt(int, int, int64_t, int64_t, NativeFmt&, std::string& err) {
+    err = "built without native experts";
+    return false;
+}
 void native_quant_act(const NativeFmt&, const float*, void*) { std::abort(); }
 void native_quant_h(const NativeFmt&, const float*, void*) { std::abort(); }
 int native_gu_mt_min(int) { return 2; }
-void native_gu_rows(const NativeFmt&, const uint8_t*, const void* const*, int, float* const*, int, int) { std::abort(); }
-void native_down_rows(const NativeFmt&, const uint8_t*, const void* const*, int, float* const*, int, int) { std::abort(); }
+void native_gu_rows(const NativeFmt&, const uint8_t*, const void* const*, int, float* const*, int, int) {
+    std::abort();
+}
+void native_down_rows(const NativeFmt&, const uint8_t*, const void* const*, int, float* const*, int, int) {
+    std::abort();
+}
 #endif
 
 namespace {
@@ -439,7 +454,7 @@ bool native_layout_parse(std::istream& in, int64_t n_layers, int64_t n_expert, E
     return true;
 #endif
 }
-}  // namespace
+}   // namespace
 
 bool expert_layout_parse_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert, ExpertLayout& out,
                               std::string& err) {
@@ -447,12 +462,11 @@ bool expert_layout_parse_text(const std::string& native_experts, int64_t n_layer
     return native_layout_parse(in, n_layers, n_expert, out, err);
 }
 
-bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert,
-                             std::string& err) {
+bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert, std::string& err) {
     ExpertLayout L;
     if (!expert_layout_parse_text(native_experts, n_layers, n_expert, L, err)) return false;
     g_layout = std::move(L);
     return true;
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

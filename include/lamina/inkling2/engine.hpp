@@ -12,4 +12,4 @@ int run(int argc, char** argv);
 /// run()'s parse of the command line alone: 0, else the exit code with the reason on stderr.
 int check_args(int argc, char** argv);
 
-}  // namespace lamina::inkling2
+}   // namespace lamina::inkling2

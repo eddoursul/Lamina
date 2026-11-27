@@ -19,13 +19,7 @@
 
 namespace lamina::core {
 
-
 // ================================ the MoE block ================================
-
-
-
-
-
 
 // ================================ the QSA mixer ================================
 
@@ -41,10 +35,10 @@ enum class KvFormat : int { F16 = 0, Int8 = 1, Q4 = 2, K8V4 = 3 };
 /// fault.
 struct QsaState {
     KvFormat kv = KvFormat::F16;
-    uint16_t* k_pool = nullptr;      ///< [page][kv_head][page_size][head_dim] fp16 (KvFormat::F16)
+    uint16_t* k_pool = nullptr;   ///< [page][kv_head][page_size][head_dim] fp16 (KvFormat::F16)
     uint16_t* v_pool = nullptr;
     /// Plan v0.3 P7: INT8 KV. Codes [page][kv_head][page_size][head_dim], one FP16 scale per 64 (K in K8V4 too).
-    bool kv_int8 = false;            ///< KvFormat::Int8: K and V
+    bool kv_int8 = false;   ///< KvFormat::Int8: K and V
     int8_t* k_q = nullptr;
     int8_t* v_q = nullptr;
     uint16_t* k_scale = nullptr;
@@ -62,18 +56,18 @@ struct QsaState {
     /// needs - its index in layer.cpp's registry; -1: carved from the arena as before.
     int32_t kv_elastic = -1;
 
-    float* idx_tail = nullptr;       ///< (idx_block - 1, idx_dim): the raw tail of the block being filled
-    float* idx_dead = nullptr;       ///< (idx_dim,): the spare slot's key, CONSTANT for the sequence
-    float* idx_pooled = nullptr;     ///< (max_cells/idx_block + 2, idx_dim); elastic: in the K/V's range
+    float* idx_tail = nullptr;     ///< (idx_block - 1, idx_dim): the raw tail of the block being filled
+    float* idx_dead = nullptr;     ///< (idx_dim,): the spare slot's key, CONSTANT for the sequence
+    float* idx_pooled = nullptr;   ///< (max_cells/idx_block + 2, idx_dim); elastic: in the K/V's range
     int32_t* idx_block_pos = nullptr;
 
-    float* cos_tab = nullptr;        ///< (max_cells, n_rot/2), built on the HOST in float64; elastic: mapped as the K/V
+    float* cos_tab = nullptr;   ///< (max_cells, n_rot/2), built on the HOST in float64; elastic: mapped as the K/V
     float* sin_tab = nullptr;
 
     /// THE PER-TOKEN COUNTS, IN DEVICE MEMORY - the whole reason this layer can be a graph.  `qsa_step_fill`
     /// computes all four from the position, so one H2D per token updates every count every kernel needs.
     int32_t* step = nullptr;
-    int32_t* attention_status = nullptr; ///< per-layer device status, captured D2H to host_step[kStepCount]
+    int32_t* attention_status = nullptr;   ///< per-layer device status, captured D2H to host_step[kStepCount]
     /// The rope positions, (n_head,) int32, all equal to the current position.  `rope_neox_apply` reads its
     /// positions from the DEVICE, so a host scalar here would be an illegal access (and uncapturable).
     int32_t* pos_dev = nullptr;
@@ -87,8 +81,8 @@ struct QsaState {
     ///
     /// Pinned as well as fixed, because a pageable source would make `cudaMemcpyAsync` a synchronous staged
     /// copy and give back the overlap the doorbell protocol exists for.
-    int32_t* host_step = nullptr;    ///< (kStepCount + 1,) pinned; final element is attention status
-    int32_t* host_pos = nullptr;     ///< (n_head,) pinned
+    int32_t* host_step = nullptr;   ///< (kStepCount + 1,) pinned; final element is attention status
+    int32_t* host_pos = nullptr;    ///< (n_head,) pinned
 };
 
 /// The format of the model's QSA layers (`--kv`): set before sizing and initializing the session.
@@ -158,19 +152,12 @@ uint64_t qsa_kv_elastic_full_bytes();
 /// again in its process).
 void qsa_kv_elastic_release();
 
-
-
-
-
-
 // ================================ THE TWO ENDS OF A TOKEN ================================
 
 /// The embeddings of `n` token ids in DEVICE memory (checked by the caller) into out_dev [n, n_embd], one launch:
 /// a column dequant of `token_embd.weight` (`[n_embd, n_vocab]`, so `out[i] = W[i][token]`), not a GEMV.
 bool embed_rows(const WeightTable& tables, const ModelGeometry& g, const int32_t* tokens_dev, int64_t n, float* out_dev,
                 void* stream, std::string& err);
-
-
 
 // ================================ THE PLE (LAYER 1'S PER-LAYER EMBEDDING) ================================
 //
@@ -181,18 +168,13 @@ struct PleRun {
     /// Null when the PLE is not wired (no table, or a pack without `blk.1.ple_*`).
     lamina::kernels::PleTable* table = nullptr;
     lamina::kernels::PleWeights w;
-    float* hist = nullptr;             ///< the session's NG_HIST x hc_dim NORMALIZED history, row-fastest
+    float* hist = nullptr;   ///< the session's NG_HIST x hc_dim NORMALIZED history, row-fastest
     lamina::kernels::PleConsts consts;
     bool ready() const {
         return table != nullptr && table->is_open() && hist != nullptr &&
-               (w.key_bf16 != nullptr || w.key_native_data != nullptr) &&
-               w.value_bf16 != nullptr &&
-               w.norm_key != nullptr && w.norm_query != nullptr && w.norm_conv != nullptr &&
-               w.conv1d_f16 != nullptr;
+               (w.key_bf16 != nullptr || w.key_native_data != nullptr) && w.value_bf16 != nullptr &&
+               w.norm_key != nullptr && w.norm_query != nullptr && w.norm_conv != nullptr && w.conv1d_f16 != nullptr;
     }
 };
 
-
-
-
-}  // namespace lamina::core
+}   // namespace lamina::core

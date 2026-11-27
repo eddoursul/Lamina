@@ -37,13 +37,13 @@ public:
     /// One float tensor in dense.bin: its index row's bytes, padded with zeros to the next 64 B.
     struct Piece {
         std::string name;
-        size_t shard = 0;         ///< into shards()
-        uint32_t type = 0;        ///< the tensor's GGML type in the GGUF
+        size_t shard = 0;    ///< into shards()
+        uint32_t type = 0;   ///< the tensor's GGML type in the GGUF
         Conv conv = Conv::Copy;
-        uint64_t src_off = 0;     ///< absolute, in the shard's file
+        uint64_t src_off = 0;   ///< absolute, in the shard's file
         uint64_t src_bytes = 0;
-        uint64_t off = 0;         ///< in dense.bin (the row's src_off)
-        uint64_t bytes = 0;       ///< in dense.bin (the row's src_bytes)
+        uint64_t off = 0;     ///< in dense.bin (the row's src_off)
+        uint64_t bytes = 0;   ///< in dense.bin (the row's src_bytes)
         /// A quantized tensor in the GGUF (not F32 0, F16 1 or BF16 30): its values are dequantized and rounded to
         /// the form.
         bool dequantized() const { return conv != Conv::Copy && type != 0 && type != 1 && type != 30; }
@@ -70,13 +70,13 @@ public:
     size_t served() const { return served_; }
 
 private:
-    std::string source_;              ///< the first shard's file name
+    std::string source_;   ///< the first shard's file name
     std::vector<std::string> shards_;
     lamina::kernels::cpu::HadamardSpec hadamard_;
     std::string index_, experts_;
-    std::vector<Piece> pieces_;       ///< in dense.bin's order
+    std::vector<Piece> pieces_;   ///< in dense.bin's order
     uint64_t dense_bytes_ = 0;
     size_t served_ = 0;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

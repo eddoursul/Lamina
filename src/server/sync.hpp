@@ -42,7 +42,7 @@ public:
     /// with batch slots (no turn to wait for): when the wait for the engine ends (a steady-clock second), set by
     /// Service::run and cleared once the request is sent
     std::optional<double> queue_deadline;
-    std::function<void()> queue_started;          ///< the request is sent: its row reads "reading"
+    std::function<void()> queue_started;   ///< the request is sent: its row reads "reading"
 
 private:
     std::atomic<bool> flag_{false};
@@ -93,4 +93,4 @@ private:
     bool closed_ = false;
 };
 
-}  // namespace lamina
+}   // namespace lamina

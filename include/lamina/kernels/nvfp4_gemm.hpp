@@ -41,4 +41,4 @@ constexpr bool nvfp4_gemm_fits(int64_t w_rows, int64_t w_cols) {
     return w_rows > 0 && w_cols > 0 && w_rows % kNvfp4GemmRows == 0 && w_cols % 64 == 0;
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

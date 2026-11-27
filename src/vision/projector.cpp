@@ -73,7 +73,7 @@ struct Keys {
     }
 };
 
-}  // namespace
+}   // namespace
 
 Projector::~Projector() {
     if (file_ != nullptr) std::fclose(file_);
@@ -83,7 +83,7 @@ Projector::~Projector() {
 
 void Projector::open(const EncoderParams& p) {
     path_ = p.mmproj;
-    gguf_init_params gp = {/*.no_alloc =*/ true, /*.ctx =*/ &meta_};
+    gguf_init_params gp = {/*.no_alloc =*/true, /*.ctx =*/&meta_};
     gguf_ = gguf_init_from_file(path_.c_str(), gp);
     if (gguf_ == nullptr) throw std::runtime_error("not a GGUF file that can be read");
     const Keys k{gguf_};
@@ -179,8 +179,8 @@ void Projector::open(const EncoderParams& p) {
             if ((find(blk + scale) != nullptr) != inkling)
                 throw std::runtime_error("its tower has " + std::string(inkling ? "no " : "") + blk + scale +
                                          (inkling ? "" : ", which this encoder does not read"));
-        for (const char* other : {"attn_q_norm.weight", "attn_k_norm.weight", "ffn_gate.weight", "attn_post_norm.weight",
-                                  "ffn_post_norm.weight"})
+        for (const char* other : {"attn_q_norm.weight", "attn_k_norm.weight", "ffn_gate.weight",
+                                  "attn_post_norm.weight", "ffn_post_norm.weight"})
             if (find(blk + other) != nullptr)
                 throw std::runtime_error("its tower has " + blk + other + ", which this encoder does not read");
         if (find("v.deepstack." + std::to_string(il) + ".fc1.weight") != nullptr)
@@ -310,4 +310,4 @@ std::vector<float> projector_planes(const Rgb& picture, const ProjectorParams& p
     return planes(fit(picture, tw, th, p.filter, p.letterbox, p.pad), p.mean, p.std);
 }
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

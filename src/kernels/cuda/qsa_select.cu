@@ -18,18 +18,18 @@ namespace {
 constexpr int IDX_DIM = 128, IDX_HEADS = 4, R = 4;
 constexpr unsigned FULL = 0xffffffffu;
 constexpr int SCORE_WARPS = 8;
-constexpr int SCORE_KB = 2;                                // key blocks per 8-lane group
-constexpr int SCORE_TILE = SCORE_WARPS * 4 * SCORE_KB;     // key blocks per thread block and round
-constexpr int SCORE_QC = 16;                               // queries staged in shared memory at a time (32 KB)
-constexpr int BATCH_T = 256, BATCH_W = BATCH_T / 32;      // batch_scores_kernel: one block an SM
-constexpr int BATCH_QT = 2, BATCH_BT = 4;                  // a lane: 2 queries x 4 key blocks, all heads
-constexpr int BATCH_TILE = 32 * BATCH_BT;                  // key blocks in shared memory (64 KB)
-constexpr int BATCH_QC = BATCH_W * BATCH_QT;               // queries a unit (a warp's slots: 32 KB)
-constexpr int QD = IDX_HEADS * IDX_DIM;                    // a query's floats
-constexpr int kBatchMinQueries = 12;                       // fewer (decode windows): block_scores_kernel
+constexpr int SCORE_KB = 2;                              // key blocks per 8-lane group
+constexpr int SCORE_TILE = SCORE_WARPS * 4 * SCORE_KB;   // key blocks per thread block and round
+constexpr int SCORE_QC = 16;                             // queries staged in shared memory at a time (32 KB)
+constexpr int BATCH_T = 256, BATCH_W = BATCH_T / 32;     // batch_scores_kernel: one block an SM
+constexpr int BATCH_QT = 2, BATCH_BT = 4;                // a lane: 2 queries x 4 key blocks, all heads
+constexpr int BATCH_TILE = 32 * BATCH_BT;                // key blocks in shared memory (64 KB)
+constexpr int BATCH_QC = BATCH_W * BATCH_QT;             // queries a unit (a warp's slots: 32 KB)
+constexpr int QD = IDX_HEADS * IDX_DIM;                  // a query's floats
+constexpr int kBatchMinQueries = 12;                     // fewer (decode windows): block_scores_kernel
 constexpr int TOPK_T = 1024, TOPK_W = TOPK_T / 32;
-constexpr int TOPK_ROWS = 32;                              // rows of TOPK_T blocks held in registers
-constexpr int TOPK_TAB_ROWS = 64;                          // the (row, warp) tables' least rows: in the histograms' room
+constexpr int TOPK_ROWS = 32;       // rows of TOPK_T blocks held in registers
+constexpr int TOPK_TAB_ROWS = 64;   // the (row, warp) tables' least rows: in the histograms' room
 
 __device__ __forceinline__ uint32_t order_key(float s) {
     const float v = s + 0.0f;
@@ -79,16 +79,14 @@ __device__ __forceinline__ void group_scores(const float4 (&k)[SCORE_KB][4], con
 
 // 8-lane groups of SCORE_KB consecutive key blocks each, read once for all the queries, which go through shared
 // memory SCORE_QC at a time.  Block n_bid of a query is its incomplete tail: the `dead` key, +1e9 when it has cells.
-__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_kernel(const float* __restrict__ pooled,
-                                                                        const float* __restrict__ dead,
-                                                                        const float* __restrict__ q_idx,
-                                                                        const int32_t* __restrict__ steps, int nq,
-                                                                        int64_t max_blocks, float* __restrict__ out) {
+__global__ void __launch_bounds__(SCORE_WARPS * 32)
+block_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ dead, const float* __restrict__ q_idx,
+                    const int32_t* __restrict__ steps, int nq, int64_t max_blocks, float* __restrict__ out) {
     __shared__ __align__(16) float qs[SCORE_QC * IDX_HEADS * IDX_DIM];
     __shared__ int s_nkv[SCORE_QC], s_nbid[SCORE_QC];
     const int t = threadIdx.x, lane = t & 31, j = lane & 7;
     const int slot = ((t >> 5) * 4 + (lane >> 3)) * SCORE_KB;   // the group's first block within a tile
-    int64_t top = -1;   // the queries' last block: the rounds end there
+    int64_t top = -1;                                           // the queries' last block: the rounds end there
     for (int qi = 0; qi < nq; ++qi) {
         const int64_t n_bid = steps[(int64_t) qi * kStepCount + kStepNBid];
         const int64_t last = n_bid < max_blocks - 1 ? n_bid : max_blocks - 1;
@@ -146,21 +144,19 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_kernel(const fl
 // over the same blocks (the second group's key reads mostly hit L1).  2-8 queries: block_scores_kernel read the queries
 // from shared memory every block, its limit; one query is bound by the keys' reads either way (and 1.03x as long here).
 template <int QG>
-__global__ void __launch_bounds__(SCORE_WARPS * 32, 2) block_scores_reg_kernel(const float* __restrict__ pooled,
-                                                                               const float* __restrict__ dead,
-                                                                               const float* __restrict__ q_idx,
-                                                                               const int32_t* __restrict__ steps,
-                                                                               int nq, int64_t max_blocks,
-                                                                               float* __restrict__ out) {
+__global__ void __launch_bounds__(SCORE_WARPS * 32, 2)
+block_scores_reg_kernel(const float* __restrict__ pooled, const float* __restrict__ dead,
+                        const float* __restrict__ q_idx, const int32_t* __restrict__ steps, int nq, int64_t max_blocks,
+                        float* __restrict__ out) {
     constexpr int V = 4 * QG, LV = QG == 2 ? 3 : 4, SH = 5 - LV;
-    constexpr int REG_UB = 4;                          // key blocks a warp a round (8: slower)
+    constexpr int REG_UB = 4;   // key blocks a warp a round (8: slower)
     static_assert(QG == 2 || QG == 4, "QG");
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, mb = (int) max_blocks - 1;
-    const bool two = nq > QG;                          // 5-8 queries: two groups of 4 warps
+    const bool two = nq > QG;   // 5-8 queries: two groups of 4 warps
     const int wpg = two ? SCORE_WARPS / 2 : SCORE_WARPS, wi = two ? warp & 3 : warp, q0 = two ? (warp >> 2) * QG : 0;
     float4 qr[QG][IDX_HEADS];
     int n_bid[QG];
-    int top = -1;                                      // the group's last block
+    int top = -1;   // the group's last block
 #pragma unroll
     for (int a = 0; a < QG; ++a) {
         const bool in = q0 + a < nq;
@@ -189,12 +185,12 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32, 2) block_scores_reg_kernel(c
         float4 kp[REG_UB];
 #pragma unroll
         for (int u = 0; u < REG_UB; ++u)
-            kp[u] = __ldg(reinterpret_cast<const float4*>(pooled + (int64_t) (b0 + u <= top ? b0 + u : b0) * IDX_DIM +
-                                                          4 * lane));
+            kp[u] = __ldg(
+                reinterpret_cast<const float4*>(pooled + (int64_t) (b0 + u <= top ? b0 + u : b0) * IDX_DIM + 4 * lane));
 #pragma unroll
         for (int u = 0; u < REG_UB; ++u) {
             const int b = b0 + u;
-            if (b > top) break;                        // warp-uniform
+            if (b > top) break;   // warp-uniform
             float v[V];
 #pragma unroll
             for (int a = 0; a < QG; ++a) {
@@ -252,18 +248,16 @@ __device__ __forceinline__ int key_at(int r, int c) { return r * IDX_DIM + 4 * (
 // between barriers when the tile changes; each warp stages its queries into a slot of its own, the next unit's even
 // leaves once this unit is done with them, then the odd ones, so the copies run while it computes.  A query's tail
 // block scores the `dead` key in the warp form.
-__global__ void __launch_bounds__(BATCH_T, 1) batch_scores_kernel(const float* __restrict__ pooled,
-                                                                  const float* __restrict__ dead,
-                                                                  const float* __restrict__ q_idx,
-                                                                  const int32_t* __restrict__ steps, int nq,
-                                                                  int64_t max_blocks, float* __restrict__ out) {
+__global__ void __launch_bounds__(BATCH_T, 1)
+batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ dead, const float* __restrict__ q_idx,
+                    const int32_t* __restrict__ steps, int nq, int64_t max_blocks, float* __restrict__ out) {
     extern __shared__ __align__(16) float smem[];
     __shared__ int s_top;
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
-    float* ks = smem;                                          // BATCH_TILE x IDX_DIM
+    float* ks = smem;   // BATCH_TILE x IDX_DIM
     float* qs = smem + BATCH_TILE * IDX_DIM + warp * BATCH_QT * QD;
     {
-        int top = -1;                                          // the batch's last block
+        int top = -1;   // the batch's last block
         for (int i = t; i < nq; i += BATCH_T) {
             const int n_bid = steps[(int64_t) i * kStepCount + kStepNBid];
             top = max(top, (int64_t) n_bid < max_blocks - 1 ? n_bid : (int) (max_blocks - 1));
@@ -287,10 +281,10 @@ __global__ void __launch_bounds__(BATCH_T, 1) batch_scores_kernel(const float* _
         }
         asm volatile("cp.async.commit_group;\n" ::);
     };
-    int have = -1;                                             // the first query of the slot's rows
+    int have = -1;   // the first query of the slot's rows
     for (int u = (int) ((int64_t) blockIdx.x * units / gridDim.x); u < u1;) {
         const int b0 = u / n_chunks * BATCH_TILE, ue = min(u1, (u / n_chunks + 1) * n_chunks);
-        __syncthreads();                                       // every warp is done with the previous tile
+        __syncthreads();   // every warp is done with the previous tile
         for (int e = t; e < BATCH_TILE * 32; e += BATCH_T) {
             const int r = e >> 5, c = e & 31;
             cp_async16(ks + key_at(r, c), pooled + (int64_t) min(b0 + r, top) * IDX_DIM + 4 * c);
@@ -308,7 +302,7 @@ __global__ void __launch_bounds__(BATCH_T, 1) batch_scores_kernel(const float* _
                 n_kv[a] = in ? steps[(int64_t) (q0 + a) * kStepCount + kStepNKv] : 0;
                 wlast = max(wlast, n_bid[a]);
             }
-            if (wlast < b0) continue;                          // the warp's queries end before the tile
+            if (wlast < b0) continue;   // the warp's queries end before the tile
             if (have != q0) {
                 // a skipped unit's prefetch may still be landing in the slot: copies to one address are unordered
                 asm volatile("cp.async.wait_group 0;\n" ::);
@@ -319,7 +313,7 @@ __global__ void __launch_bounds__(BATCH_T, 1) batch_scores_kernel(const float* _
             }
             const int q0n = u + 1 < u1 ? (u + 1) % n_chunks * BATCH_QC + warp * BATCH_QT : -1;
             const bool ahead = q0n >= 0 && q0n != q0;
-            asm volatile("cp.async.wait_group 1;\n" ::);       // the even leaves
+            asm volatile("cp.async.wait_group 1;\n" ::);   // the even leaves
             __syncwarp();
             float stk[BATCH_QT][IDX_HEADS][BATCH_BT][6];
             auto leaves = [&](auto first) {
@@ -351,7 +345,7 @@ __global__ void __launch_bounds__(BATCH_T, 1) batch_scores_kernel(const float* _
                             }
                 }
             };
-            leaves(std::integral_constant<int, 0>());           // rev5(0..15): the even leaves
+            leaves(std::integral_constant<int, 0>());   // rev5(0..15): the even leaves
             __syncwarp();
             if (ahead) {
                 stage(q0n, 0);
@@ -386,8 +380,8 @@ __global__ void __launch_bounds__(BATCH_T, 1) batch_scores_kernel(const float* _
                     float score = 0.0f;
 #pragma unroll
                     for (int h = 0; h < IDX_HEADS; ++h) {
-                        float d = dot4(k4, *reinterpret_cast<const float4*>(q_idx + (int64_t) qi * QD + h * IDX_DIM +
-                                                                            4 * lane));
+                        float d = dot4(
+                            k4, *reinterpret_cast<const float4*>(q_idx + (int64_t) qi * QD + h * IDX_DIM + 4 * lane));
 #pragma unroll
                         for (int o = 16; o > 0; o >>= 1) d += __shfl_xor_sync(FULL, d, o);
                         score += d > 0.0f ? d : 0.0f;
@@ -412,9 +406,15 @@ __device__ __forceinline__ void block_exclusive2(int a, int b, int& ea, int& eb,
 #pragma unroll
     for (int o = 1; o < 32; o <<= 1) {
         const int ya = __shfl_up_sync(FULL, ia, o), yb = __shfl_up_sync(FULL, ib, o);
-        if (lane >= o) { ia += ya; ib += yb; }
+        if (lane >= o) {
+            ia += ya;
+            ib += yb;
+        }
     }
-    if (lane == 31) { s_w[warp] = ia; s_w[TOPK_W + warp] = ib; }
+    if (lane == 31) {
+        s_w[warp] = ia;
+        s_w[TOPK_W + warp] = ib;
+    }
     __syncthreads();
     if (warp == 0) {
         const int wa = s_w[lane], wb = s_w[TOPK_W + lane];
@@ -422,11 +422,17 @@ __device__ __forceinline__ void block_exclusive2(int a, int b, int& ea, int& eb,
 #pragma unroll
         for (int o = 1; o < 32; o <<= 1) {
             const int ya = __shfl_up_sync(FULL, xa, o), yb = __shfl_up_sync(FULL, xb, o);
-            if (lane >= o) { xa += ya; xb += yb; }
+            if (lane >= o) {
+                xa += ya;
+                xb += yb;
+            }
         }
         s_w[lane] = xa - wa;
         s_w[TOPK_W + lane] = xb - wb;
-        if (lane == 31) { s_w[2 * TOPK_W] = xa; s_w[2 * TOPK_W + 1] = xb; }
+        if (lane == 31) {
+            s_w[2 * TOPK_W] = xa;
+            s_w[2 * TOPK_W + 1] = xb;
+        }
     }
     __syncthreads();
     ea = s_w[warp] + ia - a;
@@ -447,7 +453,7 @@ __device__ __forceinline__ void block_exclusive2(int a, int b, int& ea, int& eb,
 __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restrict__ scores,
                                                             const int32_t* __restrict__ steps, int64_t max_blocks,
                                                             int64_t cap, int tab_rows, int32_t* __restrict__ ids) {
-    extern __shared__ int sm[];                        // the per-warp histograms; then the scan table and the output
+    extern __shared__ int sm[];   // the per-warp histograms; then the scan table and the output
     __shared__ int hist[256];
     __shared__ int s_w[2 * TOPK_W + 2];
     __shared__ int s_digit, s_above;
@@ -456,12 +462,12 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
     const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
     int32_t* out = ids + qi * cap;
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
-    if (n_kv <= width) {                               // everything is selected: the identity, ascending
+    if (n_kv <= width) {   // everything is selected: the identity, ascending
         for (int64_t j = t; j < n_kv; j += TOPK_T) out[j] = (int32_t) j;
         return;
     }
     const float* sc = scores + qi * max_blocks;
-    const int tail_w = (int) (n_kv - n_bid * R);       // the cells of block n_bid, 0..3
+    const int tail_w = (int) (n_kv - n_bid * R);   // the cells of block n_bid, 0..3
     const int nrows = (int) ((n_bid + TOPK_T - 1) / TOPK_T);
     uint32_t key[TOPK_ROWS];
 #pragma unroll
@@ -471,13 +477,13 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
     }
     // ---- radix select: the largest key thr with (cells with key >= thr) >= width
     uint32_t prefix = 0;
-    int above = 0;                                     // cells strictly above the digits fixed so far
+    int above = 0;   // cells strictly above the digits fixed so far
     int* whist = sm + warp * 256;
     for (int shift = 24; shift >= 0; shift -= 8) {
         for (int i = lane; i < 256; i += 32) whist[i] = 0;
         __syncwarp();
         const uint32_t hi_mask = shift == 24 ? 0u : (0xffffffffu << (shift + 8));
-        int cd = -1, cc = 0;                           // a run of one digit is added at once
+        int cd = -1, cc = 0;   // a run of one digit is added at once
         auto count = [&](uint32_t k) {
             if ((k & hi_mask) != (prefix & hi_mask)) return;
             const int d = (int) ((k >> shift) & 255);
@@ -513,7 +519,10 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
             // bins 255 - 8l down to 248 - 8l
             int v[8], s = 0;
 #pragma unroll
-            for (int i = 0; i < 8; ++i) { v[i] = hist[255 - (lane * 8 + i)]; s += v[i]; }
+            for (int i = 0; i < 8; ++i) {
+                v[i] = hist[255 - (lane * 8 + i)];
+                s += v[i];
+            }
             int incl = s;
 #pragma unroll
             for (int o = 1; o < 32; o <<= 1) {
@@ -542,25 +551,31 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
         above = s_above;
     }
     const uint32_t thr = prefix;
-    const int budget = (int) (width - above);          // cells equal to thr that fit, lowest index first
+    const int budget = (int) (width - above);   // cells equal to thr that fit, lowest index first
     // ---- the cells above and at thr per (row, warp), their exclusive prefixes in block order
     int* tab_gt = sm;
     int* tab_eq = sm + tab_rows * 32;
-    int* obuf = sm + 2 * tab_rows * 32;                // the selection, copied out coalesced
-    __syncthreads();                                   // the histograms are no longer read
+    int* obuf = sm + 2 * tab_rows * 32;   // the selection, copied out coalesced
+    __syncthreads();                      // the histograms are no longer read
     auto row_key = [&](int i) { return i < TOPK_ROWS ? 0u : order_key(sc[(int64_t) i * TOPK_T + t]); };
 #pragma unroll
     for (int i = 0; i < TOPK_ROWS; ++i) {
         if (i >= nrows) break;
         const bool in = (int64_t) i * TOPK_T + t < n_bid;
         const unsigned mg = __ballot_sync(FULL, in && key[i] > thr), me = __ballot_sync(FULL, in && key[i] == thr);
-        if (lane == 0) { tab_gt[i * 32 + warp] = R * __popc(mg); tab_eq[i * 32 + warp] = R * __popc(me); }
+        if (lane == 0) {
+            tab_gt[i * 32 + warp] = R * __popc(mg);
+            tab_eq[i * 32 + warp] = R * __popc(me);
+        }
     }
     for (int i = TOPK_ROWS; i < nrows; ++i) {
         const bool in = (int64_t) i * TOPK_T + t < n_bid;
         const uint32_t k = in ? row_key(i) : 0u;
         const unsigned mg = __ballot_sync(FULL, in && k > thr), me = __ballot_sync(FULL, in && k == thr);
-        if (lane == 0) { tab_gt[i * 32 + warp] = R * __popc(mg); tab_eq[i * 32 + warp] = R * __popc(me); }
+        if (lane == 0) {
+            tab_gt[i * 32 + warp] = R * __popc(mg);
+            tab_eq[i * 32 + warp] = R * __popc(me);
+        }
     }
     __syncthreads();
     int gt_all, eq_all;
@@ -569,7 +584,10 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
         const int e = nrows * 32, per = e > 2 * TOPK_T ? (e + TOPK_T - 1) / TOPK_T : 2, k0 = per * t;
         const int k1 = k0 + per < e ? k0 + per : e;
         int gs = 0, es = 0;
-        for (int k = k0; k < k1; ++k) { gs += tab_gt[k]; es += tab_eq[k]; }
+        for (int k = k0; k < k1; ++k) {
+            gs += tab_gt[k];
+            es += tab_eq[k];
+        }
         int gx, ex;
         block_exclusive2(gs, es, gx, ex, gt_all, eq_all, s_w);
         for (int k = k0; k < k1; ++k) {
@@ -603,11 +621,13 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
         const bool in = (int64_t) i * TOPK_T + t < n_bid;
         emit(i, in ? row_key(i) : 0u, in);
     }
-    if (t == 0 && tail_w > 0) {                        // the tail block comes last
+    if (t == 0 && tail_w > 0) {   // the tail block comes last
         const uint32_t k = order_key(sc[n_bid]);
         const int pos = gt_all + (eq_all < budget ? eq_all : budget);
-        const int take = k > thr ? tail_w : (k == thr ? (budget - eq_all < 0 ? 0 : (budget - eq_all > tail_w ? tail_w
-                                                                                        : budget - eq_all)) : 0);
+        const int take =
+            k > thr
+                ? tail_w
+                : (k == thr ? (budget - eq_all < 0 ? 0 : (budget - eq_all > tail_w ? tail_w : budget - eq_all)) : 0);
         for (int c = 0; c < take; ++c) obuf[pos + c] = (int32_t) (n_bid * R + c);
     }
     __syncthreads();
@@ -625,13 +645,13 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
 // selection at a time on a GPU: a query's barrier state lives in device memory, which its last thread block out
 // clears.  (Upstream's #2072 split top-k took six launches.)
 constexpr int MT_T = 256, MT_W = MT_T / 32;
-constexpr int MT_ROWS = 8;                         // rows of MT_T blocks a thread holds in registers
-constexpr int MT_CHUNK = MT_ROWS * MT_T;           // blocks a thread block takes at least
-constexpr int MT_MAXQ = 8, MT_MAXCH = 32;          // queries a launch; thread blocks a query
+constexpr int MT_ROWS = 8;                  // rows of MT_T blocks a thread holds in registers
+constexpr int MT_CHUNK = MT_ROWS * MT_T;    // blocks a thread block takes at least
+constexpr int MT_MAXQ = 8, MT_MAXCH = 32;   // queries a launch; thread blocks a query
 static_assert(MT_T == 256, "a thread a histogram bin");
 struct TopkSync {
     int hist[4][256];
-    int cnt[MT_MAXCH][2];                          // a chunk's cells above the threshold, at it
+    int cnt[MT_MAXCH][2];   // a chunk's cells above the threshold, at it
     unsigned arrived, left;
 };
 __device__ TopkSync g_topk_sync[MT_MAXQ];
@@ -663,11 +683,11 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
     const int32_t* st = steps + (int64_t) q * kStepCount;
     const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
     int32_t* out = ids + (int64_t) q * cap;
-    if (n_kv <= width) {                               // everything is selected: the identity, ascending
+    if (n_kv <= width) {   // everything is selected: the identity, ascending
         for (int64_t j = (int64_t) c * MT_T + t; j < n_kv; j += (int64_t) gridDim.x * MT_T) out[j] = (int32_t) j;
         return;
     }
-    const int64_t nb = n_bid + 1;                      // with the tail block
+    const int64_t nb = n_bid + 1;   // with the tail block
     const int A = (int) min((int64_t) gridDim.x, (nb + MT_CHUNK - 1) / MT_CHUNK);
     if (c >= A) return;
     TopkSync& sy = g_topk_sync[q];
@@ -690,7 +710,7 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
         const uint32_t hi_mask = p == 0 ? 0u : (0xffffffffu << (shift + 8));
         for (int i = lane; i < 256; i += 32) whist[warp][i] = 0;
         __syncwarp();
-        int cd = -1, cc = 0;                           // a run of one digit is added at once
+        int cd = -1, cc = 0;   // a run of one digit is added at once
         auto count = [&](uint32_t k) {
             if ((k & hi_mask) != (prefix & hi_mask)) return;
             const int d = (int) ((k >> shift) & 255);
@@ -727,7 +747,10 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
             // lane l holds the bins 255 - 8l down to 248 - 8l
             int v[8], sum = 0;
 #pragma unroll
-            for (int i = 0; i < 8; ++i) { v[i] = hist[255 - (lane * 8 + i)]; sum += v[i]; }
+            for (int i = 0; i < 8; ++i) {
+                v[i] = hist[255 - (lane * 8 + i)];
+                sum += v[i];
+            }
             int incl = sum;
 #pragma unroll
             for (int o = 1; o < 32; o <<= 1) {
@@ -756,12 +779,15 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
         above = s_above;
     }
     const uint32_t thr = prefix;
-    const int budget = (int) (width - above);          // cells equal to thr that fit, lowest index first
+    const int budget = (int) (width - above);   // cells equal to thr that fit, lowest index first
     // ---- the chunk's cells above and at thr; the chunks' before it
     int gt = 0, eq = 0;
 #pragma unroll
     for (int i = 0; i < MT_ROWS; ++i)
-        if (b0 + (int64_t) i * MT_T + t < e1) { gt += key[i] > thr ? R : 0; eq += key[i] == thr ? R : 0; }
+        if (b0 + (int64_t) i * MT_T + t < e1) {
+            gt += key[i] > thr ? R : 0;
+            eq += key[i] == thr ? R : 0;
+        }
     for (int i = MT_ROWS; i < nrows; ++i) {
         const int64_t b = b0 + (int64_t) i * MT_T + t;
         if (b < e1) {
@@ -772,28 +798,43 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
     }
     gt = warp_sum(gt);
     eq = warp_sum(eq);
-    if (lane == 0) { s_g[warp] = gt; s_e[warp] = eq; }
+    if (lane == 0) {
+        s_g[warp] = gt;
+        s_e[warp] = eq;
+    }
     __syncthreads();
     if (A > 1) {
         if (t == 0) {
             int g = 0, e = 0;
-            for (int w = 0; w < MT_W; ++w) { g += s_g[w]; e += s_e[w]; }
-            if (tail_w > 0) { g += tkey > thr ? tail_w : 0; e += tkey == thr ? tail_w : 0; }
+            for (int w = 0; w < MT_W; ++w) {
+                g += s_g[w];
+                e += s_e[w];
+            }
+            if (tail_w > 0) {
+                g += tkey > thr ? tail_w : 0;
+                e += tkey == thr ? tail_w : 0;
+            }
             sy.cnt[c][0] = g;
             sy.cnt[c][1] = e;
         }
         query_barrier(&sy.arrived, (unsigned) A * 5u);
         if (t == 0) {
             int g0 = 0, e0 = 0;
-            for (int k = 0; k < c; ++k) { g0 += __ldcg(&sy.cnt[k][0]); e0 += __ldcg(&sy.cnt[k][1]); }
+            for (int k = 0; k < c; ++k) {
+                g0 += __ldcg(&sy.cnt[k][0]);
+                e0 += __ldcg(&sy.cnt[k][1]);
+            }
             s_gt0 = g0;
             s_eq0 = e0;
             s_last = atomicAdd(&sy.left, 1u) == (unsigned) A - 1;   // every thread block is past the last barrier
         }
         __syncthreads();
-        if (s_last) {                                  // the state back to zero for the next call
+        if (s_last) {   // the state back to zero for the next call
             for (int i = t; i < 4 * 256; i += MT_T) (&sy.hist[0][0])[i] = 0;
-            if (t == 0) { sy.arrived = 0; sy.left = 0; }
+            if (t == 0) {
+                sy.arrived = 0;
+                sy.left = 0;
+            }
         }
     } else if (t == 0) {
         s_gt0 = 0;
@@ -813,12 +854,18 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
         if (i >= MT_ROWS && in) k = order_key(sc[b]);
         const bool g = in && k > thr, e = in && k == thr;
         const unsigned mg = __ballot_sync(FULL, g), me = __ballot_sync(FULL, e);
-        if (lane == 0) { s_g[warp] = R * __popc(mg); s_e[warp] = R * __popc(me); }
+        if (lane == 0) {
+            s_g[warp] = R * __popc(mg);
+            s_e[warp] = R * __popc(me);
+        }
         __syncthreads();
         int gb = g_run, eb = e_run, rg = 0, re = 0;
 #pragma unroll
         for (int w = 0; w < MT_W; ++w) {
-            if (w < warp) { gb += s_g[w]; eb += s_e[w]; }
+            if (w < warp) {
+                gb += s_g[w];
+                eb += s_e[w];
+            }
             rg += s_g[w];
             re += s_e[w];
         }
@@ -833,15 +880,17 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
         g_run += rg;
         e_run += re;
     }
-    if (t == 0 && tail_w > 0) {                        // the tail block comes last
+    if (t == 0 && tail_w > 0) {   // the tail block comes last
         const int pos = g_run + (e_run < budget ? e_run : budget);
-        const int take = tkey > thr ? tail_w : (tkey == thr ? (budget - e_run < 0 ? 0 : (budget - e_run > tail_w ? tail_w
-                                                                                     : budget - e_run)) : 0);
+        const int take =
+            tkey > thr
+                ? tail_w
+                : (tkey == thr ? (budget - e_run < 0 ? 0 : (budget - e_run > tail_w ? tail_w : budget - e_run)) : 0);
         for (int j = 0; j < take; ++j) out[pos + j] = (int32_t) (n_bid * R + j);
     }
 }
 
-}  // namespace
+}   // namespace
 
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                       int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t grid_blocks) {
@@ -874,14 +923,21 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
     } else {
         const unsigned grid = (unsigned) ((covered + SCORE_TILE - 1) / SCORE_TILE);
         const cudaStream_t st = (cudaStream_t) stream;
-        if (nq == 2) block_scores_reg_kernel<2><<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, 2, max_blocks, scores);
+        if (nq == 2)
+            block_scores_reg_kernel<2>
+                <<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, 2, max_blocks, scores);
         else if (nq >= 3 && nq <= 8)
-            block_scores_reg_kernel<4><<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks,
-                                                                         scores);
-        else block_scores_kernel<<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
+            block_scores_reg_kernel<4>
+                <<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks, scores);
+        else
+            block_scores_kernel<<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, (int) nq, max_blocks,
+                                                                   scores);
     }
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_block_scores: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 namespace {
@@ -909,7 +965,7 @@ size_t topk_smem_limit() {
     return (size_t) optin > fa.sharedSizeBytes ? (size_t) optin - fa.sharedSizeBytes : 0;
 }
 
-}  // namespace
+}   // namespace
 
 int64_t qsa_select_max_cells(const QsaShapes& s) {
     const int64_t ints = (int64_t) (topk_smem_limit() / sizeof(int)) - qsa_selection_width(kTopkMaxCells, s);
@@ -947,7 +1003,10 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         block_topk_multi_kernel<<<dim3((unsigned) nch, (unsigned) nq), MT_T, 0, (cudaStream_t) stream>>>(
             scores, steps, max_blocks, cap, ids);
         const cudaError_t e = cudaGetLastError();
-        if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e)); std::exit(1); }
+        if (e != cudaSuccess) {
+            std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e));
+            std::exit(1);
+        }
         return;
     }
     if (smem > 48 * 1024) {
@@ -969,9 +1028,12 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         }
     }
     block_topk_kernel<<<(unsigned) nq, TOPK_T, smem, (cudaStream_t) stream>>>(scores, steps, max_blocks, cap,
-                                                                             (int) tab_rows, ids);
+                                                                              (int) tab_rows, ids);
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

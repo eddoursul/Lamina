@@ -2,9 +2,9 @@
 //
 // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
+#include "hit_plan.cuh"
 #include "lamina/kernels/verify_kernels.hpp"
 #include "lamina/kernels/warp.cuh"
-#include "hit_plan.cuh"
 
 #include <cuda_runtime.h>
 
@@ -15,19 +15,22 @@
 namespace lamina::kernels {
 namespace {
 
-constexpr int S = 128;          // GDN state size
+constexpr int S = 128;   // GDN state size
 constexpr int RG = 4;
 constexpr int RPG = S / RG;
 
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 // `commit` (one token): the history then keeps it - [hist1, hist2, x_0], each thread its channel's, after reading them
 __global__ void __launch_bounds__(S) gdn_conv_l2_multi_kernel(float* hist, const float* __restrict__ qkv,
-                                                              const float* __restrict__ w, float* __restrict__ h,
-                                                              int C, int qk_heads, float eps, int t_begin, bool commit) {
+                                                              const float* __restrict__ w, float* __restrict__ h, int C,
+                                                              int qk_heads, float eps, int t_begin, bool commit) {
     __shared__ float part[S / 32];
     const int t = t_begin + blockIdx.y;
     const int c = blockIdx.x * S + threadIdx.x;
@@ -35,7 +38,7 @@ __global__ void __launch_bounds__(S) gdn_conv_l2_multi_kernel(float* hist, const
     float win[3];
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
-        const int src = t + j;          // index into [hist(3) | x...]
+        const int src = t + j;   // index into [hist(3) | x...]
         win[j] = src < 3 ? hist[c * 3 + src] : qkv[(size_t) (src - 3) * C + c];
     }
     const float v0 = win[0], v1 = win[1], v2 = win[2], x = qkv[(size_t) t * C + c];
@@ -59,7 +62,7 @@ __global__ void gdn_conv_commit_kernel(float* __restrict__ hist, const float* __
     float seq[3];
 #pragma unroll
     for (int j = 0; j < 3; ++j) {
-        const int src = n + j;          // the last three of [hist(3) | x_0..x_{n-1}]
+        const int src = n + j;   // the last three of [hist(3) | x_0..x_{n-1}]
         seq[j] = src < 3 ? hist[c * 3 + src] : qkv[(size_t) (src - 3) * C + c];
     }
     hist[c * 3] = seq[0];
@@ -89,10 +92,14 @@ __global__ void __launch_bounds__(256) gdn_ab_multi_kernel(const float* __restri
             const float4 xa = *reinterpret_cast<const float4*>(xt + j * 8);
             const float4 xb = *reinterpret_cast<const float4*>(xt + j * 8 + 4);
             float a = acc[t];
-            a = fmaf(__uint_as_float(wv.x << 16), xa.x, a); a = fmaf(__uint_as_float(wv.x & 0xffff0000u), xa.y, a);
-            a = fmaf(__uint_as_float(wv.y << 16), xa.z, a); a = fmaf(__uint_as_float(wv.y & 0xffff0000u), xa.w, a);
-            a = fmaf(__uint_as_float(wv.z << 16), xb.x, a); a = fmaf(__uint_as_float(wv.z & 0xffff0000u), xb.y, a);
-            a = fmaf(__uint_as_float(wv.w << 16), xb.z, a); a = fmaf(__uint_as_float(wv.w & 0xffff0000u), xb.w, a);
+            a = fmaf(__uint_as_float(wv.x << 16), xa.x, a);
+            a = fmaf(__uint_as_float(wv.x & 0xffff0000u), xa.y, a);
+            a = fmaf(__uint_as_float(wv.y << 16), xa.z, a);
+            a = fmaf(__uint_as_float(wv.y & 0xffff0000u), xa.w, a);
+            a = fmaf(__uint_as_float(wv.z << 16), xb.x, a);
+            a = fmaf(__uint_as_float(wv.z & 0xffff0000u), xb.y, a);
+            a = fmaf(__uint_as_float(wv.w << 16), xb.z, a);
+            a = fmaf(__uint_as_float(wv.w & 0xffff0000u), xb.w, a);
             acc[t] = a;
         }
     }
@@ -118,13 +125,10 @@ __global__ void __launch_bounds__(256) gdn_ab_multi_kernel(const float* __restri
 // the state only (the commit's replay).
 constexpr int GS_COLS = 32;
 template <bool OUT>
-__global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __restrict__ state,
-                                                                      const float* __restrict__ hbuf, int C,
-                                                                      const float* __restrict__ gate,
-                                                                      const float* __restrict__ beta,
-                                                                      float* __restrict__ y, int h_k, int h_v, int T,
-                                                                      const int32_t* __restrict__ n_keep,
-                                                                      int t_out_begin) {
+__global__ void __launch_bounds__(GS_COLS* RG)
+gdn_step_split_kernel(float* __restrict__ state, const float* __restrict__ hbuf, int C, const float* __restrict__ gate,
+                      const float* __restrict__ beta, float* __restrict__ y, int h_k, int h_v, int T,
+                      const int32_t* __restrict__ n_keep, int t_out_begin) {
     __shared__ float sk[S], sq[S];
     __shared__ float red[RG][GS_COLS];
     const int head = blockIdx.x;
@@ -133,7 +137,7 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
     const int rg = threadIdx.y;
     const int tid = rg * GS_COLS + lc;
     const int qh = head % h_k;
-    const int qk = S * h_k;             // q at [0, qk), k at [qk, 2qk), v at [2qk, ...)
+    const int qk = S * h_k;   // q at [0, qk), k at [qk, 2qk), v at [2qk, ...)
     const int value_dim = S * h_v;
     const int n = n_keep ? *n_keep : T;
     float s[RPG];
@@ -144,7 +148,7 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
     for (int t = 0; t < n; ++t) {
         const float* ht = hbuf + (size_t) t * C;
         const bool out = OUT && t >= t_out_begin;
-        __syncthreads();                // the previous token is done with sk/sq/red
+        __syncthreads();   // the previous token is done with sk/sq/red
         sk[tid] = ht[qk + qh * S + tid];
         if (out) sq[tid] = ht[qh * S + tid];
         __syncthreads();
@@ -171,7 +175,8 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
         red[rg][lc] = o;
         __syncthreads();
         if (rg == 0)
-            y[(size_t) t * value_dim + head * S + col] = (red[0][lc] + red[1][lc] + red[2][lc] + red[3][lc]) * rsqrtf((float) S);
+            y[(size_t) t * value_dim + head * S + col] =
+                (red[0][lc] + red[1][lc] + red[2][lc] + red[3][lc]) * rsqrtf((float) S);
     }
     if (n_keep != nullptr && n > 0) {
 #pragma unroll
@@ -182,8 +187,8 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
 // y = o * rsqrt(mean(o^2) + eps) * gamma * sigmoid(z) per head and output token, the squares summed by the same warps
 // (columns 32 w .. 32 w + 31, the same butterfly) in the same order as fused_gdn_step_norm
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
-                                                        float eps, float* __restrict__ y, int h_v, int T,
-                                                        const int32_t* __restrict__ n_keep, int t_out_begin) {
+                                                         float eps, float* __restrict__ y, int h_v, int T,
+                                                         const int32_t* __restrict__ n_keep, int t_out_begin) {
     __shared__ float wsum[S / 32];
     const int head = blockIdx.x, t = t_out_begin + (int) blockIdx.y, col = threadIdx.x;
     if (t >= (n_keep ? *n_keep : T)) return;
@@ -260,14 +265,15 @@ __global__ void fetch_listed_rows_kernel(const int32_t* list, const float4* src,
         dst[r * n4 + c] = src[r * n4 + c];
 }
 
-__global__ void rebase_ptrs_kernel(unsigned long long* ptr, const int32_t* n, unsigned long long base, long long bytes) {
+__global__ void rebase_ptrs_kernel(unsigned long long* ptr, const int32_t* n, unsigned long long base,
+                                   long long bytes) {
     const int k = threadIdx.x;
     if (k < *n) ptr[k] = base + (unsigned long long) k * (unsigned long long) bytes;
 }
 
 __global__ void hit_plan_kernel(const int32_t* __restrict__ ids, int n, int k, const int32_t* __restrict__ res,
-                                int n_expert, const unsigned long long* __restrict__ slot_ptr, int32_t* __restrict__ plan,
-                                int cap, int ptr_off) {
+                                int n_expert, const unsigned long long* __restrict__ slot_ptr,
+                                int32_t* __restrict__ plan, int cap, int ptr_off) {
     hit_plan_block(ids, n, k, res, n_expert, slot_ptr, plan, cap, ptr_off);
 }
 
@@ -283,7 +289,8 @@ template <typename U>
 __global__ void gather_rows_kernel(const U* __restrict__ src, long long row_units, const int32_t* __restrict__ ids,
                                    long long n, U* __restrict__ dst) {
     const long long total = n * row_units;
-    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total; i += (long long) gridDim.x * blockDim.x) {
+    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total;
+         i += (long long) gridDim.x * blockDim.x) {
         const long long r = i / row_units, o = i - r * row_units;
         dst[i] = src[(long long) ids[r] * row_units + o];
     }
@@ -314,7 +321,8 @@ __global__ void row_top_prob_kernel(const float* __restrict__ logits, int n_voca
 
 __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t stride, const int32_t* __restrict__ ids,
                                   const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,
-                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p) {
+                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs,
+                                  float* out_p) {
     const int row = *row_dev;
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < stride; i += (int64_t) gridDim.x * blockDim.x)
         R_dst[i] = R_src[(size_t) row * stride + i];
@@ -326,11 +334,15 @@ __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t strid
     }
 }
 
-}  // namespace
+}   // namespace
 
-void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
+void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap,
+                 void* stream) {
     if (cap <= 0) return;
-    if (blob_bytes % 16 != 0) { std::fprintf(stderr, "fetch_blobs: blob size must be a multiple of 16\n"); std::exit(1); }
+    if (blob_bytes % 16 != 0) {
+        std::fprintf(stderr, "fetch_blobs: blob size must be a multiple of 16\n");
+        std::exit(1);
+    }
     fetch_blobs_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16));
     check("fetch_blobs");
 }
@@ -362,7 +374,7 @@ void verify_hit_plan(const int32_t* ids, int n, int k, const int32_t* res, int n
         std::exit(1);
     }
     hit_plan_kernel<<<1, kHitPlanMax, 0, (cudaStream_t) stream>>>(ids, n, k, res, n_expert, slot_ptr, plan, (int) cap,
-                                                                   (int) ptr_off);
+                                                                  (int) ptr_off);
     check("verify_hit_plan");
 }
 
@@ -376,7 +388,7 @@ __global__ void copy_row_to_first_kernel(const int32_t* __restrict__ row_dev, fl
     for (int64_t i = i0; i < b_n; i += st) b[i] = b[row * b_n + i];
     for (int64_t i = i0; i < c_n; i += st) c[i] = c[row * c_n + i];
 }
-}  // namespace
+}   // namespace
 
 void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,
                        void* stream) {
@@ -394,11 +406,15 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
 void gather_rows(const uint8_t* src, int64_t row_bytes, const int32_t* ids, int64_t n, uint8_t* dst, void* stream) {
     if (n <= 0) return;
     if (row_bytes % 16 == 0)
-        gather_rows_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>((const uint4*) src, row_bytes / 16, ids, n, (uint4*) dst);
+        gather_rows_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>((const uint4*) src, row_bytes / 16, ids, n,
+                                                                      (uint4*) dst);
     else if (row_bytes % 4 == 0)   // e.g. Q6_K rows of 2,560 values: 2,100 bytes
         gather_rows_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>((const uint32_t*) src, row_bytes / 4, ids, n,
                                                                       (uint32_t*) dst);
-    else { std::fprintf(stderr, "gather_rows: row size must be a multiple of 4\n"); std::exit(1); }
+    else {
+        std::fprintf(stderr, "gather_rows: row size must be a multiple of 4\n");
+        std::exit(1);
+    }
     check("gather_rows");
 }
 
@@ -418,7 +434,10 @@ constexpr int kArgMaxBlocks = 128, kArgThreads = 256, kTopBlocks = 8;
 
 // the larger value, on equality the lower index: sampler_greedy_kernel's order
 __device__ __forceinline__ void arg_take(float ov, int oi, float& bv, int& bi) {
-    if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+    if (ov > bv || (ov == bv && oi < bi)) {
+        bv = ov;
+        bi = oi;
+    }
 }
 
 // a block's (value, index) pick, in thread 0; `none` is the index of no candidate
@@ -431,7 +450,10 @@ __device__ __forceinline__ void arg_block(float& bv, int& bi, int none) {
         arg_take(ov, oi, bv, bi);
     }
     const int warp = (int) (threadIdx.x >> 5), lane = (int) (threadIdx.x & 31);
-    if (lane == 0) { sv[warp] = bv; si[warp] = bi; }
+    if (lane == 0) {
+        sv[warp] = bv;
+        si[warp] = bi;
+    }
     __syncthreads();
     if (warp == 0) {
         const int nw = (int) (blockDim.x >> 5);
@@ -469,7 +491,10 @@ __global__ void argmax_rows_kernel(const float* __restrict__ logits, int n, int 
     int bad = 0;   // a NaN or an infinity: the exponent's bits all ones (a test fast math cannot fold away)
     for (int v = lo + (int) threadIdx.x; v < hi; v += (int) blockDim.x) {
         const float s = l[v];
-        if (s > bv) { bv = s; bi = v; }
+        if (s > bv) {
+            bv = s;
+            bi = v;
+        }
         bad |= (__float_as_uint(s) & 0x7f800000u) == 0x7f800000u;
     }
     arg_block(bv, bi, n);
@@ -524,8 +549,9 @@ struct TopRow {
 };
 
 // grid (kTopBlocks, rows), 1024 / kTopBlocks threads: thread j of block b is row_top_prob's thread b * blockDim + j
-__global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int n_vocab, const int32_t* __restrict__ ids,
-                                          float* __restrict__ probs, TopRow* __restrict__ rows) {
+__global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int n_vocab,
+                                          const int32_t* __restrict__ ids, float* __restrict__ probs,
+                                          TopRow* __restrict__ rows) {
     const int row = (int) blockIdx.y;
     float* parts = rows[row].parts;
     const float* l = logits + (size_t) row * n_vocab;
@@ -548,7 +574,7 @@ __global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int 
     rows[row].counter = 0;
 }
 
-}  // namespace
+}   // namespace
 
 uint64_t argmax_rows_scratch_bytes(int n_rows) { return (uint64_t) n_rows * sizeof(ArgRow); }
 
@@ -594,10 +620,11 @@ __global__ void window_ids_kernel(int32_t* steps, int window, int32_t* ids, long
     __syncthreads();
     if (blockIdx.x == 0 && threadIdx.x == 0) st[3] = width;
 }
-}  // namespace
+}   // namespace
 
 void window_ids(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_stride, void* stream) {
-    window_ids_kernel<<<dim3(8, (unsigned) n), 256, 0, (cudaStream_t) stream>>>(steps, window, ids, (long long) ids_stride);
+    window_ids_kernel<<<dim3(8, (unsigned) n), 256, 0, (cudaStream_t) stream>>>(steps, window, ids,
+                                                                                (long long) ids_stride);
     check("window_ids");
 }
 
@@ -615,7 +642,7 @@ void gdn_conv_l2_multi(const float* history, const float* qkv, const float* conv
 
 void gdn_conv_commit(float* history, const float* qkv, int channels, const int32_t* n_keep, void* stream) {
     gdn_conv_commit_kernel<<<(unsigned) ((channels + 255) / 256), 256, 0, (cudaStream_t) stream>>>(history, qkv,
-                                                                                                 channels, n_keep);
+                                                                                                   channels, n_keep);
     check("gdn_conv_commit");
 }
 
@@ -662,7 +689,7 @@ __global__ void wait_flag_ge_kernel(const volatile uint32_t* flag, uint32_t valu
     while (*flag < value) __nanosleep(100);
     __threadfence_system();
 }
-}  // namespace
+}   // namespace
 
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream) {
     wait_flag_ge_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value);
@@ -675,7 +702,7 @@ __global__ void gpu_stamp_kernel(unsigned long long* dst) {
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
     *dst = t;
 }
-}  // namespace
+}   // namespace
 
 void gpu_stamp(unsigned long long* dst, void* stream) {
     gpu_stamp_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(dst);
@@ -703,4 +730,4 @@ void copy_indexed(float* dst, const float* src, int64_t stride, const int32_t* i
     check("copy_indexed");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

@@ -40,7 +40,10 @@ namespace mmq = lamina::prefill::mmq;
 namespace {
 
 void ck(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 // valid synthetic weights: random bytes with each block's leading f16 scale (every format here starts with one)
@@ -72,13 +75,21 @@ double run_case(const Case& c, int R, std::mt19937& rng, float* ms_out) {
     std::vector<float> x((size_t) T * c.cols);
     std::normal_distribution<float> nd(0.f, 1.f);
     std::uniform_real_distribution<float> mag(0.1f, 10.f);
-    for (int t = 0; t < T; ++t) { const float m = mag(rng); for (int64_t k = 0; k < c.cols; ++k) x[(size_t) t * c.cols + k] = nd(rng) * m; }
+    for (int t = 0; t < T; ++t) {
+        const float m = mag(rng);
+        for (int64_t k = 0; k < c.cols; ++k) x[(size_t) t * c.cols + k] = nd(rng) * m;
+    }
     std::vector<int32_t> bounds(E + 1);
     for (int e = 0; e <= E; ++e) bounds[e] = e * R;
 
-    uint8_t* dw; float *dx, *dd; void* dq; int32_t *dids, *db;
-    ck(cudaMalloc(&dw, w.size()), "w"); ck(cudaMemcpy(dw, w.data(), w.size(), cudaMemcpyHostToDevice), "w");
-    ck(cudaMalloc(&dx, x.size() * 4), "x"); ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
+    uint8_t* dw;
+    float *dx, *dd;
+    void* dq;
+    int32_t *dids, *db;
+    ck(cudaMalloc(&dw, w.size()), "w");
+    ck(cudaMemcpy(dw, w.data(), w.size(), cudaMemcpyHostToDevice), "w");
+    ck(cudaMalloc(&dx, x.size() * 4), "x");
+    ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
     ck(cudaMalloc(&dq, mmq::q8_bytes(T, c.cols)), "xq");
     ck(cudaMalloc(&dd, (size_t) T * c.rows * 4), "dst");
     const int64_t ids_rows = mmq::ids_table_rows(T);
@@ -89,25 +100,44 @@ double run_case(const Case& c, int R, std::mt19937& rng, float* ms_out) {
     mmq::quantize(dx, nullptr, dq, c.t, c.cols, c.cols, T, nullptr);
     mmq::Context ctx;
     mmq::Product p;
-    p.w = dw; p.type = c.t; p.w_rows = c.rows; p.w_cols = c.cols; p.expert_bytes = per; p.n = E;
-    p.xq = dq; p.bounds = db; p.ids = dids; p.ids_rows = ids_rows; p.total_rows = T; p.max_rows = R;
-    p.dst = dd; p.ld_dst = c.rows;
+    p.w = dw;
+    p.type = c.t;
+    p.w_rows = c.rows;
+    p.w_cols = c.cols;
+    p.expert_bytes = per;
+    p.n = E;
+    p.xq = dq;
+    p.bounds = db;
+    p.ids = dids;
+    p.ids_rows = ids_rows;
+    p.total_rows = T;
+    p.max_rows = R;
+    p.dst = dd;
+    p.ld_dst = c.rows;
     cudaEvent_t e0, e1;
-    cudaEventCreate(&e0); cudaEventCreate(&e1);
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
     std::vector<float> ts;
     for (int i = 0; i < 28; ++i) {
         cudaEventRecord(e0);
         ctx.run(p, nullptr);
         cudaEventRecord(e1);
         ck(cudaEventSynchronize(e1), "run");
-        float ms; cudaEventElapsedTime(&ms, e0, e1);
+        float ms;
+        cudaEventElapsedTime(&ms, e0, e1);
         if (i >= 3) ts.push_back(ms);
     }
     std::sort(ts.begin(), ts.end());
     const float ms = ts[ts.size() / 2];
     if (ms_out) *ms_out = ms;
-    cudaFree(dw); cudaFree(dx); cudaFree(dq); cudaFree(dd); cudaFree(dids); cudaFree(db);
-    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    cudaFree(dw);
+    cudaFree(dx);
+    cudaFree(dq);
+    cudaFree(dd);
+    cudaFree(dids);
+    cudaFree(db);
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
     return 2.0 * T * (double) c.rows * c.cols / (ms * 1e9);
 }
 
@@ -140,7 +170,10 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
         seen.push_back(layer);
         layers.push_back(rows);
     }
-    if (layers.empty()) { std::fprintf(stderr, "no layers of runner %d in %s\n", remote, path); return 1; }
+    if (layers.empty()) {
+        std::fprintf(stderr, "no layers of runner %d in %s\n", remote, path);
+        return 1;
+    }
     std::mt19937 rng(7);
     constexpr int64_t N = 2560, FF2 = 1280, FF = 640, RMAX = 8192, IDS = mmq::ids_table_rows(RMAX);
     const size_t gub = mmq::matrix_bytes(gt, FF2, N), db = mmq::matrix_bytes(dt, N, FF);
@@ -148,12 +181,20 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     std::vector<float> x((size_t) RMAX * N);
     std::normal_distribution<float> nd(0.f, 1.f);
     for (auto& v : x) v = nd(rng);
-    uint8_t *dwg, *dwd; float *dx, *dgu, *dd; void *dq, *dqh; int32_t *dids, *db_dev;
-    ck(cudaMalloc(&dwg, wg.size()), "w"); ck(cudaMemcpy(dwg, wg.data(), wg.size(), cudaMemcpyHostToDevice), "w");
-    ck(cudaMalloc(&dwd, wd.size()), "w"); ck(cudaMemcpy(dwd, wd.data(), wd.size(), cudaMemcpyHostToDevice), "w");
-    ck(cudaMalloc(&dx, x.size() * 4), "x"); ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
-    ck(cudaMalloc(&dq, mmq::q8_bytes(RMAX, N)), "xq"); ck(cudaMalloc(&dqh, mmq::q8_bytes(RMAX, FF)), "hq");
-    ck(cudaMalloc(&dgu, (size_t) RMAX * FF2 * 4), "gu"); ck(cudaMalloc(&dd, (size_t) RMAX * N * 4), "d");
+    uint8_t *dwg, *dwd;
+    float *dx, *dgu, *dd;
+    void *dq, *dqh;
+    int32_t *dids, *db_dev;
+    ck(cudaMalloc(&dwg, wg.size()), "w");
+    ck(cudaMemcpy(dwg, wg.data(), wg.size(), cudaMemcpyHostToDevice), "w");
+    ck(cudaMalloc(&dwd, wd.size()), "w");
+    ck(cudaMemcpy(dwd, wd.data(), wd.size(), cudaMemcpyHostToDevice), "w");
+    ck(cudaMalloc(&dx, x.size() * 4), "x");
+    ck(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
+    ck(cudaMalloc(&dq, mmq::q8_bytes(RMAX, N)), "xq");
+    ck(cudaMalloc(&dqh, mmq::q8_bytes(RMAX, FF)), "hq");
+    ck(cudaMalloc(&dgu, (size_t) RMAX * FF2 * 4), "gu");
+    ck(cudaMalloc(&dd, (size_t) RMAX * N * 4), "d");
     ck(cudaMalloc(&dids, (size_t) IDS * 4), "ids");
     mmq::iota(dids, IDS, nullptr);
     mmq::quantize(dx, nullptr, dq, gt, N, N, RMAX, nullptr);
@@ -162,7 +203,9 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     // the grouped kernel: 16 blobs [gate | up | down] from the same weights, the rows as q8_1 blocks, a plan per batch
     const lamina::kernels::NativeExpertLayout L = lamina::kernels::native_expert_layout((int) gt, (int) dt, N, FF);
     const size_t stride = (L.bytes + 255) & ~(size_t) 255;
-    uint8_t* dblob; void *dx81, *dscr; int32_t* dgn;
+    uint8_t* dblob;
+    void *dx81, *dscr;
+    int32_t* dgn;
     ck(cudaMalloc(&dblob, 16 * stride), "blobs");
     for (int e = 0; e < 16; ++e) {
         ck(cudaMemcpy(dblob + e * stride, wg.data() + e * gub, gub, cudaMemcpyHostToDevice), "blob");
@@ -181,7 +224,11 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     for (int i = 0; i <= 16; ++i) h_n[i] = i;
     ck(cudaMemcpy(dgn, h_n.data(), 17 * 4, cudaMemcpyHostToDevice), "n");
     // every batch's bounds, uploaded once: [order][layer][batch] -> offset in one device array
-    struct B { int n; int64_t rows, max_rows; size_t at; };
+    struct B {
+        int n;
+        int64_t rows, max_rows;
+        size_t at;
+    };
     std::vector<int32_t> h_bounds;
     std::vector<std::vector<B>> plan(2);
     for (int order = 0; order < 2; ++order)
@@ -202,14 +249,19 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     ck(cudaMalloc(&db_dev, h_bounds.size() * 4), "bounds");
     ck(cudaMemcpy(db_dev, h_bounds.data(), h_bounds.size() * 4, cudaMemcpyHostToDevice), "bounds");
     cudaEvent_t e0, e1;
-    cudaEventCreate(&e0); cudaEventCreate(&e1);
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
     cudaDeviceProp prop{};
     cudaGetDeviceProperties(&prop, 0);
     int64_t total = 0, n_exp = 0;
-    for (const auto& l : layers) { n_exp += (int64_t) l.size(); for (int r : l) total += r; }
-    std::printf("mmq_expert_bench --dump on %s: runner %d, %zu layers, %lld experts, %lld rows (%.1f an expert), %s / %s\n",
-                prop.name, remote, layers.size(), (long long) n_exp, (long long) total, (double) total / (double) n_exp,
-                ggml_type_name(gt), ggml_type_name(dt));
+    for (const auto& l : layers) {
+        n_exp += (int64_t) l.size();
+        for (int r : l) total += r;
+    }
+    std::printf(
+        "mmq_expert_bench --dump on %s: runner %d, %zu layers, %lld experts, %lld rows (%.1f an expert), %s / %s\n",
+        prop.name, remote, layers.size(), (long long) n_exp, (long long) total, (double) total / (double) n_exp,
+        ggml_type_name(gt), ggml_type_name(dt));
     double ms_of[4] = {0, 0, 0, 0};
     for (int arm = 0; arm < 4; ++arm) {
         const int order = arm % 2;
@@ -227,18 +279,35 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
                     continue;
                 }
                 mmq::Product p;
-                p.w = dwg; p.type = gt; p.w_rows = FF2; p.w_cols = N; p.expert_bytes = gub; p.n = b.n;
-                p.xq = dq; p.bounds = db_dev + b.at; p.ids = dids; p.ids_rows = IDS; p.total_rows = b.rows;
+                p.w = dwg;
+                p.type = gt;
+                p.w_rows = FF2;
+                p.w_cols = N;
+                p.expert_bytes = gub;
+                p.n = b.n;
+                p.xq = dq;
+                p.bounds = db_dev + b.at;
+                p.ids = dids;
+                p.ids_rows = IDS;
+                p.total_rows = b.rows;
                 p.max_rows = b.max_rows;
-                p.dst = dgu; p.ld_dst = FF2;
+                p.dst = dgu;
+                p.ld_dst = FF2;
                 ctx.run(p, nullptr);
-                p.w = dwd; p.type = dt; p.w_rows = N; p.w_cols = FF; p.expert_bytes = db; p.xq = dqh;
-                p.dst = dd; p.ld_dst = N;
+                p.w = dwd;
+                p.type = dt;
+                p.w_rows = N;
+                p.w_cols = FF;
+                p.expert_bytes = db;
+                p.xq = dqh;
+                p.dst = dd;
+                p.ld_dst = N;
                 ctx.run(p, nullptr);
             }
             cudaEventRecord(e1);
             ck(cudaEventSynchronize(e1), "run");
-            float ms; cudaEventElapsedTime(&ms, e0, e1);
+            float ms;
+            cudaEventElapsedTime(&ms, e0, e1);
             if (it >= 3) ts.push_back(ms);
         }
         std::sort(ts.begin(), ts.end());
@@ -251,11 +320,12 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     return 0;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc > 2 && std::strcmp(argv[1], "--dump") == 0)
-        return run_dump(argv[2], argc > 3 ? std::atoi(argv[3]) : 0, argc > 4 ? (ggml_type) std::atoi(argv[4]) : GGML_TYPE_Q4_K,
+        return run_dump(argv[2], argc > 3 ? std::atoi(argv[3]) : 0,
+                        argc > 4 ? (ggml_type) std::atoi(argv[4]) : GGML_TYPE_Q4_K,
                         argc > 5 ? (ggml_type) std::atoi(argv[5]) : GGML_TYPE_Q5_1);
     std::vector<int> Rs;
     for (int i = 1; i < argc; ++i) Rs.push_back(std::atoi(argv[i]));
@@ -263,11 +333,12 @@ int main(int argc, char** argv) {
     cudaDeviceProp prop{};
     cudaGetDeviceProperties(&prop, 0);
     std::printf("mmq_expert_bench on %s: 16 experts a launch, medians of 25\n", prop.name);
-    const Case cases[] = {{"q4_K gate/up", GGML_TYPE_Q4_K, 1280, 2560},      {"q5_K gate/up", GGML_TYPE_Q5_K, 1280, 2560},
-                          {"q5_1 down", GGML_TYPE_Q5_1, 2560, 640},          {"q8_0 down", GGML_TYPE_Q8_0, 2560, 640},
-                          {"iq3_xxs gate/up", GGML_TYPE_IQ3_XXS, 1280, 2560}, {"iq3_s gate/up", GGML_TYPE_IQ3_S, 1280, 2560},
-                          {"iq2_s gate/up", GGML_TYPE_IQ2_S, 1280, 2560},    {"iq4_xs gate/up", GGML_TYPE_IQ4_XS, 1280, 2560},
-                          {"iq4_nl down", GGML_TYPE_IQ4_NL, 2560, 640},      {"q2_0 down", GGML_TYPE_Q2_0, 2560, 640}};
+    const Case cases[] = {
+        {"q4_K gate/up", GGML_TYPE_Q4_K, 1280, 2560},       {"q5_K gate/up", GGML_TYPE_Q5_K, 1280, 2560},
+        {"q5_1 down", GGML_TYPE_Q5_1, 2560, 640},           {"q8_0 down", GGML_TYPE_Q8_0, 2560, 640},
+        {"iq3_xxs gate/up", GGML_TYPE_IQ3_XXS, 1280, 2560}, {"iq3_s gate/up", GGML_TYPE_IQ3_S, 1280, 2560},
+        {"iq2_s gate/up", GGML_TYPE_IQ2_S, 1280, 2560},     {"iq4_xs gate/up", GGML_TYPE_IQ4_XS, 1280, 2560},
+        {"iq4_nl down", GGML_TYPE_IQ4_NL, 2560, 640},       {"q2_0 down", GGML_TYPE_Q2_0, 2560, 640}};
     std::mt19937 rng(7);
     for (int R : Rs)
         for (const Case& c : cases) {

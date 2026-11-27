@@ -43,7 +43,7 @@ bool parse_enc(const std::string& line, std::string& img, std::string& out) {
     return !img.empty() && !out.empty();
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     using lamina::vision::FlashAttention;
@@ -52,7 +52,10 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
-            if (i + 1 >= argc) { std::fprintf(stderr, "%s needs a value\n", a.c_str()); std::exit(2); }
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "%s needs a value\n", a.c_str());
+                std::exit(2);
+            }
             return argv[++i];
         };
         if (a == "--mmproj") params.mmproj = next();
@@ -64,12 +67,17 @@ int main(int argc, char** argv) {
         else if (a == "--min-tokens") params.min_tokens = std::atoi(next().c_str());
         else if (a == "--q8") params.q8_fp16 = next() == "fp16";
         else if (a == "--lent") lent = true;
-        else if (a == "--flash-attn") params.flash_attention = next() == "off" ? FlashAttention::off : FlashAttention::on;
-        else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
+        else if (a == "--flash-attn")
+            params.flash_attention = next() == "off" ? FlashAttention::off : FlashAttention::on;
+        else {
+            std::fprintf(stderr, "unknown argument %s\n", a.c_str());
+            return 2;
+        }
     }
     if (params.mmproj.empty()) {
-        std::fprintf(stderr, "usage: vision_rows --mmproj <mmproj.gguf> [--gpu [--device N]] [--threads N] [--max-tokens N] "
-                             "[--min-tokens N] [--flash-attn on|off] [--q8 mmq|fp16]\n");
+        std::fprintf(stderr,
+                     "usage: vision_rows --mmproj <mmproj.gguf> [--gpu [--device N]] [--threads N] [--max-tokens N] "
+                     "[--min-tokens N] [--flash-attn on|off] [--q8 mmq|fp16]\n");
         return 2;
     }
     std::string err;
@@ -80,7 +88,8 @@ int main(int argc, char** argv) {
             std::printf("ERR no memory to lend the encoder (%s)\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "vision_rows: %.0f MiB lent to the encoder\n", (double) params.gpu_arena_bytes / 1048576.0);
+        std::fprintf(stderr, "vision_rows: %.0f MiB lent to the encoder\n",
+                     (double) params.gpu_arena_bytes / 1048576.0);
     }
     const auto load_t0 = std::chrono::steady_clock::now();
     std::unique_ptr<lamina::vision::Encoder> enc = lamina::vision::open_encoder(params, err);
@@ -113,7 +122,11 @@ int main(int argc, char** argv) {
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
         if (line == "QUIT") break;
         std::string img, out;
-        if (!parse_enc(line, img, out)) { std::printf("ERR expected: ENC <image> <output>\n"); std::fflush(stdout); continue; }
+        if (!parse_enc(line, img, out)) {
+            std::printf("ERR expected: ENC <image> <output>\n");
+            std::fflush(stdout);
+            continue;
+        }
         const auto t0 = std::chrono::steady_clock::now();
         lamina::vision::Rgb picture;
         lamina::vision::Rows rows;

@@ -27,4 +27,4 @@ private:
     std::thread thread_;
 };
 
-}  // namespace lamina
+}   // namespace lamina

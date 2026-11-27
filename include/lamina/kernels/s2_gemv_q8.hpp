@@ -16,7 +16,7 @@ namespace lamina::kernels {
 // `codes` n_out * (n_in/4) bytes, one 2-bit code byte per quad
 // `scales` n_out * (n_in/64)
 // `y`     n_out floats
-void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, float* y, int64_t n_in,
-                int64_t n_out, int threads_per_row, void* stream);
+void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, float* y, int64_t n_in, int64_t n_out,
+                int threads_per_row, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

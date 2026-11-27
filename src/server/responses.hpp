@@ -40,8 +40,8 @@ inline constexpr std::string_view kEncryptedPrefix = "lamina.r1:";
 
 /// a request error in the Responses format: {"error": {"message", "type", "param", "code"}}
 struct ResponsesError : std::invalid_argument {
-    explicit ResponsesError(const std::string& message, std::string param = "", std::string code = "",
-                            int status = 400, std::string kind = "invalid_request_error");
+    explicit ResponsesError(const std::string& message, std::string param = "", std::string code = "", int status = 400,
+                            std::string kind = "invalid_request_error");
     std::string message;       ///< the whole text (what() ends at a NUL)
     std::string param, code;   ///< empty: None
     int status;
@@ -137,4 +137,4 @@ private:
 /// the non-streaming answer: the final response object (null events are heartbeats)
 json collect(const std::vector<json>& events);
 
-}  // namespace lamina::responses
+}   // namespace lamina::responses

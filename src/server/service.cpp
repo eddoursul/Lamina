@@ -1,12 +1,12 @@
 #include "service.hpp"
 
-#include "lamina/artifact/model_family.hpp"
-#include "log.hpp"
 #include "images.hpp"
 #include "keepawake.hpp"
+#include "lamina/artifact/model_family.hpp"
+#include "log.hpp"
 #include "telemetry.hpp"
+#include "unicode.hpp"   // code point classes and lower case (the loop check's words)
 #include "vision.hpp"
-#include "unicode.hpp"     // code point classes and lower case (the loop check's words)
 
 #include <algorithm>
 #include <cmath>
@@ -17,9 +17,7 @@
 
 namespace lamina {
 
-double now_s() {
-    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
-}
+double now_s() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
 
 double mono_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -65,7 +63,7 @@ const std::map<std::string, std::string> kEffortText = {
               "consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final "
               "answer."}};
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------------------------- helpers
 std::vector<std::string> stop_strings(const json& req) {
@@ -130,9 +128,14 @@ void check_request_sampling(json& req) {
         const json& rl = jget(req, "repeat_last_n");
         if (jget(req, "penalty_last_n").is_null() && is_int(rl) && rl.get<int64_t>() > 0) req["penalty_last_n"] = rl;
     }
-    const std::pair<const char*, bool> keys[] = {{"temperature", false},  {"top_p", false},           {"min_p", false},
-                                                 {"presence_penalty", false}, {"frequency_penalty", false},
-                                                 {"repetition_penalty", false}, {"top_k", true}, {"penalty_last_n", true},
+    const std::pair<const char*, bool> keys[] = {{"temperature", false},
+                                                 {"top_p", false},
+                                                 {"min_p", false},
+                                                 {"presence_penalty", false},
+                                                 {"frequency_penalty", false},
+                                                 {"repetition_penalty", false},
+                                                 {"top_k", true},
+                                                 {"penalty_last_n", true},
                                                  {"seed", true}};
     for (const auto& [key, integer] : keys) {
         const json value = jget(req, key);
@@ -150,7 +153,8 @@ void check_request_sampling(json& req) {
                 req[key] = (int64_t) num;
             } else {
                 bool int_text = !s.empty();
-                for (size_t i = (s[0] == '+' || s[0] == '-') ? 1 : 0; i < s.size(); ++i) int_text = int_text && std::isdigit((unsigned char) s[i]);
+                for (size_t i = (s[0] == '+' || s[0] == '-') ? 1 : 0; i < s.size(); ++i)
+                    int_text = int_text && std::isdigit((unsigned char) s[i]);
                 req[key] = int_text && whole ? json((int64_t) num) : json(num);
             }
             continue;
@@ -258,7 +262,8 @@ json model_card_sampling(const std::string& arch, bool thinking) {
     if (arch == "qwen35moe")
         return thinking ? json{{"temperature", 1.0}, {"top_p", 0.95}, {"top_k", 20}, {"presence_penalty", 1.5}}
                         : json{{"temperature", 0.7}, {"top_p", 0.8}, {"top_k", 20}, {"presence_penalty", 1.5}};
-    if (model_family_from_arch(arch) == ModelFamily::Inkling2)   // Inkling 2 Mini's: the plain distribution, of the 64 likeliest here
+    if (model_family_from_arch(arch) == ModelFamily::Inkling2)   // Inkling 2 Mini's: the plain
+                                                                 // distribution, of the 64 likeliest here
         return json{{"temperature", 1.0}, {"top_p", 1.0}, {"top_k", 64}};
     return json::object();
 }
@@ -289,9 +294,7 @@ double reasoning_repeat_coverage(const std::string& text) {
     // re.findall(r"\w+|[^\w\s]"): runs of word characters, else one character that is not whitespace
     std::vector<std::string> words;
     std::string cur;
-    auto word_char = [](uint32_t c) {
-        return c == '_' || (cp_class(c) & (kCpLetter | kCpNumber)) != 0;
-    };
+    auto word_char = [](uint32_t c) { return c == '_' || (cp_class(c) & (kCpLetter | kCpNumber)) != 0; };
     auto flush = [&] {
         if (!cur.empty()) words.push_back(std::move(cur));
         cur.clear();
@@ -362,8 +365,9 @@ std::optional<std::string> held_departure(const Tokenizer& tok, const Held& held
     size_t m = 0;
     while (m < lim && h[m] == ids[m]) ++m;
     if (m + 1 >= h.size() || (int64_t) m - reused < 256) return std::nullopt;
-    const std::string where = m >= plen ? std::to_string(m - plen) + " tokens into its reply of " + std::to_string(h.size() - plen)
-                                        : std::to_string(plen - m) + " before its end";
+    const std::string where =
+        m >= plen ? std::to_string(m - plen) + " tokens into its reply of " + std::to_string(h.size() - plen)
+                  : std::to_string(plen - m) + " before its end";
     auto pieces = [&](const std::vector<int32_t>& v, size_t from) {
         std::vector<std::string> out;
         for (size_t k = from; k < std::min(v.size(), from + 8); ++k) out.push_back(tok.decode({v[k]}));
@@ -379,7 +383,8 @@ std::optional<std::string> held_departure(const Tokenizer& tok, const Held& held
 int64_t prompt_tokens_seen(int64_t prompt_tokens, const json& last) {
     const json& read = jget(last, "prompt_read");
     if (read.is_null() || jstr(last, "finish") != "cancel") return prompt_tokens;
-    return std::min(prompt_tokens, (is_int(jget(last, "reused")) ? last["reused"].get<int64_t>() : 0) + read.get<int64_t>());
+    return std::min(prompt_tokens,
+                    (is_int(jget(last, "reused")) ? last["reused"].get<int64_t>() : 0) + read.get<int64_t>());
 }
 
 json request_timings(int64_t prompt_tokens, int64_t generated, const json& last) {
@@ -390,14 +395,20 @@ json request_timings(int64_t prompt_tokens, int64_t generated, const json& last)
     const int64_t prompt_n = std::max<int64_t>(0, prompt_tokens - cache_n);
     const double prompt_ms = last["prompt_ms"].get<double>();
     const double decode_ms = jget(last, "decode_ms").is_number() ? last["decode_ms"].get<double>() : 0.0;
-    const int64_t decoded = is_int(jget(last, "generated")) && last["generated"].get<int64_t>() ? last["generated"].get<int64_t>()
-                                                                                                 : generated;
-    json t = {{"cache_n", cache_n}, {"prompt_n", prompt_n}, {"prompt_ms", py_round(prompt_ms, 1)},
+    const int64_t decoded = is_int(jget(last, "generated")) && last["generated"].get<int64_t>()
+                                ? last["generated"].get<int64_t>()
+                                : generated;
+    json t = {{"cache_n", cache_n},
+              {"prompt_n", prompt_n},
+              {"prompt_ms", py_round(prompt_ms, 1)},
               {"prompt_per_token_ms", prompt_n ? json(py_round(prompt_ms / (double) prompt_n, 3)) : json(nullptr)},
-              {"prompt_per_second", prompt_n && prompt_ms > 0 ? json(py_round((double) prompt_n / (prompt_ms / 1000), 1)) : json(nullptr)},
-              {"predicted_n", generated}, {"predicted_ms", py_round(decode_ms, 1)},
+              {"prompt_per_second",
+               prompt_n && prompt_ms > 0 ? json(py_round((double) prompt_n / (prompt_ms / 1000), 1)) : json(nullptr)},
+              {"predicted_n", generated},
+              {"predicted_ms", py_round(decode_ms, 1)},
               {"predicted_per_token_ms", decoded ? json(py_round(decode_ms / (double) decoded, 3)) : json(nullptr)},
-              {"predicted_per_second", decoded && decode_ms > 0 ? json(py_round((double) decoded / (decode_ms / 1000), 1)) : json(nullptr)}};
+              {"predicted_per_second",
+               decoded && decode_ms > 0 ? json(py_round((double) decoded / (decode_ms / 1000), 1)) : json(nullptr)}};
     if (!jget(last, "drafts_offered").is_null()) {
         t["draft_n"] = last["drafts_offered"];
         t["draft_n_accepted"] = jget(last, "drafts_accepted");
@@ -414,8 +425,8 @@ json request_stats(const std::vector<json>& segments) {
         if (segments.front().contains(key)) result[key] = segments.front()[key];
         else result.erase(key);
     }
-    for (const char* key : {"prompt_ms", "decode_ms", "generated", "drafts_offered", "drafts_accepted", "hits", "lookups",
-                            "offloaded", "ram_blobs", "file_blobs", "file_mb", "experts_streamed"}) {
+    for (const char* key : {"prompt_ms", "decode_ms", "generated", "drafts_offered", "drafts_accepted", "hits",
+                            "lookups", "offloaded", "ram_blobs", "file_blobs", "file_mb", "experts_streamed"}) {
         bool any = false, is_float = false;
         double sum = 0;
         for (const auto& s : segments) {
@@ -463,8 +474,9 @@ Service::Service(std::shared_ptr<Engine> engine_, const Tokenizer& tok_, std::sh
     prompts = std::make_unique<PromptEncoder>(tok);
     started_at = now_s();
     instance_id = random_hex(32);
-    totals = {{"since", started_at}, {"requests", 0}, {"prompt_tokens", 0}, {"reused", 0}, {"output_tokens", 0},
-              {"prompt_ms", 0.0}, {"decode_ms", 0.0}, {"drafts_offered", 0}, {"drafts_accepted", 0}};
+    totals = {{"since", started_at}, {"requests", 0},       {"prompt_tokens", 0},
+              {"reused", 0},         {"output_tokens", 0},  {"prompt_ms", 0.0},
+              {"decode_ms", 0.0},    {"drafts_offered", 0}, {"drafts_accepted", 0}};
     host_names = {"localhost", "127.0.0.1", "::1"};
 }
 
@@ -509,7 +521,8 @@ int64_t Service::begin_drain() {
 
 int64_t Service::wait_for_drain(double timeout_s) {
     std::unique_lock<std::mutex> lk(status_mu);
-    admission_changed.wait_for(lk, std::chrono::duration<double>(std::max(0.0, timeout_s)), [&] { return admission_reserved == 0; });
+    admission_changed.wait_for(lk, std::chrono::duration<double>(std::max(0.0, timeout_s)),
+                               [&] { return admission_reserved == 0; });
     return admission_reserved;
 }
 
@@ -529,7 +542,8 @@ void Service::set_aliases(const json& value) {
     std::vector<std::string> items;
     if (value.is_string()) {
         items = split(value.get<std::string>(), ",");
-    } else if (value.is_array() && std::all_of(value.begin(), value.end(), [](const json& x) { return x.is_string(); })) {
+    } else if (value.is_array() &&
+               std::all_of(value.begin(), value.end(), [](const json& x) { return x.is_string(); })) {
         for (const auto& x : value) items.push_back(x.get<std::string>());
     } else if (!value.is_null()) {
         throw std::invalid_argument("aliases=" + py_repr_value(value) + ": expected a list of model names");
@@ -551,7 +565,8 @@ json Service::lora_sync() {
     if (list != lora_list_) {
         lora_list_ = list;
         lora_scales_.clear();
-        for (const auto& a : list) lora_scales_.push_back(jget(a, "scale").is_number() ? a["scale"].get<double>() : 0.0);
+        for (const auto& a : list)
+            lora_scales_.push_back(jget(a, "scale").is_number() ? a["scale"].get<double>() : 0.0);
     }
     return lora_list_;
 }
@@ -573,15 +588,18 @@ std::vector<double> lora_entries(const json& v, size_t n, const std::string& wha
     }
     return out;
 }
-}  // namespace
+}   // namespace
 
 json Service::lora_adapters() {
     std::lock_guard<std::mutex> lk(lora_mu_);
     const json list = lora_sync();
     json out = json::array();
     for (size_t i = 0; i < list.size(); ++i)
-        out.push_back({{"id", (int64_t) i}, {"path", jget(list[i], "path")}, {"scale", lora_scales_[i]},
-                       {"task_name", jstr(list[i], "task_name")}, {"prompt_prefix", jstr(list[i], "prompt_prefix")}});
+        out.push_back({{"id", (int64_t) i},
+                       {"path", jget(list[i], "path")},
+                       {"scale", lora_scales_[i]},
+                       {"task_name", jstr(list[i], "task_name")},
+                       {"prompt_prefix", jstr(list[i], "prompt_prefix")}});
     return out;
 }
 
@@ -616,8 +634,9 @@ std::vector<double> Service::lora_for(const json& req) {
 void Service::set_lora_models(const json& value) {
     json out = json::object();
     if (!value.is_null()) {
-        if (!value.is_object()) throw std::invalid_argument("lora_models: an object of model names, each a list of "
-                                                            "{\"id\": N, \"scale\": X}");
+        if (!value.is_object())
+            throw std::invalid_argument("lora_models: an object of model names, each a list of "
+                                        "{\"id\": N, \"scale\": X}");
         for (auto it = value.begin(); it != value.end(); ++it) {
             const std::string name(strip(it.key()));
             if (name.empty() || name == model)
@@ -720,9 +739,11 @@ std::optional<int64_t> Service::reasoning_budget(const json& req) const {
         std::lock_guard<std::mutex> lk(live_mu_);
         value = reasoning_budget_tokens_;
     }
-    if (value.is_number_float() && value.get<double>() == std::floor(value.get<double>())) value = (int64_t) value.get<double>();
+    if (value.is_number_float() && value.get<double>() == std::floor(value.get<double>()))
+        value = (int64_t) value.get<double>();
     if (!is_int(value))
-        throw RequestError("reasoning_budget_tokens=" + py_repr_value(value) + ": expected a whole number of tokens (0: no budget)");
+        throw RequestError("reasoning_budget_tokens=" + py_repr_value(value) +
+                           ": expected a whole number of tokens (0: no budget)");
     const int64_t v = value.get<int64_t>();
     return v > 0 ? std::optional<int64_t>(v) : std::nullopt;
 }
@@ -734,7 +755,8 @@ std::optional<int64_t> Service::free_vram_mib() {
 
 std::string Service::say_died(const std::exception& e) {
     const std::string note = engine->death_note();
-    const std::string line = "[lamina] " + std::string(e.what()) + ". " + note + " The next request starts the engine again.";
+    const std::string line =
+        "[lamina] " + std::string(e.what()) + ". " + note + " The next request starts the engine again.";
     say(line);
     return line;
 }
@@ -750,7 +772,8 @@ void Service::ensure_loaded() {
         if (before_load.is_string()) {
             cmd = before_load.get<std::string>();
         } else {
-            for (const auto& x : before_load) cmd += (cmd.empty() ? "" : " ") + (x.is_string() ? x.get<std::string>() : py_dumps(x));
+            for (const auto& x : before_load)
+                cmd += (cmd.empty() ? "" : " ") + (x.is_string() ? x.get<std::string>() : py_dumps(x));
         }
         say("[lamina] before loading: " + cmd);
         std::string why;
@@ -760,16 +783,20 @@ void Service::ensure_loaded() {
             // a failing hook may mean the GPU was not given back; the free VRAM decides (min_free_vram_mib below),
             // "strict" always refuses, "ignore" always loads
             if (before_load_strict && !before_load_ignore_failure) {
-                say("[lamina] the before_load command failed (" + why + "); the model stays unloaded and this request "
+                say("[lamina] the before_load command failed (" + why +
+                    "); the model stays unloaded and this request "
                     "is answered 503 - try again (before_load_strict)");
-                throw GpuBusy("the before_load command failed (" + why + "): the GPU was not given back, so the model "
-                              "was not loaded; try again in a moment", 15);
+                throw GpuBusy("the before_load command failed (" + why +
+                                  "): the GPU was not given back, so the model "
+                                  "was not loaded; try again in a moment",
+                              15);
             }
             hook_failed = why;
             if (before_load_ignore_failure || !min_free_vram_mib) {
                 say("[lamina] the before_load command failed (" + why + "); loading anyway" +
-                    (before_load_ignore_failure ? "" : " (set min_free_vram_mib to have the free VRAM checked, or "
-                                                       "before_load_strict to refuse)"));
+                    (before_load_ignore_failure ? ""
+                                                : " (set min_free_vram_mib to have the free VRAM checked, or "
+                                                  "before_load_strict to refuse)"));
             } else {
                 say("[lamina] the before_load command failed (" + why + "); checking the free VRAM");
             }
@@ -785,14 +812,20 @@ void Service::ensure_loaded() {
         if (free && *free < min_free_vram_mib) {
             if (!hook_failed.empty() && !before_load_ignore_failure)
                 say("[lamina] the before_load command failed (" + hook_failed + ") and only " + std::to_string(*free) +
-                    " MiB of VRAM is free (the model needs " + std::to_string(min_free_vram_mib) + "): not loading; 503");
-            throw GpuBusy("the GPU is in use by another program: " + std::to_string(*free) + " MiB of VRAM free, the model "
-                          "needs " + std::to_string(min_free_vram_mib) + " (min_free_vram_mib) - it stays unloaded until "
-                          "that is free" + (hook_failed.empty() ? "" : "; the before_load command failed (" + hook_failed + ")"), 15);
+                    " MiB of VRAM is free (the model needs " + std::to_string(min_free_vram_mib) +
+                    "): not loading; 503");
+            throw GpuBusy("the GPU is in use by another program: " + std::to_string(*free) +
+                              " MiB of VRAM free, the model "
+                              "needs " +
+                              std::to_string(min_free_vram_mib) +
+                              " (min_free_vram_mib) - it stays unloaded until "
+                              "that is free" +
+                              (hook_failed.empty() ? "" : "; the before_load command failed (" + hook_failed + ")"),
+                          15);
         }
         if (!hook_failed.empty() && !before_load_ignore_failure)
-            say("[lamina] the before_load command failed (" + hook_failed + "), but " + std::to_string(free.value_or(0)) +
-                " MiB of VRAM is free: loading");
+            say("[lamina] the before_load command failed (" + hook_failed + "), but " +
+                std::to_string(free.value_or(0)) + " MiB of VRAM is free: loading");
     }
     bool vision_started = false;
     if (vision != nullptr && !vision->alive()) {
@@ -861,7 +894,8 @@ std::string Service::unload(std::optional<double> idle_for) {
     engine->unload();
     if (vision != nullptr) vision->unload();
     say(std::string("[lamina] model unloaded") +
-        (idle_for ? " after " + std::to_string((int) *idle_for) + " s idle" : "") + "; the next request loads it again");
+        (idle_for ? " after " + std::to_string((int) *idle_for) + " s idle" : "") +
+        "; the next request loads it again");
     return "unloaded";
 }
 
@@ -935,14 +969,16 @@ json Service::with_shared(const json& req0, const std::string& api) const {
     const json shared = this->shared();
     if (shared.empty() && effort.empty()) return req0;
     json req = req0;
-    if (shared.contains("max_tokens") && !truthy(jget(req, "max_tokens")) && !truthy(jget(req, "max_completion_tokens")))
+    if (shared.contains("max_tokens") && !truthy(jget(req, "max_tokens")) &&
+        !truthy(jget(req, "max_completion_tokens")))
         req["max_tokens"] = shared["max_tokens"];
     if (!effort.empty()) {
         if (api == "openai") {
             const json& ctk = jget(req, "chat_template_kwargs");
             const json& re = jget(req, "reasoning_effort");
             if ((re.is_null() || (re.is_string() && re.get_ref<const std::string&>().empty())) &&
-                !truthy(jget(req, "reasoning")) && !ctk.contains("enable_thinking") && !ctk.contains("reasoning_effort"))
+                !truthy(jget(req, "reasoning")) && !ctk.contains("enable_thinking") &&
+                !ctk.contains("reasoning_effort"))
                 req["reasoning_effort"] = effort;
         } else if (!truthy(jget(req, "thinking")) && !truthy(jget(req, "output_config"))) {
             if (effort == "none") req["thinking"] = {{"type", "disabled"}};
@@ -959,7 +995,8 @@ double Service::rate_of(const json& s, const std::deque<std::pair<double, int64_
         const auto& newest = rt.back();
         for (const auto& r : rt)
             if (now - r.first <= 2.0) {   // RATE_WINDOW_S
-                if (newest.first - r.first >= 0.25) return std::max(0.0, (double) (newest.second - r.second) / (newest.first - r.first));
+                if (newest.first - r.first >= 0.25)
+                    return std::max(0.0, (double) (newest.second - r.second) / (newest.first - r.first));
                 break;
             }
     }
@@ -985,8 +1022,7 @@ double Service::tok_s_mean() {
     };
     if (!live_reqs_.empty())
         for (const auto& [k, v] : live_reqs_) one(*v.first);
-    else
-        one(status);
+    else one(status);
     return sum;
 }
 
@@ -1006,12 +1042,23 @@ std::shared_ptr<json> Service::begin_request(const std::string& path, const json
     if (!api_monitor) return nullptr;
     const std::string raw = py_dumps(req, false, false, 2);
     const json& rf = jget(req, "response_format");
-    json record = {{"id", random_hex(12)}, {"path", path}, {"model", truthy(jget(req, "model")) ? req["model"] : json(model)},
-                   {"started_at", now_s()}, {"state", "queued"}, {"stream", truthy(jget(req, "stream"))},
+    json record = {{"id", random_hex(12)},
+                   {"path", path},
+                   {"model", truthy(jget(req, "model")) ? req["model"] : json(model)},
+                   {"started_at", now_s()},
+                   {"state", "queued"},
+                   {"stream", truthy(jget(req, "stream"))},
                    {"response_format", rf.is_object() ? jget(rf, "type") : json(nullptr)},
-                   {"input", raw.substr(0, std::min<size_t>(raw.size(), 262144))}, {"input_truncated", raw.size() > 262144},
-                   {"output", ""}, {"reasoning", ""}, {"output_truncated", false}, {"reasoning_truncated", false},
-                   {"queue_s", 0.0}, {"load_s", 0.0}, {"first_token_s", nullptr}, {"_clock", mono_s()}};
+                   {"input", raw.substr(0, std::min<size_t>(raw.size(), 262144))},
+                   {"input_truncated", raw.size() > 262144},
+                   {"output", ""},
+                   {"reasoning", ""},
+                   {"output_truncated", false},
+                   {"reasoning_truncated", false},
+                   {"queue_s", 0.0},
+                   {"load_s", 0.0},
+                   {"first_token_s", nullptr},
+                   {"_clock", mono_s()}};
     auto kept = std::make_shared<json>(std::move(record));
     std::lock_guard<std::mutex> lk(status_mu);
     api_requests.push_back(kept);
@@ -1028,7 +1075,9 @@ json Service::request_records(const std::string& request_id) {
         json out = json::object();
         for (auto it = r.begin(); it != r.end(); ++it) {
             if (starts_with(it.key(), "_")) continue;
-            if (!all && (it.key() == "input" || it.key() == "output" || it.key() == "reasoning" || it.key() == "response")) continue;
+            if (!all &&
+                (it.key() == "input" || it.key() == "output" || it.key() == "reasoning" || it.key() == "response"))
+                continue;
             out[it.key()] = it.value();
         }
         return out;
@@ -1042,7 +1091,8 @@ json Service::request_records(const std::string& request_id) {
     for (auto it = api_requests.rbegin(); it != api_requests.rend(); ++it) {
         const json& r = **it;
         json v = visible(r, false);
-        v["wallclock_s"] = r.contains("wallclock_s") ? r["wallclock_s"] : json(py_round(mono_s() - r["_clock"].get<double>(), 3));
+        v["wallclock_s"] =
+            r.contains("wallclock_s") ? r["wallclock_s"] : json(py_round(mono_s() - r["_clock"].get<double>(), 3));
         out.push_back(v);
     }
     return out;
@@ -1056,7 +1106,8 @@ json Service::metrics(bool all_requests) {
         s = status;
         if (!live_reqs_.empty()) {
             const json q = jget(s, "queued");
-            for (auto it = live_reqs_.rbegin()->second.first->begin(); it != live_reqs_.rbegin()->second.first->end(); ++it)
+            for (auto it = live_reqs_.rbegin()->second.first->begin(); it != live_reqs_.rbegin()->second.first->end();
+                 ++it)
                 s[it.key()] = it.value();
             s["queued"] = q;
         }
@@ -1068,14 +1119,22 @@ json Service::metrics(bool all_requests) {
     }
     const double now = now_s();
     const bool busy = truthy(jget(s, "busy"));
-    const std::string state = busy && jget(s, "first_token").is_null() ? "reading" : busy ? "generating"
-                              : !loaded() ? "unloaded" : "idle";
+    const std::string state = busy && jget(s, "first_token").is_null() ? "reading"
+                              : busy                                   ? "generating"
+                              : !loaded()                              ? "unloaded"
+                                                                       : "idle";
     const Engine::Progress pr = engine->progress();
-    json live = {{"state", state}, {"queued", jget(s, "queued")}, {"phase", busy ? jget(s, "phase") : json(nullptr)},
-                 {"prompt_tokens", busy ? jget(s, "prompt_tokens") : json(nullptr)}, {"prompt_read", nullptr},
-                 {"prompt_total", nullptr}, {"generated", busy ? jget(s, "generated") : json(nullptr)},
+    json live = {{"state", state},
+                 {"queued", jget(s, "queued")},
+                 {"phase", busy ? jget(s, "phase") : json(nullptr)},
+                 {"prompt_tokens", busy ? jget(s, "prompt_tokens") : json(nullptr)},
+                 {"prompt_read", nullptr},
+                 {"prompt_total", nullptr},
+                 {"generated", busy ? jget(s, "generated") : json(nullptr)},
                  {"max_tokens", busy ? jget(s, "max_tokens") : json(nullptr)},
-                 {"elapsed_s", busy && jget(s, "started").is_number() ? json(py_round(now - s["started"].get<double>(), 1)) : json(nullptr)},
+                 {"elapsed_s", busy && jget(s, "started").is_number()
+                                   ? json(py_round(now - s["started"].get<double>(), 1))
+                                   : json(nullptr)},
                  {"tok_s", state == "generating" ? json(py_round(tok_s(), 1)) : json(nullptr)},
                  {"tok_s_mean", state == "generating" ? json(py_round(tok_s_mean(), 1)) : json(nullptr)},
                  {"prefill_tok_s_mean", busy && pr.tok_s_mean >= 0 ? json(pr.tok_s_mean) : json(nullptr)},
@@ -1094,7 +1153,8 @@ json Service::metrics(bool all_requests) {
         // wait their turn
         json slots = engine->slots_view();
         if (!slots.is_array()) slots = json::array();
-        const size_t in_slots = (size_t) std::count_if(slots.begin(), slots.end(), [](const json& x) { return jstr(x, "state") != "idle"; });
+        const size_t in_slots = (size_t) std::count_if(slots.begin(), slots.end(),
+                                                       [](const json& x) { return jstr(x, "state") != "idle"; });
         const auto [waiting, admitting] = engine->admission();
         live["parallel"] = par;
         live["running"] = running;
@@ -1108,15 +1168,23 @@ json Service::metrics(bool all_requests) {
     json eng = {{"model", model}, {"max_context", reported_ctx()}, {"images", vision != nullptr}};
     const json facts = engine->info();
     for (auto it = facts.begin(); it != facts.end(); ++it) eng[it.key()] = it.value();
-    const json tel = telemetry != nullptr ? telemetry->snapshot()
-                                          : json{{"now", json::object()}, {"history", json::object()}, {"static", json::object()}};
+    const json tel = telemetry != nullptr
+                         ? telemetry->snapshot()
+                         : json{{"now", json::object()}, {"history", json::object()}, {"static", json::object()}};
     size_t kept;
     {
         std::lock_guard<std::mutex> lk(status_mu);
         kept = history.size();
     }
-    return {{"engine", eng}, {"live", live}, {"requests", hist}, {"requests_kept", kept}, {"totals", tot},
-            {"hardware", tel["now"]}, {"hardware_static", tel["static"]}, {"history", tel["history"]}, {"time", now}};
+    return {{"engine", eng},
+            {"live", live},
+            {"requests", hist},
+            {"requests_kept", kept},
+            {"totals", tot},
+            {"hardware", tel["now"]},
+            {"hardware_static", tel["static"]},
+            {"history", tel["history"]},
+            {"time", now}};
 }
 
 std::string Service::prometheus() {
@@ -1148,17 +1216,22 @@ std::string Service::prometheus() {
         {"llamacpp:prompt_tokens_cached_total", "counter", "Prompt tokens the conversation cache already held",
          std::to_string(t["reused"].get<int64_t>())},
         {"llamacpp:prompt_seconds_total", "counter", "Prompt read time", num(prompt_s)},
-        {"llamacpp:tokens_predicted_total", "counter", "Tokens generated", std::to_string(t["output_tokens"].get<int64_t>())},
+        {"llamacpp:tokens_predicted_total", "counter", "Tokens generated",
+         std::to_string(t["output_tokens"].get<int64_t>())},
         {"llamacpp:tokens_predicted_seconds_total", "counter", "Generation time", num(decode_s)},
         {"llamacpp:prompt_tokens_seconds", "gauge", "Average prompt read throughput in tokens/s, since the last scrape",
          d_prompt_s > 0 ? num(d_prompt_n / d_prompt_s) : "0"},
-        {"llamacpp:predicted_tokens_seconds", "gauge", "Average generation throughput in tokens/s, since the last scrape",
+        {"llamacpp:predicted_tokens_seconds", "gauge",
+         "Average generation throughput in tokens/s, since the last scrape",
          d_decode_s > 0 ? num(d_pred_n / d_decode_s) : "0"},
         {"llamacpp:requests_processing", "gauge", "Requests running", std::to_string(running)},
-        {"llamacpp:requests_deferred", "gauge", "Requests waiting their turn", std::to_string(jget(s, "queued").get<int64_t>())},
+        {"llamacpp:requests_deferred", "gauge", "Requests waiting their turn",
+         std::to_string(jget(s, "queued").get<int64_t>())},
         {"lamina:requests_total", "counter", "Requests finished", std::to_string(t["requests"].get<int64_t>())},
-        {"lamina:drafts_offered_total", "counter", "Speculative draft tokens offered", std::to_string(t["drafts_offered"].get<int64_t>())},
-        {"lamina:drafts_accepted_total", "counter", "Speculative draft tokens accepted", std::to_string(t["drafts_accepted"].get<int64_t>())},
+        {"lamina:drafts_offered_total", "counter", "Speculative draft tokens offered",
+         std::to_string(t["drafts_offered"].get<int64_t>())},
+        {"lamina:drafts_accepted_total", "counter", "Speculative draft tokens accepted",
+         std::to_string(t["drafts_accepted"].get<int64_t>())},
         {"lamina:model_loaded", "gauge", "1 while the model is loaded", loaded() ? "1" : "0"},
     };
     std::string out;
@@ -1180,7 +1253,8 @@ json Service::v1_status() {
         last_at = last_request_at;
         running = live_reqs_.size() ? live_reqs_.size() : (size_t) truthy(jget(s, "busy"));
     }
-    const json tel = telemetry != nullptr ? telemetry->snapshot() : json{{"now", json::object()}, {"static", json::object()}};
+    const json tel =
+        telemetry != nullptr ? telemetry->snapshot() : json{{"now", json::object()}, {"static", json::object()}};
     const json& hw = tel["now"];
     const json& st = tel["static"];
     auto scaled = [](const json& v, double unit, int digits) -> json {
@@ -1189,29 +1263,42 @@ json Service::v1_status() {
     const int64_t ctx = reported_ctx();
     const bool img = vision != nullptr;
     json machine = {{"at", (int64_t) now_s()}};
-    machine["gpu"] = truthy(jget(st, "gpu_name"))
-                         ? json{{"name", st["gpu_name"]}, {"used_mib", scaled(jget(hw, "gpu_mem_used"), 1048576.0, 0)},
-                                {"total_mib", scaled(jget(hw, "gpu_mem_total"), 1048576.0, 0)}, {"util_pct", jget(hw, "gpu_util")},
-                                {"temp_c", jget(hw, "gpu_temp")}, {"power_w", jget(hw, "gpu_power")}}
-                         : json(nullptr);
+    machine["gpu"] = truthy(jget(st, "gpu_name")) ? json{{"name", st["gpu_name"]},
+                                                         {"used_mib", scaled(jget(hw, "gpu_mem_used"), 1048576.0, 0)},
+                                                         {"total_mib", scaled(jget(hw, "gpu_mem_total"), 1048576.0, 0)},
+                                                         {"util_pct", jget(hw, "gpu_util")},
+                                                         {"temp_c", jget(hw, "gpu_temp")},
+                                                         {"power_w", jget(hw, "gpu_power")}}
+                                                  : json(nullptr);
     machine["ram"] = truthy(jget(hw, "ram_total")) ? json{{"used_gib", scaled(jget(hw, "ram_used"), 1073741824.0, 1)},
                                                           {"total_gib", scaled(jget(hw, "ram_total"), 1073741824.0, 1)}}
                                                    : json(nullptr);
     const int serving = std::max(1, engine->batch());
-    return {{"service", "lamina"}, {"model", model}, {"loaded", loaded()}, {"auto_load", engine->auto_load()},
-            {"structured_output", {{"formats", {"json_object", "json_schema"}}, {"method", "prompt_and_validate"},
-                                   {"constrained_decoding", false}, {"stream_buffered", true}}},
-            {"engine", jget(engine->info(), "version")}, {"started", (int64_t) started_at},
-            {"uptime_s", (int64_t) (now_s() - started_at)}, {"cache_max_tokens", ctx},
+    return {{"service", "lamina"},
+            {"model", model},
+            {"loaded", loaded()},
+            {"auto_load", engine->auto_load()},
+            {"structured_output",
+             {{"formats", {"json_object", "json_schema"}},
+              {"method", "prompt_and_validate"},
+              {"constrained_decoding", false},
+              {"stream_buffered", true}}},
+            {"engine", jget(engine->info(), "version")},
+            {"started", (int64_t) started_at},
+            {"uptime_s", (int64_t) (now_s() - started_at)},
+            {"cache_max_tokens", ctx},
             {"context", {{"native", ctx}, {"max_positions", ctx}}},
-            {"concurrency", {{"serving", serving}, {"requested", requested_slots > 0 ? requested_slots : (int64_t) serving}}},
+            {"concurrency",
+             {{"serving", serving}, {"requested", requested_slots > 0 ? requested_slots : (int64_t) serving}}},
             {"dialects", {"/v1/chat/completions", "/v1/messages", "/v1/responses"}},
             {"vision", {{"enabled", img}, {"available", img}, {"error", nullptr}}},
             {"image_generation", images != nullptr ? images->status() : json{{"enabled", false}}},
-            {"activity", {{"requests", tot["requests"].get<int64_t>() + (int64_t) running},
-                          {"in_flight", (int64_t) running + jget(s, "queued").get<int64_t>()},
-                          {"last_request_at", last_at ? json((int64_t) *last_at) : json(nullptr)}}},
-            {"last_timings", last_t}, {"machine", machine}};
+            {"activity",
+             {{"requests", tot["requests"].get<int64_t>() + (int64_t) running},
+              {"in_flight", (int64_t) running + jget(s, "queued").get<int64_t>()},
+              {"last_request_at", last_at ? json((int64_t) *last_at) : json(nullptr)}}},
+            {"last_timings", last_t},
+            {"machine", machine}};
 }
 
 bool Service::short_opening(const json& messages) const {
@@ -1236,7 +1323,8 @@ bool Service::short_opening(const json& messages) const {
 }
 
 std::string Service::render_prompt(const json& messages, const json& tools, const json& kwargs) {
-    if (tok.hy4) return tpl->render(messages, tools, true, hy4_kwargs(kwargs));   // its own effort levels, no workarounds
+    if (tok.hy4)
+        return tpl->render(messages, tools, true, hy4_kwargs(kwargs));   // its own effort levels, no workarounds
     if (tok.blocks) return tpl->render(messages, tools, true, block_kwargs(kwargs));
     // #458: with effort_end, a request with a non-default effort is rendered as a default one up to the answer (the
     // same prompt start, so the conversation cache keeps it) and its effort follows in a short system turn
@@ -1250,8 +1338,7 @@ std::string Service::render_prompt(const json& messages, const json& tools, cons
         medium["reasoning_effort"] = "medium";
         return tpl->render(messages, tools, true, medium);
     }
-    if (!effort_end || top)
-        return tpl->render(messages, tools, true, kwargs);
+    if (!effort_end || top) return tpl->render(messages, tools, true, kwargs);
     json base = json::object();
     for (auto it = kwargs.begin(); it != kwargs.end(); ++it)
         if (it.key() != "reasoning_effort" && it.key() != "enable_thinking") base[it.key()] = it.value();
@@ -1260,8 +1347,10 @@ std::string Service::render_prompt(const json& messages, const json& tools, cons
     const std::string mine = tpl->render(messages, tools, false, kwargs);
     if (!starts_with(full, mine)) return full;   // a template this cannot take apart: rendered as asked
     const auto text = kEffortText.find(e);
-    const std::string tail = off ? "" : "<|im_start|>system\n" + (text != kEffortText.end() ? text->second : kEffortText.at("medium")) +
-                                            "<|im_end|>\n";
+    const std::string tail = off ? ""
+                                 : "<|im_start|>system\n" +
+                                       (text != kEffortText.end() ? text->second : kEffortText.at("medium")) +
+                                       "<|im_end|>\n";
     return history_text + tail + full.substr(mine.size());
 }
 
@@ -1275,7 +1364,8 @@ std::vector<int32_t> Service::encode_prompt(const json& messages, const json& to
         prompt = std::move(p);
         for (const auto& [a, b] : spans) plain.push_back({a, b});
     }
-    return prompts->encode(prompt, plain, store);   // #567: only what follows the last literal shared with a recent prompt
+    return prompts->encode(prompt, plain, store);   // #567: only what follows the last
+                                                    // literal shared with a recent prompt
 }
 
 void Service::forget_prompt(const std::vector<int32_t>& ids) { prompts->forget(ids); }
@@ -1332,15 +1422,18 @@ double Service::progress_line(double last_print, json& st, double every) {
             return out;
         };
         const auto pr = engine->progress().read;
-        const std::string done = pr && pr->second ? with_commas(pr->first) + " of " + with_commas(pr->second)
-                                                  : with_commas(jget(s, "prompt_tokens").is_number() ? s["prompt_tokens"].get<int64_t>() : 0);
+        const std::string done =
+            pr && pr->second
+                ? with_commas(pr->first) + " of " + with_commas(pr->second)
+                : with_commas(jget(s, "prompt_tokens").is_number() ? s["prompt_tokens"].get<int64_t>() : 0);
         std::snprintf(buf, sizeof buf, "[lamina] reading the prompt: %s tokens, %.0f s so far", done.c_str(), el);
     } else {
         const int64_t gen = s["generated"].get<int64_t>();
         // the span floored as the live rate floors it: at the first token the rate is not a rate yet
         const double r = (double) gen / std::max(0.25, now - s["first_token"].get<double>());
         const std::string limit = jstr(s, "phase") == "thinking" && truthy(jget(s, "thinking_budget"))
-                                      ? "budget " + py_repr_value(s["thinking_budget"]) + " (max " + py_repr_value(jget(s, "max_tokens")) + ")"
+                                      ? "budget " + py_repr_value(s["thinking_budget"]) + " (max " +
+                                            py_repr_value(jget(s, "max_tokens")) + ")"
                                       : "max " + py_repr_value(jget(s, "max_tokens"));
         std::snprintf(buf, sizeof buf, "[lamina] %s: %lld of %s tokens, %.1f tok/s, %.0f s", jstr(s, "phase").c_str(),
                       (long long) gen, limit.c_str(), r, el);
@@ -1349,4 +1442,4 @@ double Service::progress_line(double last_print, json& st, double every) {
     return now;
 }
 
-}  // namespace lamina
+}   // namespace lamina

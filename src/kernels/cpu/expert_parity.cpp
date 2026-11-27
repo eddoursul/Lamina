@@ -54,8 +54,15 @@ float f16_at(const std::vector<uint8_t>& b, size_t off) {
     uint32_t exp = (h >> 10) & 0x1Fu, man = h & 0x3FFu, f;
     if (exp == 0) {
         if (man == 0) f = sign << 31;
-        else { exp = 127 - 15 + 1; while (!(man & 0x400u)) { man <<= 1; --exp; } man &= 0x3FFu;
-               f = (sign << 31) | (exp << 23) | (man << 13); }
+        else {
+            exp = 127 - 15 + 1;
+            while (!(man & 0x400u)) {
+                man <<= 1;
+                --exp;
+            }
+            man &= 0x3FFu;
+            f = (sign << 31) | (exp << 23) | (man << 13);
+        }
     } else if (exp == 31) {
         f = (sign << 31) | 0x7F800000u | (man << 13);
     } else {
@@ -66,7 +73,7 @@ float f16_at(const std::vector<uint8_t>& b, size_t off) {
     return o;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
@@ -78,16 +85,17 @@ int main(int argc, char** argv) {
         else if (a == "--file" && i + 1 < argc) path = argv[++i];
         else if (a == "--layer" && i + 1 < argc) layer = std::atoll(argv[++i]);
         else if (a == "--expert" && i + 1 < argc) expert = std::atoll(argv[++i]);
-        else { std::fprintf(stderr, "usage: expert_parity [--selftest] [--file P] [--layer N] [--expert N]\n");
-               return 2; }
+        else {
+            std::fprintf(stderr, "usage: expert_parity [--selftest] [--file P] [--layer N] [--expert N]\n");
+            return 2;
+        }
     }
 
     int bad = 0;
 
     // ---- the CPU must be able to run the kernel, and the report must say WHICH feature is missing
     const cpu::CpuFeatures feat = cpu::cpu_features();
-    std::printf("  %-44s %s\n", "AVX512 F/BW/VL/VNNI/VBMI",
-                feat.usable() ? "all present" : feat.reason());
+    std::printf("  %-44s %s\n", "AVX512 F/BW/VL/VNNI/VBMI", feat.usable() ? "all present" : feat.reason());
     if (!feat.usable()) {
         std::printf("      the VNNI path cannot run here; only the scalar oracle can be exercised.\n");
         std::printf("      P2.S3's kernel check is SKIPPED, not passed.\n");
@@ -127,7 +135,8 @@ int main(int argc, char** argv) {
         if (!real) synth_blob(idx + 1, other);
         if (!real || read_blob(path, (layer * 512 + expert) + 1, other)) {
             long long diff = 0;
-            for (size_t i = 0; i < blob.size(); ++i) if (blob[i] != other[i]) ++diff;
+            for (size_t i = 0; i < blob.size(); ++i)
+                if (blob[i] != other[i]) ++diff;
             const double frac = (double) diff / (double) blob.size();
             const bool ok = frac > 0.1;
             std::printf("  %-44s %s (%.1f%% of bytes differ)\n", "the next expert is different data",
@@ -162,13 +171,16 @@ int main(int argc, char** argv) {
     }
 
     // ---- 1. the kernel, against an oracle fed the SAME activations
-    std::printf("  %-44s rel %.3e   (P2.S3 asks <= 3e-3, mean |ref| %.4f)\n", "VNNI vs scalar (INT8 acts)",
-                rel_kernel, mag);
-    if (!(rel_kernel <= 3e-3)) { std::printf("    *** over P2.S3's 3e-3 ***\n"); ++bad; }
+    std::printf("  %-44s rel %.3e   (P2.S3 asks <= 3e-3, mean |ref| %.4f)\n", "VNNI vs scalar (INT8 acts)", rel_kernel,
+                mag);
+    if (!(rel_kernel <= 3e-3)) {
+        std::printf("    *** over P2.S3's 3e-3 ***\n");
+        ++bad;
+    }
 
     // ---- 2. the activation contract's own cost, reported rather than asserted
-    std::printf("  %-44s rel %.3e   (the cost of the contract, REPORTED)\n",
-                "VNNI vs scalar (FP32 acts)", rel_contract);
+    std::printf("  %-44s rel %.3e   (the cost of the contract, REPORTED)\n", "VNNI vs scalar (FP32 acts)",
+                rel_contract);
 
     std::printf("\nexpert_parity: %d failures (layer %lld expert %lld of %s)\n", bad, layer, expert, path);
     if (bad) return 1;

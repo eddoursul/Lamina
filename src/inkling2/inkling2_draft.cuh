@@ -116,7 +116,8 @@ __global__ void __launch_bounds__(256) head_m8_kernel(const __half* __restrict__
     const float wm = warp_max(fabsf(x));
     if ((i & 31) == 0) rv[i >> 5] = wm;
     __syncthreads();
-    const float mx = fmaxf(fmaxf(fmaxf(rv[0], rv[1]), fmaxf(rv[2], rv[3])), fmaxf(fmaxf(rv[4], rv[5]), fmaxf(rv[6], rv[7])));
+    const float mx =
+        fmaxf(fmaxf(fmaxf(rv[0], rv[1]), fmaxf(rv[2], rv[3])), fmaxf(fmaxf(rv[4], rv[5]), fmaxf(rv[6], rv[7])));
     const float d = mx / 127.0f;
     M8[(size_t) v * R + i] = (int8_t) (d > 0.f ? roundf(x / d) : 0.f);
     if (i == 0) scale[v] = d / 127.0f;
@@ -152,8 +153,8 @@ __global__ void __launch_bounds__(kTB) joint_pre_kernel(JointPreIn a) {
 /// cand = tanh(j[R .. 2R)), s = cand + gate (s - cand), lat = tanh(j[2R .. 3R)).  w1 [V][R] bfloat16.  One block of R
 /// threads.
 struct StepIn {
-    const float* W;        // [3 R][stride]
-    const float* pre;      // [3 R], the block row's
+    const float* W;     // [3 R][stride]
+    const float* pre;   // [3 R], the block row's
     const uint16_t* w1;
     const int32_t* prev;   // the token before
     float* s;              // [R]
@@ -269,8 +270,9 @@ __device__ __forceinline__ float draft_chance(int j, float q, float u, float T) 
 /// nothing, and their out[0] stays what it was (-1).  A sampled request (ctl[3]) joins each draft's chance to pass
 /// under its position's draw instead (draft_chance: Philox(seed ctl[4..5], the position ctl[6..7] + j), the
 /// temperature ctl[8]).  One block; a thread up to four parts.  j: the draft's step.
-__global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict__ part, int nb, int32_t* __restrict__ out,
-                                                         int32_t* __restrict__ prev, int32_t* __restrict__ ctl, int j) {
+__global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict__ part, int nb,
+                                                         int32_t* __restrict__ out, int32_t* __restrict__ prev,
+                                                         int32_t* __restrict__ ctl, int j) {
     if (ctl[2]) return;
     __shared__ float rv[32];
     __shared__ int ri[32];
@@ -311,8 +313,9 @@ __global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict
         if (ctl[3] != 0) {
             const uint64_t seed = (uint64_t) (uint32_t) ctl[4] | (uint64_t) (uint32_t) ctl[5] << 32;
             const uint64_t at = (uint64_t) (uint32_t) ctl[6] | (uint64_t) (uint32_t) ctl[7] << 32;
-            joint = __int_as_float(ctl[0]) *
-                    draft_chance(j, 1.0f / z, lamina::kernels::philox_uniform(seed, at + (uint64_t) j), __int_as_float(ctl[8]));
+            joint = __int_as_float(ctl[0]) * draft_chance(j, 1.0f / z,
+                                                          lamina::kernels::philox_uniform(seed, at + (uint64_t) j),
+                                                          __int_as_float(ctl[8]));
         }
         if (!(joint >= __int_as_float(ctl[1]))) {
             ctl[2] = 1;
@@ -325,4 +328,4 @@ __global__ void __launch_bounds__(1024) head_pick_kernel(const float* __restrict
     }
 }
 
-}  // namespace ik
+}   // namespace ik

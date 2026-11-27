@@ -1,13 +1,13 @@
 // src/core/session.cpp - the sequence state: its layout, its zeroing and the prompt cache's checkpoints of it.
 #include "lamina/core/session.hpp"
 
-#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
 #include "lamina/kernels/elementwise.hpp"
 #include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/kernels/qsa.hpp"
 #include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/s2_expert_grouped.hpp"
-#include "lamina/kernels/cpu/pool.hpp"
-#include "lamina/kernels/ngram.hpp"
 
 #include <cuda_runtime.h>
 
@@ -25,7 +25,7 @@ constexpr uint64_t SESSION_STATE_ALIGN = 256;
 
 uint64_t align_up(uint64_t n, uint64_t a) { return (n + a - 1) / a * a; }
 
-}  // namespace
+}   // namespace
 
 /// `gdn_buffers_bytes` carves a GDN layer's state for ONE layer and `GdnBuffers::state`/`conv_state` point INTO that
 /// carve, so a session with 36 GDN layers has to give each one its own - they cannot share, because the recurrence
@@ -46,9 +46,10 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells) {
     n += (uint64_t) g.n_gdn_layers() * gdn_state_floats(g) * 4;
     // One QSA state carries the RoPE table; the others borrow it (P7: 64 MiB per layer at 262K).
     if (g.n_qsa_layers() > 0)
-        n += qsa_state_bytes(g, max_cells, true) + (uint64_t) (g.n_qsa_layers() - 1) * qsa_state_bytes(g, max_cells, false);
+        n += qsa_state_bytes(g, max_cells, true) +
+             (uint64_t) (g.n_qsa_layers() - 1) * qsa_state_bytes(g, max_cells, false);
     n += align_up((uint64_t) g.hc * g.n_embd * 4, SESSION_STATE_ALIGN);   // R
-    n += ple_hist_bytes();                       // the PLE's NG_HIST normalized history rows
+    n += ple_hist_bytes();                                                // the PLE's NG_HIST normalized history rows
     return align_up(n, SESSION_STATE_ALIGN) + 4096;
 }
 
@@ -101,8 +102,7 @@ void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, 
     // embedding broadcast to every stream, which is the reference's own initial condition.
     if (R_init != nullptr) {
         for (int64_t c = 0; c < g.hc; ++c)
-            cudaMemcpyAsync(s.R + (size_t) c * g.n_embd, R_init, (size_t) g.n_embd * 4,
-                            cudaMemcpyDeviceToDevice, cs);
+            cudaMemcpyAsync(s.R + (size_t) c * g.n_embd, R_init, (size_t) g.n_embd * 4, cudaMemcpyDeviceToDevice, cs);
     } else {
         cudaMemsetAsync(s.R, 0, (size_t) g.hc * g.n_embd * 4, cs);
     }
@@ -125,7 +125,12 @@ namespace {
 
 /// One region of a checkpoint: `bytes` of device memory at `dev`, at `host` in the host buffer; `layer`: the model
 /// layer whose state it is (the PLE's: layer 1).
-struct CkptPart { void* dev; uint64_t bytes; uint64_t host; int64_t layer; };
+struct CkptPart {
+    void* dev;
+    uint64_t bytes;
+    uint64_t host;
+    int64_t layer;
+};
 
 /// The parts of a checkpoint at `pos` of the layers [lo, hi), from a state whose GDN and QSA states are indexed from
 /// `first` <= lo (a split prompt path's later stage, prefill/split.hpp, which holds its own layers alone: no state of
@@ -178,7 +183,7 @@ uint64_t ckpt_ints_at(const ModelGeometry& g) {
            (uint64_t) g.n_qsa_layers() * ((uint64_t) (sh.idx_block + 1) * row + sizeof(int32_t));
 }
 
-}  // namespace
+}   // namespace
 
 uint64_t session_ckpt_bytes(const ModelGeometry& g) { return ckpt_ints_at(g) + kCkptHostInts * sizeof(int32_t); }
 
@@ -230,4 +235,4 @@ bool session_copy_failed(void* stream) {
     return false;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

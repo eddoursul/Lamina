@@ -65,14 +65,14 @@ struct RopeKernelArgs {
 /// against the pre-scaling builder bit for bit.
 struct RopeScaling {
     RopeScalingType type = RopeScalingType::None;
-    double freq_base = 1e7;    ///< `rope.freq_base` (the value pinned by `qsa_freq_base()`)
-    double factor = 1.0;       ///< `--rope-scale`: how far past the trained context the run goes
-    double freq_scale_in = 0;  ///< `--rope-freq-scale`: the raw ggml knob; 0 = 1/factor
-    double orig_ctx = 262144;  ///< `--yarn-orig-ctx`: the context the model was trained over
-    double ext_factor = 0;     ///< `--yarn-ext-factor`: correction depth; 0 = off, 1 = full YaRN
-    double attn_factor = 1.0;  ///< `--yarn-attn-factor`: extra magnitude scale (ggml's attn_factor)
-    double beta_fast = 32.0;   ///< `--yarn-beta-fast`
-    double beta_slow = 1.0;    ///< `--yarn-beta-slow`
+    double freq_base = 1e7;     ///< `rope.freq_base` (the value pinned by `qsa_freq_base()`)
+    double factor = 1.0;        ///< `--rope-scale`: how far past the trained context the run goes
+    double freq_scale_in = 0;   ///< `--rope-freq-scale`: the raw ggml knob; 0 = 1/factor
+    double orig_ctx = 262144;   ///< `--yarn-orig-ctx`: the context the model was trained over
+    double ext_factor = 0;      ///< `--yarn-ext-factor`: correction depth; 0 = off, 1 = full YaRN
+    double attn_factor = 1.0;   ///< `--yarn-attn-factor`: extra magnitude scale (ggml's attn_factor)
+    double beta_fast = 32.0;    ///< `--yarn-beta-fast`
+    double beta_slow = 1.0;     ///< `--yarn-beta-slow`
 
     /// The angle shrink.  ggml's `freq_scale`: 1 means "the trained angles", 1/factor squeezes
     /// `factor` positions into the trained range.
@@ -122,8 +122,7 @@ private:
     /// float64 rather than ggml's float32: the table path computes in float64 and is held to a
     /// bit-exact float64 reference, so its inputs are float64 too.
     static double rope_yarn_corr_dim(int n_dims, double n_ctx_orig, double n_rot, double base) {
-        return (double) n_dims * std::log(n_ctx_orig / (n_rot * 2.0 * 3.14159265358979323846)) /
-               (2.0 * std::log(base));
+        return (double) n_dims * std::log(n_ctx_orig / (n_rot * 2.0 * 3.14159265358979323846)) / (2.0 * std::log(base));
     }
 };
 
@@ -146,8 +145,8 @@ LAMINA_ROPE_SCALING_HD inline float rope_yarn_ramp(float low, float high, int pa
 /// (ggml's kernels receive the raw knob and apply the log term here, where it is per-pair constant;
 /// this helper keeps that shape so the native path reads against ggml line by line).
 LAMINA_ROPE_SCALING_HD inline void rope_scaled_angle(float theta_extrap, float freq_scale, float corr_low,
-                                                     float corr_high, float ext_factor, float mscale_in,
-                                                     int pair, float& cos_out, float& sin_out) {
+                                                     float corr_high, float ext_factor, float mscale_in, int pair,
+                                                     float& cos_out, float& sin_out) {
     // The interpolation, always applied; the correction mixed in on top (ggml-cuda/rope.cu rope_yarn).
     float theta = freq_scale * theta_extrap;
     float mscale = mscale_in;
@@ -179,7 +178,8 @@ inline const char* rope_scaling_invalid(const RopeScaling& s) {
     if (!std::isfinite(s.attn_factor) || s.attn_factor <= 0.0) return "the attention factor must be finite and > 0";
     if (!std::isfinite(s.beta_fast) || s.beta_fast <= 0.0 || !std::isfinite(s.beta_slow) || s.beta_slow <= 0.0)
         return "the YaRN betas must be finite and > 0";
-    if (!std::isfinite(s.mscale()) || s.mscale() <= 0.0) return "the resolved magnitude correction must be finite and > 0";
+    if (!std::isfinite(s.mscale()) || s.mscale() <= 0.0)
+        return "the resolved magnitude correction must be finite and > 0";
     return nullptr;
 }
 
@@ -190,4 +190,4 @@ inline const char* rope_scaling_invalid(const RopeScaling& s) {
 void rope_scaling_set(const RopeScaling& scaling);
 const RopeScaling& rope_scaling();
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

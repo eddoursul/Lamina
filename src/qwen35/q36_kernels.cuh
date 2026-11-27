@@ -1,7 +1,7 @@
 // q36_kernels.cuh - decode kernels of the Qwen3.6 engine (q36_engine.cu), written to give the SAME BITS as the shared
-// kernels they replace (native_small_mmvq_kernel, k_moe_out, k_add_rms, k_group, native_quantize_q8_1) with a layout that
-// keeps more bytes in flight and fewer launches.  Every kernel here is checked bit for bit against the old one on the
-// real activations (LAMINA_Q36_VERIFY=1, --no-graph).
+// kernels they replace (native_small_mmvq_kernel, k_moe_out, k_add_rms, k_group, native_quantize_q8_1) with a layout
+// that keeps more bytes in flight and fewer launches.  Every kernel here is checked bit for bit against the old one on
+// the real activations (LAMINA_Q36_VERIFY=1, --no-graph).
 #pragma once
 
 #include "lamina/kernels/dp4a.hpp"
@@ -28,9 +28,9 @@ static_assert(sizeof(QB) == 36, "q8_1 block");
 
 __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 
-// The shared CUDA kernels these ones replace (native_mmvq.cu, native_router.cu) are compiled with --use_fast_math (CMakeLists.txt);
-// this file is not, so on CUDA the division and the exponential they use are spelled out as the instructions that flag selects
-// (div.approx.ftz, rcp.approx.ftz, ex2.approx.ftz via __expf).
+// The shared CUDA kernels these ones replace (native_mmvq.cu, native_router.cu) are compiled with --use_fast_math
+// (CMakeLists.txt); this file is not, so on CUDA the division and the exponential they use are spelled out as the
+// instructions that flag selects (div.approx.ftz, rcp.approx.ftz, ex2.approx.ftz via __expf).
 #if defined(__CUDACC__)
 __device__ __forceinline__ float fdiv_fm(float a, float b) {
     float r;
@@ -64,14 +64,14 @@ __device__ __forceinline__ void q8_store(QB* __restrict__ y, int i, float v, int
     if (lane == 0) y[i >> 5].ds = lamina::kernels::q8_1_ds(d, sum);
 }
 
-/// A Q8_0 row (GGUF blocks of 34 bytes, or the qs / d planes with PK) against NC activation columns, with the arithmetic of
-/// native_small_mmvq_kernel / native_mmvq_multi_kernel's exact layout: the 4 warps of the old block are the 4 partial sums
-/// P_w of one lane here (block kbx = 8 w + lane / 4 + 32 j, ints 2 (lane % 4) and +1), added in warp order, then the xor
-/// tree.  One warp per row, every load of a lane issued before the first dot (NJ = ceil(nb / 32) terms per partial).
-/// res[c] = the row's value for column c in every lane.
+/// A Q8_0 row (GGUF blocks of 34 bytes, or the qs / d planes with PK) against NC activation columns, with the
+/// arithmetic of native_small_mmvq_kernel / native_mmvq_multi_kernel's exact layout: the 4 warps of the old block are
+/// the 4 partial sums P_w of one lane here (block kbx = 8 w + lane / 4 + 32 j, ints 2 (lane % 4) and +1), added in warp
+/// order, then the xor tree.  One warp per row, every load of a lane issued before the first dot (NJ = ceil(nb / 32)
+/// terms per partial). res[c] = the row's value for column c in every lane.
 template <int NC, int NJ, bool PK>
-__device__ __forceinline__ void q8_row_dot(const uint8_t* __restrict__ w, const half* __restrict__ dpl, const QB* __restrict__ x,
-                                           int row, int nb, int lane, float (&res)[NC]) {
+__device__ __forceinline__ void q8_row_dot(const uint8_t* __restrict__ w, const half* __restrict__ dpl,
+                                           const QB* __restrict__ x, int row, int nb, int lane, float (&res)[NC]) {
     const int kqs = 2 * (lane & 3);
     const int kb0 = lane >> 2;
     int v0[4][NJ], v1[4][NJ];
@@ -142,27 +142,29 @@ __global__ void __launch_bounds__(256) k_q8_rows(const uint8_t* __restrict__ w, 
 }
 
 template <int NC, int NJ, bool PK>
-inline void launch_q8_rows_t(const void* w, const half* dpl, const void* x, float* y, int nb, int n_out, int warps, int max_warps,
-                           cudaStream_t s) {
+inline void launch_q8_rows_t(const void* w, const half* dpl, const void* x, float* y, int nb, int n_out, int warps,
+                             int max_warps, cudaStream_t s) {
     const int rows = n_out < max_warps ? n_out : max_warps;
-    k_q8_rows<NC, NJ, PK><<<(unsigned) ((rows + warps - 1) / warps), warps * 32, 0, s>>>(static_cast<const uint8_t*>(w), dpl,
-                                                                                    static_cast<const QB*>(x), y, nb, n_out);
+    k_q8_rows<NC, NJ, PK><<<(unsigned) ((rows + warps - 1) / warps), warps * 32, 0, s>>>(
+        static_cast<const uint8_t*>(w), dpl, static_cast<const QB*>(x), y, nb, n_out);
 }
 
 template <int NC, int NJ, bool PK>
-/// At most 1024 warps in the grid, a grid-stride loop over the rows beyond: a 2048-row product took 21 us on gfx1201 as 2048 warps and
-/// 5.2 us as 1024 (a grid above 32768 threads is several times slower there; the same rows, the same sums).
+/// At most 1024 warps in the grid, a grid-stride loop over the rows beyond: a 2048-row product took 21 us on gfx1201 as
+/// 2048 warps and 5.2 us as 1024 (a grid above 32768 threads is
+/// several times slower there; the same rows, the same sums).
 inline void launch_q8_rows(const void* w, const half* dpl, const void* x, float* y, int nb, int n_out, cudaStream_t s) {
     launch_q8_rows_t<NC, NJ, PK>(w, dpl, x, y, nb, n_out, 8, 1024, s);
 }
 
-/// The shared expert's gate and up products and SwiGLU + q8_1 in one launch: 32 rows (one q8_1 block of h) per 1024-thread
-/// block, warp w computing gate row and up row 32 b + w, then warp 0 applying native_swiglu_quantize_q8_1_kernel's body to
-/// the 32 pairs.  Column c of the h image is at hq + c * (n_out / 32).  n_out % 32 == 0.
+/// The shared expert's gate and up products and SwiGLU + q8_1 in one launch: 32 rows (one q8_1 block of h) per
+/// 1024-thread block, warp w computing gate row and up row 32 b + w, then warp 0 applying
+/// native_swiglu_quantize_q8_1_kernel's body to the 32 pairs.  Column
+/// c of the h image is at hq + c * (n_out / 32).  n_out % 32 == 0.
 template <int NC, int NJ, bool PK>
-__global__ void __launch_bounds__(1024) k_sh_gu(const uint8_t* __restrict__ wg, const half* __restrict__ dg, const uint8_t* __restrict__ wu,
-                                                const half* __restrict__ du, const QB* __restrict__ x, QB* __restrict__ hq,
-                                                int nb, int n_out) {
+__global__ void __launch_bounds__(1024) k_sh_gu(const uint8_t* __restrict__ wg, const half* __restrict__ dg,
+                                                const uint8_t* __restrict__ wu, const half* __restrict__ du,
+                                                const QB* __restrict__ x, QB* __restrict__ hq, int nb, int n_out) {
     __shared__ float g[NC][32], u[NC][32];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int row = blockIdx.x * 32 + warp;
@@ -187,7 +189,8 @@ __global__ void __launch_bounds__(1024) k_sh_gu(const uint8_t* __restrict__ wg, 
 }
 
 /// k_add_rms (x += y; h = rms(x) * w, one block of 256 per row) and the q8_1 image of h in the same launch.
-__global__ void __launch_bounds__(256) k_add_rms_q(float* x, const float* y, const float* w, float* h, QB* hq, int n, float eps) {
+__global__ void __launch_bounds__(256) k_add_rms_q(float* x, const float* y, const float* w, float* h, QB* hq, int n,
+                                                   float eps) {
     __shared__ float sh[256];
     float* xr = x + (size_t) blockIdx.x * n;
     const float* yr = y + (size_t) blockIdx.x * n;
@@ -207,25 +210,29 @@ __global__ void __launch_bounds__(256) k_add_rms_q(float* x, const float* y, con
     }
     const float r = rsqrtf(sh[0] / (float) n + eps);
     for (int i = threadIdx.x; i < n; i += 256) {
-        const float hv = __fmul_rn(__fmul_rn(xr[i], r), w[i]);   // no FMA with the quantizer's sums: the old h was stored first
+        const float hv = __fmul_rn(__fmul_rn(xr[i], r), w[i]);   // no FMA with the quantizer's
+                                                                 // sums: the old h was stored first
         hr[i] = hv;
-        q8_store(qr, i, ((volatile float*) hr)[i], threadIdx.x & 31);   // the stored value, as the standalone quantizer reads it
+        q8_store(qr, i, ((volatile float*) hr)[i], threadIdx.x & 31);   // the stored value, as the
+                                                                        // standalone quantizer reads it
     }
 }
 
-/// k_moe_out for T <= 8 rows (decode, verify windows) with n <= 2048 and n % 256 == 0: 1024 threads per row instead of 256
-/// (the elements' loads in parallel), the squares summed per old thread (element t, t + 256, ... in order) and the
+/// k_moe_out for T <= 8 rows (decode, verify windows) with n <= 2048 and n % 256 == 0: 1024 threads per row instead of
+/// 256 (the elements' loads in parallel), the squares summed per old thread (element t, t + 256, ... in order) and the
 /// 256-wide tree as before: the same bits.  x += sum_k w_k part_k (+ gate * shared); h = rms(x) * wn; with hq the q8_1
 /// image of h as well (the next layer's input).
-__global__ void __launch_bounds__(1024) k_moe_out_small(float* x, const float* parts, const int32_t* prow, const float* wts,
-                                                        int K_, const float* shared, const float* sgate, int sg_stride,
-                                                        const float* wn, float* h, int n, float eps, QB* hq = nullptr) {
+__global__ void __launch_bounds__(1024) k_moe_out_small(float* x, const float* parts, const int32_t* prow,
+                                                        const float* wts, int K_, const float* shared,
+                                                        const float* sgate, int sg_stride, const float* wn, float* h,
+                                                        int n, float eps, QB* hq = nullptr) {
     __shared__ float vv[2048];
     __shared__ float sh[256];
     __shared__ const float* pk[16];
     const int t = blockIdx.x;
     float* xr = x + (size_t) t * n;
-    if (threadIdx.x < K_) pk[threadIdx.x] = parts + (size_t) (prow ? prow[t * K_ + threadIdx.x] : t * K_ + threadIdx.x) * n;
+    if (threadIdx.x < K_)
+        pk[threadIdx.x] = parts + (size_t) (prow ? prow[t * K_ + threadIdx.x] : t * K_ + threadIdx.x) * n;
     __syncthreads();
     const float* wr = wts + (size_t) t * K_;
     const float gs = sigm(sgate[(size_t) t * sg_stride]);
@@ -262,8 +269,8 @@ __global__ void __launch_bounds__(1024) k_moe_out_small(float* x, const float* p
 /// expert has a VRAM slot (slot_of >= 0), the group's blob at blobs + slot * blob.
 template <bool HY>
 __global__ void k_group_small(const int32_t* ids, int n_ent, int K_, const int32_t* slot_of, const uint8_t* blobs,
-                              unsigned long long blob, unsigned long long* grp_ptr, int32_t* grp_start, int32_t* n_groups,
-                              int32_t* ent_dst, int32_t* ent_tok) {
+                              unsigned long long blob, unsigned long long* grp_ptr, int32_t* grp_start,
+                              int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok) {
     __shared__ int sid[64];
     const int e = threadIdx.x;
     const int id = e < n_ent ? ids[e] : 0;
@@ -297,14 +304,13 @@ __global__ void k_group_small(const int32_t* ids, int n_ent, int K_, const int32
     }
 }
 
-/// route_topk<256, 8> (native_router.cu, copied: the same expressions) for n_tok <= 8 tokens (one warp each) and, in the same
-/// launch, k_group_small's grouping of the picks.  block (32, 8).  HY as k_group_small.
+/// route_topk<256, 8> (native_router.cu, copied: the same expressions) for n_tok <= 8 tokens (one warp each) and, in
+/// the same launch, k_group_small's grouping of the picks.  block (32, 8).  HY as k_group_small.
 template <bool HY>
-__global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                                                     float* __restrict__ weights, int n_tok, int ld, const int32_t* slot_of,
-                                                     const uint8_t* blobs, unsigned long long blob,
-                                                     unsigned long long* grp_ptr, int32_t* grp_start, int32_t* n_groups,
-                                                     int32_t* ent_dst, int32_t* ent_tok) {
+__global__ void __launch_bounds__(256)
+k_route_group(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ weights, int n_tok,
+              int ld, const int32_t* slot_of, const uint8_t* blobs, unsigned long long blob,
+              unsigned long long* grp_ptr, int32_t* grp_start, int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok) {
     constexpr int NE = 256, K = 8, V = NE / 32;
     __shared__ int sids[64], sid[64];
     const int tk = threadIdx.y;
@@ -336,13 +342,19 @@ __global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ l
             int expert = lane;
 #pragma unroll
             for (int i = 1; i < V; ++i) {
-                if (values[i] > best) { best = values[i]; expert = lane + i * 32; }
+                if (values[i] > best) {
+                    best = values[i];
+                    expert = lane + i * 32;
+                }
             }
 #pragma unroll
             for (int mask = 16; mask; mask >>= 1) {
                 const float other = __shfl_xor_sync(0xffffffffu, best, mask, 32);
                 const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
-                if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
+                if (other > best || (other == best && other_id < expert)) {
+                    best = other;
+                    expert = other_id;
+                }
             }
             if ((expert & 31) == lane) {
                 values[expert / 32] = -INFINITY;
@@ -390,4 +402,4 @@ __global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ l
     }
 }
 
-}  // namespace q36k
+}   // namespace q36k

@@ -26,14 +26,15 @@ float philox_reference(uint64_t seed, uint64_t counter) {
     uint32_t c[4] = {(uint32_t) counter, (uint32_t) (counter >> 32), (uint32_t) seed, (uint32_t) (seed >> 32)};
     for (uint32_t i = 0; i < 10; ++i) {
         const uint64_t p0 = (uint64_t) 0x9E3779B9u * c[0], p1 = (uint64_t) 0xBB67AE85u * c[2];
-        const uint32_t hi0 = (uint32_t) (p0 >> 32), lo0 = (uint32_t) p0, hi1 = (uint32_t) (p1 >> 32), lo1 = (uint32_t) p1;
+        const uint32_t hi0 = (uint32_t) (p0 >> 32), lo0 = (uint32_t) p0, hi1 = (uint32_t) (p1 >> 32),
+                       lo1 = (uint32_t) p1;
         const uint32_t n[4] = {hi1 ^ c[1] ^ i, lo1, hi0 ^ c[3] ^ 0u, lo0};
         for (int k = 0; k < 4; ++k) c[k] = n[k];
     }
     return (float) (c[0] >> 8) / 16777216.0f;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     std::printf("draft_pass_test\n");
@@ -87,14 +88,19 @@ int main() {
               "a lower temperature widens the likeliest token's interval");
     }
     {   // the constants: values of the fit's own code
-        struct { int step; float q, u, t, want; } c[] = {{0, 0.7f, 0.2f, 0.7f, 0.65417f}, {0, 0.7f, 0.95f, 0.7f, 0.20464f},
-                                                         {1, 0.5f, 0.5f, 0.7f, 0.36337f}, {2, 0.9f, 0.99f, 1.0f, 0.28441f},
-                                                         {0, 0.4f, 0.05f, 0.3f, 0.49229f}, {5, 0.6f, 0.3f, 1.5f, 0.43514f}};
-        struct { int step; float p, t, want; } f[] = {{0, 0.5f, 0.7f, 0.36305f}, {1, 0.5f, 0.7f, 0.34991f},
-                                                      {2, 0.5f, 0.7f, 0.34492f}, {0, 0.5f, 1.0f, 0.31496f},
-                                                      {0, 0.3f, 0.7f, 0.22100f}, {2, 0.7f, 0.4f, 0.55369f}};
+        struct {
+            int step;
+            float q, u, t, want;
+        } c[] = {{0, 0.7f, 0.2f, 0.7f, 0.65417f},  {0, 0.7f, 0.95f, 0.7f, 0.20464f}, {1, 0.5f, 0.5f, 0.7f, 0.36337f},
+                 {2, 0.9f, 0.99f, 1.0f, 0.28441f}, {0, 0.4f, 0.05f, 0.3f, 0.49229f}, {5, 0.6f, 0.3f, 1.5f, 0.43514f}};
+        struct {
+            int step;
+            float p, t, want;
+        } f[] = {{0, 0.5f, 0.7f, 0.36305f}, {1, 0.5f, 0.7f, 0.34991f}, {2, 0.5f, 0.7f, 0.34492f},
+                 {0, 0.5f, 1.0f, 0.31496f}, {0, 0.3f, 0.7f, 0.22100f}, {2, 0.7f, 0.4f, 0.55369f}};
         bool chances = true, floors = true;
-        for (const auto& x : c) chances = chances && std::fabs(draft_pass_chance(x.step, x.q, x.u, x.t) - x.want) < 1e-3f;
+        for (const auto& x : c)
+            chances = chances && std::fabs(draft_pass_chance(x.step, x.q, x.u, x.t) - x.want) < 1e-3f;
         for (const auto& x : f) floors = floors && std::fabs(draft_pass_floor(x.step, x.p, x.t) - x.want) < 1e-3f;
         check(chances, "the chance is the fit's");
         check(floors, "the floor is the fit's");

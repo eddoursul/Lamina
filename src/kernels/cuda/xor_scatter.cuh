@@ -16,14 +16,14 @@ namespace {
 __device__ __forceinline__ float select_f(bool c, float a, float b) {
     float r;
     asm("{ .reg .pred p; setp.ne.u32 p, %3, 0; selp.f32 %0, %1, %2, p; }"
-        : "=f"(r) : "f"(a), "f"(b), "r"((unsigned) c));
+        : "=f"(r)
+        : "f"(a), "f"(b), "r"((unsigned) c));
     return r;
 }
 
 // step S of xor_scatter (distance 16 >> S); the steps are template recursion so that every loop has a constant trip
 // count and unrolls (a rolled loop indexes v at run time, in local memory)
-template <int NV, int S>
-__device__ __forceinline__ void xor_scatter_step(float (&v)[NV], int lane) {
+template <int NV, int S> __device__ __forceinline__ void xor_scatter_step(float (&v)[NV], int lane) {
     if constexpr (S < 5) {
         constexpr int o = 16 >> S, n = NV >> S;   // n: the values left before this step
         if constexpr (n > 1) {
@@ -42,15 +42,13 @@ __device__ __forceinline__ void xor_scatter_step(float (&v)[NV], int lane) {
 }
 
 // NV (a power of two, at most 32) values a lane; afterwards v[0] is the sum of value xor_scatter_index<NV>(lane)
-template <int NV>
-__device__ __forceinline__ void xor_scatter(float (&v)[NV], int lane) {
+template <int NV> __device__ __forceinline__ void xor_scatter(float (&v)[NV], int lane) {
     static_assert(NV >= 1 && NV <= 32 && (NV & (NV - 1)) == 0, "NV must be a power of two <= 32");
     xor_scatter_step<NV, 0>(v, lane);
 }
 
 // the value a lane's v[0] sums after xor_scatter: the halves its bits 16, 8, ... selected
-template <int NV>
-__device__ __forceinline__ int xor_scatter_index(int lane) {
+template <int NV> __device__ __forceinline__ int xor_scatter_index(int lane) {
     int vi = 0;
 #pragma unroll
     for (int s = 0; (NV >> s) > 1; ++s) vi += (lane & (16 >> s)) ? NV >> (s + 1) : 0;
@@ -60,5 +58,5 @@ __device__ __forceinline__ int xor_scatter_index(int lane) {
 // the smallest power of two >= n
 __host__ __device__ constexpr int pow2_at_least(int n) { return n <= 1 ? 1 : 2 * pow2_at_least((n + 1) / 2); }
 
-}  // namespace
-}  // namespace lamina::kernels
+}   // namespace
+}   // namespace lamina::kernels

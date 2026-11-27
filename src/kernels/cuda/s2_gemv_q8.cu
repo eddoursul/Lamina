@@ -39,13 +39,13 @@ __global__ void s2_gemv_q8_kernel(const uint8_t* __restrict__ act, const uint8_t
     const int tid = threadIdx.x;
 
     const long long n_quads = n_in / 4;
-    const uint8_t* c = codes + o * n_quads;             // one code byte per quad
+    const uint8_t* c = codes + o * n_quads;   // one code byte per quad
     const float* s = scales + o * (n_in / QK_S2);
 
     float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
     for (long long q = tid; q < n_quads; q += threads_per_row) {
         const uint8_t byte = c[q];
-        const float d = s[q >> 4];                      // (q*4) >> 6, the S2 group index as a shift
+        const float d = s[q >> 4];   // (q*4) >> 6, the S2 group index as a shift
         // the activation quad: four int8 in one 32-element block, so one block scale
         const long long ablk = (q * 4) / QK8_0;
         const uint8_t* blk = act + ablk * 34;
@@ -72,19 +72,18 @@ __global__ void s2_gemv_q8_kernel(const uint8_t* __restrict__ act, const uint8_t
     if (tid == 0) y[o] = partial[0];
 }
 
-}  // namespace
+}   // namespace
 
-void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, float* y, int64_t n_in,
-                int64_t n_out, int threads_per_row, void* stream) {
+void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, float* y, int64_t n_in, int64_t n_out,
+                int threads_per_row, void* stream) {
     if (n_in <= 0 || n_out <= 0) return;
     if (n_in % QK8_0 != 0 || n_in % QK_S2 != 0) {
         std::fprintf(stderr, "s2_gemv_q8: n_in %lld must be a multiple of %d\n", (long long) n_in, QK_S2);
         std::exit(1);
     }
     const size_t smem = (size_t) threads_per_row * sizeof(float);
-    s2_gemv_q8_kernel<<<(unsigned) n_out, threads_per_row, smem, (cudaStream_t) stream>>>(act, codes, scales, y,
-                                                                                         n_in, n_out,
-                                                                                         threads_per_row);
+    s2_gemv_q8_kernel<<<(unsigned) n_out, threads_per_row, smem, (cudaStream_t) stream>>>(act, codes, scales, y, n_in,
+                                                                                          n_out, threads_per_row);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "s2_gemv_q8 launch: %s\n", cudaGetErrorString(e));
@@ -93,4 +92,4 @@ void s2_gemv_q8(const uint8_t* act, const uint8_t* codes, const float* scales, f
     if (stream == nullptr) cudaDeviceSynchronize();
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

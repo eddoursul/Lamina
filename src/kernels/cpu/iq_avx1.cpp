@@ -51,7 +51,10 @@ inline float h2f(uint16_t h) {
             f = sign << 31;
         } else {
             exp = 127 - 15 + 1;
-            while (!(man & 0x400u)) { man <<= 1; --exp; }
+            while (!(man & 0x400u)) {
+                man <<= 1;
+                --exp;
+            }
             man &= 0x3FFu;
             f = (sign << 31) | (exp << 23) | (man << 13);
         }
@@ -78,7 +81,6 @@ inline __m128i sgn16(uint32_t w, int byte_pair) {   // byte_pair 0: bytes 0-1 (v
     return _mm_or_si128(_mm_cmpeq_epi8(_mm_and_si128(bits, sel), sel), _mm_set1_epi8(1));
 }
 
-
 // The low index bytes interleaved with the spread high bits: eight 16-bit grid indices in one register.
 // (iq_avx2.cpp's grid_indices stores them to memory; on Ivy Bridge that store -> narrow-load round trip
 // costs a forwarding stall per index, so the decoders below read the lanes with _mm_extract_epi16 instead.)
@@ -99,13 +101,13 @@ template <int TY> struct Fmt128;
 template <> struct Fmt128<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 7-bit sign index + 4-bit scale)
     static constexpr int bytes = 98;
     static constexpr float K = 0.25f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
+    static inline void decode(const uint8_t* b, int j, int half, __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1,
+                              __m128i& c0, __m128i& c1) {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
-        g0 = _mm_set_epi32((int) iq3xxs_grid[q[3]], (int) iq3xxs_grid[q[2]],
-                           (int) iq3xxs_grid[q[1]], (int) iq3xxs_grid[q[0]]);
-        g1 = _mm_set_epi32((int) iq3xxs_grid[q[7]], (int) iq3xxs_grid[q[6]],
-                           (int) iq3xxs_grid[q[5]], (int) iq3xxs_grid[q[4]]);
+        g0 = _mm_set_epi32((int) iq3xxs_grid[q[3]], (int) iq3xxs_grid[q[2]], (int) iq3xxs_grid[q[1]],
+                           (int) iq3xxs_grid[q[0]]);
+        g1 = _mm_set_epi32((int) iq3xxs_grid[q[7]], (int) iq3xxs_grid[q[6]], (int) iq3xxs_grid[q[5]],
+                           (int) iq3xxs_grid[q[4]]);
         const uint32_t w = u32(b + 2 + 64 + 8 * j + 4 * half);
         s0 = _mm_set_epi64x((long long) even_signs.v[(w >> 7) & 127], (long long) even_signs.v[w & 127]);
         s1 = _mm_set_epi64x((long long) even_signs.v[(w >> 21) & 127], (long long) even_signs.v[(w >> 14) & 127]);
@@ -116,8 +118,8 @@ template <> struct Fmt128<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x
 template <> struct Fmt128<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4]
     static constexpr int bytes = 110;
     static constexpr float K = 1.0f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
+    static inline void decode(const uint8_t* b, int j, int half, __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1,
+                              __m128i& c0, __m128i& c1) {
         const uint8_t* q = b + 2 + 16 * j + 8 * half;
         const __m128i idx = grid_idx(q, hi_spread.iq3s[b[66 + 2 * j + half]]);
 #define G3(k) (int) iq3s_grid[_mm_extract_epi16(idx, k)]
@@ -135,8 +137,8 @@ template <> struct Fmt128<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[
 template <> struct Fmt128<22> {   // IQ2_S: d, qs[64] (32 grid bytes, 32 sign bytes), qh[8], scales[8]
     static constexpr int bytes = 82;
     static constexpr float K = 0.125f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
+    static inline void decode(const uint8_t* b, int j, int half, __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1,
+                              __m128i& c0, __m128i& c1) {
         // only the first 4 index bytes are this half's (the load's rest stays inside the block)
         const __m128i idx = grid_idx(b + 2 + 8 * j + 4 * half, hi_spread.iq2s[b[66 + 2 * j + half]]);
         g0 = _mm_set_epi64x((long long) iq2s_grid[_mm_extract_epi16(idx, 1)],
@@ -159,8 +161,8 @@ template <> struct Fmt128<23> {   // IQ4_XS: d, scales_h, scales_l[4], qs[128] -
     // unsigned maddubs operand (a pair is at most 2 * 127 * 128, no saturation).
     static constexpr int bytes = 136;
     static constexpr float K = 1.0f;
-    static inline void decode(const uint8_t* b, int j, int half,
-                              __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1, __m128i& c0, __m128i& c1) {
+    static inline void decode(const uint8_t* b, int j, int half, __m128i& g0, __m128i& g1, __m128i& s0, __m128i& s1,
+                              __m128i& c0, __m128i& c1) {
         const int H = 2 * j + half;
         const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
         const __m128i bits = _mm_loadu_si128((const __m128i*) (b + 8 + 16 * H));
@@ -182,8 +184,7 @@ inline __m128i madd_add(__m128i acc, __m128i g, __m128i sgn, __m128i yv, __m128i
 }
 
 // ---- the row kernels (iq_avx2_rows.inl's row_dot in 128-bit lanes)
-template <int TY, int NT>
-inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
+template <int TY, int NT> inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     const int pf = prefetch_distance();
     __m128 accf[NT];
     for (int t = 0; t < NT; ++t) accf[t] = _mm_setzero_ps();
@@ -218,8 +219,8 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
 // ---- IQ4_NL (20) down rows against Q8_0: ggml's dot is single-token even where it is vectorized (and
 // scalar here); decode the nibbles once, every token pays a sign, a maddubs, a madd and an fmadd-equivalent.
 template <int NT>
-void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out,
-                int r0, int r1) {
+void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out, int r0,
+                int r1) {
     const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
     const __m128i m4b = _mm_set1_epi8(0x0f);
     const __m128i ones = _mm_set1_epi16(1);
@@ -240,8 +241,10 @@ void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* con
             const float dx = h2f(u16(blk));
             for (int t = 0; t < NT; ++t) {
                 const uint8_t* q8 = (const uint8_t*) y[t][ib].qs;
-                const __m128i p0 = _mm_madd_epi16(_mm_maddubs_epi16(aq0, _mm_sign_epi8(_mm_loadu_si128((const __m128i*) q8), v0)), ones);
-                const __m128i p1 = _mm_madd_epi16(_mm_maddubs_epi16(aq1, _mm_sign_epi8(_mm_loadu_si128((const __m128i*) (q8 + 16)), v1)), ones);
+                const __m128i p0 = _mm_madd_epi16(
+                    _mm_maddubs_epi16(aq0, _mm_sign_epi8(_mm_loadu_si128((const __m128i*) q8), v0)), ones);
+                const __m128i p1 = _mm_madd_epi16(
+                    _mm_maddubs_epi16(aq1, _mm_sign_epi8(_mm_loadu_si128((const __m128i*) (q8 + 16)), v1)), ones);
                 const __m128 f = _mm_add_ps(_mm_cvtepi32_ps(p0), _mm_cvtepi32_ps(p1));
                 accf[t] = _mm_add_ps(accf[t], _mm_mul_ps(_mm_set1_ps(dx * h2f(y[t][ib].d)), f));
             }
@@ -254,8 +257,8 @@ void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* con
 // Codes {0,1,2,3} map to {c-1}: unpack to unsigned code bytes, dot them with maddubs, and subtract the
 // activation's pair sums - all integer, so the per-block sum is EXACTLY the generic dot's sumi_block.
 template <int NT>
-void q2_0_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out,
-               int r0, int r1) {
+void q2_0_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out, int r0,
+               int r1) {
     const __m128i m3 = _mm_set1_epi8(3);
     const __m128i ones = _mm_set1_epi16(1);
     const int nb = n / QK2_0;
@@ -285,8 +288,10 @@ void q2_0_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* cons
                     const __m128i y0 = _mm_loadu_si128((const __m128i*) q8);
                     const __m128i y1 = _mm_loadu_si128((const __m128i*) (q8 + 16));
                     // (c-1)*qy per pair: c*qy - qy, both at int16 level (|result| <= 508, no saturation)
-                    const __m128i d0 = _mm_sub_epi16(_mm_maddubs_epi16(k0, y0), _mm_maddubs_epi16(_mm_set1_epi8(1), y0));
-                    const __m128i d1 = _mm_sub_epi16(_mm_maddubs_epi16(k1, y1), _mm_maddubs_epi16(_mm_set1_epi8(1), y1));
+                    const __m128i d0 =
+                        _mm_sub_epi16(_mm_maddubs_epi16(k0, y0), _mm_maddubs_epi16(_mm_set1_epi8(1), y0));
+                    const __m128i d1 =
+                        _mm_sub_epi16(_mm_maddubs_epi16(k1, y1), _mm_maddubs_epi16(_mm_set1_epi8(1), y1));
                     const __m128 f = _mm_add_ps(_mm_cvtepi32_ps(_mm_madd_epi16(d0, ones)),
                                                 _mm_cvtepi32_ps(_mm_madd_epi16(d1, ones)));
                     accf[t] = _mm_add_ps(accf[t], _mm_mul_ps(_mm_set1_ps(dx * h2f(y[t][i * 2 + k].d)), f));
@@ -297,7 +302,7 @@ void q2_0_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* cons
     }
 }
 
-}  // namespace
+}   // namespace
 
 bool iq128_supported(int type) noexcept {
     // IQ4_XS (23) is deliberately NOT here: its ggml generic dot auto-vectorizes well and beats the 128-bit
@@ -307,12 +312,10 @@ bool iq128_supported(int type) noexcept {
     return type == 18 || type == 21 || type == 22;
 }
 
-bool iq128_down_supported(int type) noexcept {
-    return type == 20 || type == 42;
-}
+bool iq128_down_supported(int type) noexcept { return type == 20 || type == 42; }
 
-void iq128_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
-                   int nt, float* const* ff, int r0, int r1) {
+void iq128_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
+                   float* const* ff, int r0, int r1) {
     switch (type) {
         case 18: gu_rows_nt<18>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 21: gu_rows_nt<21>(nt, blob, gu_row, up_off, n, act, ff, r0, r1); break;
@@ -414,4 +417,4 @@ void q8k_quant_avx1(const float* x, void* vy, int64_t k) {
     }
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

@@ -125,7 +125,8 @@ struct Q6K {
 #pragma unroll
                 for (int r = 0; r < 2; ++r) {
                     const int l = (q & 1) ? lb[r][hf] : la[r][hf];
-                    a[r] = q6((q >> 1) ? l >> 4 : l, (2 * q <= 4) ? qh[r][hf] << (4 - 2 * q) : qh[r][hf] >> (2 * q - 4));
+                    a[r] =
+                        q6((q >> 1) ? l >> 4 : l, (2 * q <= 4) ? qh[r][hf] << (4 - 2 * q) : qh[r][hf] >> (2 * q - 4));
                 }
                 c[hf][0] = c[hf][1] = c[hf][2] = c[hf][3] = 0;
                 mma16(c[hf], a[0], a[1], x.b[q][hf]);
@@ -161,8 +162,7 @@ struct Q6K {
 // 2j / 2j + 1 = q8_1 block 8b + 2j (+ 1). y = d sc sum(q u) - dmin m sum(u) per sub-block, sum(u) the column's
 // quantized sum (an mma with A = ones gives it in the C layout). A stage holds 2 blocks; unit u: block u >> 1's
 // j = 2(u & 1), + 1: 4 sub-blocks.
-template <bool Q5>
-struct QK {
+template <bool Q5> struct QK {
     static constexpr int VALUES = 256, BLOCK = Q5 ? 176 : 144, SB = 2, UPT = 4, NK = 4, QS = Q5 ? 48 : 16;
     static constexpr int PITCH = Q5 ? 368 : 304;   // 352 / 288 bytes at 92 / 76 words (28 / 12 mod 32)
     __device__ __forceinline__ static int kb0(int s, int u) { return 16 * s + 8 * (u >> 1) + 4 * (u & 1); }
@@ -334,8 +334,8 @@ struct Q80 {
 
 // TM tiles of 16 rows a CTA, F::UPT warps a tile (a unit each a stage), ST stages in flight: block `block`'s rows
 template <class F, int TM, int ST>
-__device__ __forceinline__ void mma_rows(const uint8_t* __restrict__ w, const Acts& acts, float* __restrict__ y, int n_in,
-                                         int n_out, int ncols, int block) {
+__device__ __forceinline__ void mma_rows(const uint8_t* __restrict__ w, const Acts& acts, float* __restrict__ y,
+                                         int n_in, int n_out, int ncols, int block) {
     constexpr int UPT = F::UPT, W = UPT * TM, ROWS = 16 * TM, PITCH = F::PITCH, BYTES = F::SB * F::BLOCK;
     constexpr int CH = PITCH / 16, NCP = (ROWS * CH + W * 32 - 1) / (W * 32);
     extern __shared__ __align__(16) uint8_t smem[];
@@ -413,9 +413,8 @@ __device__ __forceinline__ void mma_rows(const uint8_t* __restrict__ w, const Ac
     }
 }
 template <class F, int TM, int ST>
-__launch_bounds__(TM * F::UPT * 32)
-__global__ void native_mma_kernel(const uint8_t* __restrict__ w, Acts acts, float* __restrict__ y, int n_in,
-                                  int n_out, int ncols) {
+__launch_bounds__(TM* F::UPT * 32) __global__ void
+native_mma_kernel(const uint8_t* __restrict__ w, Acts acts, float* __restrict__ y, int n_in, int n_out, int ncols) {
     mma_rows<F, TM, ST>(w, acts, y, n_in, n_out, ncols, (int) blockIdx.x);
 }
 // several matrices of one n_in: job blockIdx.y, its tiles up to its rows
@@ -426,8 +425,7 @@ struct Jobs {
     int n_out[5];
 };
 template <class F, int TM, int ST>
-__launch_bounds__(TM * F::UPT * 32)
-__global__ void native_mma_jobs_kernel(Jobs j, int n_in, int ncols) {
+__launch_bounds__(TM* F::UPT * 32) __global__ void native_mma_jobs_kernel(Jobs j, int n_in, int ncols) {
     const int k = (int) blockIdx.y;
     if ((int) blockIdx.x * 16 * TM >= j.n_out[k]) return;
     mma_rows<F, TM, ST>(j.w[k], j.a[k], j.y[k], n_in, j.n_out[k], ncols, (int) blockIdx.x);
@@ -446,12 +444,14 @@ void launch(const void* w, const Acts& a, float* y, int n_in, int n_out, int nco
 // reaches), from n0 tokens, with tm tiles a CTA and st stages in flight. The heads' class also on the RTX 5070 Ti.
 // Not Q8_0 (UD-Q4_K_XL's): faster alone from 5 tokens, but its shorter dense chain and head took time from the
 // adaptive tiers' copies, and that model's CPU-bound rounds were 0.3-1.3% longer.
-struct Rule { int type, min_out, n0, tm, st; };
+struct Rule {
+    int type, min_out, n0, tm, st;
+};
 constexpr Rule kRules[] = {
     {14, 65536, 2, 2, 2}, {14, 12288, 2, 1, 2}, {14, 8192, 2, 2, 2}, {14, 4096, 2, 1, 2}, {14, 2048, 2, 1, 3},   // Q6_K
     {13, 12288, 6, 1, 2}, {13, 8192, 5, 2, 2},  {13, 4096, 6, 1, 3}, {13, 2048, 6, 1, 2},                        // Q5_K
     {12, 12288, 5, 1, 2}, {12, 8192, 5, 2, 2},  {12, 4096, 5, 1, 3}, {12, 2048, 6, 1, 2},                        // Q4_K
-    {23, 12288, 6, 1, 2}, {23, 8192, 5, 1, 2},  {23, 4096, 6, 1, 3},                                             // IQ4_XS
+    {23, 12288, 6, 1, 2}, {23, 8192, 5, 1, 2},  {23, 4096, 6, 1, 3},   // IQ4_XS
 };
 
 template <class F>
@@ -468,7 +468,7 @@ bool run(const Rule& r, const void* w, const Acts& a, float* y, int n_in, int n_
     return true;
 }
 
-}  // namespace
+}   // namespace
 
 bool native_mma(int ggml_type, const void* weights, const void* x_il, float* y, int n_in, int n_out, int ncols,
                 void* stream) {
@@ -484,18 +484,19 @@ bool native_mma(int ggml_type, const void* weights, const void* x_il, float* y, 
     const Acts a{parts.bm, parts.d, native_q8_1_il_cp(ncols)};
     const auto s = static_cast<cudaStream_t>(stream);
     switch (ggml_type) {
-    case 14: return run<Q6K>(*r, weights, a, y, n_in, n_out, ncols, s);
-    case 13: return run<QK<true>>(*r, weights, a, y, n_in, n_out, ncols, s);
-    case 12: return run<QK<false>>(*r, weights, a, y, n_in, n_out, ncols, s);
-    case 23: return run<IQ4XS>(*r, weights, a, y, n_in, n_out, ncols, s);
-    default: return false;
+        case 14: return run<Q6K>(*r, weights, a, y, n_in, n_out, ncols, s);
+        case 13: return run<QK<true>>(*r, weights, a, y, n_in, n_out, ncols, s);
+        case 12: return run<QK<false>>(*r, weights, a, y, n_in, n_out, ncols, s);
+        case 23: return run<IQ4XS>(*r, weights, a, y, n_in, n_out, ncols, s);
+        default: return false;
     }
 }
 
 bool native_mma_q8_0(const MmaJob* jobs, int n_jobs, int n_in, int ncols, void* stream) {
     constexpr int TM = 1, ST = 2, smem = ST * 16 * TM * Q80::PITCH + Q80::UPT * TM * 512;
     static_assert(smem <= 48 * 1024, "within the default dynamic shared memory");
-    if (jobs == nullptr || ncols < 2 || ncols > 8 || n_jobs < 1 || n_jobs > 5 || n_in <= 0 || n_in % (Q80::SB * Q80::VALUES) != 0)
+    if (jobs == nullptr || ncols < 2 || ncols > 8 || n_jobs < 1 || n_jobs > 5 || n_in <= 0 ||
+        n_in % (Q80::SB * Q80::VALUES) != 0)
         return false;
     Jobs j{};
     int most = 0;
@@ -510,9 +511,10 @@ bool native_mma_q8_0(const MmaJob* jobs, int n_jobs, int n_in, int ncols, void* 
         j.n_out[i] = jobs[i].n_out;
         most = most > jobs[i].n_out ? most : jobs[i].n_out;
     }
-    native_mma_jobs_kernel<Q80, TM, ST><<<dim3((unsigned) ((most + 16 * TM - 1) / (16 * TM)), (unsigned) n_jobs),
-                                          TM * Q80::UPT * 32, smem, static_cast<cudaStream_t>(stream)>>>(j, n_in, ncols);
+    native_mma_jobs_kernel<Q80, TM, ST>
+        <<<dim3((unsigned) ((most + 16 * TM - 1) / (16 * TM)), (unsigned) n_jobs), TM * Q80::UPT * 32, smem,
+           static_cast<cudaStream_t>(stream)>>>(j, n_in, ncols);
     return cudaPeekAtLastError() == cudaSuccess;
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

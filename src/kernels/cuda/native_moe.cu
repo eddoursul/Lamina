@@ -31,8 +31,7 @@
 namespace lamina::kernels {
 namespace {
 __global__ void combine(const float* __restrict__ parts, const float* __restrict__ weights,
-                        const float* __restrict__ shared, float* __restrict__ output,
-                        int64_t n_embd, int k) {
+                        const float* __restrict__ shared, float* __restrict__ output, int64_t n_embd, int k) {
     const int64_t col = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (col >= n_embd) return;
     float sum = parts[col] * weights[0];
@@ -114,29 +113,26 @@ bool overlap(const void* a, size_t an, const void* b, size_t bn) {
     const auto ap = reinterpret_cast<uintptr_t>(a), bp = reinterpret_cast<uintptr_t>(b);
     return ap < bp + bn && bp < ap + an;
 }
-}
-void native_moe_combine(const float* parts, const float* weights, const float* shared,
-                        float* output, int64_t n_embd, int64_t k, void* stream) {
+}   // namespace
+void native_moe_combine(const float* parts, const float* weights, const float* shared, float* output, int64_t n_embd,
+                        int64_t k, void* stream) {
     if (!stream || n_embd <= 0 || n_embd > std::numeric_limits<int>::max() || k < 1 || k > 15)
         throw std::invalid_argument("native MoE combine requires a stream, positive width and 1..15 experts");
     const size_t row_bytes = size_t(n_embd) * sizeof(float);
     const size_t part_bytes = row_bytes * size_t(k), weight_bytes = size_t(k) * sizeof(float);
-    if (!valid_span(parts, part_bytes) || !valid_span(weights, weight_bytes) || !valid_span(output, row_bytes)
-            || (shared && !valid_span(shared, row_bytes))
-            || overlap(output, row_bytes, parts, part_bytes)
-            || overlap(output, row_bytes, weights, weight_bytes)
-            || (shared && overlap(output, row_bytes, shared, row_bytes)))
+    if (!valid_span(parts, part_bytes) || !valid_span(weights, weight_bytes) || !valid_span(output, row_bytes) ||
+        (shared && !valid_span(shared, row_bytes)) || overlap(output, row_bytes, parts, part_bytes) ||
+        overlap(output, row_bytes, weights, weight_bytes) || (shared && overlap(output, row_bytes, shared, row_bytes)))
         throw std::invalid_argument("native MoE combine requires aligned spans and disjoint output");
-    combine<<<unsigned((n_embd + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(
-        parts, weights, shared, output, n_embd, int(k));
+    combine<<<unsigned((n_embd + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(parts, weights, shared,
+                                                                                           output, n_embd, int(k));
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-void native_moe_gather_combine(const float* gpu_rows, const float* host_rows, const int32_t* dst,
-                               const int32_t* count, const int32_t* dst2, const int32_t* count2, const int32_t* dst3,
-                               const int32_t* count3, const float* weights, const float* shared,
-                               const float* shared_gate, float* output, int64_t n_embd, int64_t k, int n_tok,
-                               void* stream) {
+void native_moe_gather_combine(const float* gpu_rows, const float* host_rows, const int32_t* dst, const int32_t* count,
+                               const int32_t* dst2, const int32_t* count2, const int32_t* dst3, const int32_t* count3,
+                               const float* weights, const float* shared, const float* shared_gate, float* output,
+                               int64_t n_embd, int64_t k, int n_tok, void* stream) {
     if (!stream || n_embd <= 0 || n_embd > std::numeric_limits<int>::max() || k < 1 || k > kMaxK || n_tok < 1 ||
         !gpu_rows || !host_rows || !dst || !count || (dst2 != nullptr && count2 == nullptr) ||
         (dst3 != nullptr && count3 == nullptr) || !weights || !output || (shared_gate != nullptr && !shared))
@@ -144,9 +140,9 @@ void native_moe_gather_combine(const float* gpu_rows, const float* host_rows, co
                                     "and its buffers");
     const dim3 grid(unsigned((n_embd + 255) / 256), unsigned(n_tok));
     gather_combine<<<grid, 256, 0, static_cast<cudaStream_t>(stream)>>>(gpu_rows, host_rows, dst, count, dst2, count2,
-                                                                         dst3, count3, weights, shared, shared_gate,
-                                                                         output, n_embd, int(k));
+                                                                        dst3, count3, weights, shared, shared_gate,
+                                                                        output, n_embd, int(k));
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-}
+}   // namespace lamina::kernels

@@ -19,4 +19,4 @@ __device__ __forceinline__ void q8_widen4(uint32_t u, __half2 d2, __half2& lo, _
     hi = __hmul2(__hsub2(*reinterpret_cast<const __half2*>(&b), bias), d2);
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

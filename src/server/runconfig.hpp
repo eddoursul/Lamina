@@ -86,4 +86,4 @@ std::pair<json, std::vector<std::string>> apply(const json& cfg, const json& cha
 std::string save(const std::string& path, const json& cfg);
 json load(const std::string& path);
 
-}  // namespace lamina::runconfig
+}   // namespace lamina::runconfig

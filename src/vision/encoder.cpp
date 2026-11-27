@@ -23,4 +23,4 @@ std::unique_ptr<Encoder> open_encoder(const EncoderParams& params, std::string& 
     return params.gpu ? open_cuda_encoder(params, err) : open_ggml_encoder(params, err);
 }
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

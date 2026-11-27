@@ -26,14 +26,14 @@
 #include <fcntl.h>
 #include <io.h>
 #else
-#include <cerrno>
-#include <csignal>
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <cerrno>
+#include <csignal>
 extern char** environ;
 #endif
 
@@ -78,13 +78,14 @@ void check_spawn(const SpawnOptions& o) {
         if (a.find('\0') != std::string::npos) throw std::invalid_argument("embedded null byte");
     if (o.env)
         for (const auto& [k, v] : *o.env) {
-            if (k.empty() || k.find('=') != std::string::npos) throw std::invalid_argument("illegal environment variable name");
+            if (k.empty() || k.find('=') != std::string::npos)
+                throw std::invalid_argument("illegal environment variable name");
             if (k.find('\0') != std::string::npos || v.find('\0') != std::string::npos)
                 throw std::invalid_argument("embedded null byte");
         }
 }
 
-}  // namespace
+}   // namespace
 
 bool EnvLess::operator()(const std::string& a, const std::string& b) const {
 #ifdef _WIN32
@@ -177,7 +178,7 @@ HANDLE inheritable_copy(DWORD which, bool write) {
     return inheritable_null(write);
 }
 
-}  // namespace
+}   // namespace
 
 struct Process::Impl {
     HANDLE process = nullptr, job = nullptr, in = nullptr, out = nullptr, err = nullptr;
@@ -254,9 +255,11 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
         } else if (o.err == SpawnOptions::null) {
             child[2] = inheritable_null(true);
         } else if (o.err == SpawnOptions::file) {
-            child[2] = CreateFileW(widen(o.err_file).c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                   FILE_SHARE_DELETE, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (child[2] == INVALID_HANDLE_VALUE) throw std::runtime_error(os_error(GetLastError()) + ": " + o.err_file);
+            child[2] = CreateFileW(widen(o.err_file).c_str(), FILE_APPEND_DATA,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa, OPEN_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (child[2] == INVALID_HANDLE_VALUE)
+                throw std::runtime_error(os_error(GetLastError()) + ": " + o.err_file);
         } else {
             child[2] = inheritable_copy(STD_ERROR_HANDLE, true);
         }
@@ -305,9 +308,9 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
     if (o.no_window) flags |= CREATE_NO_WINDOW;
     PROCESS_INFORMATION pi{};
     const std::wstring wcwd = widen(o.cwd);
-    const BOOL ok = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, flags,
-                                   o.env ? (LPVOID) block.data() : nullptr, o.cwd.empty() ? nullptr : wcwd.c_str(),
-                                   &si.StartupInfo, &pi);
+    const BOOL ok =
+        CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, flags, o.env ? (LPVOID) block.data() : nullptr,
+                       o.cwd.empty() ? nullptr : wcwd.c_str(), &si.StartupInfo, &pi);
     const DWORD error = GetLastError();
     DeleteProcThreadAttributeList(attrs);
     close_child();
@@ -324,8 +327,9 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
         p.job = CreateJobObjectW(nullptr, nullptr);   // no security attributes: the handle is not inherited
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (p.job != nullptr && (!SetInformationJobObject(p.job, JobObjectExtendedLimitInformation, &info, sizeof info) ||
-                                 !AssignProcessToJobObject(p.job, pi.hProcess))) {
+        if (p.job != nullptr &&
+            (!SetInformationJobObject(p.job, JobObjectExtendedLimitInformation, &info, sizeof info) ||
+             !AssignProcessToJobObject(p.job, pi.hProcess))) {
             CloseHandle(p.job);
             p.job = nullptr;
         }
@@ -456,8 +460,9 @@ void redirect_stderr(const std::string& path) {
     if (saved >= 0) {
         if (std::FILE* console = _fdopen(saved, "w")) set_err_stream(console);
     }
-    const HANDLE h = CreateFileW(widen(path).c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE |
-                                 FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const HANDLE h =
+        CreateFileW(widen(path).c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     const int fd = _open_osfhandle((intptr_t) h, _O_APPEND | _O_WRONLY);
     if (fd < 0) {
@@ -495,8 +500,7 @@ std::string os_error(int code) { return "[Errno " + std::to_string(code) + "] " 
 class Anchor {
 public:
     Anchor() : t_([this] { loop(); }) { t_.detach(); }
-    template <class F>
-    auto call(F f) -> decltype(f()) {
+    template <class F> auto call(F f) -> decltype(f()) {
         std::packaged_task<decltype(f())()> task(std::move(f));
         auto fut = task.get_future();
         {
@@ -531,7 +535,7 @@ Anchor& anchor() {
     return *a;
 }
 
-}  // namespace
+}   // namespace
 
 struct Process::Impl {
     pid_t pid = -1;
@@ -604,7 +608,8 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
         (o.out == SpawnOptions::pipe && ::pipe2(out_pipe, O_CLOEXEC) != 0) ||
         (o.err == SpawnOptions::pipe && ::pipe2(err_pipe, O_CLOEXEC) != 0) || ::pipe2(status, O_CLOEXEC) != 0) {
         const int e = errno;
-        closeall({&in_pipe[0], &in_pipe[1], &out_pipe[0], &out_pipe[1], &err_pipe[0], &err_pipe[1], &status[0], &status[1]});
+        closeall(
+            {&in_pipe[0], &in_pipe[1], &out_pipe[0], &out_pipe[1], &err_pipe[0], &err_pipe[1], &status[0], &status[1]});
         throw std::runtime_error(os_error(e));
     }
     // everything the child needs, prepared before the fork (only async-signal-safe calls after it)
@@ -623,7 +628,8 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
     if (exe.find('/') == std::string::npos) {
         const std::string found = which(exe, o.env ? &*o.env : nullptr);
         if (found.empty()) {
-            closeall({&in_pipe[0], &in_pipe[1], &out_pipe[0], &out_pipe[1], &err_pipe[0], &err_pipe[1], &status[0], &status[1]});
+            closeall({&in_pipe[0], &in_pipe[1], &out_pipe[0], &out_pipe[1], &err_pipe[0], &err_pipe[1], &status[0],
+                      &status[1]});
             throw std::runtime_error(os_error(ENOENT) + ": '" + exe + "'");
         }
         exe = found;
@@ -633,7 +639,8 @@ Process::Process(SpawnOptions o) : impl_(std::make_unique<Impl>()) {
         err_fd = ::open(o.err_file.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
         if (err_fd < 0) {
             const int e = errno;
-            closeall({&in_pipe[0], &in_pipe[1], &out_pipe[0], &out_pipe[1], &err_pipe[0], &err_pipe[1], &status[0], &status[1]});
+            closeall({&in_pipe[0], &in_pipe[1], &out_pipe[0], &out_pipe[1], &err_pipe[0], &err_pipe[1], &status[0],
+                      &status[1]});
             throw std::runtime_error(os_error(e) + ": '" + o.err_file + "'");
         }
     }
@@ -761,7 +768,8 @@ std::optional<int> Process::poll() {
 }
 
 std::optional<int> Process::wait(double timeout_s) {
-    const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s < 0 ? 1e9 : timeout_s);
+    const auto until =
+        std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_s < 0 ? 1e9 : timeout_s);
     for (;;) {
         if (auto c = poll()) return c;
         if (std::chrono::steady_clock::now() >= until) return std::nullopt;
@@ -889,4 +897,4 @@ int64_t run_command(const json& cmd, double timeout_s, std::string& why) {
     return -1;
 }
 
-}  // namespace lamina
+}   // namespace lamina

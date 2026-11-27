@@ -104,7 +104,8 @@ std::string clean(std::string_view name) {
     for (size_t i = 0; i < name.size();) {
         size_t n = 1;
         const uint32_t c = utf8_at(name, i, &n);
-        const bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        const bool keep =
+            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
         out += keep ? (char) c : '_';
         i += n;
     }
@@ -173,9 +174,9 @@ json wait_slot(Slot& slot, double timeout, Cancel* cancel, const std::string& wh
 /// an event stream read as it arrives, until the event that answers `rid` (it may carry notifications first)
 struct EventReader {
     long long rid = 0;
-    std::string part;                 // a line not ended yet
-    std::vector<std::string> data;    // the data lines of the event so far
-    json found;                       // the answer, once read
+    std::string part;                // a line not ended yet
+    std::vector<std::string> data;   // the data lines of the event so far
+    json found;                      // the answer, once read
 
     /// true once the answer is in
     bool feed(std::string_view chunk) {
@@ -210,7 +211,7 @@ struct EventReader {
     }
 };
 
-}  // namespace
+}   // namespace
 
 json mcp_defaults() {
     return {{"timeout_s", 60.0}, {"max_result_chars", 20000}, {"max_rounds", 8}, {"start_timeout_s", 120.0}};
@@ -227,8 +228,8 @@ struct StdioTransport::Impl {
     std::string protocol = kMcpProtocol;
     std::string junk, junk_after;   // that line, and the stderr tail when it came (which of the two is newer)
     std::atomic<bool> ended{false};
-    bool reader_done = false;       // under mu
-    bool writer_done = false;       // under mu
+    bool reader_done = false;            // under mu
+    bool writer_done = false;            // under mu
     std::condition_variable reader_cv;   // and writer_done
     // the lines to the server, written by write_loop: a server that stops reading holds that thread in its write,
     // not a request (it times out, a Stop ends it) or close (it ends the server then)
@@ -249,7 +250,8 @@ StdioTransport::StdioTransport(std::string name, json cfg) : impl_(std::make_sha
 
 StdioTransport::~StdioTransport() {
     impl_->lines->close();
-    if (impl_->proc) impl_->proc->kill();   // with what it started; the reader ends with its output, the writer's write fails
+    if (impl_->proc)
+        impl_->proc->kill();   // with what it started; the reader ends with its output, the writer's write fails
 }
 
 void StdioTransport::start() {
@@ -263,8 +265,7 @@ void StdioTransport::start() {
     std::string exe;
     try {
         exe = which(command, &env);
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
     SpawnOptions o;
     o.args.push_back(exe.empty() ? command : exe);
     const json& args = jget(s.cfg, "args");
@@ -328,7 +329,8 @@ void StdioTransport::Impl::read() {
         before = std::move(after);
     }
     const std::optional<int> code = proc->poll();
-    const std::string err = "the server stopped" + (code ? " (exit code " + exit_code_text(*code) + ")" : std::string()) + tail();
+    const std::string err =
+        "the server stopped" + (code ? " (exit code " + exit_code_text(*code) + ")" : std::string()) + tail();
     std::map<long long, std::shared_ptr<Slot>> slots;
     {
         std::lock_guard<std::mutex> lk(mu);
@@ -370,10 +372,10 @@ void StdioTransport::Impl::dispatch(const json& m) {
                 if (method.is_string() && method.get<std::string>() == "ping")
                     send({{"jsonrpc", "2.0"}, {"id", m["id"]}, {"result", json::object()}});
                 else
-                    send({{"jsonrpc", "2.0"}, {"id", m["id"]},
+                    send({{"jsonrpc", "2.0"},
+                          {"id", m["id"]},
                           {"error", {{"code", -32601}, {"message", "method not supported: " + py_str(method)}}}});
-            } catch (const McpError&) {
-            }
+            } catch (const McpError&) {}
         }
         return;   // notifications (log messages, list changes): not used
     }
@@ -411,9 +413,10 @@ void StdioTransport::Impl::cancelled(long long rid, const std::string& reason) {
         pending.erase(rid);
     }
     try {   // tell the server to stop working on it
-        send({{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}, {"params", {{"requestId", rid}, {"reason", reason}}}});
-    } catch (const McpError&) {
-    }
+        send({{"jsonrpc", "2.0"},
+              {"method", "notifications/cancelled"},
+              {"params", {{"requestId", rid}, {"reason", reason}}}});
+    } catch (const McpError&) {}
 }
 
 json StdioTransport::request(const std::string& method, const json& params, double timeout, Cancel* cancel) {
@@ -472,8 +475,8 @@ void StdioTransport::set_protocol(const std::string& p) {
 // ------------------------------------------------------------------------------------------------ Streamable HTTP
 struct HttpTransport::Impl {
     std::string name, url;
-    HttpHeaders headers;    // the config's
-    mutable std::mutex mu;  // session, protocol, next_id, broken
+    HttpHeaders headers;     // the config's
+    mutable std::mutex mu;   // session, protocol, next_id, broken
     std::string session, protocol;
     long long next_id = 0;
     std::optional<std::string> broken;
@@ -492,9 +495,11 @@ HttpTransport::HttpTransport(std::string name, const json& cfg) : impl_(std::mak
 }
 
 HttpHeaders HttpTransport::Impl::request_headers() const {
-    HttpHeaders h = {{"Content-Type", "application/json"}, {"Accept", "application/json, text/event-stream"},
+    HttpHeaders h = {{"Content-Type", "application/json"},
+                     {"Accept", "application/json, text/event-stream"},
                      {"User-Agent", "lamina"}};
-    auto set = [&h](const std::string& k, const std::string& v) {   // urllib keys them case-insensitively: the last wins
+    auto set = [&h](const std::string& k, const std::string& v) {   // urllib keys them
+                                                                    // case-insensitively: the last wins
         for (auto& [hk, hv] : h)
             if (lower(hk) == lower(k)) {
                 hv = v;
@@ -517,18 +522,19 @@ json HttpTransport::Impl::exchange(const json& msg, long long rid, double timeou
     std::string body;
     // `timeout` bounds each read: a stream's keep-alive comments would hold the POST past its call's end without this
     const double until = mono() + timeout;
-    const HttpReply r = http_request("POST", url, request_headers(), py_dumps(msg, false), timeout, 0,
-                                     [&](std::string_view chunk) {
-                                         body.append(chunk);
-                                         // a notification's answer is not read; a stream may stay open after the
-                                         // event that answers
-                                         return answer && !events.feed(chunk) && mono() < until;
-                                     });
+    const HttpReply r =
+        http_request("POST", url, request_headers(), py_dumps(msg, false), timeout, 0, [&](std::string_view chunk) {
+            body.append(chunk);
+            // a notification's answer is not read; a stream may stay open after the
+            // event that answers
+            return answer && !events.feed(chunk) && mono() < until;
+        });
     if (r.status < 200 || r.status >= 300) {
         const std::string detail = first_chars(decode_replace(body), 300);
         {
             std::lock_guard<std::mutex> lk(mu);
-            if (r.status == 404 && !session.empty()) broken = "the server ended the session";   // a restart starts a new one
+            if (r.status == 404 && !session.empty())
+                broken = "the server ended the session";   // a restart starts a new one
         }
         throw McpError("HTTP " + std::to_string(r.status) + " " + r.reason + (detail.empty() ? "" : ": " + detail));
     }
@@ -596,13 +602,13 @@ json HttpTransport::request(const std::string& method, const json& params, doubl
     // the POST runs on its own thread so the stop button and the deadline are noticed while it waits
     std::thread([s, slot, msg = std::move(msg), rid, timeout] { s->post(msg, rid, timeout + 5, slot.get()); }).detach();
     auto cancelled = [&](const char* reason) {
-        json note = {{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"},
+        json note = {{"jsonrpc", "2.0"},
+                     {"method", "notifications/cancelled"},
                      {"params", {{"requestId", rid}, {"reason", reason}}}};
         std::thread([s, note = std::move(note)] {
             try {
                 s->post(note, 0, 10, nullptr);
-            } catch (const std::exception&) {
-            }
+            } catch (const std::exception&) {}
         }).detach();
     };
     try {
@@ -626,8 +632,7 @@ void HttpTransport::close() {
     if (session().empty()) return;
     try {   // the server may not allow it
         http_request("DELETE", impl_->url, impl_->request_headers(), "", 3);
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
 }
 
 std::string HttpTransport::protocol() const {
@@ -647,7 +652,8 @@ std::string HttpTransport::session() const {
 
 // ------------------------------------------------------------------------------------------------ one server
 McpServer::McpServer(std::string name_, json cfg_, const json& settings_)
-    : name(std::move(name_)), cfg(std::move(cfg_)), kind(truthy(jget(cfg, "url")) ? "http" : "stdio"), settings(settings_) {}
+    : name(std::move(name_)), cfg(std::move(cfg_)), kind(truthy(jget(cfg, "url")) ? "http" : "stdio"),
+      settings(settings_) {}
 
 std::shared_ptr<McpTransport> McpServer::transport() const {
     std::lock_guard<std::mutex> lk(state_mu);
@@ -685,7 +691,8 @@ bool McpServer::start_locked(Cancel* cancel) {
         const json& si = jget(res, "serverInfo");
         if (si.is_object())
             for (auto it = si.begin(); it != si.end(); ++it)
-                if (it.key() == "name" || it.key() == "title" || it.key() == "version") server_info[it.key()] = it.value();
+                if (it.key() == "name" || it.key() == "title" || it.key() == "version")
+                    server_info[it.key()] = it.value();
         server_info["protocol"] = t->protocol();
         {
             std::lock_guard<std::mutex> lk(state_mu);
@@ -696,7 +703,8 @@ bool McpServer::start_locked(Cancel* cancel) {
         for (int page_no = 0; page_no < 100; ++page_no) {   // pages; a server that never stops paging is cut off
             json page;
             try {
-                page = t->request("tools/list", truthy(cursor) ? json{{"cursor", cursor}} : json::object(), timeout, cancel);
+                page = t->request("tools/list", truthy(cursor) ? json{{"cursor", cursor}} : json::object(), timeout,
+                                  cancel);
             } catch (const McpError& e) {
                 // a server without tools (prompts or resources only)
                 if (std::string_view(e.what()).find("code -32601") != std::string_view::npos && listed.empty()) break;
@@ -728,7 +736,8 @@ bool McpServer::start_locked(Cancel* cancel) {
         t->close();
         throw;
     } catch (const std::exception& e) {   // McpError (anything else would be a failed start as well)
-        bool listed;   // its tools from an earlier start stay: a call to one starts it again (at most every 10 s)
+        bool listed;                      // its tools from an earlier start stay: a call
+                                          // to one starts it again (at most every 10 s)
         {
             std::lock_guard<std::mutex> lk(state_mu);
             status = "failed";
@@ -737,7 +746,8 @@ bool McpServer::start_locked(Cancel* cancel) {
         }
         t->close();
         say("[lamina] MCP server " + py_repr_str(name) + " did not start: " + e.what() +
-            (listed ? ". Its tools stay listed; a call to one tries again." : ". Its tools are left out; the chat works without them."));
+            (listed ? ". Its tools stay listed; a call to one tries again."
+                    : ". Its tools are left out; the chat works without them."));
         return false;
     }
 }
@@ -759,7 +769,8 @@ json McpServer::call(const std::string& tool, const json& arguments, double time
                 why = error;
             }
             if (was == "failed" && mono() - last_start_ < 10)
-                throw McpError("the server is not running (" + (why && !why->empty() ? *why : std::string("it stopped")) + ")");
+                throw McpError("the server is not running (" +
+                               (why && !why->empty() ? *why : std::string("it stopped")) + ")");
             say("[lamina] MCP server " + py_repr_str(name) + " had stopped; starting it again");
             if (!start_locked(cancel)) {
                 std::lock_guard<std::mutex> st(state_mu);
@@ -803,8 +814,7 @@ std::string result_text(const json& result) {
                 parts.push_back(block.contains("text") ? py_str(block["text"]) : "");
             } else if (k == "resource") {
                 const json& res = jget(block, "resource");   // not an object: read as {}
-                if (res.is_object() && res.contains("text"))
-                    parts.push_back(py_str(res["text"]));
+                if (res.is_object() && res.contains("text")) parts.push_back(py_str(res["text"]));
                 else
                     parts.push_back("[resource " + (res.contains("uri") ? py_str(res["uri"]) : "") + " (" +
                                     (res.contains("mimeType") ? py_str(res["mimeType"]) : "binary") + "), not shown]");
@@ -825,7 +835,8 @@ std::string result_text(const json& result) {
             }
         }
     }
-    if (parts.empty() && result.is_object() && result.contains("structuredContent") && !result["structuredContent"].is_null())
+    if (parts.empty() && result.is_object() && result.contains("structuredContent") &&
+        !result["structuredContent"].is_null())
         parts.push_back(py_dumps(result["structuredContent"], false));
     std::string out;
     for (size_t i = 0; i < parts.size(); ++i) out += (i ? "\n" : "") + parts[i];
@@ -859,8 +870,7 @@ void McpHub::start(bool wait_all) {
             threads_.emplace_back([this, srv = s.get()] {
                 try {
                     srv->start();
-                } catch (const std::exception&) {
-                }
+                } catch (const std::exception&) {}
                 {
                     std::lock_guard<std::mutex> done(mu_);
                     --starting_;
@@ -890,7 +900,8 @@ McpRoutes McpHub::routes() {
         }
         for (const auto& t : listed) {
             std::string n = (clean(s->name) + "__" + clean(tool_name(t))).substr(0, 64);
-            for (int k = 2; out.count(n) != 0; ++k) n = n.substr(0, 60) + "_" + std::to_string(k);   // two names that differ only in cleaned characters
+            for (int k = 2; out.count(n) != 0; ++k)
+                n = n.substr(0, 60) + "_" + std::to_string(k);   // two names that differ only in cleaned characters
             out[n] = {s.get(), tool_name(t)};
         }
     }
@@ -917,9 +928,12 @@ json McpHub::template_tools(const std::set<std::string>& exclude) {
         const json& description = jget(t, "description");
         const json& title = jget(t, "title");
         out.push_back({{"name", n},
-                       {"description", truthy(description) ? py_str(description) : truthy(title) ? py_str(title) : ""},
-                       {"parameters", schema.is_object() && !schema.empty() ? schema
-                                                                             : json{{"type", "object"}, {"properties", json::object()}}}});
+                       {"description", truthy(description) ? py_str(description)
+                                       : truthy(title)     ? py_str(title)
+                                                           : ""},
+                       {"parameters", schema.is_object() && !schema.empty()
+                                          ? schema
+                                          : json{{"type", "object"}, {"properties", json::object()}}}});
     }
     return out;
 }
@@ -1012,9 +1026,10 @@ json McpHub::status() {
     }
     return {{"servers", list},
             {"tools", r.size()},
-            {"settings", {{"timeout_s", jget(settings, "timeout_s")},
-                          {"max_result_chars", jget(settings, "max_result_chars")},
-                          {"max_rounds", jget(settings, "max_rounds")}}}};
+            {"settings",
+             {{"timeout_s", jget(settings, "timeout_s")},
+              {"max_result_chars", jget(settings, "max_result_chars")},
+              {"max_rounds", jget(settings, "max_rounds")}}}};
 }
 
 void McpHub::close() {
@@ -1025,8 +1040,7 @@ void McpHub::close() {
     for (const auto& s : servers) {
         try {   // closing is best effort
             s->close();
-        } catch (const std::exception&) {
-        }
+        } catch (const std::exception&) {}
     }
 }
 
@@ -1039,8 +1053,9 @@ json check_server(const std::string& name, const json& cfg, const std::string& w
     if (truthy(jget(cfg, "url"))) {
         const json& type = jget(cfg, "type");
         if (type.is_string() && type.get<std::string>() == "sse")
-            throw McpConfigError(who + " uses the old SSE transport (\"type\": \"sse\"); Lamina speaks Streamable HTTP - "
-                                       "most servers offer it at /mcp");
+            throw McpConfigError(who +
+                                 " uses the old SSE transport (\"type\": \"sse\"); Lamina speaks Streamable HTTP - "
+                                 "most servers offer it at /mcp");
         const json& headers = jget(cfg, "headers");
         if (truthy(headers) && !headers.is_object()) throw McpConfigError(who + ": \"headers\" must be an object");
         return cfg;
@@ -1084,11 +1099,12 @@ bool read_file(const std::string& path, std::string& text, std::string& error) {
     return !failed;
 }
 
-}  // namespace
+}   // namespace
 
 json servers_from(const json& block, const std::string& where) {
     if (block.is_null()) return json::object();
-    if (!block.is_object()) throw McpConfigError("[lamina] " + where + ": the MCP servers must be an object {\"name\": {...}}");
+    if (!block.is_object())
+        throw McpConfigError("[lamina] " + where + ": the MCP servers must be an object {\"name\": {...}}");
     json out = json::object();
     for (auto it = block.begin(); it != block.end(); ++it) {
         const json& disabled = jget(it.value(), "disabled");
@@ -1102,7 +1118,8 @@ json settings_from(const json& cfg) {
     json out = json::object();
     const json& block = jget(cfg, "mcp");
     if (!truthy(block)) return out;
-    if (!block.is_object()) throw McpConfigError("[lamina] config mcp=" + py_repr_value(block) + ": expected an object");
+    if (!block.is_object())
+        throw McpConfigError("[lamina] config mcp=" + py_repr_value(block) + ": expected an object");
     for (auto it = block.begin(); it != block.end(); ++it) {
         const std::string& key = it.key();
         const json& value = it.value();
@@ -1148,4 +1165,4 @@ std::shared_ptr<McpHub> hub_from_config(const json& cfg, const std::string& mcp_
     return std::make_shared<McpHub>(servers, settings_from(cfg));
 }
 
-}  // namespace lamina
+}   // namespace lamina

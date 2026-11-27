@@ -17,7 +17,10 @@ NativeHead::~NativeHead() {
 }
 
 bool NativeHead::keep_rows(int64_t rows, std::string& err) {
-    if (!loaded() || rows <= 0 || rows >= n_out_) { err = "native head: keep_rows out of range"; return false; }
+    if (!loaded() || rows <= 0 || rows >= n_out_) {
+        err = "native head: keep_rows out of range";
+        return false;
+    }
     const uint64_t bytes = (uint64_t) rows * row_bytes();
     void* w = nullptr;
     if (cudaMalloc(&w, bytes) != cudaSuccess ||
@@ -35,7 +38,10 @@ bool NativeHead::keep_rows(int64_t rows, std::string& err) {
 }
 
 bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int64_t n_out, std::string& err) {
-    if (loaded()) { err = "native head is already loaded"; return false; }
+    if (loaded()) {
+        err = "native head is already loaded";
+        return false;
+    }
     if (n_in <= 0 || n_out <= 0 || n_in > INT_MAX || n_out > INT_MAX || n_in % 256) {
         err = "native head requires positive int32 dimensions and whole 256-value rows";
         return false;
@@ -61,8 +67,7 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
         void* weights = nullptr;
         void* scratch = nullptr;
         cudaError_t status = cudaMalloc(&weights, bytes);
-        if (status == cudaSuccess)
-            status = cudaMalloc(&scratch, lamina::kernels::native_q8_1_bytes((int) n_in, 1));
+        if (status == cudaSuccess) status = cudaMalloc(&scratch, lamina::kernels::native_q8_1_bytes((int) n_in, 1));
         if (status == cudaSuccess)
             status = cudaMemcpy(weights, gguf.tensor_data(*tensor), bytes, cudaMemcpyHostToDevice);
         if (status != cudaSuccess) {
@@ -85,7 +90,10 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
 }
 
 bool NativeHead::run(const float* mixed, float* logits, void* stream, std::string& err) const {
-    if (part_) { err = "native head: it holds part of the vocabulary (the rest is on the second GPU)"; return false; }
+    if (part_) {
+        err = "native head: it holds part of the vocabulary (the rest is on the second GPU)";
+        return false;
+    }
     if (!loaded() || !mixed || !logits || !stream) {
         err = "native head requires loaded weights, device buffers and an explicit stream";
         return false;
@@ -176,4 +184,4 @@ void NativeEmbed::gather_dev(const int32_t* tokens, int64_t n_tok, float* out, v
     lamina::kernels::iq_embed_rows(type_, dev_, row_, n_vocab_, tokens, n_tok, n_embd_, out, stream);
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

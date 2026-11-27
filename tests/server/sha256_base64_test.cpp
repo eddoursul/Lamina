@@ -8,12 +8,12 @@
 #include <string>
 
 static int fails = 0;
-#define CHECK(c)                                                                  \
-    do {                                                                          \
-        if (!(c)) {                                                               \
-            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);   \
-            ++fails;                                                              \
-        }                                                                         \
+#define CHECK(c)                                                                                                       \
+    do {                                                                                                               \
+        if (!(c)) {                                                                                                    \
+            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);                                          \
+            ++fails;                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 int main() {
@@ -24,8 +24,9 @@ int main() {
     CHECK(sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     CHECK(sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
-    CHECK(sha256_hex("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopq"
-                     "rstnopqrstu") == "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1");
+    CHECK(sha256_hex(
+              "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopq"
+              "rstnopqrstu") == "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1");
     CHECK(sha256_hex(std::string(1000000, 'a')) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
     const struct {
         size_t n;

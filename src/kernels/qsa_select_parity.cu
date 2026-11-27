@@ -32,11 +32,9 @@ __device__ __forceinline__ uint32_t order_key(float s) {
     return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
 }
 
-__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_kernel(const float* __restrict__ pooled,
-                                                                        const float* __restrict__ dead,
-                                                                        const float* __restrict__ q_idx,
-                                                                        const int32_t* __restrict__ steps,
-                                                                        int64_t max_blocks, float* __restrict__ out) {
+__global__ void __launch_bounds__(SCORE_WARPS * 32)
+block_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ dead, const float* __restrict__ q_idx,
+                    const int32_t* __restrict__ steps, int64_t max_blocks, float* __restrict__ out) {
     const int64_t qi = blockIdx.y;
     const int32_t* st = steps + qi * kStepCount;
     const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid];
@@ -129,8 +127,10 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
         int ag = 0, ae = 0;
         for (int i = 0; i < TOPK_T; ++i) {
             const int g = s_a[i], e = s_b[i];
-            s_a[i] = ag; s_b[i] = ae;
-            ag += g; ae += e;
+            s_a[i] = ag;
+            s_b[i] = ae;
+            ag += g;
+            ae += e;
         }
     }
     __syncthreads();
@@ -144,7 +144,11 @@ __global__ void __launch_bounds__(TOPK_T) block_topk_kernel(const float* __restr
     __syncthreads();
     if (t == 0) {
         int a = 0;
-        for (int i = 0; i < TOPK_T; ++i) { const int c = s_a[i]; s_a[i] = a; a += c; }
+        for (int i = 0; i < TOPK_T; ++i) {
+            const int c = s_a[i];
+            s_a[i] = a;
+            a += c;
+        }
     }
     __syncthreads();
     int64_t wpos = s_a[t];
@@ -173,14 +177,14 @@ void topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blo
     block_topk_kernel<<<(unsigned) nq, TOPK_T, 0, s>>>(scores, steps, max_blocks, cap, ids);
 }
 
-}  // namespace ref
+}   // namespace ref
 
 namespace {
 
 using namespace lamina::kernels;
 
 constexpr int64_t kTrainedCells = 262144;
-constexpr int QD = 512;                 // a query's floats: 4 heads x 128
+constexpr int QD = 512;   // a query's floats: 4 heads x 128
 
 struct Data {
     explicit Data(int64_t cells) : max_cells(cells), max_blocks(cells / 4 + 2) {}
@@ -296,16 +300,16 @@ int selftest(Data& d, cudaStream_t s) {
         }
     // prompt batches: 256 queries and a sub-chunk's last, shorter batch (11 go to the decode windows' kernel), the grid
     // covering the batch's last block
-    const int64_t pos_pre[][2] = {{0, 256},          {1900, 256},        {16384, 256}, {65536 - 100, 256},
-                                  {131072 - 256, 256}, {199936 - 1, 256}, {5000, 12},   {70001, 37},
-                                  {131072 - 100, 100}, {199936 - 255, 255}, {9000, 11}};
+    const int64_t pos_pre[][2] = {
+        {0, 256},   {1900, 256}, {16384, 256},        {65536 - 100, 256},  {131072 - 256, 256}, {199936 - 1, 256},
+        {5000, 12}, {70001, 37}, {131072 - 100, 100}, {199936 - 255, 255}, {9000, 11}};
     for (const auto& pq : pos_pre) {
         const int64_t p = pq[0], nq = pq[1], last = p + nq - 1;
         bad += compare(d, p, nq, (last + 1) / 4 + 1, s, "prompt");
         ++cases;
     }
-    std::printf("qsa_select: %s (%d cases at %lld cells: scores bitwise, selections equal)\n", bad ? "MISMATCH" : "PASS",
-                cases, (long long) d.max_cells);
+    std::printf("qsa_select: %s (%d cases at %lld cells: scores bitwise, selections equal)\n",
+                bad ? "MISMATCH" : "PASS", cases, (long long) d.max_cells);
     return bad;
 }
 
@@ -314,24 +318,24 @@ int selftest(Data& d, cudaStream_t s) {
 int selftest_long(Data& d, cudaStream_t s) {
     int bad = 0, cases = 0;
     const int64_t m = d.max_cells;
-    const int64_t pos_dec[] = {0, 2051, 131070, 262136, 262140, 262143, 262144, 266237, 300001, 393213, 524284,
-                               786431, 1048572, m - 8};
+    const int64_t pos_dec[] = {0,      2051,   131070, 262136, 262140, 262143,  262144,
+                               266237, 300001, 393213, 524284, 786431, 1048572, m - 8};
     for (int64_t p : pos_dec)
         for (int64_t nq : {1, 3, 4, 5, 8}) {
             if (p + nq > m) continue;
             bad += compare(d, p, nq, qsa_score_grid_blocks, s, "decode (long)");
             ++cases;
         }
-    const int64_t pos_pre[][2] = {{16384, 256},          {262144 - 128, 256}, {393216 - 256, 256},
-                                  {524288 - 256, 256},   {700001, 37},        {m - 256, 256}};
+    const int64_t pos_pre[][2] = {{16384, 256},        {262144 - 128, 256}, {393216 - 256, 256},
+                                  {524288 - 256, 256}, {700001, 37},        {m - 256, 256}};
     for (const auto& pq : pos_pre) {
         const int64_t p = pq[0], nq = pq[1], last = p + nq - 1;
         if (last >= m) continue;
         bad += compare(d, p, nq, (last + 1) / 4 + 1, s, "prompt (long)");
         ++cases;
     }
-    std::printf("qsa_select long: %s (%d cases at %lld cells, the GPU's capacity)\n", bad ? "MISMATCH" : "PASS",
-                cases, (long long) m);
+    std::printf("qsa_select long: %s (%d cases at %lld cells, the GPU's capacity)\n", bad ? "MISMATCH" : "PASS", cases,
+                (long long) m);
     return bad;
 }
 
@@ -363,46 +367,46 @@ template <typename F> float time_ms(cudaStream_t s, int reps, const F& fn) {
 
 void bench(Data& d, cudaStream_t s) {
     std::printf("%-26s %12s %12s %12s %12s\n", "case", "ref scores", "new scores", "ref top-k", "new top-k");
-    struct Case { const char* name; int64_t pos; int64_t nq; bool prompt; };
-    const Case cs[] = {{"decode 4 q, 1K cells", 1024, 4, false},      {"decode 4 q, 2K cells", 2048, 4, false},
-                       {"decode 4 q, 16K cells", 16384, 4, false},
-                       {"decode 4 q, 64K cells", 65536, 4, false},    {"decode 4 q, 131K cells", 131072, 4, false},
-                       {"decode 1 q, 131K cells", 131072, 1, false},  {"decode 8 q, 131K cells", 131072, 8, false},
-                       {"decode 1 q, 2K cells", 2048, 1, false},      {"decode 8 q, 16K cells", 16384, 8, false},
-                       {"decode 4 q, 200K cells", 200000, 4, false},  {"decode 8 q, 200K cells", 200000, 8, false},
-                       {"prompt 256 q at 16K", 16384 - 256, 256, true},
-                       {"prompt 256 q at 64K", 65536 - 256, 256, true},
-                       {"prompt 256 q at 131K", 131072 - 256, 256, true},
-                       {"prompt 16 q at 131K", 131072 - 16, 16, true},  {"prompt 64 q at 131K", 131072 - 64, 64, true},
-                       {"decode 4 q, 262K cells", 262144 - 4, 4, false},  {"decode 8 q, 262K cells", 262144 - 8, 8, false},
-                       {"decode 4 q, 393K cells", 393216, 4, false},    {"decode 8 q, 393K cells", 393216, 8, false},
-                       {"decode 4 q, 524K cells", 524288 - 4, 4, false},  {"decode 8 q, 524K cells", 524288 - 8, 8, false},
-                       {"prompt 256 q at 262K", 262144 - 256, 256, true},
-                       {"prompt 256 q at 393K", 393216 - 256, 256, true},
-                       {"prompt 256 q at 524K", 524288 - 256, 256, true}};
+    struct Case {
+        const char* name;
+        int64_t pos;
+        int64_t nq;
+        bool prompt;
+    };
+    const Case cs[] = {
+        {"decode 4 q, 1K cells", 1024, 4, false},          {"decode 4 q, 2K cells", 2048, 4, false},
+        {"decode 4 q, 16K cells", 16384, 4, false},        {"decode 4 q, 64K cells", 65536, 4, false},
+        {"decode 4 q, 131K cells", 131072, 4, false},      {"decode 1 q, 131K cells", 131072, 1, false},
+        {"decode 8 q, 131K cells", 131072, 8, false},      {"decode 1 q, 2K cells", 2048, 1, false},
+        {"decode 8 q, 16K cells", 16384, 8, false},        {"decode 4 q, 200K cells", 200000, 4, false},
+        {"decode 8 q, 200K cells", 200000, 8, false},      {"prompt 256 q at 16K", 16384 - 256, 256, true},
+        {"prompt 256 q at 64K", 65536 - 256, 256, true},   {"prompt 256 q at 131K", 131072 - 256, 256, true},
+        {"prompt 16 q at 131K", 131072 - 16, 16, true},    {"prompt 64 q at 131K", 131072 - 64, 64, true},
+        {"decode 4 q, 262K cells", 262144 - 4, 4, false},  {"decode 8 q, 262K cells", 262144 - 8, 8, false},
+        {"decode 4 q, 393K cells", 393216, 4, false},      {"decode 8 q, 393K cells", 393216, 8, false},
+        {"decode 4 q, 524K cells", 524288 - 4, 4, false},  {"decode 8 q, 524K cells", 524288 - 8, 8, false},
+        {"prompt 256 q at 262K", 262144 - 256, 256, true}, {"prompt 256 q at 393K", 393216 - 256, 256, true},
+        {"prompt 256 q at 524K", 524288 - 256, 256, true}};
     std::printf("(capacity %lld cells)\n", (long long) d.max_cells);
     for (const Case& c : cs) {
         if (c.pos + c.nq > d.max_cells) continue;
         steps_from(d, c.pos, c.nq);
         const int64_t grid = c.prompt ? (c.pos + c.nq) / 4 + 1 : qsa_score_grid_blocks;
         const int reps = c.prompt ? 5 : 50;
-        const float rs = time_ms(s, reps, [&] {
-            ref::scores(d.pooled, d.dead, d.q, d.steps, c.nq, d.max_blocks, d.sc_ref, s, grid);
-        });
+        const float rs = time_ms(
+            s, reps, [&] { ref::scores(d.pooled, d.dead, d.q, d.steps, c.nq, d.max_blocks, d.sc_ref, s, grid); });
         const float ns = time_ms(s, reps, [&] {
             qsa_block_scores(d.pooled, d.dead, d.q, d.steps, c.nq, d.max_blocks, d.s, d.sc_new, s, grid);
         });
-        const float rt = time_ms(s, reps, [&] {
-            ref::topk(d.sc_ref, d.steps, c.nq, d.max_blocks, d.cap, d.ids_ref, s);
-        });
-        const float nt = time_ms(s, reps, [&] {
-            qsa_block_topk(d.sc_new, d.steps, c.nq, d.max_blocks, d.cap, d.s, d.ids_new, s);
-        });
+        const float rt =
+            time_ms(s, reps, [&] { ref::topk(d.sc_ref, d.steps, c.nq, d.max_blocks, d.cap, d.ids_ref, s); });
+        const float nt =
+            time_ms(s, reps, [&] { qsa_block_topk(d.sc_new, d.steps, c.nq, d.max_blocks, d.cap, d.s, d.ids_new, s); });
         std::printf("%-26s %9.1f us %9.1f us %9.1f us %9.1f us\n", c.name, rs * 1e3f, ns * 1e3f, rt * 1e3f, nt * 1e3f);
     }
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool do_bench = false;

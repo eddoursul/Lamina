@@ -22,4 +22,4 @@ __device__ __forceinline__ uint32_t prmt_sel(uint32_t a, uint32_t b, uint32_t se
     return d;
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

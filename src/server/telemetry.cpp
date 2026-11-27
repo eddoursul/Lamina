@@ -50,8 +50,8 @@ namespace {
 
 constexpr size_t kHistory = 60;
 // the series the sparklines draw
-constexpr const char* kSeries[] = {"gpu_util", "gpu_mem_used", "gpu_temp", "gpu_power", "gpu_pcie_rx_mb", "cpu",
-                                   "ram_used", "disk_read_mb", "tok_s", "prefill_tok_s_mean"};
+constexpr const char* kSeries[] = {"gpu_util", "gpu_mem_used", "gpu_temp",     "gpu_power", "gpu_pcie_rx_mb",
+                                   "cpu",      "ram_used",     "disk_read_mb", "tok_s",     "prefill_tok_s_mean"};
 
 // ---------------------------------------------------------------------------------------------- Python's numbers
 
@@ -98,9 +98,9 @@ json py_max(const std::vector<json>& v) {
 
 /// time.time()
 double time_time() {
-    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           std::chrono::system_clock::now().time_since_epoch())
-                           .count();
+    const int64_t ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
     return ns % 1000000000 == 0 ? (double) (ns / 1000000000) : (double) ns / 1e9;
 }
 
@@ -203,8 +203,7 @@ struct Nvml {
     NvmlUtilizationFn utilization = nullptr;
     NvmlMemoryFn memory = nullptr;
     NvmlUintOfFn temperature = nullptr, pcie_throughput = nullptr;
-    NvmlUintFn power = nullptr, power_limit = nullptr, pcie_gen = nullptr, pcie_gen_max = nullptr,
-               pcie_width = nullptr;
+    NvmlUintFn power = nullptr, power_limit = nullptr, pcie_gen = nullptr, pcie_gen_max = nullptr, pcie_width = nullptr;
 };
 
 void* nvml_open() {
@@ -223,8 +222,7 @@ void* nvml_open() {
 #endif
 }
 
-template <class F>
-F nvml_fn(void* lib, const char* name, const char* fallback = nullptr) {
+template <class F> F nvml_fn(void* lib, const char* name, const char* fallback = nullptr) {
 #ifdef _WIN32
     auto find = [lib](const char* n) { return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(lib), n)); };
 #else
@@ -318,13 +316,13 @@ public:
         auto scaled = [](std::optional<unsigned> v, double unit) {
             return v ? json((double) *v / unit) : json(nullptr);
         };
-        out["temp"] = whole(value_of(n.temperature, 0));            // NVML_TEMPERATURE_GPU
-        out["power"] = scaled(value(n.power), 1000.0);              // mW
+        out["temp"] = whole(value_of(n.temperature, 0));   // NVML_TEMPERATURE_GPU
+        out["power"] = scaled(value(n.power), 1000.0);     // mW
         out["power_limit"] = scaled(value(n.power_limit), 1000.0);
-        out["pcie_gen"] = whole(value(n.pcie_gen));                 // drops at idle (power saving)
+        out["pcie_gen"] = whole(value(n.pcie_gen));   // drops at idle (power saving)
         out["pcie_gen_max"] = whole(value(n.pcie_gen_max));
         out["pcie_width"] = whole(value(n.pcie_width));
-        const auto rx = value_of(n.pcie_throughput, 1);             // NVML_PCIE_UTIL_RX_BYTES, KB/s
+        const auto rx = value_of(n.pcie_throughput, 1);   // NVML_PCIE_UTIL_RX_BYTES, KB/s
         const auto tx = value_of(n.pcie_throughput, 0);
         out["pcie_rx_mb"] = scaled(rx, 1024.0);
         out["pcie_tx_mb"] = scaled(tx, 1024.0);
@@ -484,7 +482,7 @@ json cpu_name() {
     return s.empty() || s == "unknown" ? json(nullptr) : json(s);
 }
 
-}  // namespace win
+}   // namespace win
 #endif
 
 #ifdef LAMINA_TELEMETRY_PROCFS
@@ -700,7 +698,7 @@ json cpu_cores(const std::string& proc, const std::string& sys) {
     if (!lists.empty()) return (int64_t) lists.size();
     std::string text;
     if (!read_file(proc + "/cpuinfo", text)) return nullptr;
-    std::map<int64_t, int64_t> cores;          // physical id -> cpu cores
+    std::map<int64_t, int64_t> cores;   // physical id -> cpu cores
     std::map<std::string, int64_t> section;
     for (const auto line : lines(text)) {
         const std::string l = lower(strip_bytes(line));
@@ -746,7 +744,7 @@ json cpu_name(const std::string& proc) {
     return nullptr;
 }
 
-}  // namespace procfs
+}   // namespace procfs
 #endif
 
 #ifndef _WIN32
@@ -767,7 +765,7 @@ json uname_p() {
 #ifdef _WIN32
 constexpr bool kProcStat = false;   // the CPU times' fields: Windows' (user system idle interrupt dpc)
 #else
-constexpr bool kProcStat = true;    // /proc/stat's
+constexpr bool kProcStat = true;   // /proc/stat's
 #endif
 
 std::optional<std::vector<double>> os_cpu_times() {
@@ -805,7 +803,7 @@ double cpu_busy_percent(const std::vector<double>& t1, const std::vector<double>
     if (proc_stat && d.size() > 9) total -= d[9];   // guest_nice
     const size_t idle = proc_stat ? 3 : 2;
     double busy = total - (idle < d.size() ? d[idle] : 0.0);
-    if (proc_stat && d.size() > 4) busy -= d[4];    // iowait
+    if (proc_stat && d.size() > 4) busy -= d[4];   // iowait
     if (total == 0.0) return 0.0;
     return py_round(busy / total * 100, 1);
 }
@@ -939,13 +937,19 @@ json assemble(const std::vector<std::pair<int, json>>& reads, const std::vector<
         json each = json::array();
         for (size_t i = 0; i < reads.size(); ++i) {
             const json& r = reads[i].second;
-            json one = {{"index", reads[i].first}, {"name", i < names.size() ? names[i] : json(nullptr)},
-                        {"util", jget(r, "util")}, {"mem_used", jget(r, "mem_used")},
-                        {"mem_total", jget(r, "mem_total")}, {"temp", jget(r, "temp")},
-                        {"power", jget(r, "power")}, {"power_limit", jget(r, "power_limit")},
+            json one = {{"index", reads[i].first},
+                        {"name", i < names.size() ? names[i] : json(nullptr)},
+                        {"util", jget(r, "util")},
+                        {"mem_used", jget(r, "mem_used")},
+                        {"mem_total", jget(r, "mem_total")},
+                        {"temp", jget(r, "temp")},
+                        {"power", jget(r, "power")},
+                        {"power_limit", jget(r, "power_limit")},
                         {"pcie_gen", jget(r, "pcie_gen")},
-                        {"pcie_gen_max", jget(r, "pcie_gen_max")}, {"pcie_width", jget(r, "pcie_width")},
-                        {"pcie_rx_mb", jget(r, "pcie_rx_mb")}, {"pcie_tx_mb", jget(r, "pcie_tx_mb")}};
+                        {"pcie_gen_max", jget(r, "pcie_gen_max")},
+                        {"pcie_width", jget(r, "pcie_width")},
+                        {"pcie_rx_mb", jget(r, "pcie_rx_mb")},
+                        {"pcie_tx_mb", jget(r, "pcie_tx_mb")}};
             each.push_back(std::move(one));
         }
         s["gpus"] = std::move(each);
@@ -1008,12 +1012,19 @@ json machine_facts(const std::vector<std::pair<int, GpuReader>>& gpus) {
     const json threads = online >= 1 ? json((int64_t) online) : json(nullptr);
 #endif
     // "psutil": the CPU, RAM and disk figures are psutil's (the web app's disk card asks for them)
-    return {{"gpu_name", gpu_name}, {"gpu_vram_total_mib", nullptr}, {"gpu_count", (int64_t) gpus.size()},
-            {"gpu_note", nullptr}, {"cpu_name", cpu}, {"cores", cores}, {"threads", threads}, {"sockets", sockets},
-            {"numa_nodes", numa}, {"psutil", true}};
+    return {{"gpu_name", gpu_name},
+            {"gpu_vram_total_mib", nullptr},
+            {"gpu_count", (int64_t) gpus.size()},
+            {"gpu_note", nullptr},
+            {"cpu_name", cpu},
+            {"cores", cores},
+            {"threads", threads},
+            {"sockets", sockets},
+            {"numa_nodes", numa},
+            {"psutil", true}};
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------------------------- the sampler
 struct Telemetry::Impl {
@@ -1022,7 +1033,7 @@ struct Telemetry::Impl {
     json facts;
     CpuPercent cpu;   // the sampler thread's
     DiskRate disk;
-    std::mutex mu;    // now, hist
+    std::mutex mu;   // now, hist
     json now = json::object(), hist = json::object();
     std::mutex stop_mu, join_mu;
     std::condition_variable stop_cv;
@@ -1034,7 +1045,8 @@ struct Telemetry::Impl {
         std::vector<json> names;
         if (gpus.front().second.ok()) {
             for (const auto& g : gpus) reads.emplace_back(g.first, g.second.read());
-            for (const auto& g : gpus) names.push_back(g.second.name());   // the legend names each card, even a single one
+            for (const auto& g : gpus)
+                names.push_back(g.second.name());   // the legend names each card, even a single one
         }
         const std::optional<double> load = cpu.percent();
         std::optional<std::pair<int64_t, int64_t>> ram;
@@ -1108,4 +1120,4 @@ int64_t Telemetry::free_vram_mib(int index) {
     return m ? ((int64_t) m->total - (int64_t) m->used) >> 20 : -1;
 }
 
-}  // namespace lamina
+}   // namespace lamina

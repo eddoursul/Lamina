@@ -18,16 +18,16 @@
 namespace lamina::kernels {
 
 struct CvecRows {
-    float* R = nullptr;                ///< T tokens' stacks, token-major: hc streams of n_embd each
+    float* R = nullptr;   ///< T tokens' stacks, token-major: hc streams of n_embd each
     int64_t T = 0;
     int64_t n_embd = 0, hc = 0;
     /// The layer's FFN write, applied first; null `bo`: R holds the layer's output already.
-    const float* bo = nullptr;         ///< T rows of n_embd
-    const uint16_t* partial = nullptr; ///< FP16, T rows of n_embd added to bo (the second GPU's sums), or null
-    const float* inj = nullptr;        ///< T rows of `inj_ld`, the first hc of each used
+    const float* bo = nullptr;           ///< T rows of n_embd
+    const uint16_t* partial = nullptr;   ///< FP16, T rows of n_embd added to bo (the second GPU's sums), or null
+    const float* inj = nullptr;          ///< T rows of `inj_ld`, the first hc of each used
     int64_t inj_ld = 0;
     /// The next read's norm (null `w_norm`: none): rs[t * hc + c] and xn16 = bf16(h * rs * w_norm[c]).
-    const float* w_norm = nullptr;     ///< hc rows of n_embd
+    const float* w_norm = nullptr;   ///< hc rows of n_embd
     float eps = 0.0f;
     float* rs = nullptr;
     uint16_t* xn16 = nullptr;
@@ -40,4 +40,4 @@ bool cvec_supported(int64_t n_embd);
 /// launch fails or the geometry is not supported.
 void cvec_apply(const CvecRows& rows, const float* cv, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

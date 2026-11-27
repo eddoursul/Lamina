@@ -23,13 +23,13 @@ namespace {
 
 constexpr int K = 2560;
 
-#define CK(x)                                                         \
-    do {                                                              \
-        const cudaError_t e_ = (x);                                   \
-        if (e_ != cudaSuccess) {                                      \
-            std::printf("%s: %s\n", #x, cudaGetErrorString(e_));      \
-            return 1;                                                 \
-        }                                                             \
+#define CK(x)                                                                                                          \
+    do {                                                                                                               \
+        const cudaError_t e_ = (x);                                                                                    \
+        if (e_ != cudaSuccess) {                                                                                       \
+            std::printf("%s: %s\n", #x, cudaGetErrorString(e_));                                                       \
+            return 1;                                                                                                  \
+        }                                                                                                              \
     } while (0)
 
 float half_to_float(uint16_t h) {
@@ -155,8 +155,10 @@ int run(int type, int rows) {
         CK(cudaMemcpy(hl.data(), logits, hl.size() * 4, cudaMemcpyDeviceToHost));
         float t1 = -INFINITY, t2 = -INFINITY;   // the exact top two
         for (float l : hl) {
-            if (l > t1) { t2 = t1; t1 = l; }
-            else if (l > t2) t2 = l;
+            if (l > t1) {
+                t2 = t1;
+                t1 = l;
+            } else if (l > t2) t2 = l;
         }
         // a clear lead (3 logits, beyond the copy's error) must give the exact pick; within it the copy may pick a
         // near-tie (counted)
@@ -171,7 +173,8 @@ int run(int type, int rows) {
         }
     }
     std::printf("draft_proxy %s: %s (%d rows; 40 vectors; the probability within %.2e of the exact one; %d near-ties "
-                "picked otherwise)\n", type == 14 ? "Q6_K" : "Q8_0", bad ? "FAIL" : "ok", ROWS, pmax, close);
+                "picked otherwise)\n",
+                type == 14 ? "Q6_K" : "Q8_0", bad ? "FAIL" : "ok", ROWS, pmax, close);
     // ---- timing: the copy's top-1 against the exact head over the same rows (the last vector's activations): what the
     // 2-bit copy buys.  The exact path is native_mmvq + argmax_rows + row_top_prob_split + map_ids, as above.
     {
@@ -204,13 +207,22 @@ int run(int type, int rows) {
         cudaEventDestroy(e0);
         cudaEventDestroy(e1);
     }
-    cudaFree(w); cudaFree(proxy); cudaFree(scratch); cudaFree(xq); cudaFree(dx); cudaFree(logits); cudaFree(prob);
-    cudaFree(ids); cudaFree(map); cudaFree(arg); cudaFree(top);
+    cudaFree(w);
+    cudaFree(proxy);
+    cudaFree(scratch);
+    cudaFree(xq);
+    cudaFree(dx);
+    cudaFree(logits);
+    cudaFree(prob);
+    cudaFree(ids);
+    cudaFree(map);
+    cudaFree(arg);
+    cudaFree(top);
     cudaStreamDestroy(st);
     return bad ? 1 : 0;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2 || std::strcmp(argv[1], "--selftest") != 0) {

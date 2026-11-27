@@ -35,14 +35,13 @@ const uint8_t* class_bytes() {
     return table.data();
 }
 
-template <size_t N>
-uint32_t mapped(const CaseMapping (&map)[N], uint32_t cp) {
-    const auto it = std::lower_bound(std::begin(map), std::end(map), cp,
-                                     [](const CaseMapping& m, uint32_t c) { return m.cp < c; });
+template <size_t N> uint32_t mapped(const CaseMapping (&map)[N], uint32_t cp) {
+    const auto it =
+        std::lower_bound(std::begin(map), std::end(map), cp, [](const CaseMapping& m, uint32_t c) { return m.cp < c; });
     return it != std::end(map) && it->cp == cp ? it->to : cp;
 }
 
-}  // namespace
+}   // namespace
 
 uint16_t cp_class(uint32_t cp) {
     if (cp >= kCodePoints) return kCpUndefined;
@@ -54,4 +53,4 @@ uint32_t cp_lower(uint32_t cp) { return mapped(kLowerCase, cp); }
 
 uint32_t cp_upper(uint32_t cp) { return mapped(kUpperCase, cp); }
 
-}  // namespace lamina
+}   // namespace lamina

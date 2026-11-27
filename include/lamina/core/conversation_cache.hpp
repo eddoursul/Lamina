@@ -183,11 +183,11 @@ inline bool superseded(const Seq& seq, const std::vector<int64_t>& ids, int64_t 
 /// continues from the longest start of its prompt that a session or the park holds.
 struct Start {
     enum Kind {
-        kFresh,          ///< nothing held is a start of the prompt: an empty sequence
-        kContinue,       ///< the conversation `session` holds, from `cells`: its end, or a checkpoint of it
-        kBorrowSession,  ///< the first `cells` of the conversation session `from` holds, copied into `session`
-        kTake,           ///< the parked conversation `from` comes back into `session`: whole, or cut at `cells`
-        kBorrowParked,   ///< the first `cells` of the parked conversation `from`, which stays whole
+        kFresh,           ///< nothing held is a start of the prompt: an empty sequence
+        kContinue,        ///< the conversation `session` holds, from `cells`: its end, or a checkpoint of it
+        kBorrowSession,   ///< the first `cells` of the conversation session `from` holds, copied into `session`
+        kTake,            ///< the parked conversation `from` comes back into `session`: whole, or cut at `cells`
+        kBorrowParked,    ///< the first `cells` of the parked conversation `from`, which stays whole
     };
     Kind kind = kFresh;
     int session = -1;         ///< where the request runs (-1: every session decodes)
@@ -421,4 +421,4 @@ private:
     std::vector<Seq> entries_;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

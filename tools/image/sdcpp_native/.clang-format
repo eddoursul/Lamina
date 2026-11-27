@@ -1,0 +1,6 @@
+# stable-diffusion.cpp's code (apply.py copies it into its tree), in that project's layout: clang-format leaves it as
+# it is.
+---
+DisableFormat: true
+SortIncludes: Never
+...

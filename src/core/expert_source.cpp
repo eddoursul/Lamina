@@ -1,15 +1,15 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
 #include "lamina/core/expert_source.hpp"
-#include "lamina/core/second_gpu.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/second_gpu.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include "lamina/core/pinned.hpp"
-#include "lamina/platform/memory.hpp"
 #include "lamina/kernels/elementwise.hpp"
-#include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/platform/memory.hpp"
 
 #include <cuda_runtime.h>
 
@@ -41,7 +41,6 @@ namespace lamina::core {
 
 // ================================ THE ADAPTER ================================
 
-
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out) {
     using namespace lamina::kernels::cpu;
@@ -59,7 +58,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
     static const bool ptrace = std::getenv("LAMINA_POOL_TRACE") != nullptr;
     auto pt = [&](const char* what, long long a = -1) {
-        if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
+        if (ptrace) {
+            std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a);
+            std::fflush(stderr);
+        }
     };
     const auto c0 = std::chrono::steady_clock::now();
     pt("begin");
@@ -67,10 +69,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     pt("begun");
     if (!d.usage.empty())
         for (int64_t i = 0; i < n_tok * k; ++i)
-            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+            if (ids[i] >= 0 && ids[i] < d.n_expert)
+                d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
     if (!d.routed.empty())
         for (int64_t i = 0; i < n_tok * k; ++i)
-            if (ids[i] >= 0 && ids[i] < d.n_expert) ++d.routed[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]];
+            if (ids[i] >= 0 && ids[i] < d.n_expert)
+                ++d.routed[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]];
     // ---- plan v0.3 P6: who computes each routed entry.  Distinct experts in routing order: the ones the main GPU's
     // VRAM tier holds are its own (the window decides them itself, from the same residency), a GPU tier's when the
     // tiers take this layer, the last pcie_num/256 of the rest the PCIe share (published FIRST, so the GPU reads them
@@ -84,7 +88,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     }
     const int32_t* res = d.host_res != nullptr ? d.host_res + (size_t) d.layers * (size_t) d.n_expert : nullptr;
     auto in_vram = [&](int32_t e) { return res != nullptr && res[e] >= 0; };   // e in range
-    int32_t kind[128];                     // per entry: -1 CPU, 0 VRAM, 1 PCIe, 2 + t GPU tier t
+    int32_t kind[128];                                                         // per entry: -1 CPU, 0 VRAM,
+                                                                               // 1 PCIe, 2 + t GPU tier t
     // tier t's share: group g = the expert in its slot g2_slot[t][g], entries g2_ent[t][g2_start[t][g] ..)
     const int NT = d.n_tiers;
     int n2g[kMaxGpuTiers] = {}, n2e[kMaxGpuTiers] = {};
@@ -97,9 +102,15 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 if (d.tiers[t].res[at] >= 0) ++d.tiers[t].slept;
                 continue;
             }
-            if (d.tiers[t].res[at] >= 0) { slot = d.tiers[t].res[at]; return t; }
+            if (d.tiers[t].res[at] >= 0) {
+                slot = d.tiers[t].res[at];
+                return t;
+            }
             const int p = d.tiers[t].gpu->prefetched(d.layers, e);
-            if (p >= 0) { slot = -2 - p; return t; }
+            if (p >= 0) {
+                slot = -2 - p;
+                return t;
+            }
         }
         return -1;
     };
@@ -108,7 +119,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     for (int64_t i = 0; i < n; ++i) {
         first_of[i] = i;
         for (int64_t j = 0; j < i; ++j)
-            if (ids[j] == ids[i]) { first_of[i] = first_of[j]; break; }
+            if (ids[j] == ids[i]) {
+                first_of[i] = first_of[j];
+                break;
+            }
         if (first_of[i] == i) distinct[nd++] = i;
     }
     // The tiers take this layer's shares only when the layer's misses are big enough that the CPU would need longer
@@ -116,8 +130,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     // only add their latency.  Their rows reach the main GPU through the sink.
     GpuPlanSink* const S2 = NT > 0 && d.plan != nullptr && d.plan->tier_flag[0] != nullptr ? d.plan : nullptr;
     d.tier_used = false;
-    int8_t tier_q[128];      // per distinct expert: its tier, or -1
-    int32_t slot_q[128];     // and its slot there
+    int8_t tier_q[128];    // per distinct expert: its tier, or -1
+    int32_t slot_q[128];   // and its slot there
     for (int q = 0; q < nd; ++q) tier_q[q] = -1;
     if (S2 != nullptr) {
         uint64_t miss_bytes = 0, tier_bytes = 0;
@@ -194,7 +208,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 S2->tier_ring[t] = S2->ring;
             }
     }
-    if (P != nullptr) {                          // the PCIe groups: staging slot q, their entries in routing order
+    if (P != nullptr) {   // the PCIe groups: staging slot q, their entries in routing order
         const uint64_t bb = lay.blob_bytes(d.layers);
         int entries = 0;
         for (int q = 0; q < fetches; ++q) {
@@ -218,7 +232,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         pt("publish", fetches);
         if (P->publish) P->publish(P->ctx);
         pt("fetch", fetches);
-        if (P->fetch) P->fetch(P->ctx, dma_src, P->pcie_mode != 0 ? 0 : fetches, (size_t) bb);   // the copy engine, beside the CPU's work
+        if (P->fetch)
+            P->fetch(P->ctx, dma_src, P->pcie_mode != 0 ? 0 : fetches, (size_t) bb);   // the copy engine,
+                                                                                       // beside the CPU's
+                                                                                       // work
     }
     const bool skip_gpu_rows = d.plan != nullptr && d.plan->host_rows_only;
     const auto c1 = std::chrono::steady_clock::now();
@@ -232,7 +249,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         for (int64_t t = 0; t < n_tok; ++t) act_quant_any(x_f + (size_t) t * H, H, d.act_multi[(size_t) t]);
     else if (xk == nullptr)
         for (int64_t t = 0; t < n_tok; ++t)
-            native_quant_act(lay.fmt[(size_t) d.layers], x_f + (size_t) t * H, d.nact_multi.data() + (size_t) t * kNativeActBytes);
+            native_quant_act(lay.fmt[(size_t) d.layers], x_f + (size_t) t * H,
+                             d.nact_multi.data() + (size_t) t * kNativeActBytes);
     const auto c2 = std::chrono::steady_clock::now();
     int njobs = 0;
     for (int64_t t = 0; t < n_tok; ++t)
@@ -247,9 +265,9 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 d.fail_expert = e;
                 return;
             }
-            if (kind[i] >= 0) {             // a GPU computes this entry (a VRAM hit, a PCIe read, a GPU tier)
+            if (kind[i] >= 0) {   // a GPU computes this entry (a VRAM hit, a PCIe read, a GPU tier)
                 if (kind[i] == 0) ++d.cache_hits;
-                if (kind[i] >= 2) {         // its row is that tier's to write
+                if (kind[i] >= 2) {   // its row is that tier's to write
                     ++d.tier_entries;
                     ++d.tiers[kind[i] - 2].entries;
                 } else if (!skip_gpu_rows) {
@@ -306,9 +324,9 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         const int64_t xs = xk ? S.xk_stride : (int64_t) (lamina::kernels::cpu::H / 32) * 36;
         for (int t = 0; t < s.d->n_tiers && s.ok; ++t) {   // (the last tier first measured within 1.4% either way)
             if (s.n_groups[t] <= 0) continue;
-            s.ok = xa != nullptr && s.d->tiers[t].gpu->submit(s.d->layers, xa, xs, s.n_tok, s.k, s.slots[t],
-                                                               s.starts[t], s.entries[t], s.n_groups[t], s.out,
-                                                               S.tier_flag[t], S.ring, s.d->tier_err);
+            s.ok = xa != nullptr &&
+                   s.d->tiers[t].gpu->submit(s.d->layers, xa, xs, s.n_tok, s.k, s.slots[t], s.starts[t], s.entries[t],
+                                             s.n_groups[t], s.out, S.tier_flag[t], S.ring, s.d->tier_err);
             if (s.ok) S.tier_ring[t] = S.ring;
         }
     };
@@ -320,11 +338,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (!shares) submit2 = nullptr;
     pt("run", njobs);
     // LAMINA_POOL_FUSED=1 (opt-in): the layer's gate/up and down rows as one batch, no barrier between them
-    static const bool pool_fused = [] { const char* v = std::getenv("LAMINA_POOL_FUSED"); return v != nullptr && std::atoi(v) != 0; }();
-    if (pool_fused)
-        d.pool->run_fused_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
-    else
-        d.pool->run_split_multi_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
+    static const bool pool_fused = [] {
+        const char* v = std::getenv("LAMINA_POOL_FUSED");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    if (pool_fused) d.pool->run_fused_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
+    else d.pool->run_split_multi_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
     if (!s2.ok) {
         d.failed = true;
         d.fail = d.tier_err.c_str();
@@ -354,7 +373,7 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
     int room = 0;   // the prefetch slots the tiers' budgets take
     for (int t = 0; t < d.n_tiers; ++t)
         if (!d.tiers[t].asleep)
-            room += (int) (std::min)((uint64_t) d.tiers[t].gpu->prefetch_slots(), d.tiers[t].prefetch_bytes / bb);
+            room += (int) (std::min) ((uint64_t) d.tiers[t].gpu->prefetch_slots(), d.tiers[t].prefetch_bytes / bb);
     if (room <= 0) return;
     // the predicted experts no GPU holds, ranked by their summed routing weight over the window's tokens
     int32_t cand[128];
@@ -369,21 +388,25 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
         if (held) continue;
         int c = 0;
         while (c < nc && cand[c] != e) ++c;
-        if (c == nc) { cand[nc] = e; score[nc++] = 0.0f; }
+        if (c == nc) {
+            cand[nc] = e;
+            score[nc++] = 0.0f;
+        }
         score[c] += w[i];
     }
     // the likeliest first, the first tier's slots filled first
     int m[kMaxGpuTiers] = {}, total = 0;
     for (int t = 0; t < d.n_tiers; ++t) {
         if (d.tiers[t].asleep) continue;   // (and its experts are candidates for the tiers awake)
-        m[t] = (int) (std::min)((uint64_t) (std::min)(nc - total, d.tiers[t].gpu->prefetch_slots()),
-                                d.tiers[t].prefetch_bytes / bb);
+        m[t] = (int) (std::min) ((uint64_t) (std::min) (nc - total, d.tiers[t].gpu->prefetch_slots()),
+                                 d.tiers[t].prefetch_bytes / bb);
         total += m[t];
     }
     const uint8_t* src[128];
     for (int q = 0; q < total; ++q) {
         int best = q;
-        for (int c = q + 1; c < nc; ++c) if (score[c] > score[best]) best = c;
+        for (int c = q + 1; c < nc; ++c)
+            if (score[c] > score[best]) best = c;
         std::swap(cand[q], cand[best]);
         std::swap(score[q], score[best]);
         src[q] = d.src->blob(layer, cand[q]);
@@ -397,7 +420,6 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
         }
     }
 }
-
 
 // ================================ THE RESIDENT ARENA (R2.1) ================================
 
@@ -429,7 +451,8 @@ bool locate_experts_gguf(const std::vector<std::string>& shards, const lamina::k
                 if (t == nullptr || (int) t->type != (r < 2 ? fm.gu_type : fm.d_type) ||
                     !lamina::block_geometry(t->type, be, bb) ||
                     t->elements() / (uint64_t) be * (uint64_t) bb != per[r] * (uint64_t) lay.n_expert) {
-                    err = "ArenaExpertSource: " + name + " is missing from the model or differs from the pack's "
+                    err = "ArenaExpertSource: " + name +
+                          " is missing from the model or differs from the pack's "
                           "native_experts.txt";
                     return false;
                 }
@@ -489,7 +512,10 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
-            if (ready && !ready(l)) { bad = true; break; }
+            if (ready && !ready(l)) {
+                bad = true;
+                break;
+            }
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
@@ -502,10 +528,16 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                     fd = ::open(shards[sp.shard].c_str(), O_RDONLY | O_CLOEXEC);
                     if (fd >= 0) (void) posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
                 }
-                if (fd < 0) { bad = true; break; }
+                if (fd < 0) {
+                    bad = true;
+                    break;
+                }
                 // runs of up to `batch` experts the arena holds, one forward read each
                 for (int64_t e0 = 0; e0 < lay.n_expert;) {
-                    if (ix != nullptr && ix[e0] < 0) { ++e0; continue; }   // only in VRAM
+                    if (ix != nullptr && ix[e0] < 0) {
+                        ++e0;
+                        continue;
+                    }   // only in VRAM
                     int n = 0;
                     for (; n < batch && e0 + n < lay.n_expert && (ix == nullptr || ix[e0 + n] >= 0); ++n) {
                         const int64_t at_e = ix != nullptr ? ix[e0 + n] : e0 + n;
@@ -516,8 +548,8 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                         break;
                     }
                     if (uncached)   // --no-file-cache: the pages just read leave the page cache
-                        (void) posix_fadvise(fd, (off_t) (sp.offset + (uint64_t) e0 * per[r]), (off_t) ((uint64_t) n * per[r]),
-                                             POSIX_FADV_DONTNEED);
+                        (void) posix_fadvise(fd, (off_t) (sp.offset + (uint64_t) e0 * per[r]),
+                                             (off_t) ((uint64_t) n * per[r]), POSIX_FADV_DONTNEED);
                     e0 += n;
                 }
             }
@@ -540,7 +572,10 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
-            if (ready && !ready(l)) { bad = true; break; }
+            if (ready && !ready(l)) {
+                bad = true;
+                break;
+            }
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
@@ -559,17 +594,26 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                         h = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                         FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
                     }
-                    if (h == INVALID_HANDLE_VALUE) { bad = true; break; }
+                    if (h == INVALID_HANDLE_VALUE) {
+                        bad = true;
+                        break;
+                    }
                     const size_t need = (size_t) chunk + 2 * 4096;
                     if (abuf_bytes < need) {
                         if (abuf != nullptr) VirtualFree(abuf, 0, MEM_RELEASE);
                         abuf = (uint8_t*) VirtualAlloc(nullptr, need, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
                         abuf_bytes = abuf != nullptr ? need : 0;
                     }
-                    if (abuf == nullptr) { bad = true; break; }
+                    if (abuf == nullptr) {
+                        bad = true;
+                        break;
+                    }
                 } else {
                     if (f == nullptr) f = std::fopen(shards[sp.shard].c_str(), "rb");
-                    if (f == nullptr) { bad = true; break; }
+                    if (f == nullptr) {
+                        bad = true;
+                        break;
+                    }
                     buf.resize((size_t) chunk);
                 }
                 for (uint64_t pos = 0; pos < total; pos += chunk) {
@@ -581,7 +625,8 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                         ov.Offset = (DWORD) at0;
                         ov.OffsetHigh = (DWORD) (at0 >> 32);
                         DWORD got = 0;
-                        if (!ReadFile(h, abuf, (DWORD) ((head + n + 4095) / 4096 * 4096), &got, &ov) || got < head + n) {
+                        if (!ReadFile(h, abuf, (DWORD) ((head + n + 4095) / 4096 * 4096), &got, &ov) ||
+                            got < head + n) {
                             bad = true;
                             break;
                         }
@@ -638,7 +683,7 @@ void release_pageable(void* p, uint64_t bytes) {
     munmap(p, (size_t) bytes);
 #endif
 }
-}  // namespace
+}   // namespace
 
 ArenaExpertSource::~ArenaExpertSource() { close(); }
 
@@ -724,7 +769,8 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
     auto place_layers = [&](const std::function<void(int64_t)>& placed) {
         for (int64_t l = 0; l < n_layers; ++l) {
             void* p = nullptr;
-            if (cudaHostAlloc(&p, (size_t) room[(size_t) l], cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess) {
+            if (cudaHostAlloc(&p, (size_t) room[(size_t) l], cudaHostAllocPortable | cudaHostAllocMapped) !=
+                cudaSuccess) {
                 (void) cudaGetLastError();
                 for (int64_t m = l; m < n_layers; ++m) tail_bytes_ += room[(size_t) m];
                 tail_ = reserve_pageable(tail_bytes_);
@@ -793,8 +839,7 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
         if (cudaHostRegister(layer_base_[(size_t) l], (size_t) room[(size_t) l],
                              cudaHostRegisterMapped | cudaHostRegisterPortable) == cudaSuccess)
             reg_ok[(size_t) l] = 1;
-        else
-            (void) cudaGetLastError();
+        else (void) cudaGetLastError();
     };
     const LoadStats st = load_experts_gguf(gguf_, spans, layer_base_, lay, threads, on_layer, idx_, vram_only_bytes_,
                                            anon ? nullptr : std::function<bool(int64_t)>(layer_ready), uncached_);
@@ -864,10 +909,12 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
                 ++checked;
             }
         }
-        std::fprintf(stderr, "ArenaExpertSource: LAMINA_LOAD_VERIFY: %lld blobs equal to the file\n", (long long) checked);
+        std::fprintf(stderr, "ArenaExpertSource: LAMINA_LOAD_VERIFY: %lld blobs equal to the file\n",
+                     (long long) checked);
     }
     note_ = std::to_string(pinned_layers_) + " of " + std::to_string(n_layers) + " layers pinned (" +
-            std::to_string(pinned_total >> 30) + (anon ? " GiB, page-locked as each layer loaded)" : " GiB, a cudaHostAlloc block each)");
+            std::to_string(pinned_total >> 30) +
+            (anon ? " GiB, page-locked as each layer loaded)" : " GiB, a cudaHostAlloc block each)");
     if (tail_ != nullptr || anon_lock_ != nullptr) note_ += "; the others pageable: " + tail_note;
     if (uncached_) note_ += "; read past the file cache";
     if (vram_only_bytes_ > 0) {
@@ -936,7 +983,8 @@ void ArenaExpertSource::close() {
     vram_only_bytes_ = 0;
     spans_.clear();
 #if !defined(_WIN32)
-    for (const int fd : fds_) if (fd >= 0) ::close(fd);
+    for (const int fd : fds_)
+        if (fd >= 0) ::close(fd);
 #endif
     fds_.clear();
 }
@@ -1006,4 +1054,4 @@ bool ArenaExpertSource::read_file_blob(int64_t layer, int64_t expert, uint8_t* d
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

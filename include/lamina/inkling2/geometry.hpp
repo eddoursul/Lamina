@@ -34,37 +34,38 @@ namespace lamina::inkling2 {
 enum Ctrl { kCtrlQ = 0, kCtrlK = 1, kCtrlV = 2, kCtrlFfn = 3, kCtrlCount = 4 };
 
 struct Geometry {
-    bool mainline = false;   ///< the file's layout: inkling2_loop (mainline llama.cpp's), else unsloth's inkling2
-    std::string arch;        ///< general.architecture, the metadata keys' prefix
-    int64_t n_layers = 0;    ///< layers with weights (24)
-    int64_t n_embd = 0;      ///< embedding_length (2,304)
-    int64_t n_vocab = 0;     ///< vocab_size_unpadded: the tokens (200,058)
+    bool mainline = false;        ///< the file's layout: inkling2_loop (mainline llama.cpp's), else unsloth's inkling2
+    std::string arch;             ///< general.architecture, the metadata keys' prefix
+    int64_t n_layers = 0;         ///< layers with weights (24)
+    int64_t n_embd = 0;           ///< embedding_length (2,304)
+    int64_t n_vocab = 0;          ///< vocab_size_unpadded: the tokens (200,058)
     int64_t n_vocab_padded = 0;   ///< vocab_size: the embedding's and the head's rows (201,024)
-    float eps = 1e-6f;       ///< attention.layer_norm_rms_epsilon
+    float eps = 1e-6f;            ///< attention.layer_norm_rms_epsilon
 
     // attention
-    int64_t n_head = 0;      ///< attention.head_count (24): query heads, the same in every layer
-    int64_t n_head_kv = 0;   ///< attention.head_count_kv (8): K/V heads
-    int64_t head_dim = 0;    ///< attention.key_length (128)
+    int64_t n_head = 0;         ///< attention.head_count (24): query heads, the same in every layer
+    int64_t n_head_kv = 0;      ///< attention.head_count_kv (8): K/V heads
+    int64_t head_dim = 0;       ///< attention.key_length (128)
     std::vector<uint8_t> swa;   ///< per layer: a window layer (attention.sliding_window_pattern)
-    int64_t n_swa = 0;       ///< attention.sliding_window (1,024): a window layer's cells, its own included
-    int64_t n_rel = 0;       ///< attention.relative_length (16): the distance bias's values a head
-    int64_t rel_extent = 0;  ///< attention.relative_extent (1,024): distances with a bias (a full layer's table)
-    float qk_clip = 0;       ///< attention.qk_clip (22.63): a head's q and k rows have at most this L2 norm
-    float rel_clip = 0;      ///< attention.relative_clip (8)
-    int64_t log_floor = 0;   ///< attention.log_scale_floor (8,192)
-    float log_alpha = 0;     ///< attention.log_scale_alpha (0.1): q and r of a full layer times 1 + alpha ln(max(1, (pos + 1) / floor))
-    int64_t n_conv = 0;      ///< shortconv.l_cache (4): the causal convolutions' taps
-    int64_t res_block = 0;   ///< attn_res.block_size (6): layers a block
+    int64_t n_swa = 0;          ///< attention.sliding_window (1,024): a window layer's cells, its own included
+    int64_t n_rel = 0;          ///< attention.relative_length (16): the distance bias's values a head
+    int64_t rel_extent = 0;     ///< attention.relative_extent (1,024): distances with a bias (a full layer's table)
+    float qk_clip = 0;          ///< attention.qk_clip (22.63): a head's q and k rows have at most this L2 norm
+    float rel_clip = 0;         ///< attention.relative_clip (8)
+    int64_t log_floor = 0;      ///< attention.log_scale_floor (8,192)
+    float log_alpha = 0;        ///< attention.log_scale_alpha (0.1): q and r of a full
+                                ///< layer times 1 + alpha ln(max(1, (pos + 1) / floor))
+    int64_t n_conv = 0;         ///< shortconv.l_cache (4): the causal convolutions' taps
+    int64_t res_block = 0;      ///< attn_res.block_size (6): layers a block
 
     // MoE
-    int64_t n_expert = 0;    ///< expert_count (128)
-    int64_t top_k = 0;       ///< expert_used_count (8)
-    int64_t n_ff = 0;        ///< expert_feed_forward_length (1,152): an expert's hidden width
-    float w_scale = 1;       ///< expert_weights_scale (8)
-    float situ_beta = 0;     ///< activation.situ_beta (4): the gate's cap
-    float situ_lbeta = 0;    ///< activation.situ_linear_beta (25): up's cap
-    float softcap = 0;       ///< final_logit_softcapping (30), 0: none
+    int64_t n_expert = 0;   ///< expert_count (128)
+    int64_t top_k = 0;      ///< expert_used_count (8)
+    int64_t n_ff = 0;       ///< expert_feed_forward_length (1,152): an expert's hidden width
+    float w_scale = 1;      ///< expert_weights_scale (8)
+    float situ_beta = 0;    ///< activation.situ_beta (4): the gate's cap
+    float situ_lbeta = 0;   ///< activation.situ_linear_beta (25): up's cap
+    float softcap = 0;      ///< final_logit_softcapping (30), 0: none
 
     // the loop: layers [loop_start, loop_end) run n_pass times; n_pass 1: no loop
     int64_t loop_start = 0, loop_end = 0, n_pass = 1, gate_rank = 0;
@@ -96,7 +97,7 @@ struct Geometry {
     int64_t kv_width() const { return n_head_kv * head_dim; }   ///< 1,024: a cell's K, and its V
     /// a cell's K (or V) bytes: halves, or q8_0 blocks (34 bytes a 32 values)
     int64_t cell_bytes(bool q8) const { return q8 ? n_head_kv * (head_dim / 32) * 34 : kv_width() * 2; }
-    int64_t rel_width() const { return n_head * n_rel; }        ///< 384
+    int64_t rel_width() const { return n_head * n_rel; }   ///< 384
     /// a visit's convolution state: K, V, the attention's output and the MoE's, n_conv - 1 earlier rows each
     int64_t conv_channels() const { return 2 * kv_width() + 2 * n_embd; }
 };
@@ -169,8 +170,9 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     // unsloth's block_count is the visits, mainline's the layers
     g.n_layers = g.mainline ? block_count : block_count - (g.n_pass - 1) * (g.loop_end - g.loop_start);
     if (g.n_layers <= 0 || g.n_layers > 4096) return bad("block_count out of range");
-    if (g.n_pass > 1 && (g.loop_start <= 0 || g.loop_start >= g.loop_end || g.loop_end > g.n_layers || g.gate_rank <= 0 ||
-                         g.res_block <= 0 || g.loop_start % g.res_block || g.loop_end % g.res_block))
+    if (g.n_pass > 1 &&
+        (g.loop_start <= 0 || g.loop_start >= g.loop_end || g.loop_end > g.n_layers || g.gate_rank <= 0 ||
+         g.res_block <= 0 || g.loop_start % g.res_block || g.loop_end % g.res_block))
         return bad("the loop's bounds do not lie on block boundaries inside the layers");
 
     // the per-layer arrays: one value a layer (mainline) or a visit (unsloth), or a single number
@@ -179,8 +181,8 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
         std::vector<uint64_t> raw;
         if (const MetaValue* v = f.get(p + k); v && v->is_num()) raw.assign(n_file, v->u);
         else if (!f.numbers(p + k, &raw)) return bad(p + k + " is not a number or an array of numbers");
-        if (raw.size() != n_file) return bad(p + k + " has " + std::to_string(raw.size()) + " values, the layout " +
-                                             std::to_string(n_file));
+        if (raw.size() != n_file)
+            return bad(p + k + " has " + std::to_string(raw.size()) + " values, the layout " + std::to_string(n_file));
         out.resize((size_t) g.n_layers);
         for (int64_t l = 0; l < g.n_layers; ++l) out[(size_t) l] = raw[(size_t) (g.mainline ? l : g.first_visit(l))];
         // a looped layer is one layer: its visits say the same
@@ -202,13 +204,14 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     }
     g.head_dim = key;
     if (key != value) return bad("attention.key_length and value_length differ");
-    if (const MetaValue* v = f.get("tokenizer.ggml.tokens"); v && v->type == MetaType::ARRAY && (int64_t) v->count != g.n_vocab)
+    if (const MetaValue* v = f.get("tokenizer.ggml.tokens");
+        v && v->type == MetaType::ARRAY && (int64_t) v->count != g.n_vocab)
         return bad("the tokenizer's size is not vocab_size_unpadded");
-    if (g.n_embd <= 0 || g.n_embd % 32 || g.n_head <= 0 || g.n_head_kv <= 0 || g.n_head % g.n_head_kv || g.head_dim <= 0 ||
-        g.head_dim % 32 || g.n_swa <= 0 || g.n_rel <= 0 || g.rel_extent <= 0 || g.n_conv < 2 || g.n_conv > 8 ||
-        g.res_block <= 0 || g.n_expert <= 0 || g.top_k <= 0 || g.top_k > g.n_expert || g.n_ff <= 0 || g.n_ff % 32 ||
-        g.n_vocab <= 0 || g.n_vocab > g.n_vocab_padded || g.log_floor <= 0 || !(g.qk_clip > 0) || !(g.rel_clip > 0) ||
-        !(g.situ_beta > 0) || !(g.situ_lbeta > 0) || !(g.eps > 0) || g.log_alpha < 0)
+    if (g.n_embd <= 0 || g.n_embd % 32 || g.n_head <= 0 || g.n_head_kv <= 0 || g.n_head % g.n_head_kv ||
+        g.head_dim <= 0 || g.head_dim % 32 || g.n_swa <= 0 || g.n_rel <= 0 || g.rel_extent <= 0 || g.n_conv < 2 ||
+        g.n_conv > 8 || g.res_block <= 0 || g.n_expert <= 0 || g.top_k <= 0 || g.top_k > g.n_expert || g.n_ff <= 0 ||
+        g.n_ff % 32 || g.n_vocab <= 0 || g.n_vocab > g.n_vocab_padded || g.log_floor <= 0 || !(g.qk_clip > 0) ||
+        !(g.rel_clip > 0) || !(g.situ_beta > 0) || !(g.situ_lbeta > 0) || !(g.eps > 0) || g.log_alpha < 0)
         return bad("a geometry key is zero or out of range");
     return {};
 }
@@ -234,10 +237,10 @@ inline std::pair<std::string, int64_t> msg_query_at(const Geometry& g, int64_t l
     if (g.mainline) return {"blk." + std::to_string(l) + ".loop_msg_query.weight", c};
     const int64_t k = 2 * (l - g.loop_start);
     switch (c) {
-    case kCtrlQ: return {"loop_res_query.weight", k};
-    case kCtrlFfn: return {"loop_res_query.weight", k + 1};
-    case kCtrlK: return {"loop_kv_res_query.weight", k};
-    default: return {"loop_kv_res_query.weight", k + 1};
+        case kCtrlQ: return {"loop_res_query.weight", k};
+        case kCtrlFfn: return {"loop_res_query.weight", k + 1};
+        case kCtrlK: return {"loop_kv_res_query.weight", k};
+        default: return {"loop_kv_res_query.weight", k + 1};
     }
 }
 
@@ -247,7 +250,9 @@ inline std::vector<TensorWant> layer_tensors(const Geometry& g, int64_t l) {
     const bool full = g.full(l);
     const std::string b = "blk." + std::to_string(l) + ".";
     std::vector<TensorWant> t;
-    auto add = [&](const std::string& s, std::vector<int64_t> shape, bool opt = false) { t.push_back({s, std::move(shape), opt}); };
+    auto add = [&](const std::string& s, std::vector<int64_t> shape, bool opt = false) {
+        t.push_back({s, std::move(shape), opt});
+    };
     add(b + "attn_q.weight", {N, Q});
     add(b + "attn_k.weight", {N, KV});
     add(b + "attn_v.weight", {N, KV});
@@ -322,7 +327,8 @@ inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* c
             for (int64_t x : w.shape) want += (want.empty() ? "" : ", ") + std::to_string(x);
             return w.name + " is [" + got + "], Inkling 2's layout wants [" + want + "]";
         }
-        if (!m.in_bounds(*t, s)) return w.name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
+        if (!m.in_bounds(*t, s))
+            return w.name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
         ++n;
         return {};
     };
@@ -343,10 +349,11 @@ inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* c
 // Two layouts of the same weights exist.  unsloth's first files: the mix of the target's states as logits
 // (`dspark_fuse` [taps, layers + 1]), the head's output in the target's rows (`dspark_hidden_out`, the target's head
 // over it), `markov_w1` over the padded vocabulary, `dflare_norm` / `dspark_norm`, one `mask_embd` row, the window as
-// the checkpoint counts it.  Mainline llama.cpp's (PR #32218, unsloth's files since 2026-11-23): each mix softmaxed in a
-// tensor of its own (`blk.N.ctx_mix`, `markov_ctx_mix`), the head folded through the target's unembedding
+// the checkpoint counts it.  Mainline llama.cpp's (PR #32218, unsloth's files since 2026-11-23): each mix softmaxed in
+// a tensor of its own (`blk.N.ctx_mix`, `markov_ctx_mix`), the head folded through the target's unembedding
 // (`markov_w2` [rank, vocabulary] and its bias), the tokenizer's rows alone, `ctx_norm` / `markov_ctx_norm`, a
-// `mask_embd` row a masked row, no rank or vocabulary keys, the window one cell more (llama.cpp's counts the query's own).
+// `mask_embd` row a masked row, no rank or vocabulary keys, the
+// window one cell more (llama.cpp's counts the query's own).
 
 /// A drafter file in mainline llama.cpp's layout (its head folded: markov_w2)
 inline bool drafter_folded(const GgufFile& f) {
@@ -393,8 +400,8 @@ inline uint64_t drafter_rings_bytes(const GgufFile& f, int64_t reach, bool q8) {
     };
     std::vector<uint64_t> pat;
     f.numbers("dflash.attention.sliding_window_pattern", &pat);
-    return drafter_rings_bytes(num("attention.head_count_kv"), num("attention.key_length"), drafter_window(f), pat, reach,
-                               q8);
+    return drafter_rings_bytes(num("attention.head_count_kv"), num("attention.key_length"), drafter_window(f), pat,
+                               reach, q8);
 }
 
 // ---- the drafter as Thinking Machines' checkpoint ships it: mtp.safetensors (the same weights as the dspark GGUFs,
@@ -402,13 +409,13 @@ inline uint64_t drafter_rings_bytes(const GgufFile& f, int64_t reach, bool q8) {
 // tensors alone: the settings no shape says are the checkpoint's (its config.json's mtp_config), below.  The engine
 // reads it as unsloth's first layout, its matrices made Q8_0 as the GGUF files have them.
 struct MtpSettings {
-    int64_t block = 8;                       ///< block_size: a block's rows
-    int64_t window = 1024;                   ///< sliding_window_size: the cells a window layer sees
-    std::vector<uint64_t> pattern{1, 0, 1};  ///< local_layer_ids [0, 2]: a layer's window or not
+    int64_t block = 8;                           ///< block_size: a block's rows
+    int64_t window = 1024;                       ///< sliding_window_size: the cells a window layer sees
+    std::vector<uint64_t> pattern{1, 0, 1};      ///< local_layer_ids [0, 2]: a layer's window or not
     std::vector<uint64_t> taps{5, 23, 41, 48};   ///< target_layer_ids: the target's states it reads
-    double rope_base = 1000000.0;            ///< rope_theta
-    float eps = 1e-6f;                       ///< rms_norm_eps
-    int64_t HK = 8, D = 128;                 ///< num_key_value_heads, head_dim
+    double rope_base = 1000000.0;                ///< rope_theta
+    float eps = 1e-6f;                           ///< rms_norm_eps
+    int64_t HK = 8, D = 128;                     ///< num_key_value_heads, head_dim
 };
 inline const MtpSettings& mtp_settings() {
     static const MtpSettings s;
@@ -418,13 +425,20 @@ inline const MtpSettings& mtp_settings() {
 /// mtp.safetensors; "" for one it does not have
 inline std::string mtp_tensor_name(const std::string& n) {
     static const std::pair<const char*, const char*> layer[] = {
-        {"attn_q.weight", "self_attn.q_proj.weight"},       {"attn_k.weight", "self_attn.k_proj.weight"},
-        {"attn_v.weight", "self_attn.v_proj.weight"},       {"attn_output.weight", "self_attn.o_proj.weight"},
-        {"attn_k_ctx.weight", "self_attn.k_proj_ctx.weight"}, {"attn_v_ctx.weight", "self_attn.v_proj_ctx.weight"},
-        {"ffn_gate.weight", "mlp.gate_proj.weight"},         {"ffn_up.weight", "mlp.up_proj.weight"},
-        {"ffn_down.weight", "mlp.down_proj.weight"},         {"attn_norm.weight", "input_layernorm.weight"},
-        {"ffn_norm.weight", "post_attention_layernorm.weight"}, {"dflare_norm.weight", "dflare_norm.weight"},
-        {"attn_q_norm.weight", "self_attn.q_norm.weight"},   {"attn_k_norm.weight", "self_attn.k_norm.weight"},
+        {"attn_q.weight", "self_attn.q_proj.weight"},
+        {"attn_k.weight", "self_attn.k_proj.weight"},
+        {"attn_v.weight", "self_attn.v_proj.weight"},
+        {"attn_output.weight", "self_attn.o_proj.weight"},
+        {"attn_k_ctx.weight", "self_attn.k_proj_ctx.weight"},
+        {"attn_v_ctx.weight", "self_attn.v_proj_ctx.weight"},
+        {"ffn_gate.weight", "mlp.gate_proj.weight"},
+        {"ffn_up.weight", "mlp.up_proj.weight"},
+        {"ffn_down.weight", "mlp.down_proj.weight"},
+        {"attn_norm.weight", "input_layernorm.weight"},
+        {"ffn_norm.weight", "post_attention_layernorm.weight"},
+        {"dflare_norm.weight", "dflare_norm.weight"},
+        {"attn_q_norm.weight", "self_attn.q_norm.weight"},
+        {"attn_k_norm.weight", "self_attn.k_norm.weight"},
         {"attn_k_ctx_norm.weight", "self_attn.k_norm_ctx.weight"}};
     static const std::pair<const char*, const char*> top[] = {
         {"output_norm.weight", "norm.weight"},
@@ -484,4 +498,4 @@ inline uint64_t drafter_file_rings_bytes(const std::string& path, int64_t reach,
     return drafter_rings_bytes(GgufFile(path), reach, q8);
 }
 
-}  // namespace lamina::inkling2
+}   // namespace lamina::inkling2

@@ -43,16 +43,18 @@ namespace lamina::vision {
 enum class FlashAttention {
     automatic,   ///< on
     on,
-    off,         ///< the attention as two products in FP32
+    off,   ///< the attention as two products in FP32
 };
 
 struct EncoderParams {
     std::string mmproj;
-    bool gpu = false;      ///< on a GPU: the CUDA device `device` of this process's
+    bool gpu = false;   ///< on a GPU: the CUDA device `device` of this process's
     int device = 0;
-    int threads = 0;       ///< the CPU's threads; 0: one a core, at most 16
-    int max_tokens = 0;    ///< a picture's tokens at most; 0: the projector's own limit
-    int min_tokens = 0;    ///< a picture's tokens at least; 0: the projector's own
+    int threads = 0;                                              ///< the CPU's threads; 0: one a core, at most 16
+    int max_tokens = 0;                                           ///< a picture's tokens at most;
+                                                                  ///< 0: the projector's own limit
+    int min_tokens = 0;                                           ///< a picture's tokens at least;
+                                                                  ///< 0: the projector's own
     FlashAttention flash_attention = FlashAttention::automatic;   ///< the CPU's attention
     /// A GPU, a Q8_0 projector: each matrix's values as FP16 and the products as the other files' (FP16 in, FP32
     /// sums), in place of MMQ over its blocks (the activations rounded to q8_1, llama.cpp's arithmetic for the file).
@@ -99,4 +101,4 @@ uint64_t gpu_free_bytes(int device);
 /// GPU.
 std::unique_ptr<Encoder> open_encoder(const EncoderParams& params, std::string& err);
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

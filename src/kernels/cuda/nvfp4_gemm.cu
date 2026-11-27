@@ -1,6 +1,6 @@
 // src/kernels/cuda/nvfp4_gemm.cu - see include/lamina/kernels/nvfp4_gemm.hpp.
-#include "lamina/kernels/nvfp4_gemm.hpp"
 #include "lamina/kernels/fp4_bits.cuh"
+#include "lamina/kernels/nvfp4_gemm.hpp"
 #include "lamina/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
@@ -14,7 +14,6 @@ namespace {
 
 constexpr int kPad = 72;   // a tile row in shared memory, halves (64 + 8: ldmatrix's eight rows on distinct banks)
 constexpr int kSmem = 4096 + 2 * (kNvfp4GemmRows + kNvfp4GemmEntries) * kPad * 2;
-
 
 /// A thread eight halves.  Grid ceil(rows * cols / 8 / 256).
 __global__ void halves_kernel(const float* __restrict__ src, const int32_t* __restrict__ map, uint4* __restrict__ dst,
@@ -76,9 +75,9 @@ __device__ __forceinline__ void fp4_halves(uint32_t qa, uint32_t qb, uint4 tb, u
 /// (17-20 M a ms) is two thirds of the time left.  Dynamic shared memory: kSmem.  Grid (w_rows / 128, tiles).
 __global__ void __launch_bounds__(512) nvfp4_gemm_kernel(const unsigned long long* __restrict__ ptr, size_t off,
                                                          size_t row_bytes, int K, const int32_t* __restrict__ bounds,
-                                                         const int32_t* __restrict__ tiles, const __half* __restrict__ xh,
-                                                         const int32_t* __restrict__ ids, float* __restrict__ y,
-                                                         size_t ld) {
+                                                         const int32_t* __restrict__ tiles,
+                                                         const __half* __restrict__ xh, const int32_t* __restrict__ ids,
+                                                         float* __restrict__ y, size_t ld) {
     constexpr int BM = kNvfp4GemmRows, BN = kNvfp4GemmEntries;
     extern __shared__ __align__(16) unsigned char smem[];
     uint4* lut = reinterpret_cast<uint4*>(smem);
@@ -91,7 +90,8 @@ __global__ void __launch_bounds__(512) nvfp4_gemm_kernel(const unsigned long lon
     const bool stager = w >= 8;
     if (!stager) lut[i] = fp4_table((uint8_t) i);
     const int si = i & 255, row = si >> 1, part = si & 1, xe = si >> 2, xp = si & 3;
-    const uint32_t* wrow = reinterpret_cast<const uint32_t*>((const uint8_t*) ptr[place] + off + (size_t) (r0 + row) * row_bytes);
+    const uint32_t* wrow =
+        reinterpret_cast<const uint32_t*>((const uint8_t*) ptr[place] + off + (size_t) (r0 + row) * row_bytes);
     __builtin_assume(__isGlobal(wrow));
     const uint4* xrow = reinterpret_cast<const uint4*>(xh + (size_t) (e0 + min(xe, n - 1)) * K) + 2 * xp;
     auto stage = [&](int kt) {
@@ -162,10 +162,13 @@ __global__ void __launch_bounds__(512) nvfp4_gemm_kernel(const unsigned long lon
 
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
-}  // namespace
+}   // namespace
 
 void nvfp4_gemm_halves(const float* src, const int32_t* map, void* dst, int64_t rows, int cols, void* stream) {
     if (rows <= 0) return;
@@ -181,8 +184,8 @@ void nvfp4_gemm_halves(const float* src, const int32_t* map, void* dst, int64_t 
 void nvfp4_gemm(const Nvfp4Gemm& p, void* stream) {
     if (p.n_tiles <= 0) return;
     if (!nvfp4_gemm_fits(p.w_rows, p.w_cols) || p.row_bytes != (size_t) (p.w_cols / 64) * 36) {
-        std::fprintf(stderr, "nvfp4_gemm: a matrix of %d rows of %d values (%zu bytes) is not its blocks' shape\n", p.w_rows,
-                     p.w_cols, p.row_bytes);
+        std::fprintf(stderr, "nvfp4_gemm: a matrix of %d rows of %d values (%zu bytes) is not its blocks' shape\n",
+                     p.w_rows, p.w_cols, p.row_bytes);
         std::exit(1);
     }
     if (cudaFuncSetAttribute(nvfp4_gemm_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem) != cudaSuccess)
@@ -193,4 +196,4 @@ void nvfp4_gemm(const Nvfp4Gemm& p, void* stream) {
     check("nvfp4_gemm");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

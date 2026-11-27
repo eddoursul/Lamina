@@ -26,8 +26,7 @@ bool read_dfly_config(const std::string& dir, DFlyConfig& c, std::string& err) {
         std::vector<int> index = c.kv_layers;
         if (const auto& v = j.value("dfly_target_index_layer", nlohmann::json()); v.is_number())
             index.assign(c.kv_layers.size(), v.get<int>());
-        else if (v.is_array())
-            index = v.get<std::vector<int>>();
+        else if (v.is_array()) index = v.get<std::vector<int>>();
         c.mask = j.at("dfly_mask_token_id").get<int32_t>();
         c.width = j.at("speculative_config").at("num_speculative_tokens").get<int>() + 1;
         c.top_k = j.at("dfly_target_index_topk").get<int>();
@@ -51,4 +50,4 @@ bool read_dfly_config(const std::string& dir, DFlyConfig& c, std::string& err) {
     return true;
 }
 
-}  // namespace lamina::hy4
+}   // namespace lamina::hy4

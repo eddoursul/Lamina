@@ -77,8 +77,7 @@ struct Q81One {
 
 // The activations a kernel for NC columns reads: one column's q8_1 blocks, 2+ columns' interleaved copy (nb blocks a
 // column)
-template <int NC, bool PM>
-__device__ __forceinline__ auto q8_1_cols(const void* xq, const float* xd, int nb) {
+template <int NC, bool PM> __device__ __forceinline__ auto q8_1_cols(const void* xq, const float* xd, int nb) {
     if constexpr (NC == 1) return Q81One{static_cast<const uint8_t*>(xq)};
     else return Q81Il<NC, PM>{static_cast<const int*>(xq), xd, nb};
 }
@@ -95,5 +94,5 @@ inline Q81IlParts q8_1_il_parts(const void* x_il, int n_in, int ncols) {
     return {bm, bm + words, reinterpret_cast<const float*>(bm + 2 * words)};
 }
 
-}  // namespace
-}  // namespace lamina::kernels
+}   // namespace
+}   // namespace lamina::kernels

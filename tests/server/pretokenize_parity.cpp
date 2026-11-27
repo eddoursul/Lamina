@@ -152,10 +152,18 @@ const std::vector<Case>& cases() {
         {P::Qwen35, "a .", {"a", " ."}},
         {P::Qwen35, "\xE3\x80\x80漢字", {"\xE3\x80\x80漢字"}},
         {P::Qwen35, "\xF0\x9F\x98\x80!\r\nok", {"\xF0\x9F\x98\x80!\r\n", "ok"}},
-        {P::Qwen35, "a\xED\xA0\x80" "b", {"a", "\xED\xA0\x80" "b"}},   // a surrogate is a code point, Cs
+        {P::Qwen35,
+         "a\xED\xA0\x80"
+         "b",
+         {"a", "\xED\xA0\x80"
+               "b"}},                                                              // a surrogate is a code point, Cs
         {P::Qwen35, "ab\xE4\xB8 cd", {"ab", "\xEF\xBF\xBD\xEF\xBF\xBD", " cd"}},   // a cut sequence: U+FFFD a byte
         // an overlong form and one past 0x10FFFF: U+FFFD a byte (llama.cpp of this build decodes them)
-        {P::Qwen35, "a\xC0\x80" "b", {"a", "\xEF\xBF\xBD\xEF\xBF\xBD", "b"}, false},
+        {P::Qwen35,
+         "a\xC0\x80"
+         "b",
+         {"a", "\xEF\xBF\xBD\xEF\xBF\xBD", "b"},
+         false},
         {P::Qwen35, "x\xF4\x90\x80\x80", {"x", "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD"}, false},
         // hy_v4: numbers in threes cut the text first, then kana and CJK runs; text no expression takes is one piece
         {P::HyV4, "abc 1234567 x", {"abc", " ", "123", "456", "7", " x"}},
@@ -174,7 +182,10 @@ const std::vector<Case>& cases() {
         {P::Gpt4o, "don't stop", {"don't", " stop"}},
         {P::Gpt4o, "1234567", {"123", "456", "7"}},
         {P::Gpt4o, "x!\n/", {"x", "!\n/"}},
-        {P::Gpt4o, "\xCC\x81" "A", {"\xCC\x81", "A"}},
+        {P::Gpt4o,
+         "\xCC\x81"
+         "A",
+         {"\xCC\x81", "A"}},
         {P::Gpt4o, "ÀB", {"À", "B"}},
         {P::Gpt4o, "a  b", {"a", " ", " b"}},
     };
@@ -228,41 +239,40 @@ int check_tables() {
 
 // ----------------------------------------------------------------------------------------------------- random texts
 // code points by what they are to the expressions
-constexpr uint32_t kUpper[] = {'A', 'B', 'M', 'S', 'Z', 0xC0, 0xC9, 0x391, 0x3A9, 0x410, 0x42F, 0x1C5, 0x10400,
-                               0x1E900};
-constexpr uint32_t kLower[] = {'a', 'd', 'e', 'l', 'm', 'r', 's', 't', 'v', 'z', 0xDF, 0xE9, 0xFF, 0x17F, 0x3B1,
-                               0x3C9, 0x430, 0x44F, 0x10428};
-constexpr uint32_t kLetters[] = {0x2B0, 0x5D0, 0x627, 0x915, 0xE01, 0xAC00, 0x3400, 0x4E00, 0x4E2D, 0x6F22, 0x9FA5,
-                                 0x9FA6, 0x9FFF, 0x3042, 0x3093, 0x309D, 0x30AB, 0x30FC, 0x30FF, 0xF900, 0x20000,
-                                 0x2A700, 0x1D400};
+constexpr uint32_t kUpper[] = {'A',   'B',   'M',   'S',   'Z',   0xC0,    0xC9,
+                               0x391, 0x3A9, 0x410, 0x42F, 0x1C5, 0x10400, 0x1E900};
+constexpr uint32_t kLower[] = {'a',  'd',  'e',  'l',   'm',   'r',   's',   't',   'v',    'z',
+                               0xDF, 0xE9, 0xFF, 0x17F, 0x3B1, 0x3C9, 0x430, 0x44F, 0x10428};
+constexpr uint32_t kLetters[] = {0x2B0,  0x5D0,  0x627,  0x915,  0xE01,   0xAC00,  0x3400, 0x4E00,
+                                 0x4E2D, 0x6F22, 0x9FA5, 0x9FA6, 0x9FFF,  0x3042,  0x3093, 0x309D,
+                                 0x30AB, 0x30FC, 0x30FF, 0xF900, 0x20000, 0x2A700, 0x1D400};
 constexpr uint32_t kMarks[] = {0x300, 0x301, 0x308, 0x93F, 0x94D, 0xE31, 0x20DD, 0x3099, 0xFE0F, 0x1D167};
 constexpr uint32_t kNumbers[] = {'0', '1', '5', '9', 0xB2, 0xBD, 0x660, 0x966, 0x2160, 0x2460, 0x3007, 0xFF11, 0x1D7CE};
-constexpr uint32_t kPunct[] = {'!', '"', '#', '%', '&', '\'', '(', ')', '*', ',', '-', '.', '/', ':', ';', '?', '@',
-                               '[', '\\', ']', '_', '{', '}', 0xA1, 0xAB, 0xBB, 0xBF, 0x2014, 0x2019, 0x201C, 0x2026,
-                               0x3001, 0x3002, 0x30A0, 0x30FB, 0xFF01};
-constexpr uint32_t kSymbols[] = {'$', '+', '<', '=', '>', '^', '`', '|', '~', 0xA9, 0xB0, 0x20AC, 0x2190, 0x2211,
-                                 0x2605, 0x309B, 0xFFFD, 0x1F3FD, 0x1F44D, 0x1F600};
-constexpr uint32_t kSpaces[] = {' ', ' ', ' ', ' ', '\t', '\n', '\n', '\r', 0x0B, 0x0C, 0x85, 0xA0, 0x1680, 0x2000,
-                                0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000};
-constexpr uint32_t kOthers[] = {0x00, 0x01, 0x07, 0x1B, 0x1C, 0x1F, 0x7F, 0x80, 0x9F, 0xAD, 0x200B, 0x200C, 0x200D,
-                                0x2060, 0xFEFF, 0x180E, 0xD800, 0xDFFF, 0xE000, 0xF8FF, 0x378, 0x3040, 0xFFFE,
-                                0xE0001, 0x10FFFF};
+constexpr uint32_t kPunct[] = {'!',    '"',    '#',    '%',    '&',    '\'',   '(',    ')',    '*',
+                               ',',    '-',    '.',    '/',    ':',    ';',    '?',    '@',    '[',
+                               '\\',   ']',    '_',    '{',    '}',    0xA1,   0xAB,   0xBB,   0xBF,
+                               0x2014, 0x2019, 0x201C, 0x2026, 0x3001, 0x3002, 0x30A0, 0x30FB, 0xFF01};
+constexpr uint32_t kSymbols[] = {'$',  '+',    '<',    '=',    '>',    '^',    '`',    '|',     '~',     0xA9,
+                                 0xB0, 0x20AC, 0x2190, 0x2211, 0x2605, 0x309B, 0xFFFD, 0x1F3FD, 0x1F44D, 0x1F600};
+constexpr uint32_t kSpaces[] = {' ',  ' ',    ' ',    ' ',    '\t',   '\n',   '\n',   '\r',   0x0B,   0x0C,  0x85,
+                                0xA0, 0x1680, 0x2000, 0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000};
+constexpr uint32_t kOthers[] = {0x00,   0x01,   0x07,   0x1B,   0x1C,   0x1F,    0x7F,    0x80,   0x9F,
+                                0xAD,   0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF,  0x180E,  0xD800, 0xDFFF,
+                                0xE000, 0xF8FF, 0x378,  0x3040, 0xFFFE, 0xE0001, 0x10FFFF};
 // above 0xFFFF with kana or CJK in their low 16 bits (Egyptian, Tangut, CJK extension B, private use)
 constexpr uint32_t kCut[] = {0x13041, 0x17000, 0x24E00, 0x25000, 0x29FA5, 0xF4E01};
 // bytes both decoders read alike (no overlong form can come of them with what follows)
 const char* const kInvalid[] = {"\x80", "\xBF", "\xF8", "\xFF", "\xC3", "\xE4\xB8", "\xF0\x9F\x98", "\xED\xA0"};
-const char* const kWords[] = {"'s", "'S", "'t", "'re", "'Re", "'rE", "'ve", "'VE", "'m", "'ll", "'lL", "'d", "'x",
-                              "'", "\r\n", "\n\n", " \n", "\n ", "\n/", "!/", "McDonald", "iPhone", "HTTPServer",
-                              "ÀB", "Àb", "aÀ", ".NET", "-x", "1,234.5", "don't", "I'M"};
+const char* const kWords[] = {"'s",  "'S",  "'t",   "'re", "'Re",      "'rE",    "'ve",        "'VE",
+                              "'m",  "'ll", "'lL",  "'d",  "'x",       "'",      "\r\n",       "\n\n",
+                              " \n", "\n ", "\n/",  "!/",  "McDonald", "iPhone", "HTTPServer", "ÀB",
+                              "Àb",  "aÀ",  ".NET", "-x",  "1,234.5",  "don't",  "I'M"};
 
 struct Texts {
     std::mt19937_64 rng;
     bool cut_ok;   ///< kCut may be used
     size_t pick(size_t n) { return std::uniform_int_distribution<size_t>(0, n - 1)(rng); }
-    template <size_t N>
-    uint32_t from(const uint32_t (&a)[N]) {
-        return a[pick(N)];
-    }
+    template <size_t N> uint32_t from(const uint32_t (&a)[N]) { return a[pick(N)]; }
     std::string next() {
         std::string s;
         const size_t atoms = 1 + pick(pick(5) == 0 ? 40 : 16);
@@ -393,7 +403,7 @@ int bench(const std::vector<const char*>& paths) {
     return 0;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     size_t n = 20000;

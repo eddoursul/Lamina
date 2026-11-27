@@ -2,8 +2,8 @@
 // tiles, for gemm.cu's instances and for a bench of others.
 //
 // Y[T][N] = X[T][K] . W[N][K]^T, X and W halves or BF16 with K along a row, the sums FP32 (mma.m16n8k16: X's rows are
-// its row operand and W's rows its column operand as they lie, no transposition).  A block takes BM = 16 MT WM rows of X
-// against BN = 16 NT WN rows of W and walks K in slabs of BK through shared memory (cp.async into ST buffers, the
+// its row operand and W's rows its column operand as they lie, no transposition).  A block takes BM = 16 MT WM rows of
+// X against BN = 16 NT WN rows of W and walks K in slabs of BK through shared memory (cp.async into ST buffers, the
 // copies ST - 1 slabs ahead of the products, one barrier a slab), each warp 16 MT x 16 NT sums in registers, K in
 // order.  Rows past T or N and values past K arrive as zeros (a copy of no source bytes).  The FP32 product
 // (sg_block) has the same frame on the float units: GM x GN threads of TM x TN sums, slabs of 32.
@@ -25,10 +25,10 @@
 
 namespace lamina::kernels::gemmk {
 
-constexpr int kYHalf = 1;   // Y in halves (the sums rounded to nearest)
-constexpr int kYPair = 2;   // Y's value pairs are aligned: two a store
-constexpr int kYQuad = 8;   // (floats) Y's values in fours are aligned: four a store
-constexpr int kTInner = 4;  // X's tiles are the grid's inner index (else W's)
+constexpr int kYHalf = 1;    // Y in halves (the sums rounded to nearest)
+constexpr int kYPair = 2;    // Y's value pairs are aligned: two a store
+constexpr int kYQuad = 8;    // (floats) Y's values in fours are aligned: four a store
+constexpr int kTInner = 4;   // X's tiles are the grid's inner index (else W's)
 
 struct TcArgs {
     const uint16_t* x;   // [T][K], rows ldx apart
@@ -61,7 +61,8 @@ __device__ __forceinline__ void tile_of(int i, int nI, int nO, int ci, int& inne
     }
 }
 
-template <bool BF> __device__ __forceinline__ void tc_mma(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+template <bool BF>
+__device__ __forceinline__ void tc_mma(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
     if constexpr (BF)
         asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                      "{%0,%1,%2,%3};\n"
@@ -75,8 +76,8 @@ template <bool BF> __device__ __forceinline__ void tc_mma(float (&d)[4], const u
 }
 /// 16 bytes to shared memory in the background, `bytes` of them from g and zeros after
 __device__ __forceinline__ void tc_cp16(void* s, const void* g, unsigned bytes) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g),
-                 "r"(bytes));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)),
+                 "l"(g), "r"(bytes));
 }
 
 /// 16 bytes to shared memory in the background
@@ -105,12 +106,13 @@ template <int MT, int NT, int WM, int WN, int BK, int ST> constexpr int tc_smem_
 /// 3 as 2 without the stores, 4 the stores alone.
 template <bool BF, int MT, int NT, int WM, int WN, int BK, int ST, bool PL, int DBG>
 __device__ __forceinline__ void tc_block(const uint16_t* __restrict__ x, const uint16_t* __restrict__ w, void* yv,
-                                         long long ldx, long long ldy, int T, int N, int K, int kb, int ke, int t0, int n0,
-                                         float alpha, float beta, int flags) {
+                                         long long ldx, long long ldy, int T, int N, int K, int kb, int ke, int t0,
+                                         int n0, float alpha, float beta, int flags) {
     constexpr int BM = 16 * MT * WM, BN = 16 * NT * WN, NTH = 32 * WM * WN, GK = BK / 8, KS = BK / 16;
     constexpr int kBuf = (BM + BN) * BK, kGran = (BM + BN) * GK, NG = (kGran + NTH - 1) / NTH;
     constexpr int M = 2 * MT * NT, NLD = MT + NT;   // a k step's products, and its loads of the next step's operands
-    constexpr int CL = NG / KS, CR = NG - CL;       // a group's copies in a slab's last step, and in the next slab's others
+    constexpr int CL = NG / KS, CR = NG - CL;       // a group's copies in a slab's last
+                                                    // step, and in the next slab's others
     static_assert(BK == 32 || BK == 64, "a slab is 32 or 64 values of K");
     static_assert(ST >= 3 && ST <= 5, "3 to 5 buffers");
     static_assert(NTH % GK == 0, "a thread's granules lie at one place of their rows");
@@ -187,11 +189,13 @@ __device__ __forceinline__ void tc_block(const uint16_t* __restrict__ x, const u
             boff[ks] = (unsigned) (rb * BK + ((2 * ks + ((lane >> 3) & 1)) ^ tc_swz<BK>(rb)) * 8);
         }
     }
-    unsigned af[2][MT][4], bf[2][NT][4];   // a k step's operands and the next step's
+    unsigned af[2][MT][4], bf[2][NT][4];                           // a k step's operands and the next step's
     auto ld = [&](int set, int o, const uint16_t* buf, int ks) {   // operand o of a step: X's tiles, then W's
         if constexpr (DBG == 1 || DBG == 4) return;
         if (o < MT) ldsm4(af[set][o], buf + aoff[ks] + o * 16 * BK);
-        else ldsm4(bf[set][o - MT], buf + boff[ks] + (o - MT) * 16 * BK);   // [0..1]: columns 0-7 (k 0-7, 8-15), [2..3]: 8-15
+        else
+            ldsm4(bf[set][o - MT], buf + boff[ks] + (o - MT) * 16 * BK);   // [0..1]: columns 0-7 (k
+                                                                           // 0-7, 8-15), [2..3]: 8-15
     };
     // the first ST - 1 slabs, a group each, and the first part of the next one's
 #pragma unroll
@@ -358,19 +362,20 @@ template <bool BF, int MT, int NT, int WM, int WN, int BK, int ST, bool PL = fal
 __global__ void __launch_bounds__(32 * WM * WN) tc_kernel(const TcArgs a) {
     int ti, to;
     tile_of((int) blockIdx.x, a.nI, a.nO, a.ci, ti, to);
-    const int t0 = ((a.flags & kTInner) ? ti : to) * (16 * MT * WM), n0 = ((a.flags & kTInner) ? to : ti) * (16 * NT * WN);
+    const int t0 = ((a.flags & kTInner) ? ti : to) * (16 * MT * WM),
+              n0 = ((a.flags & kTInner) ? to : ti) * (16 * NT * WN);
     const int kb = blockIdx.z * a.kz, ke = min(a.K, kb + a.kz);
     const long long zoff = (long long) blockIdx.z * a.zstride;
     void* const y = (a.flags & kYHalf) ? (void*) ((__half*) a.y + zoff) : (void*) ((float*) a.y + zoff);
-    tc_block<BF, MT, NT, WM, WN, BK, ST, PL, DBG>(a.x, a.w, y, a.ldx, a.ldy, a.T, a.N, a.K, kb, ke, t0, n0, a.alpha, a.beta,
-                                                  a.flags);
+    tc_block<BF, MT, NT, WM, WN, BK, ST, PL, DBG>(a.x, a.w, y, a.ldx, a.ldy, a.T, a.N, a.K, kb, ke, t0, n0, a.alpha,
+                                                  a.beta, a.flags);
 }
 
 /// Several products of one N and K in one launch (a batch's experts, K whole): a block belongs to the problem whose
 /// first block is the last at or before it, and takes its x, w and y from the device arrays.
 constexpr int kTcGroupMax = 32;
 struct TcGroupArgs {
-    const uint16_t* const* x;     // [n] pointers: problem i's x [rows[i]][K], w [N][K] and y [rows[i]][N]
+    const uint16_t* const* x;   // [n] pointers: problem i's x [rows[i]][K], w [N][K] and y [rows[i]][N]
     const uint16_t* const* w;
     float* const* y;
     int first[kTcGroupMax + 1];   // problem i's first block
@@ -384,14 +389,15 @@ __global__ void __launch_bounds__(32 * WM * WN) tc_group_kernel(const TcGroupArg
     for (int j = 1; j < a.n; ++j) i = (int) blockIdx.x >= a.first[j] ? j : i;
     const int local = (int) blockIdx.x - a.first[i], nN = (a.N + BN - 1) / BN;
     tc_block<BF, MT, NT, WM, WN, BK, ST, false, 0>(a.x[i], a.w[i], a.y[i], a.K, a.N, a.rows[i], a.N, a.K, 0, a.K,
-                                                  local / nN * BM, local % nN * BN, 1.0f, 0.0f, a.N % 2 == 0 ? kYPair : 0);
+                                                   local / nN * BM, local % nN * BN, 1.0f, 0.0f,
+                                                   a.N % 2 == 0 ? kYPair : 0);
 }
 
 /// y = alpha * (the splits' partials part[z] added in order, T x N floats each, zstride floats apart: a multiple of
 /// four) + beta * y; y floats, or halves (HALF).  A thread four values.
 template <bool HALF>
-__global__ void tc_reduce_kernel(const float* __restrict__ part, void* __restrict__ yv, long long ldy, long long zstride,
-                                 int T, int N, int splits, float alpha, float beta) {
+__global__ void tc_reduce_kernel(const float* __restrict__ part, void* __restrict__ yv, long long ldy,
+                                 long long zstride, int T, int N, int splits, float alpha, float beta) {
     const long long i4 = ((long long) blockIdx.x * blockDim.x + threadIdx.x) * 4, n_all = (long long) T * N;
     if (i4 >= n_all) return;
     float4 s = *reinterpret_cast<const float4*>(part + i4);
@@ -506,7 +512,7 @@ struct SgArgs {
     int T, N, K, kz;
     int nI, nO, ci;
     float alpha, beta;
-    int flags;        // kTInner, kYQuad
+    int flags;   // kTInner, kYQuad
 };
 
 constexpr int kSgK = 32;   // a slab
@@ -515,9 +521,9 @@ template <int GM, int GN, int TM, int TN, int ST> constexpr int sg_smem_bytes() 
 }
 
 template <int GM, int GN, int TM, int TN, int ST, bool PL>
-__device__ __forceinline__ void sg_block(const float* __restrict__ x, const float* __restrict__ w, float* __restrict__ y,
-                                         long long ldx, long long ldy, int T, int N, int K, int kb, int ke, int t0, int n0,
-                                         float alpha, float beta, bool quad) {
+__device__ __forceinline__ void sg_block(const float* __restrict__ x, const float* __restrict__ w,
+                                         float* __restrict__ y, long long ldx, long long ldy, int T, int N, int K,
+                                         int kb, int ke, int t0, int n0, float alpha, float beta, bool quad) {
     constexpr int BK = kSgK, BM = GM * TM, BN = GN * TN, NTH = GM * GN, GK = BK / 4;
     constexpr int kBuf = (BM + BN) * BK, kGran = (BM + BN) * GK, NG = (kGran + NTH - 1) / NTH;
     static_assert(ST >= 2 && ST <= 5, "2 to 5 buffers");
@@ -562,7 +568,8 @@ __device__ __forceinline__ void sg_block(const float* __restrict__ x, const floa
     for (int i = 0; i < TM; ++i)
 #pragma unroll
         for (int j = 0; j < TN; ++j) acc[i][j] = 0.0f;
-    const int sa = (tm / TM) & 7, sb = (tn / TN) & 7;   // its rows' swizzle (one for a thread's TM rows, one for its TN)
+    const int sa = (tm / TM) & 7, sb = (tn / TN) & 7;   // its rows' swizzle (one for a
+                                                        // thread's TM rows, one for its TN)
 #pragma unroll
     for (int p = 0; p < ST - 1; ++p) {
         if (p < nk) {
@@ -588,7 +595,8 @@ __device__ __forceinline__ void sg_block(const float* __restrict__ x, const floa
 #pragma unroll
             for (int i = 0; i < TM; ++i) av[i] = *reinterpret_cast<const float4*>(buf + (tm + i) * BK + (kq ^ sa) * 4);
 #pragma unroll
-            for (int j = 0; j < TN; ++j) bv[j] = *reinterpret_cast<const float4*>(buf + (BM + tn + j) * BK + (kq ^ sb) * 4);
+            for (int j = 0; j < TN; ++j)
+                bv[j] = *reinterpret_cast<const float4*>(buf + (BM + tn + j) * BK + (kq ^ sb) * 4);
             // k by k, every sum once a k: a sum's next term never waits for its last
 #pragma unroll
             for (int i = 0; i < TM; ++i)
@@ -624,7 +632,8 @@ __device__ __forceinline__ void sg_block(const float* __restrict__ x, const floa
                     for (int i = 0; i < RB; ++i)
 #pragma unroll
                         for (int q = 0; q < JQ; ++q)
-                            if (i0 + i < TM) o[i][q] = *reinterpret_cast<const float4*>(yb + (long long) (i0 + i) * ldy + q * 4);
+                            if (i0 + i < TM)
+                                o[i][q] = *reinterpret_cast<const float4*>(yb + (long long) (i0 + i) * ldy + q * 4);
                 }
 #pragma unroll
                 for (int i = 0; i < RB; ++i)
@@ -662,13 +671,13 @@ __device__ __forceinline__ void sg_block(const float* __restrict__ x, const floa
 }
 
 template <int GM, int GN, int TM, int TN, int ST, bool PL = false>
-__global__ void __launch_bounds__(GM * GN) sg_kernel(const SgArgs a) {
+__global__ void __launch_bounds__(GM* GN) sg_kernel(const SgArgs a) {
     int ti, to;
     tile_of((int) blockIdx.x, a.nI, a.nO, a.ci, ti, to);
     const int t0 = ((a.flags & kTInner) ? ti : to) * (GM * TM), n0 = ((a.flags & kTInner) ? to : ti) * (GN * TN);
     const int kb = blockIdx.z * a.kz, ke = min(a.K, kb + a.kz);
-    sg_block<GM, GN, TM, TN, ST, PL>(a.x, a.w, a.y + (long long) blockIdx.z * a.zstride, a.ldx, a.ldy, a.T, a.N, a.K, kb, ke,
-                                     t0, n0, a.alpha, a.beta, (a.flags & kYQuad) != 0);
+    sg_block<GM, GN, TM, TN, ST, PL>(a.x, a.w, a.y + (long long) blockIdx.z * a.zstride, a.ldx, a.ldy, a.T, a.N, a.K,
+                                     kb, ke, t0, n0, a.alpha, a.beta, (a.flags & kYQuad) != 0);
 }
 
-}  // namespace lamina::kernels::gemmk
+}   // namespace lamina::kernels::gemmk

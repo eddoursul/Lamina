@@ -50,7 +50,7 @@ struct Handle {
     Handle& operator=(const Handle&) = delete;
 };
 
-}  // namespace
+}   // namespace
 
 HttpReply http_request(const std::string& method, const std::string& url, const HttpHeaders& headers,
                        const std::string& body, double timeout_s, size_t max_bytes,
@@ -59,13 +59,14 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
     URL_COMPONENTS uc{};
     uc.dwStructSize = sizeof uc;
     uc.dwSchemeLength = uc.dwHostNameLength = uc.dwUrlPathLength = uc.dwExtraInfoLength = (DWORD) -1;
-    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc) || (uc.nScheme != INTERNET_SCHEME_HTTP && uc.nScheme != INTERNET_SCHEME_HTTPS))
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc) ||
+        (uc.nScheme != INTERNET_SCHEME_HTTP && uc.nScheme != INTERNET_SCHEME_HTTPS))
         throw HttpError("not an http(s) URL: " + url);
     const std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
     const std::wstring path = std::wstring(uc.lpszUrlPath, uc.dwUrlPathLength) +
                               std::wstring(uc.lpszExtraInfo != nullptr ? uc.lpszExtraInfo : L"", uc.dwExtraInfoLength);
-    Handle session(WinHttpOpen(L"lamina", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-                               WINHTTP_NO_PROXY_BYPASS, 0));
+    Handle session(
+        WinHttpOpen(L"lamina", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (session.h == nullptr) throw HttpError(win_error("the request could not be made"));
     const int ms = (int) std::clamp(timeout_s * 1000.0, 1.0, 2.0e9);
     WinHttpSetTimeouts(session.h, ms, ms, ms, ms);
@@ -107,7 +108,8 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
                 }
                 const size_t colon = lines[i].find(':');
                 if (colon == std::string::npos) continue;
-                reply.headers.emplace_back(lower(lines[i].substr(0, colon)), std::string(strip(lines[i].substr(colon + 1))));
+                reply.headers.emplace_back(lower(lines[i].substr(0, colon)),
+                                           std::string(strip(lines[i].substr(colon + 1))));
             }
         }
     }
@@ -119,10 +121,12 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
         if (avail == 0) break;
         buf.resize(avail);
         DWORD got = 0;
-        if (!WinHttpReadData(request.h, buf.data(), avail, &got)) throw HttpError(win_error("the reply could not be read"));
+        if (!WinHttpReadData(request.h, buf.data(), avail, &got))
+            throw HttpError(win_error("the reply could not be read"));
         if (got == 0) break;
         total += got;
-        if (max_bytes > 0 && total > max_bytes) throw HttpError("the reply is larger than " + std::to_string(max_bytes) + " bytes");
+        if (max_bytes > 0 && total > max_bytes)
+            throw HttpError("the reply is larger than " + std::to_string(max_bytes) + " bytes");
         if (on_data) {
             if (!on_data(std::string_view(buf.data(), got))) break;
         } else {
@@ -187,4 +191,4 @@ HttpReply http_request(const std::string& method, const std::string& url, const 
 
 #endif
 
-}  // namespace lamina
+}   // namespace lamina

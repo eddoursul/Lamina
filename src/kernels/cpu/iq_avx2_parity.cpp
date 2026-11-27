@@ -22,8 +22,8 @@
 #include "lamina/kernels/cpu/iq_avx2.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 
-#include "ggml.h"
 #include "ggml-cpu.h"
+#include "ggml.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -87,14 +87,16 @@ void gu_rows_v(int v, int type, const uint8_t* blob, size_t gu_row, size_t up_of
                float* const* ff) {
     cpu::iq256_gu_rows_v(v, type, blob, gu_row, up_off, (int) kH, act, nt, ff, 0, (int) kFF);
 }
-void gate_rows_v(int v, int type, const uint8_t* w, size_t row_bytes, const void* const* act, int nt, float* const* out) {
+void gate_rows_v(int v, int type, const uint8_t* w, size_t row_bytes, const void* const* act, int nt,
+                 float* const* out) {
     cpu::iq256_rows_v(v, type, w, row_bytes, (int) kH, act, nt, out, 0, (int) kFF);
 }
 void iq4nl_rows_v(int v, const uint8_t* w, size_t row_bytes, const void* const* hq, int nt, float* const* out) {
     cpu::iq4nl256_down_rows_v(v, w, row_bytes, (int) kFF, hq, nt, out, 0, (int) kH);
 }
 void q2_rows_v(int v, const uint8_t* w, size_t row_bytes, const cpu::ActQ* const* a, int nt, float* const* out) {
-    cpu::q2_0_gguf_rows_multi_avx2_v((v & cpu::kIq256Vnni) != 0, w, row_bytes, (int) (kFF / 64), a, nt, out, 0, (int) kH);
+    cpu::q2_0_gguf_rows_multi_avx2_v((v & cpu::kIq256Vnni) != 0, w, row_bytes, (int) (kFF / 64), a, nt, out, 0,
+                                     (int) kH);
 }
 std::string variant_name(int v) {
     if (v == 0) return "scalar";
@@ -137,7 +139,7 @@ void fill_blocks(uint8_t* p, size_t bytes, int type, uint64_t& seed) {
 }
 
 void fill_blob(uint8_t* blob, const cpu::NativeFmt& f, uint64_t& seed) {
-    fill_blocks(blob, f.down_off, f.gu_type, seed);                     // the gate and up rows
+    fill_blocks(blob, f.down_off, f.gu_type, seed);   // the gate and up rows
     fill_blocks(blob + f.down_off, f.bytes - f.down_off, f.d_type, seed);
 }
 
@@ -170,7 +172,10 @@ struct Acts {
 
 double rel(const float* a, const float* b, size_t n) {
     double num = 0, den = 0;
-    for (size_t i = 0; i < n; ++i) { num += std::fabs((double) a[i] - b[i]); den += std::fabs((double) b[i]); }
+    for (size_t i = 0; i < n; ++i) {
+        num += std::fabs((double) a[i] - b[i]);
+        den += std::fabs((double) b[i]);
+    }
     return num / (den + 1e-30);
 }
 
@@ -247,14 +252,17 @@ int check_gate_up(int type) {
     int failures = 0;
     const double r_ggml = rel(one_g.data(), ref.data(), one_g.size());
     std::printf("  %-8s gate rows vs ggml vec_dot: rel %.2e\n", type_name(type), r_ggml);
-    if (!(r_ggml <= 1e-5)) { std::printf("  %-8s MISMATCH against ggml\n", type_name(type)); ++failures; }
+    if (!(r_ggml <= 1e-5)) {
+        std::printf("  %-8s MISMATCH against ggml\n", type_name(type));
+        ++failures;
+    }
     if (type == 16 || type == 17 || type == 18 || type == 21 || type == 22) {
         size_t different = 0;
         std::vector<float> exact(R);
         const ggml_vec_dot_t dot = traits_cpu(type)->vec_dot;
         for (int t = 0; t < kMaxT; ++t) {
-            cpu::iq256_gu_rows_exact_one(type, blob.data(), f.gu_row, f.up_off, (int) kH, a.gup[t],
-                                          exact.data(), 0, (int) kFF);
+            cpu::iq256_gu_rows_exact_one(type, blob.data(), f.gu_row, f.up_off, (int) kH, a.gup[t], exact.data(), 0,
+                                         (int) kFF);
             for (size_t r = 0; r < R; ++r) {
                 float g = 0.f, u = 0.f;
                 dot((int) kH, &g, 0, blob.data() + r * f.gu_row, 0, a.gup[t], 0, 1);
@@ -263,8 +271,8 @@ int check_gate_up(int type) {
                 different += std::memcmp(&exact[r], &want, sizeof(float)) != 0;
             }
         }
-        std::printf("  %-8s exact singleton vs ggml: %zu of %zu expert outputs differ bitwise\n",
-                    type_name(type), different, (size_t) kMaxT * R);
+        std::printf("  %-8s exact singleton vs ggml: %zu of %zu expert outputs differ bitwise\n", type_name(type),
+                    different, (size_t) kMaxT * R);
         if (different) ++failures;
     }
     for (int v : subsets(gu_variants())) {
@@ -273,7 +281,10 @@ int check_gate_up(int type) {
         for (int nt = 1; nt <= kMaxT; ++nt) {
             float* gp[kMaxT];
             float* fp[kMaxT];
-            for (int t = 0; t < nt; ++t) { gp[t] = &g[t * R]; fp[t] = &ff[t * R]; }
+            for (int t = 0; t < nt; ++t) {
+                gp[t] = &g[t * R];
+                fp[t] = &ff[t * R];
+            }
             gate_rows_v(v, type, blob.data(), f.gu_row, a.gup, nt, gp);
             gu_rows_v(v, type, blob.data(), f.gu_row, f.up_off, a.gup, nt, fp);
             for (int t = 0; t < nt; ++t)
@@ -334,7 +345,10 @@ int check_down(int d_type) {
     const double r_ref = rel(one.data(), ref.data(), one.size());
     std::printf("  %-8s down rows vs %s: rel %.2e\n", type_name(d_type),
                 d_type == 20 ? "ggml vec_dot" : "a double reference", r_ref);
-    if (!(r_ref <= 1e-5)) { std::printf("  %-8s MISMATCH against the reference\n", type_name(d_type)); ++failures; }
+    if (!(r_ref <= 1e-5)) {
+        std::printf("  %-8s MISMATCH against the reference\n", type_name(d_type));
+        ++failures;
+    }
     for (int v : subsets(down_variants())) {
         size_t differ = 0;
         std::vector<float> o(kMaxT * R);
@@ -383,7 +397,8 @@ int check_engine_width(int type) {
         for (int t = 0; t < nt; ++t) differ += rows_differ(fp[t], &one[t * R], R);
     }
     std::printf("  %-8s engine: multi-token from one token on, 2..8 tokens: %zu gate/up rows differ from the one-token "
-                "rows\n", type_name(type), differ);
+                "rows\n",
+                type_name(type), differ);
     return differ ? 1 : 0;
 }
 #endif
@@ -428,7 +443,10 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
         std::vector<float> ffb(kMaxT * (size_t) kFF), outb(kMaxT * (size_t) kH);
         float* ff[kMaxT];
         float* out[kMaxT];
-        for (int t = 0; t < kMaxT; ++t) { ff[t] = &ffb[(size_t) t * kFF]; out[t] = &outb[(size_t) t * kH]; }
+        for (int t = 0; t < kMaxT; ++t) {
+            ff[t] = &ffb[(size_t) t * kFF];
+            out[t] = &outb[(size_t) t * kH];
+        }
         const ggml_vec_dot_t gdot = traits_cpu(gt)->vec_dot, ddot = traits_cpu(dt)->vec_dot;
 
         std::vector<Method> ms;
@@ -441,7 +459,9 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
         if (!dispatch_only && kVariants) {
             for (int v : subsets(gu_variants() | down_variants()))
                 ms.push_back({variant_name(v),
-                              [&, v, gt](const uint8_t* blob, int nt) { gu_rows_v(v, gt, blob, f.gu_row, f.up_off, a.gup, nt, ff); },
+                              [&, v, gt](const uint8_t* blob, int nt) {
+                                  gu_rows_v(v, gt, blob, f.gu_row, f.up_off, a.gup, nt, ff);
+                              },
                               down_v(v)});
         } else {
             ms.push_back({"kernels",
@@ -449,8 +469,12 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
                               cpu::iq256_gu_rows(gt, blob, f.gu_row, f.up_off, (int) kH, a.gup, nt, ff, 0, (int) kFF);
                           },
                           [&, dt](const uint8_t* blob, int nt) {
-                              if (dt == 20) cpu::iq4nl256_down_rows(blob + f.down_off, f.d_row, (int) kFF, a.dnp, nt, out, 0, (int) kH);
-                              else cpu::q2_0_gguf_rows_multi_avx2(blob + f.down_off, f.d_row, (int) (kFF / 64), a.q2p, nt, out, 0, (int) kH);
+                              if (dt == 20)
+                                  cpu::iq4nl256_down_rows(blob + f.down_off, f.d_row, (int) kFF, a.dnp, nt, out, 0,
+                                                          (int) kH);
+                              else
+                                  cpu::q2_0_gguf_rows_multi_avx2(blob + f.down_off, f.d_row, (int) (kFF / 64), a.q2p,
+                                                                 nt, out, 0, (int) kH);
                           }});
         }
         ms.push_back({"ggml",   // ggml-cpu's dot, token by token: the engine's one-token path (#152's rule)
@@ -466,18 +490,23 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
                       [&](const uint8_t* blob, int nt) {
                           for (int64_t r = 0; r < kH; ++r)
                               for (int t = 0; t < nt; ++t)
-                                  ddot((int) kFF, &out[t][r], 0, blob + f.down_off + (size_t) r * f.d_row, 0, a.dnp[t], 0, 1);
+                                  ddot((int) kFF, &out[t][r], 0, blob + f.down_off + (size_t) r * f.d_row, 0, a.dnp[t],
+                                       0, 1);
                       }});
         if (gt == 16 || gt == 17 || gt == 18 || gt == 21 || gt == 22)
-            ms.push_back({"exact1", [&, gt](const uint8_t* blob, int nt) {
+            ms.push_back({"exact1",
+                          [&, gt](const uint8_t* blob, int nt) {
                               for (int t = 0; t < nt; ++t)
-                                  cpu::iq256_gu_rows_exact_one(gt, blob, f.gu_row, f.up_off, (int) kH,
-                                                                 a.gup[t], ff[t], 0, (int) kFF);
-                          }, down_v(0)});
+                                  cpu::iq256_gu_rows_exact_one(gt, blob, f.gu_row, f.up_off, (int) kH, a.gup[t], ff[t],
+                                                               0, (int) kFF);
+                          },
+                          down_v(0)});
         ms.push_back({"engine",   // what the pool calls: native_gu_rows, native_down_rows or (Q2_0) q2_rows_any
                       [&](const uint8_t* blob, int nt) { cpu::native_gu_rows(f, blob, a.gup, nt, ff, 0, (int) kFF); },
                       [&, dt](const uint8_t* blob, int nt) {
-                          if (dt == 42) cpu::q2_rows_any(blob + f.down_off, f.d_row, (int) (kFF / 64), a.q2p, nt, out, 0, (int) kH);
+                          if (dt == 42)
+                              cpu::q2_rows_any(blob + f.down_off, f.d_row, (int) (kFF / 64), a.q2p, nt, out, 0,
+                                               (int) kH);
                           else cpu::native_down_rows(f, blob, a.dnp, nt, out, 0, (int) kH);
                       }});
 
@@ -503,10 +532,13 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
                     tg[m].push_back(sg / (double) E);
                     td[m].push_back(sd / (double) E);
                 }
-            std::printf("  %d token%s ms per expert, median of %d (min): gate/up, down, total\n", nt, nt == 1 ? "" : "s",
-                        reps);
+            std::printf("  %d token%s ms per expert, median of %d (min): gate/up, down, total\n", nt,
+                        nt == 1 ? "" : "s", reps);
             for (size_t m = 0; m < ms.size(); ++m) {
-                auto med = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+                auto med = [](std::vector<double> v) {
+                    std::sort(v.begin(), v.end());
+                    return v[v.size() / 2];
+                };
                 auto mn = [](const std::vector<double>& v) { return *std::min_element(v.begin(), v.end()); };
                 std::vector<double> tot(tg[m].size());
                 for (size_t i = 0; i < tot.size(); ++i) tot[i] = tg[m][i] + td[m][i];
@@ -518,7 +550,7 @@ int bench(const std::vector<std::string>& pairs, const std::vector<int>& nts, in
     return 0;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -552,18 +584,22 @@ int main(int argc, char** argv) {
     }
     if (pin >= 0 && !pin_to(pin)) std::printf("iq_avx2_parity: could not pin to CPU %d\n", pin);
     ggml_cpu_init();
-    auto env = [](const char* k) { const char* v = std::getenv(k); return v ? v : "-"; };
+    auto env = [](const char* k) {
+        const char* v = std::getenv(k);
+        return v ? v : "-";
+    };
     std::printf("iq_avx2_parity: %s (avx2 %d, avx512 %d), CPU %d, core type %02Xh\n", cpu::cpu_name().c_str(),
                 (int) cpu::cpu_avx2_ok(), (int) cpu::cpu_avx512_ok(), pin, core_type());
     std::printf("  LAMINA_IQ256_GATHER %s, LAMINA_NO_AVXVNNI %s, LAMINA_IQ_MT_MIN %s, LAMINA_IQ_PREFETCH %s\n",
-                env("LAMINA_IQ256_GATHER"), env("LAMINA_NO_AVXVNNI"), env("LAMINA_IQ_MT_MIN"), env("LAMINA_IQ_PREFETCH"));
+                env("LAMINA_IQ256_GATHER"), env("LAMINA_NO_AVXVNNI"), env("LAMINA_IQ_MT_MIN"),
+                env("LAMINA_IQ_PREFETCH"));
     if (!cpu::cpu_avx2_ok()) {
         std::printf("iq_avx2_parity: no AVX2 here, nothing to check (the engine takes ggml-cpu's dot)\n");
         return 0;
     }
 #if !defined(LAMINA_IQ_PARITY_DISPATCH_ONLY)
-    std::printf("  variants this CPU runs: %s; this thread's: %s\n",
-                variant_name(cpu::iq256_variants()).c_str(), variant_name(cpu::iq256_variant()).c_str());
+    std::printf("  variants this CPU runs: %s; this thread's: %s\n", variant_name(cpu::iq256_variants()).c_str(),
+                variant_name(cpu::iq256_variant()).c_str());
 #endif
     if (do_bench) return bench(pairs, nts, mb, reps, dispatch_only);
     int failures = 0;

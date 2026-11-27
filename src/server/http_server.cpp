@@ -4,6 +4,7 @@
 #include "api.hpp"
 #include "frontend.hpp"
 #include "images.hpp"
+#include "lamina/embedded.hpp"
 #include "log.hpp"
 #include "mcp.hpp"
 #include "net.hpp"
@@ -13,7 +14,6 @@
 #include "runconfig.hpp"
 #include "structured.hpp"
 #include "vision.hpp"
-#include "lamina/embedded.hpp"
 
 #include <httplib.h>
 
@@ -33,7 +33,7 @@ namespace lamina {
 namespace {
 
 constexpr size_t kChunkedBodyMax = 256u << 20;   // a million-token conversation with room to spare
-constexpr size_t kRecordMax = 262144;           // the monitor keeps this much of a request's text
+constexpr size_t kRecordMax = 262144;            // the monitor keeps this much of a request's text
 constexpr size_t kControlBodyMax = 65536;
 
 /// explicit model controls must not interrupt running or queued requests: a 409
@@ -75,7 +75,8 @@ int64_t py_int(const json& v) {
         const std::string s(strip(v.get<std::string>()));
         size_t i = s.size() && (s[0] == '-' || s[0] == '+') ? 1 : 0;
         bool ok = i < s.size();
-        for (size_t j = i; j < s.size(); ++j) ok = ok && ((s[j] >= '0' && s[j] <= '9') || (s[j] == '_' && j > i && j + 1 < s.size()));
+        for (size_t j = i; j < s.size(); ++j)
+            ok = ok && ((s[j] >= '0' && s[j] <= '9') || (s[j] == '_' && j > i && j + 1 < s.size()));
         if (ok) {
             const std::string digits = replace_all(s.substr(s[0] == '+' ? 1 : 0), "_", "");
             int64_t out = 0;
@@ -86,7 +87,10 @@ int64_t py_int(const json& v) {
         throw RequestError("invalid literal for int() with base 10: " + py_repr_value(v));
     }
     throw RequestError("int() argument must be a string, a bytes-like object or a real number, not '" +
-                       std::string(v.is_null() ? "NoneType" : v.is_array() ? "list" : "dict") + "'");
+                       std::string(v.is_null()    ? "NoneType"
+                                   : v.is_array() ? "list"
+                                                  : "dict") +
+                       "'");
 }
 
 /// `or` of request fields as Python reads them: the first truthy one
@@ -128,16 +132,21 @@ json normalize_bias(const json& value, int64_t vocab) {
     }
     int64_t bans = 0;
     for (auto& [token, bias] : entries) {
-        std::string t = token.is_string() ? token.get<std::string>() : token.is_number_integer() ? std::to_string(token.get<int64_t>()) : "";
+        std::string t = token.is_string()           ? token.get<std::string>()
+                        : token.is_number_integer() ? std::to_string(token.get<int64_t>())
+                                                    : "";
         if (t.empty() || !std::all_of(t.begin(), t.end(), ::isdigit) || t.size() > 10)
             throw RequestError("logit_bias: token IDs must be non-negative integers");
         const int64_t id = std::stoll(t);
-        if (id > 2147483647 || (vocab > 0 && id >= vocab)) throw RequestError("logit_bias: token ID outside the model vocabulary");
+        if (id > 2147483647 || (vocab > 0 && id >= vocab))
+            throw RequestError("logit_bias: token ID outside the model vocabulary");
         if (out.contains(std::to_string(id))) throw RequestError("logit_bias: duplicate token ID");
         json b = bias;
         if (pairs && b.is_boolean() && !b.get<bool>()) b = -100.0;
-        if (b.is_boolean() || !b.is_number() || !std::isfinite(b.get<double>()) || b.get<double>() < -100 || b.get<double>() > 100)
-            throw RequestError("logit_bias: biases must be finite numbers between -100 and 100; false is a pair-list ban");
+        if (b.is_boolean() || !b.is_number() || !std::isfinite(b.get<double>()) || b.get<double>() < -100 ||
+            b.get<double>() > 100)
+            throw RequestError(
+                "logit_bias: biases must be finite numbers between -100 and 100; false is a pair-list ban");
         out[std::to_string(id)] = b.get<double>();
         bans += b.get<double>() == -100;
     }
@@ -162,7 +171,7 @@ struct Watch {
     }
 };
 
-}  // namespace
+}   // namespace
 
 size_t body_limit() {
     // the most a request body may hold (read into memory); a larger one is answered 413 before it is read
@@ -184,7 +193,8 @@ namespace {
 /// the API key a request sends: "Authorization: Bearer KEY", else x-api-key (Anthropic's)
 std::string given_key(const httplib::Request& req) {
     const std::string auth = req.get_header_value("Authorization");
-    return lower(auth.substr(0, 7)) == "bearer " ? std::string(strip(auth.substr(7))) : req.get_header_value("x-api-key");
+    return lower(auth.substr(0, 7)) == "bearer " ? std::string(strip(auth.substr(7)))
+                                                 : req.get_header_value("x-api-key");
 }
 
 class Exchange {
@@ -198,8 +208,7 @@ public:
     ~Exchange() {
         try {
             finish();
-        } catch (...) {
-        }
+        } catch (...) {}
     }
 
     Service& svc;
@@ -207,9 +216,9 @@ public:
     const httplib::Request& req;
     httplib::Response& res;
     std::string path;
-    std::shared_ptr<json> record;          // #332: this request's monitor record, when the monitor is on
-    std::shared_ptr<Cancel> cancel;        // (before watch: its thread reads it until watch is gone)
-    std::shared_ptr<Watch> watch;          // #430 #431: cancels the request when its client hangs up
+    std::shared_ptr<json> record;     // #332: this request's monitor record, when the monitor is on
+    std::shared_ptr<Cancel> cancel;   // (before watch: its thread reads it until watch is gone)
+    std::shared_ptr<Watch> watch;     // #430 #431: cancels the request when its client hangs up
     bool reserved = false, streaming = false, finished = false;
 
     std::string header(const char* name) const { return req.get_header_value(name); }
@@ -233,7 +242,8 @@ public:
         std::string allow;
         if (std::find(svc.cors_origins.begin(), svc.cors_origins.end(), "*") != svc.cors_origins.end()) {
             allow = "*";
-        } else if (!origin.empty() && std::find(svc.cors_origins.begin(), svc.cors_origins.end(), origin) != svc.cors_origins.end()) {
+        } else if (!origin.empty() &&
+                   std::find(svc.cors_origins.begin(), svc.cors_origins.end(), origin) != svc.cors_origins.end()) {
             allow = origin;
             res.set_header("Vary", "Origin");
         } else {
@@ -243,11 +253,13 @@ public:
         res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         const std::string asked = header("Access-Control-Request-Headers");   // "*" does not cover Authorization
         res.set_header("Access-Control-Allow-Headers",
-                       asked.empty() ? "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta" : asked);
+                       asked.empty() ? "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta"
+                                     : asked);
         res.set_header("Access-Control-Max-Age", "600");
     }
 
-    void reply(int code, const json& obj, const json& headers = json::object(), std::optional<int> retry_after = std::nullopt) {
+    void reply(int code, const json& obj, const json& headers = json::object(),
+               std::optional<int> retry_after = std::nullopt) {
         if (record != nullptr) {
             std::lock_guard<std::mutex> lk(svc.status_mu);
             (*record)["http_status"] = code;
@@ -294,12 +306,15 @@ public:
         std::vector<std::string> origins = svc.trusted_origins;
         origins.insert(origins.end(), svc.cors_origins.begin(), svc.cors_origins.end());
         if (!origin_allowed(origin, header("Host"), svc.host_names, origins)) {
-            say("[lamina] refused an API request from the web page " + py_repr_value(json(origin)) + " (no API key; add its "
+            say("[lamina] refused an API request from the web page " + py_repr_value(json(origin)) +
+                " (no API key; add its "
                 "host to \"allowed_hosts\" or its origin to \"cors_origins\" in the config)");
-            reply(403, {{"error", {{"type", "forbidden"},
-                                   {"message", "web pages of " + origin + " may not use this server without an API key; set "
-                                               "\"api_key\", or add the page's host to \"allowed_hosts\" (or its origin to "
-                                               "\"cors_origins\") in the config"}}}});
+            reply(403, {{"error",
+                         {{"type", "forbidden"},
+                          {"message", "web pages of " + origin +
+                                          " may not use this server without an API key; set "
+                                          "\"api_key\", or add the page's host to \"allowed_hosts\" (or its origin to "
+                                          "\"cors_origins\") in the config"}}}});
             return true;
         }
         if (!starts_with(header("Content-Type"), "application/json")) {
@@ -316,8 +331,9 @@ public:
             return false;
         }
         if (foreign_origin()) {
-            reply(403, {{"error", {{"message", what + " only from Lamina's own page (or an origin in the config's "
-                                                      "trusted_origins)"}}}});
+            reply(403, {{"error",
+                         {{"message", what + " only from Lamina's own page (or an origin in the config's "
+                                             "trusted_origins)"}}}});
             return false;
         }
         return true;
@@ -328,8 +344,9 @@ public:
         if (!foreign_origin()) return;
         for (const auto& src : images_of(messages))
             if (!starts_with(src, "data:") && !starts_with(src, "http://") && !starts_with(src, "https://"))
-                throw RequestError("a web page of another origin cannot have a file on this computer read as an image: send "
-                                   "it as a data: URL (or add the page's origin to the config's trusted_origins)");
+                throw RequestError(
+                    "a web page of another origin cannot have a file on this computer read as an image: send "
+                    "it as a data: URL (or add the page's origin to the config's trusted_origins)");
     }
 
     bool control_body() {
@@ -376,7 +393,9 @@ public:
             json& r = *record;
             r["wallclock_s"] = py_round(mono_s() - r["_clock"].get<double>(), 3);
             r["finished_at"] = now_s();
-            r["state"] = truthy(jget(r, "error")) ? json("error") : r.contains("outcome") ? r["outcome"] : json("completed");
+            r["state"] = truthy(jget(r, "error")) ? json("error")
+                         : r.contains("outcome")  ? r["outcome"]
+                                                  : json("completed");
         }
         svc.end_request();
     }
@@ -405,7 +424,8 @@ public:
         }
         std::lock_guard<std::mutex> lk(svc.status_mu);
         json& r = *record;
-        for (const auto& [name, value] : {std::pair<const char*, const std::string&>{"output", content}, {"reasoning", reasoning}}) {
+        for (const auto& [name, value] :
+             {std::pair<const char*, const std::string&>{"output", content}, {"reasoning", reasoning}}) {
             if (value.empty()) continue;
             const std::string combined = r[name].get<std::string>() + value;
             r[name] = head_chars(combined, kRecordMax);
@@ -452,7 +472,7 @@ void stream(std::shared_ptr<Exchange> x, std::function<void(httplib::DataSink&)>
 
 bool write(httplib::DataSink& sink, const std::string& data) { return sink.write(data.data(), data.size()); }
 
-}  // namespace
+}   // namespace
 
 // ============================================================================================ the server
 // the routes, by method (below)
@@ -480,34 +500,43 @@ HttpServer::HttpServer(Service& svc) : svc_(svc), http_(std::make_unique<httplib
         // with an API key a POST's body is read only once its key is right (here, before the body: up to 256 MiB of it)
         if (req.method == "POST" && truthy(svc_.api_key) && !key_matches(given_key(req), svc_.api_key)) {
             Exchange x(svc_, *this, req, res);
-            x.authorized();   // the 401, as a handler gives it
+            x.authorized();                          // the 401, as a handler gives it
             res.set_header("Connection", "close");   // the unread body is not drained
             return httplib::Server::HandlerResponse::Handled;
         }
         // without an API key every request first passes the Host check (DNS rebinding); with a key a rebinding page
         // cannot authenticate, so tunnels and proxies that pass their own name keep working
         const std::string host = req.get_header_value("Host");
-        const bool any = std::find(svc_.allowed_hosts.begin(), svc_.allowed_hosts.end(), "*") != svc_.allowed_hosts.end();
-        if (truthy(svc_.api_key) || host_allowed(host, svc_.host_names, any)) return httplib::Server::HandlerResponse::Unhandled;
+        const bool any =
+            std::find(svc_.allowed_hosts.begin(), svc_.allowed_hosts.end(), "*") != svc_.allowed_hosts.end();
+        if (truthy(svc_.api_key) || host_allowed(host, svc_.host_names, any))
+            return httplib::Server::HandlerResponse::Unhandled;
         say("[lamina] refused a request for Host " + py_repr_value(json(host)) + " from " + req.remote_addr +
             ": not a name this server answers to (add it to \"allowed_hosts\" in the config or LAMINA_ALLOWED_HOSTS, or "
             "set an API key)");
         res.status = 403;
-        res.set_content(py_dumps({{"error", {{"type", "forbidden"},
-                                             {"message", "Host " + py_repr_value(json(host)) + " is not allowed (DNS rebinding "
-                                                         "protection). Reaching Lamina under this name on purpose? Add it to "
-                                                         "\"allowed_hosts\" in the config or to the "
-                                                         "LAMINA_ALLOWED_HOSTS environment variable, or set an API key "
-                                                         "(\"api_key\"), which turns this check off"}}}}, false),
-                        "application/json");
+        res.set_content(
+            py_dumps({{"error",
+                       {{"type", "forbidden"},
+                        {"message", "Host " + py_repr_value(json(host)) +
+                                        " is not allowed (DNS rebinding "
+                                        "protection). Reaching Lamina under this name on purpose? Add it to "
+                                        "\"allowed_hosts\" in the config or to the "
+                                        "LAMINA_ALLOWED_HOSTS environment variable, or set an API key "
+                                        "(\"api_key\"), which turns this check off"}}}},
+                     false),
+            "application/json");
         return httplib::Server::HandlerResponse::Handled;
     });
     h.set_error_handler([](const httplib::Request&, httplib::Response& res) {
         if (res.status == 413 && res.body.empty())
-            res.set_content(py_dumps({{"error", {{"type", "invalid_request_error"},
-                                                 {"message", "the request body is larger than " + std::to_string(body_limit() >> 20) +
-                                                             " MiB (LAMINA_MAX_BODY_MIB raises the limit)"}}}}, false),
-                            "application/json");
+            res.set_content(
+                py_dumps({{"error",
+                           {{"type", "invalid_request_error"},
+                            {"message", "the request body is larger than " + std::to_string(body_limit() >> 20) +
+                                            " MiB (LAMINA_MAX_BODY_MIB raises the limit)"}}}},
+                         false),
+                "application/json");
     });
     h.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
         std::string what = "unknown error";
@@ -515,11 +544,11 @@ HttpServer::HttpServer(Service& svc) : svc_(svc), http_(std::make_unique<httplib
             std::rethrow_exception(ep);
         } catch (const std::exception& e) {
             what = e.what();
-        } catch (...) {
-        }
+        } catch (...) {}
         say("[lamina] 500: " + what);
         res.status = 500;
-        res.set_content(py_dumps({{"error", {{"type", "server_error"}, {"message", what}}}}, false), "application/json");
+        res.set_content(py_dumps({{"error", {{"type", "server_error"}, {"message", what}}}}, false),
+                        "application/json");
     });
     auto route = [this](void (*fn)(Service&, HttpServer&, const httplib::Request&, httplib::Response&)) {
         return [this, fn](const httplib::Request& req, httplib::Response& res) { fn(svc_, *this, req, res); };
@@ -578,17 +607,23 @@ void get_props(Exchange& x) {
     for (auto it = shared.begin(); it != shared.end(); ++it) defaults[it.key()] = it.value();
     json params = json::object();
     for (auto it = defaults.begin(); it != defaults.end(); ++it) {
-        static const std::set<std::string> keep = {"temperature", "top_p", "top_k", "min_p", "seed", "repetition_penalty",
-                                                   "presence_penalty", "frequency_penalty", "penalty_last_n"};
+        static const std::set<std::string> keep = {
+            "temperature",       "top_p",         "top_k", "min_p", "seed", "repetition_penalty", "presence_penalty",
+            "frequency_penalty", "penalty_last_n"};
         if (!keep.count(it.key())) continue;
-        const std::string k = it.key() == "repetition_penalty" ? "repeat_penalty" : it.key() == "penalty_last_n" ? "repeat_last_n" : it.key();
+        const std::string k = it.key() == "repetition_penalty" ? "repeat_penalty"
+                              : it.key() == "penalty_last_n"   ? "repeat_last_n"
+                                                               : it.key();
         params[k] = it.value();
     }
     params["n_predict"] = shared.contains("max_tokens") ? shared["max_tokens"] : json(-1);
     json props = {{"default_generation_settings", {{"n_ctx", svc.reported_ctx()}, {"params", params}}},
                   {"total_slots", std::max(1, svc.engine->batch())},   // #1004: the batch slots
-                  {"model_alias", svc.model}, {"chat_template", svc.tpl->source()}, {"chat_template_caps", svc.tpl->caps()},
-                  {"modalities", {{"vision", svc.vision != nullptr}}}, {"models_autoload", svc.engine->auto_load()},
+                  {"model_alias", svc.model},
+                  {"chat_template", svc.tpl->source()},
+                  {"chat_template_caps", svc.tpl->caps()},
+                  {"modalities", {{"vision", svc.vision != nullptr}}},
+                  {"models_autoload", svc.engine->auto_load()},
                   {"is_sleeping", !svc.loaded()}};
     if (!svc.engine->model_path.empty()) props["model_path"] = svc.engine->model_path;
     const json version = jget(svc.engine->info(), "version");
@@ -599,10 +634,14 @@ void get_props(Exchange& x) {
 void get_models(Exchange& x) {
     Service& svc = x.svc;
     bool loaded = svc.loaded();
-    json model = {{"id", svc.model}, {"object", "model"}, {"status", {{"value", "loaded"}}},
-                  {"meta", {{"n_ctx", svc.reported_ctx()}}},
-                  {"architecture", {{"input_modalities", svc.vision != nullptr ? json::array({"text", "image"}) : json::array({"text"})},
-                                    {"output_modalities", json::array({"text"})}}}};
+    json model = {
+        {"id", svc.model},
+        {"object", "model"},
+        {"status", {{"value", "loaded"}}},
+        {"meta", {{"n_ctx", svc.reported_ctx()}}},
+        {"architecture",
+         {{"input_modalities", svc.vision != nullptr ? json::array({"text", "image"}) : json::array({"text"})},
+          {"output_modalities", json::array({"text"})}}}};
     if (!loaded && (svc.idle_unload_s || svc.engine->unloaded())) {
         model["status"] = {{"value", "unloaded"}};   // like llama-server's router: listed, loads on use
         loaded = true;
@@ -626,8 +665,12 @@ void get_models(Exchange& x) {
     }
     if (!loaded) data = json::array();
     if (svc.images != nullptr)   // the image model: POST /v1/images/generations
-        data.push_back({{"id", svc.images->model}, {"object", "model"}, {"status", {{"value", "loaded"}}},
-                        {"architecture", {{"input_modalities", json::array({"text"})}, {"output_modalities", json::array({"image"})}}}});
+        data.push_back(
+            {{"id", svc.images->model},
+             {"object", "model"},
+             {"status", {{"value", "loaded"}}},
+             {"architecture",
+              {{"input_modalities", json::array({"text"})}, {"output_modalities", json::array({"image"})}}}});
     x.reply(200, {{"object", "list"}, {"data", data}});
 }
 
@@ -648,11 +691,14 @@ void get_slots(Exchange& x) {
         const int64_t n_ctx = svc.reported_ctx();
         for (const auto& s : view) {
             const json& pt = truthy(jget(s, "prompt_tokens")) ? s["prompt_tokens"] : jget(s, "held_tokens");
-            slots.push_back({{"id", s["slot"]}, {"n_ctx", n_ctx}, {"is_processing", jstr(s, "state") != "idle"},
+            slots.push_back({{"id", s["slot"]},
+                             {"n_ctx", n_ctx},
+                             {"is_processing", jstr(s, "state") != "idle"},
                              {"n_prompt_tokens", pt.is_number() ? pt.get<int64_t>() : 0}});
         }
     } else {
-        slots.push_back({{"id", 0}, {"n_ctx", svc.reported_ctx()}, {"is_processing", busy}, {"n_prompt_tokens", in_use}});
+        slots.push_back(
+            {{"id", 0}, {"n_ctx", svc.reported_ctx()}, {"is_processing", busy}, {"n_prompt_tokens", in_use}});
     }
     x.reply(200, loaded ? slots : json::array());
 }
@@ -686,7 +732,7 @@ void serve_asset(Exchange& x, const std::string& name, const char* type, const c
     x.raw(200, std::string(a->data), type, cache);
 }
 
-}  // namespace
+}   // namespace
 
 void do_get(Service& svc, HttpServer& server, const httplib::Request& req, httplib::Response& res) {
     Exchange x(svc, server, req, res);
@@ -703,8 +749,10 @@ void do_get(Service& svc, HttpServer& server, const httplib::Request& req, httpl
     if (starts_with(path, "/web/")) {   // the web app's own files: same origin, no CDN
         const std::string name = path.substr(5);
         const std::string ext = name.find('.') == std::string::npos ? "" : name.substr(name.rfind('.'));
-        const char* type = ext == ".css" ? "text/css; charset=utf-8" : ext == ".js" ? "text/javascript; charset=utf-8"
-                           : ext == ".svg" ? "image/svg+xml" : nullptr;
+        const char* type = ext == ".css"   ? "text/css; charset=utf-8"
+                           : ext == ".js"  ? "text/javascript; charset=utf-8"
+                           : ext == ".svg" ? "image/svg+xml"
+                                           : nullptr;
         if (name.find_first_of("/\\") != std::string::npos || type == nullptr) {
             x.reply(404, {{"error", {{"message", "not found"}}}});
             return;
@@ -735,8 +783,12 @@ void do_get(Service& svc, HttpServer& server, const httplib::Request& req, httpl
         const json records = svc.request_records(id != nullptr ? *id : "");
         if (records.is_null()) x.reply(404, {{"error", {{"message", "request no longer retained"}}}});
         else if (id != nullptr) x.reply(200, records);
-        else x.reply(200, {{"requests", records}, {"retention", 100}, {"persistent", false}, {"loaded", svc.loaded()},
-                           {"auto_load", svc.engine->auto_load()}});
+        else
+            x.reply(200, {{"requests", records},
+                          {"retention", 100},
+                          {"persistent", false},
+                          {"loaded", svc.loaded()},
+                          {"auto_load", svc.engine->auto_load()}});
         return;
     }
     if (path == "/settings") {
@@ -753,14 +805,17 @@ void do_get(Service& svc, HttpServer& server, const httplib::Request& req, httpl
             std::lock_guard<std::mutex> lk(svc.config_mu);
             view = config_view(svc);
         } catch (const std::exception& e) {
-            x.reply(500, {{"error", {{"type", "server_error"}, {"message", std::string("the run config cannot be read: ") + e.what()}}}});
+            x.reply(500, {{"error",
+                           {{"type", "server_error"},
+                            {"message", std::string("the run config cannot be read: ") + e.what()}}}});
             return;
         }
         x.reply(200, view);
         return;
     }
     if (path == "/mcp") {   // the MCP servers, their state and tools (the web app's switch and Monitor card)
-        if (x.authorized()) x.reply(200, svc.mcp != nullptr ? svc.mcp->status() : json{{"servers", json::array()}, {"tools", 0}});
+        if (x.authorized())
+            x.reply(200, svc.mcp != nullptr ? svc.mcp->status() : json{{"servers", json::array()}, {"tools", 0}});
         return;
     }
     if (path.empty() || (path == "/api-monitor" && svc.api_monitor)) {
@@ -771,8 +826,13 @@ void do_get(Service& svc, HttpServer& server, const httplib::Request& req, httpl
         return;
     }
     if (path == "/health" || path == "/api/health") {
-        x.reply(200, {{"status", "ok"}, {"max_context", svc.reported_ctx()}, {"model", svc.model}, {"images", svc.vision != nullptr},
-                      {"api_key", truthy(svc.api_key)}, {"image_generation", svc.images != nullptr}, {"loaded", svc.loaded()},
+        x.reply(200, {{"status", "ok"},
+                      {"max_context", svc.reported_ctx()},
+                      {"model", svc.model},
+                      {"images", svc.vision != nullptr},
+                      {"api_key", truthy(svc.api_key)},
+                      {"image_generation", svc.images != nullptr},
+                      {"loaded", svc.loaded()},
                       {"service", "lamina"}});
     } else if (starts_with(path, "/v1/images/files/")) {
         // response_format url: the name (32 random hex digits) is the access, as an OpenAI image URL is
@@ -851,10 +911,13 @@ std::string image_turn(Service& svc, images::ImageGen& gen, const images::Job& j
         }
         {
             std::lock_guard<std::mutex> lk(svc.status_mu);
-            for (const auto& [k, v] : std::vector<std::pair<const char*, json>>{{"busy", true}, {"phase", "generating an image"},
-                                                                                  {"started", now_s()}, {"first_token", nullptr},
-                                                                                  {"prompt_tokens", nullptr}, {"generated", nullptr},
-                                                                                  {"max_tokens", nullptr}})
+            for (const auto& [k, v] : std::vector<std::pair<const char*, json>>{{"busy", true},
+                                                                                {"phase", "generating an image"},
+                                                                                {"started", now_s()},
+                                                                                {"first_token", nullptr},
+                                                                                {"prompt_tokens", nullptr},
+                                                                                {"generated", nullptr},
+                                                                                {"max_tokens", nullptr}})
                 svc.status[k] = v;
         }
         const bool unloaded = policy == "unload";
@@ -867,7 +930,8 @@ std::string image_turn(Service& svc, images::ImageGen& gen, const images::Job& j
                 try {
                     svc.ensure_loaded();   // the turn is still held
                 } catch (const std::exception& e) {
-                    gen.say(std::string("image job: the model did not load again yet (") + e.what() + "); the next request loads it");
+                    gen.say(std::string("image job: the model did not load again yet (") + e.what() +
+                            "); the next request loads it");
                 }
             }
             std::lock_guard<std::mutex> lk(svc.status_mu);
@@ -891,8 +955,13 @@ std::string image_turn(Service& svc, images::ImageGen& gen, const images::Job& j
 void post_images(Exchange& x, const json& req) {
     Service& svc = x.svc;
     if (svc.images == nullptr) {
-        x.reply(404, {{"error", {{"type", "invalid_request_error"}, {"code", "images_not_set_up"},
-                                 {"message", "image generation is not set up on this server (the config's images section: docs/USING.md, Image generation)"}}}});
+        x.reply(
+            404,
+            {{"error",
+              {{"type", "invalid_request_error"},
+               {"code", "images_not_set_up"},
+               {"message",
+                "image generation is not set up on this server (the config's images section: docs/USING.md, Image generation)"}}}});
         return;
     }
     images::ImageGen& gen = *svc.images;
@@ -902,15 +971,16 @@ void post_images(Exchange& x, const json& req) {
         svc.last_request_at = now_s();
     }
     Cancel& cancel = x.watch_client();
-    say("[lamina] image: " + std::to_string(job.width) + "x" + std::to_string(job.height) + ", n=" + std::to_string(job.n) +
-        ", " + std::to_string(job.steps) + " steps, seed " + std::to_string(job.seed));
+    say("[lamina] image: " + std::to_string(job.width) + "x" + std::to_string(job.height) +
+        ", n=" + std::to_string(job.n) + ", " + std::to_string(job.steps) + " steps, seed " + std::to_string(job.seed));
     std::vector<std::string> pictures;
     json figures;
     std::string policy;
     try {
         policy = image_turn(svc, gen, job, &cancel, [&] { std::tie(pictures, figures) = gen.run(job, &cancel); });
     } catch (const images::ImageJobFailed& e) {
-        x.reply(500, {{"error", {{"type", "server_error"}, {"code", "image_generation_failed"}, {"message", e.what()}}}});
+        x.reply(500,
+                {{"error", {{"type", "server_error"}, {"code", "image_generation_failed"}, {"message", e.what()}}}});
         return;
     }
     figures["gpu_policy"] = policy;
@@ -933,8 +1003,11 @@ void post_settings(Exchange& x) {
         return;
     }
     if (!req.is_object() || !req.contains("defaults")) {
-        x.reply(400, {{"error", {{"type", "invalid_request_error"},
-                                 {"message", "the body must be {\"defaults\": {...}} to set them, or {\"defaults\": null} to clear them"}}}});
+        x.reply(400,
+                {{"error",
+                  {{"type", "invalid_request_error"},
+                   {"message",
+                    "the body must be {\"defaults\": {...}} to set them, or {\"defaults\": null} to clear them"}}}});
         return;
     }
     json shared;
@@ -946,7 +1019,8 @@ void post_settings(Exchange& x) {
     }
     if (truthy(shared)) {
         std::string list;
-        for (auto it = shared.begin(); it != shared.end(); ++it) list += (list.empty() ? "" : ", ") + it.key() + "=" + py_str(it.value());
+        for (auto it = shared.begin(); it != shared.end(); ++it)
+            list += (list.empty() ? "" : ", ") + it.key() + "=" + py_str(it.value());
         say("[lamina] other apps now use the Chat settings: " + list);
     } else {
         say("[lamina] other apps use their own settings again");
@@ -978,7 +1052,8 @@ json config_view(Service& svc) {
     } catch (const std::exception& e) {   // moved, or edited into something else: Apply still works, Save cannot
         json v = runconfig::view(svc.live_config, svc.started_config, command_line, nullptr);
         v["file"] = u8_str(u8_path(svc.config_path).filename());
-        v["note"] = "The config file cannot be read (" + std::string(e.what()) + "): Apply's changes last for this "
+        v["note"] = "The config file cannot be read (" + std::string(e.what()) +
+                    "): Apply's changes last for this "
                     "session, and Save configuration waits for the file.";
         return v;
     }
@@ -1028,12 +1103,12 @@ void post_config(Exchange& x) {
                 if (e == nullptr || e->live) continue;   // a start-up setting the session cannot keep is refused
                 if (svc.config_path.empty())
                     throw RequestError(it.key() + " is read when the server starts, and this session has no config "
-                                       "file to keep it in: the command line sets it");
+                                                  "file to keep it in: the command line sets it");
                 const runconfig::FileSettings fs = file_settings(svc, file_now());
                 if (!runconfig::savable(*e, &fs))
                     throw RequestError(it.key() + " is an engine option, read when the server starts, and a config "
-                                       "without \"args\" holds none: the command line sets it (or a config "
-                                       "lamina write-config writes)");
+                                                  "without \"args\" holds none: the command line sets it (or a config "
+                                                  "lamina write-config writes)");
             }
             json updated;
             std::tie(updated, changed) = runconfig::apply(svc.live_config, set);
@@ -1076,7 +1151,8 @@ void post_config(Exchange& x) {
     view["changed"] = changed;
     view["at_start"] = at_start;
     view["saved"] = save;
-    view["backup"] = bak.empty() ? json(nullptr) : json(u8_str(u8_path(bak).filename()));   // null: the file did not change
+    view["backup"] = bak.empty() ? json(nullptr) : json(u8_str(u8_path(bak).filename()));   // null: the file
+                                                                                            // did not change
     view["skipped"] = skipped;
     x.reply(200, view);
 }
@@ -1090,7 +1166,9 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
     json messages = std::move(conv.messages), tools = std::move(conv.tools);
     const json kw = std::move(conv.kwargs);
     x.no_local_images(messages);
-    if (tool_choice_of(jget(req, "tool_choice")).first == "none") tools = nullptr;   // as the Responses route: none offered
+    if (tool_choice_of(jget(req, "tool_choice")).first == "none")
+        tools = nullptr;                                                                     // as the Responses
+                                                                                             // route: none offered
     const std::optional<std::string> force = forced_call(jget(req, "tool_choice"), tools);   // a bad value: a 400 now
     auto [formatted, validator] = prepare_format(jget(req, "response_format"), messages, false, xp->req.body,
                                                  {"response_format", "json_schema", "schema"});
@@ -1098,29 +1176,30 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
     if (validator != nullptr && (truthy(tools) || truthy(jget(req, "lamina_mcp"))))
         throw RequestError("structured response_format with tools/MCP is not supported");
     svc.load();
-    const int64_t max_req = py_int(first_truthy({&jget(req, "max_completion_tokens"), &jget(req, "max_tokens")}));   // 0/-1: the rest
+    const int64_t max_req =
+        py_int(first_truthy({&jget(req, "max_completion_tokens"), &jget(req, "max_tokens")}));   // 0/-1: the rest
     int64_t max_new = max_req;
     validate_bias(req, *svc.engine, svc.tok.n_vocab());
     bool use_mcp = jget(req, "lamina_mcp") == true && svc.mcp != nullptr;   // the web app's opt-in
-    std::set<std::string> own;   // #592: a second line of defence
+    std::set<std::string> own;                                              // #592: a second line of defence
     if (tools.is_array())
         for (const auto& t : tools)
             if (t.is_object() && jget(t, "name").is_string()) own.insert(t["name"].get<std::string>());
     json extra = json::array();
     if (use_mcp) {
         if (!x.own_page("MCP tools can be used")) return;   // tools run with the user's rights on this PC
-        svc.mcp->wait(10);                                   // servers still starting (only right after start)
-        extra = svc.mcp->template_tools(own);                // the request's own tools win a name clash
+        svc.mcp->wait(10);                                  // servers still starting (only right after start)
+        extra = svc.mcp->template_tools(own);               // the request's own tools win a name clash
         use_mcp = !extra.empty();
         json all = tools.is_array() ? tools : json::array();
         for (const auto& t : extra) all.push_back(t);
         tools = all.empty() ? json(nullptr) : all;
     }
     if (force && use_mcp) throw RequestError("a forced tool_choice with MCP tools is not supported");
-    svc.reasoning_budget(req);       // a bad value is a 400 before anything is sent
-    stop_strings(req);               // ... and so is a bad stop / stop_sequences
-    check_request_sampling(req);     // ... and a sampling field of the wrong type
-    svc.check_lora(req);             // ... and a "lora" list the adapters do not take
+    svc.reasoning_budget(req);           // a bad value is a 400 before anything is sent
+    stop_strings(req);                   // ... and so is a bad stop / stop_sequences
+    check_request_sampling(req);         // ... and a sampling field of the wrong type
+    svc.check_lora(req);                 // ... and a "lora" list the adapters do not take
     Cancel& cancel = x.watch_client();   // #430 #431 (#1999: before prepare, which can take long)
     Prepared p = svc.prepare(messages, tools, kw, max_new, force, &req, &cancel);
     debug_request("openai", req, messages, tools, p.max_new, p.thinking, p.ids.size());
@@ -1130,7 +1209,8 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
     if (use_mcp) {
         auto hub = svc.mcp;
         *runner = [&svc, hub, messages, tools, kw, p, max_req, req, cancel = x.cancel, mcp_names](const Sink& sink) {
-            run_with_mcp(svc, hub, messages, tools, kw, p.ids, p.thinking, p.max_new, max_req, req, cancel, mcp_names, sink);
+            run_with_mcp(svc, hub, messages, tools, kw, p.ids, p.thinking, p.max_new, max_req, req, cancel, mcp_names,
+                         sink);
         };
     }
     std::shared_ptr<const Validator> keep_validator = validator;
@@ -1148,7 +1228,8 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
                           [&](const json* c) { return in(c) || !(gone = true); });
             if (!gone) buf.finish();
         } else {
-            openai_chunks(x.svc, req, p.ids, p.thinking, tools, p.max_new, *x.cancel, use_mcp ? runner.get() : nullptr, force, captured);
+            openai_chunks(x.svc, req, p.ids, p.thinking, tools, p.max_new, *x.cancel, use_mcp ? runner.get() : nullptr,
+                          force, captured);
         }
     };
     if (!truthy(jget(req, "stream"))) {
@@ -1181,11 +1262,15 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
             }
             write(sink, "data: [DONE]\n\n");
         } catch (const EngineDied& e) {   // mid-stream: said, then the stream ends properly
-            fail({{"error", {{"type", "server_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
+            fail({{"error",
+                   {{"type", "server_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
         } catch (const QueueWaitExpired& e) {
             fail({{"error", {{"type", "rate_limit_error"}, {"code", "queue_wait_timeout"}, {"message", e.what()}}}});
         } catch (const StructuredOutputError& e) {
-            fail({{"error", {{"type", "structured_output_failed"}, {"code", "structured_output_failed"}, {"message", e.what()}}}});
+            fail({{"error",
+                   {{"type", "structured_output_failed"},
+                    {"code", "structured_output_failed"},
+                    {"message", e.what()}}}});
         } catch (const std::invalid_argument& e) {   // the engine's ERR after the stream started: no 400 now
             fail({{"error", {{"type", "server_error"}, {"message", e.what()}}}});
         }
@@ -1201,9 +1286,12 @@ void post_anthropic(std::shared_ptr<Exchange> xp, json req) {
     json messages = std::move(conv.messages), tools = std::move(conv.tools);
     const json kw = std::move(conv.kwargs);
     x.no_local_images(messages);
-    if (tool_choice_of(jget(req, "tool_choice")).first == "none") tools = nullptr;   // {"type": "none"}: none offered
+    if (tool_choice_of(jget(req, "tool_choice")).first == "none")
+        tools = nullptr;                                                                     // {"type": "none"}:
+                                                                                             // none offered
     const std::optional<std::string> force = forced_call(jget(req, "tool_choice"), tools);   // "any" / {"type": "tool"}
-    const int64_t max_new = py_int(first_truthy({&jget(req, "max_tokens")}));   // 0/-1: the rest of the context
+    const int64_t max_new = py_int(first_truthy({&jget(req, "max_tokens")}));                // 0/-1: the rest
+                                                                                             // of the context
     svc.reasoning_budget(req);
     stop_strings(req);
     check_request_sampling(req);
@@ -1237,8 +1325,9 @@ void post_anthropic(std::shared_ptr<Exchange> xp, json req) {
         };
         try {
             produce([&](const std::string* name, const json* e) {
-                const bool ok = write(sink, name == nullptr ? std::string(": keep-alive\n\n")
-                                                            : "event: " + *name + "\ndata: " + py_dumps(*e, false) + "\n\n");
+                const bool ok =
+                    write(sink, name == nullptr ? std::string(": keep-alive\n\n")
+                                                : "event: " + *name + "\ndata: " + py_dumps(*e, false) + "\n\n");
                 if (!ok) gone = true;
                 return ok;
             });
@@ -1247,9 +1336,12 @@ void post_anthropic(std::shared_ptr<Exchange> xp, json req) {
                 x.svc.note_client_disconnect(*x.cancel);
             }
         } catch (const EngineDied& e) {   // mid-stream: Anthropic's error event
-            fail({{"type", "error"}, {"error", {{"type", "api_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
+            fail({{"type", "error"},
+                  {"error",
+                   {{"type", "api_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
         } catch (const QueueWaitExpired& e) {
-            fail({{"type", "error"}, {"error", {{"type", "rate_limit_error"}, {"code", "queue_wait_timeout"}, {"message", e.what()}}}});
+            fail({{"type", "error"},
+                  {"error", {{"type", "rate_limit_error"}, {"code", "queue_wait_timeout"}, {"message", e.what()}}}});
         } catch (const std::invalid_argument& e) {   // the engine's ERR after the stream started
             fail({{"type", "error"}, {"error", {{"type", "api_error"}, {"message", e.what()}}}});
         }
@@ -1257,7 +1349,8 @@ void post_anthropic(std::shared_ptr<Exchange> xp, json req) {
 }
 
 void post_count_tokens(Exchange& x, json req) {
-    // Anthropic's token count (Claude Code's context figures): the prompt this server would read, rendered and tokenized
+    // Anthropic's token count (Claude Code's context figures):
+    // the prompt this server would read, rendered and tokenized
     Service& svc = x.svc;
     req = svc.with_shared(req, "anthropic");
     Converted conv = anthropic_to_messages(req, svc.anthropic_think_unasked);
@@ -1270,7 +1363,11 @@ void post_count_tokens(Exchange& x, json req) {
 bool valid_utf8(const std::string& s) {
     for (size_t i = 0; i < s.size();) {
         const unsigned char c = (unsigned char) s[i];
-        const size_t n = c < 0x80 ? 0 : c >= 0xC2 && c <= 0xDF ? 1 : c >= 0xE0 && c <= 0xEF ? 2 : c >= 0xF0 && c <= 0xF4 ? 3 : 9;
+        const size_t n = c < 0x80                 ? 0
+                         : c >= 0xC2 && c <= 0xDF ? 1
+                         : c >= 0xE0 && c <= 0xEF ? 2
+                         : c >= 0xF0 && c <= 0xF4 ? 3
+                                                  : 9;
         if (n == 9 || i + n >= s.size() + (n == 0)) return false;
         for (size_t k = 1; k <= n; ++k)
             if (((unsigned char) s[i + k] & 0xC0) != 0x80) return false;
@@ -1289,7 +1386,8 @@ void post_tokenize(Exchange& x, const json& req) {
     const json& content = jget(req, "content");
     if (!content.is_string()) throw RequestError("content must be a string");
     const json& special = jget(req, "parse_special");
-    const std::vector<int32_t> ids = x.svc.tok.encode(content.get<std::string>(), !special.is_boolean() || special.get<bool>());
+    const std::vector<int32_t> ids =
+        x.svc.tok.encode(content.get<std::string>(), !special.is_boolean() || special.get<bool>());
     json tokens = json::array();
     for (const int32_t id : ids) {
         if (!truthy(jget(req, "with_pieces"))) {
@@ -1325,7 +1423,8 @@ void post_apply_template(Exchange& x, json req) {
     Converted conv = openai_to_messages(req);
     if (tool_choice_of(jget(req, "tool_choice")).first == "none") conv.tools = nullptr;
     auto formatted = prepare_format(jget(req, "response_format"), conv.messages, false, x.req.body,
-                                    {"response_format", "json_schema", "schema"}).first;
+                                    {"response_format", "json_schema", "schema"})
+                         .first;
     x.reply(200, {{"prompt", svc.render_prompt(formatted, conv.tools, conv.kwargs)}});
 }
 
@@ -1437,7 +1536,8 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
             throw;
         } catch (const std::invalid_argument& e) {   // too long for the context, an image without vision
             const std::string m = e.what();
-            throw responses::ResponsesError(m, "input", m.find("context") != std::string::npos ? "context_length_exceeded" : "");
+            throw responses::ResponsesError(m, "input",
+                                            m.find("context") != std::string::npos ? "context_length_exceeded" : "");
         }
         if (svc.codex_compaction_cache) responses::prompt_made(req, shown);
         debug_request("responses", req, messages, tools, p.max_new, p.thinking, p.ids.size());
@@ -1445,8 +1545,8 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
         bool encrypted = false;
         if (include.is_array())
             for (const auto& i : include) encrypted = encrypted || i == "reasoning.encrypted_content";
-        asm_ = std::make_shared<responses::Assembler>(req, svc.model_for(req), (int64_t) p.ids.size(), rt.names, encrypted,
-                                                      validator != nullptr);
+        asm_ = std::make_shared<responses::Assembler>(req, svc.model_for(req), (int64_t) p.ids.size(), rt.names,
+                                                      encrypted, validator != nullptr);
     } catch (const ClientGone&) {
         x.note({{"outcome", "disconnected"}});
         return;
@@ -1490,7 +1590,9 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
         if (gone || done.is_null() || jstr(done, "finish") == "cancel" || x.cancel->is_set()) return;
         std::function<std::string(const std::string&, const std::string&)> check;
         if (validator != nullptr)
-            check = [validator](const std::string& text, const std::string& finish) { return validated_json(text, validator.get(), finish); };
+            check = [validator](const std::string& text, const std::string& finish) {
+                return validated_json(text, validator.get(), finish);
+            };
         for (const auto& e : asm_->finish(done, check))
             if (!emit(e)) return;
     };
@@ -1505,10 +1607,12 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
             x.reply(502, responses::error_body(e.what(), "server_error", nullptr, "structured_output_failed"));
             return;
         } catch (const QueueWaitExpired& e) {
-            x.reply(429, responses::error_body(e.what(), "server_error", nullptr, "queue_wait_timeout"), json::object(), 1);
+            x.reply(429, responses::error_body(e.what(), "server_error", nullptr, "queue_wait_timeout"), json::object(),
+                    1);
             return;
         } catch (const EngineDied& e) {
-            x.reply(503, responses::error_body(std::string(e.what()) + "; the next request restarts it", "server_error", nullptr, "server_error"));
+            x.reply(503, responses::error_body(std::string(e.what()) + "; the next request restarts it", "server_error",
+                                               nullptr, "server_error"));
             return;
         } catch (const EngineNonFinite& e) {   // #879, twice: not the request's fault
             x.reply(503, responses::error_body(e.what(), "server_error", nullptr, "server_error"));
@@ -1571,14 +1675,15 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
 }
 
 json error_for(const std::string& path, const std::string& message, const char* kind, const char* code) {
-    if (path == "/v1/responses") return responses::error_body(message, kind, nullptr, code != nullptr ? json(code) : json(nullptr));
+    if (path == "/v1/responses")
+        return responses::error_body(message, kind, nullptr, code != nullptr ? json(code) : json(nullptr));
     json e = {{"type", kind}};
     if (code != nullptr) e["code"] = code;
     e["message"] = message;
     return {{"error", e}};
 }
 
-}  // namespace
+}   // namespace
 
 void do_post(Service& svc, HttpServer& server, const httplib::Request& req, httplib::Response& res) {
     auto xp = std::make_shared<Exchange>(svc, server, req, res);
@@ -1636,15 +1741,21 @@ void do_post(Service& svc, HttpServer& server, const httplib::Request& req, http
         if (path == "/v1/chat/completions" || path == "/v1/messages" || path == "/v1/responses") {
             const auto r = svc.reserve_inference();
             if (!r) {
-                x.reply(503, error_for(path, "this instance is draining; retry against the next instance", "server_error", "server_draining"),
+                x.reply(503,
+                        error_for(path, "this instance is draining; retry against the next instance", "server_error",
+                                  "server_draining"),
                         json::object(), 1);
                 return;
             }
             if (!*r) {
-                x.reply(429, path == "/v1/responses"
-                                 ? responses::error_body("the inference admission limit is full; retry later", "server_error", nullptr, "admission_full")
-                                 : json{{"error", {{"type", "rate_limit_error"}, {"code", "admission_full"},
-                                                   {"message", "the inference admission limit is full; retry later"}}}},
+                x.reply(429,
+                        path == "/v1/responses"
+                            ? responses::error_body("the inference admission limit is full; retry later",
+                                                    "server_error", nullptr, "admission_full")
+                            : json{{"error",
+                                    {{"type", "rate_limit_error"},
+                                     {"code", "admission_full"},
+                                     {"message", "the inference admission limit is full; retry later"}}}},
                         json::object(), 1);
                 return;
             }
@@ -1655,8 +1766,10 @@ void do_post(Service& svc, HttpServer& server, const httplib::Request& req, http
         if (!py_loads(req.body.empty() ? "{}" : req.body, body, &err)) throw RequestError(err);
         if (!body.is_object()) throw RequestError("send a JSON object");
         if (starts_with(path, "/v1/responses/")) {   // retrieve/delete/cancel/compact: nothing is stored
-            x.reply(404, responses::error_body("this server keeps no responses (stateless); send the whole conversation to "
-                                               "POST /v1/responses", "invalid_request_error", nullptr, "not_found"));
+            x.reply(404,
+                    responses::error_body("this server keeps no responses (stateless); send the whole conversation to "
+                                          "POST /v1/responses",
+                                          "invalid_request_error", nullptr, "not_found"));
             x.finish();
             return;
         }
@@ -1717,18 +1830,23 @@ void do_post(Service& svc, HttpServer& server, const httplib::Request& req, http
         x.reply(502, error_for(path, e.what(), "server_error", "tool_call_failed"));
     } catch (const std::invalid_argument& e) {   // Python's ValueError
         say(std::string("[lamina] 400 invalid request: ") + e.what());
-        x.reply(400, path == "/v1/responses" ? responses::error_body(e.what())
-                                             : json{{"error", {{"type", "invalid_request_error"}, {"message", e.what()}}}});
+        x.reply(400, path == "/v1/responses"
+                         ? responses::error_body(e.what())
+                         : json{{"error", {{"type", "invalid_request_error"}, {"message", e.what()}}}});
     } catch (const ModelBusy& e) {
         x.reply(409, {{"error", {{"type", "model_busy"}, {"message", e.what()}}}});
     } catch (const QueueWaitExpired& e) {
         const json error = {{"type", "rate_limit_error"}, {"code", "queue_wait_timeout"}, {"message", e.what()}};
         x.note({{"error", error}});
-        x.reply(429, path == "/v1/responses" ? responses::error_body(e.what(), "server_error", nullptr, "queue_wait_timeout")
-                                             : json{{"error", error}},
+        x.reply(429,
+                path == "/v1/responses" ? responses::error_body(e.what(), "server_error", nullptr, "queue_wait_timeout")
+                                        : json{{"error", error}},
                 json::object(), 1);
     } catch (const StructuredOutputError& e) {
-        x.reply(502, {{"error", {{"type", "structured_output_failed"}, {"code", "structured_output_failed"}, {"message", e.what()}}}});
+        x.reply(
+            502,
+            {{"error",
+              {{"type", "structured_output_failed"}, {"code", "structured_output_failed"}, {"message", e.what()}}}});
     } catch (const GpuBusy& e) {   // #1997: a refusal worth retrying
         x.reply(503, {{"error", {{"type", "server_error"}, {"message", e.what()}}}},
                 e.retry_after ? json{{"Retry-After", e.retry_after}} : json::object());
@@ -1739,9 +1857,12 @@ void do_post(Service& svc, HttpServer& server, const httplib::Request& req, http
         if (x.streaming) throw;
         say(std::string("[lamina] 400 malformed request (") + e.what() + ")");
         const std::string m = std::string("the request is malformed (") + e.what() + ")";
-        x.reply(400, path == "/v1/responses" ? responses::error_body(m) : json{{"error", {{"type", "invalid_request_error"}, {"message", m}}}});
+        x.reply(400, path == "/v1/responses" ? responses::error_body(m)
+                                             : json{{"error", {{"type", "invalid_request_error"}, {"message", m}}}});
     } catch (const EngineDied& e) {   // before the answer started (not streamed)
-        x.reply(503, {{"error", {{"type", "server_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
+        x.reply(503,
+                {{"error",
+                  {{"type", "server_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
     } catch (const EngineStuck& e) {   // an unload or restart that could not end the engine
         x.reply(503, {{"error", {{"type", "server_error"}, {"message", e.what()}}}});
     } catch (const ClientGone&) {   // #1999: the client left while the request was prepared
@@ -1750,4 +1871,4 @@ void do_post(Service& svc, HttpServer& server, const httplib::Request& req, http
     if (!x.streaming) x.finish();
 }
 
-}  // namespace lamina
+}   // namespace lamina

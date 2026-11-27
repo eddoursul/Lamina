@@ -12,7 +12,7 @@
 
 int main(int argc, char** argv) {
     uint64_t ctx = 20480;
-    uint64_t free_vram = 12ull * 1000 * 1000 * 1000; // RTX 5070 nominal; overridden by --vram
+    uint64_t free_vram = 12ull * 1000 * 1000 * 1000;   // RTX 5070 nominal; overridden by --vram
     lamina::plan::Costs costs;
     bool state_given = false;
     uint64_t pool_given = 0;   // --pool: the pool itself (0: from --vram)
@@ -25,16 +25,11 @@ int main(int argc, char** argv) {
             }
             out = std::strtoull(argv[++i], nullptr, 10);
         };
-        if (a == "--max-context")
-            next(ctx);
-        else if (a == "--vram")
-            next(free_vram);
-        else if (a == "--dense")
-            next(costs.dense_bytes);
-        else if (a == "--embd")
-            next(costs.embd_bytes);
-        else if (a == "--workspace")
-            next(costs.workspace_bytes);
+        if (a == "--max-context") next(ctx);
+        else if (a == "--vram") next(free_vram);
+        else if (a == "--dense") next(costs.dense_bytes);
+        else if (a == "--embd") next(costs.embd_bytes);
+        else if (a == "--workspace") next(costs.workspace_bytes);
         else if (a == "--state") {
             next(costs.state_bytes);
             state_given = true;
@@ -60,8 +55,9 @@ int main(int argc, char** argv) {
     // directly, to reproduce the standard-tier numbers exactly (lamina::plan::vram_pool_bytes()).  A card with no
     // room left plans nothing: 0 does not close.
     const uint64_t pool = pool_given ? pool_given
-                          : free_vram > costs.dense_bytes + costs.embd_bytes ? free_vram - costs.dense_bytes - costs.embd_bytes
-                                                                              : 0;
+                          : free_vram > costs.dense_bytes + costs.embd_bytes
+                              ? free_vram - costs.dense_bytes - costs.embd_bytes
+                              : 0;
     try {
         const lamina::plan::Plan p = lamina::plan::make_plan(ctx, lamina::plan::Geometry{}, costs, pool);
         std::printf("%s", lamina::plan::to_string(p).c_str());

@@ -22,11 +22,11 @@ namespace lamina::plan {
 // ---- model geometry (the real Qwen3.8-Flash-Next artifact) ------------------
 struct Geometry {
     int n_layers = 48;
-    int n_qsa_layers = 12; // layers 3, 7, ... 47 - the full-attention ones
+    int n_qsa_layers = 12;   // layers 3, 7, ... 47 - the full-attention ones
     int n_kv_heads = 2;
     int head_dim = 256;
-    int kv_group = 64; // INT8 KV is grouped-64: one fp16 scale per 64 elements
-    int qsa_block = 4; // the indexer pools one key per 4-token block
+    int kv_group = 64;   // INT8 KV is grouped-64: one fp16 scale per 64 elements
+    int qsa_block = 4;   // the indexer pools one key per 4-token block
     /// THE INDEXER'S KEY STORE, and the trap that has now been walked into twice in opposite directions.
     ///
     /// `indexer.q_proj.weight` is [2560, 512] = **4 QUERY heads** of 128.  `indexer.k_proj.weight` is
@@ -42,9 +42,9 @@ struct Geometry {
     /// Round 194 "fixed" this by reading `indexer.head_count = 4` out of the metadata and multiplying by it -
     /// right about the metadata, wrong about what was being counted.  **A head count in the metadata does not
     /// say WHICH tensor it counts.**
-    int indexer_q_heads = 4;    // query heads: they multiply the SCORES, and cost no cache at all
-    int indexer_key_heads = 1;  // k_proj is [n_embd, 128]: ONE shared key head
-    int indexer_key_dim = 128;  // the key width, and the width of the thing that IS cached
+    int indexer_q_heads = 4;     // query heads: they multiply the SCORES, and cost no cache at all
+    int indexer_key_heads = 1;   // k_proj is [n_embd, 128]: ONE shared key head
+    int indexer_key_dim = 128;   // the key width, and the width of the thing that IS cached
 
     /// GDN geometry.  `docs/semantics.md`: `ssm.state_size = 128`, `ssm.time_step_rank = 48` (the v heads),
     /// `ssm.conv_kernel = 4`, and `n_embd_r() = (d_conv-1) * (ssm_d_inner + 2*n_group*d_state) = 3 * 10240`.
@@ -60,12 +60,12 @@ struct Geometry {
 
 // ---- byte costs ------------------------------------------------------------
 struct Costs {
-    uint64_t expert_blob = 1382400; // one expert's gate_up+down, codes and scales (architecture §3.2)
-    uint64_t dense_bytes = 0;       // from the manifest: every non-expert tensor, canonical form
-    uint64_t embd_bytes = 0;        // token embedding
-    uint64_t mtp_bytes = 0;         // multi-token-prediction head, when present
+    uint64_t expert_blob = 1382400;   // one expert's gate_up+down, codes and scales (architecture §3.2)
+    uint64_t dense_bytes = 0;         // from the manifest: every non-expert tensor, canonical form
+    uint64_t embd_bytes = 0;          // token embedding
+    uint64_t mtp_bytes = 0;           // multi-token-prediction head, when present
     uint64_t workspace_bytes = 0;
-    uint64_t state_bytes = 0; // GDN recurrence + conv history + replay log, per sequence
+    uint64_t state_bytes = 0;   // GDN recurrence + conv history + replay log, per sequence
 };
 
 // GDN recurrence + conv history, bytes per sequence.  DERIVED, for the same reason everything else here is.
@@ -81,34 +81,33 @@ struct Costs {
 // evicted to make room for an expert.  A planner that omits it returns a plan it cannot honour, which is the
 // failure `DoesNotClose` exists to prevent.
 inline uint64_t state_bytes(const Geometry& g) {
-    const uint64_t per_layer = (uint64_t) g.ssm_state_size * (uint64_t) g.ssm_v_heads *
-                                   (uint64_t) g.ssm_state_size * sizeof(float) +
-                               (uint64_t) (g.ssm_d_conv - 1) * (uint64_t) g.ssm_conv_channels * sizeof(float);
+    const uint64_t per_layer =
+        (uint64_t) g.ssm_state_size * (uint64_t) g.ssm_v_heads * (uint64_t) g.ssm_state_size * sizeof(float) +
+        (uint64_t) (g.ssm_d_conv - 1) * (uint64_t) g.ssm_conv_channels * sizeof(float);
     return (uint64_t) g.n_gdn_layers() * per_layer;
 }
 
 // INT8 KV + indexer keys, bytes per token.  Both terms come from the geometry above and nothing else.
 inline uint64_t kv_bytes_per_token(const Geometry& g) {
-    const uint64_t kv_elems = 2ull * g.n_kv_heads * g.head_dim;       // K and V
-    const uint64_t kv_scales = (kv_elems / (uint64_t)g.kv_group) * 2; // fp16 scale per group
-    const uint64_t per_layer = kv_elems * 1 + kv_scales;              // INT8: one byte per element
+    const uint64_t kv_elems = 2ull * g.n_kv_heads * g.head_dim;          // K and V
+    const uint64_t kv_scales = (kv_elems / (uint64_t) g.kv_group) * 2;   // fp16 scale per group
+    const uint64_t per_layer = kv_elems * 1 + kv_scales;                 // INT8: one byte per element
     // indexer: ONE cached key per block, `idx_dim` wide, SHARED across the query heads.  See the note on
     // `indexer_key_heads` above - this term has been wrong in both directions and the derivation is why.
-    const uint64_t idx_layer =
-        (uint64_t) g.indexer_key_heads * (uint64_t) g.indexer_key_dim / (uint64_t) g.qsa_block;
-    return (uint64_t)g.n_qsa_layers * (per_layer + idx_layer);
+    const uint64_t idx_layer = (uint64_t) g.indexer_key_heads * (uint64_t) g.indexer_key_dim / (uint64_t) g.qsa_block;
+    return (uint64_t) g.n_qsa_layers * (per_layer + idx_layer);
 }
 
 // ---- the plan --------------------------------------------------------------
 struct Plan {
     uint64_t max_context = 0;
-    uint64_t kv_bytes = 0;    // KV + indexer keys at max_context
-    uint64_t state_bytes = 0; // GDN recurrence + conv history - FIXED, not evictable
-    uint64_t cache_bytes = 0; // what is left for expert cache slots
+    uint64_t kv_bytes = 0;      // KV + indexer keys at max_context
+    uint64_t state_bytes = 0;   // GDN recurrence + conv history - FIXED, not evictable
+    uint64_t cache_bytes = 0;   // what is left for expert cache slots
     uint64_t cache_slots = 0;
     uint64_t vram_budget = 0;
     uint64_t vram_used = 0;
-    uint64_t dram_experts = 0; // the whole expert arena, streamed
+    uint64_t dram_experts = 0;   // the whole expert arena, streamed
     std::vector<std::string> notes;
 };
 
@@ -122,18 +121,15 @@ struct DoesNotClose : std::runtime_error {
 // The VRAM budget that the KV cache and the expert cache share.  This is the one number taken from
 // `00-README.md` §2 rather than derived: the table's three rows all leave `KV + cache` constant, and that
 // constant is what the planner is dividing.  Expressed in bytes, decimal, matching how the table rounds.
-inline uint64_t vram_pool_bytes() {
-    return 5943000000ull;
-}
+inline uint64_t vram_pool_bytes() { return 5943000000ull; }
 
-inline Plan make_plan(uint64_t max_context, const Geometry& g, const Costs& c,
-                      uint64_t pool = vram_pool_bytes()) {
+inline Plan make_plan(uint64_t max_context, const Geometry& g, const Costs& c, uint64_t pool = vram_pool_bytes()) {
     Plan p;
     p.max_context = max_context;
     p.vram_budget = pool;
     p.kv_bytes = kv_bytes_per_token(g) * max_context;
     p.state_bytes = c.state_bytes;
-    p.dram_experts = c.dense_bytes + c.embd_bytes; // costs that never enter the pool
+    p.dram_experts = c.dense_bytes + c.embd_bytes;   // costs that never enter the pool
 
     const uint64_t fixed = c.mtp_bytes + c.workspace_bytes + c.state_bytes;   // the dense ones are outside the pool
     if (p.kv_bytes + fixed > pool) {
@@ -143,10 +139,9 @@ inline Plan make_plan(uint64_t max_context, const Geometry& g, const Costs& c,
     }
     p.cache_bytes = pool - p.kv_bytes - fixed;
     p.cache_slots = p.cache_bytes / c.expert_blob;
-    p.vram_used = pool - p.cache_bytes % c.expert_blob; // slot remainder is unusable, not free
+    p.vram_used = pool - p.cache_bytes % c.expert_blob;   // slot remainder is unusable, not free
     if (p.cache_slots == 0) {
-        throw DoesNotClose("no room for even one expert cache slot at max-context " +
-                           std::to_string(max_context));
+        throw DoesNotClose("no room for even one expert cache slot at max-context " + std::to_string(max_context));
     }
     return p;
 }
@@ -165,4 +160,4 @@ inline std::string to_string(const Plan& p) {
     return s;
 }
 
-} // namespace lamina::plan
+}   // namespace lamina::plan

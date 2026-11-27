@@ -9,4 +9,4 @@ namespace lamina {
 /// the SHA-256 digest of `data` as 64 lowercase hex digits
 std::string sha256_hex(std::string_view data);
 
-}  // namespace lamina
+}   // namespace lamina

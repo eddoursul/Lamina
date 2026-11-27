@@ -97,7 +97,7 @@ void read_words(const uint8_t* p, uint64_t bytes) {
     g_sink.fetch_xor(a0 ^ a1 ^ a2 ^ a3, std::memory_order_relaxed);
 }
 
-}  // namespace
+}   // namespace
 
 int64_t ArenaExpertSource::place_block(size_t q) const {
     return (int64_t) (std::upper_bound(place_off_.begin(), place_off_.end(), (int64_t) q) - place_off_.begin()) - 1;
@@ -150,9 +150,8 @@ std::vector<std::pair<size_t, size_t>> ArenaExpertSource::plan_swaps(const std::
         for (size_t k = 0; k < out.size() && k < in.size(); ++k) swaps.emplace_back(out[k], in[k]);
     }
     // the CPU's hottest expert's first, over all classes (replace_some makes them in this order)
-    std::stable_sort(swaps.begin(), swaps.end(), [&](const auto& a, const auto& b) {
-        return key(place_occ_[a.first]) < key(place_occ_[b.first]);
-    });
+    std::stable_sort(swaps.begin(), swaps.end(),
+                     [&](const auto& a, const auto& b) { return key(place_occ_[a.first]) < key(place_occ_[b.first]); });
     return swaps;
 }
 
@@ -259,9 +258,11 @@ bool ArenaExpertSource::place(const std::vector<int32_t>& rank, const std::vecto
         }
     }
     char buf[512];
-    int len = std::snprintf(buf, sizeof buf, "--arena-place: %zu places timed in %.1f s on %d cores, the fast ones ~%.1f "
-                                             "GB/s (the median %.1f, the 10th percentile %.1f); %zu slow", n, t_time, T,
-                            (double) fast, (double) sorted[n / 2], (double) sorted[n / 10], slow_gbs.size());
+    int len =
+        std::snprintf(buf, sizeof buf,
+                      "--arena-place: %zu places timed in %.1f s on %d cores, the fast ones ~%.1f "
+                      "GB/s (the median %.1f, the 10th percentile %.1f); %zu slow",
+                      n, t_time, T, (double) fast, (double) sorted[n / 2], (double) sorted[n / 10], slow_gbs.size());
     if (!slow_gbs.empty())
         len += std::snprintf(buf + len, sizeof buf - (size_t) len, " (%.2f GiB, ~%.1f GB/s)",
                              (double) slow_bytes / 1073741824.0, (double) slow_gbs[slow_gbs.size() / 2]);
@@ -325,8 +326,10 @@ size_t ArenaExpertSource::replace_some(size_t max) {
             const int64_t l = i / n_expert_, e = i % n_expert_;
             std::string err;
             if (!read_file_blob(l, e, swap_buf_.data(), err) || std::memcmp(swap_buf_.data(), blob(l, e), bb) != 0) {
-                std::fprintf(stderr, "ArenaExpertSource: LAMINA_LOAD_VERIFY: layer %lld expert %lld differs from the "
-                                     "model after a swap between requests %s\n", (long long) l, (long long) e, err.c_str());
+                std::fprintf(stderr,
+                             "ArenaExpertSource: LAMINA_LOAD_VERIFY: layer %lld expert %lld differs from the "
+                             "model after a swap between requests %s\n",
+                             (long long) l, (long long) e, err.c_str());
                 std::abort();
             }
         }
@@ -334,4 +337,4 @@ size_t ArenaExpertSource::replace_some(size_t max) {
     return pending_.size() - pending_at_;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

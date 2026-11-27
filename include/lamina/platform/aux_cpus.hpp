@@ -64,15 +64,24 @@ inline bool parse_cpu_list(const std::string& text, std::vector<int>& out) {
     };
     for (;;) {
         long lo = 0, hi = 0;
-        if (!number(lo)) { out.clear(); return false; }
+        if (!number(lo)) {
+            out.clear();
+            return false;
+        }
         hi = lo;
         if (i < text.size() && text[i] == '-') {
             ++i;
-            if (!number(hi) || hi < lo) { out.clear(); return false; }
+            if (!number(hi) || hi < lo) {
+                out.clear();
+                return false;
+            }
         }
         for (long c = lo; c <= hi; ++c) out.push_back((int) c);
         if (i == text.size()) break;
-        if (text[i] != ',') { out.clear(); return false; }
+        if (text[i] != ',') {
+            out.clear();
+            return false;
+        }
         ++i;
     }
     std::sort(out.begin(), out.end());
@@ -83,11 +92,15 @@ inline bool parse_cpu_list(const std::string& text, std::vector<int>& out) {
 /// The CPUs `auto` gives to the aux threads, in order: the SMT siblings of the host's physical core first, then every
 /// CPU of a physical core that has no worker and is not the host's.  A CPU that shares a core with a worker is never
 /// returned, and neither is one whose core is unknown (no sysfs): it might be a worker's sibling.
-inline std::vector<int> derive(const std::vector<LogicalCpu>& allowed, int host_cpu, const std::vector<int>& worker_cpus) {
+inline std::vector<int> derive(const std::vector<LogicalCpu>& allowed, int host_cpu,
+                               const std::vector<int>& worker_cpus) {
     using Key = std::pair<long, long>;
     auto key_of = [&](int cpu, Key& k) {
         for (const LogicalCpu& c : allowed)
-            if (c.cpu == cpu) { k = {c.pkg, c.core}; return c.pkg >= 0 && c.core >= 0; }
+            if (c.cpu == cpu) {
+                k = {c.pkg, c.core};
+                return c.pkg >= 0 && c.core >= 0;
+            }
         return false;
     };
     std::vector<Key> worker_keys;
@@ -115,8 +128,8 @@ inline std::vector<int> derive(const std::vector<LogicalCpu>& allowed, int host_
 }
 
 /// An explicit list, restricted to CPUs the process may use, without the host's CPU and the workers' CPUs.
-inline std::vector<int> restrict_list(const std::vector<int>& list, const std::vector<LogicalCpu>& allowed, int host_cpu,
-                                      const std::vector<int>& worker_cpus) {
+inline std::vector<int> restrict_list(const std::vector<int>& list, const std::vector<LogicalCpu>& allowed,
+                                      int host_cpu, const std::vector<int>& worker_cpus) {
     std::vector<int> out;
     for (int c : list) {
         if (c == host_cpu || std::find(worker_cpus.begin(), worker_cpus.end(), c) != worker_cpus.end()) continue;
@@ -137,7 +150,10 @@ struct Config {
 inline bool parse_spec(const std::string& spec, Config& cfg, std::string& err) {
     cfg = Config{};
     if (spec.empty() || spec == "off") return true;
-    if (spec == "auto") { cfg.on = true; return true; }
+    if (spec == "auto") {
+        cfg.on = true;
+        return true;
+    }
     if (!parse_cpu_list(spec, cfg.list)) {
         err = "--aux-cpus takes off, auto or a CPU list such as 24,26 or 24-27 (got '" + spec + "')";
         return false;
@@ -156,13 +172,13 @@ struct State {
     Config cfg;
     std::atomic<bool> enabled{false};
     std::atomic<bool> have_plan{false};
-    std::vector<int> allowed;                     ///< the process's CPUs, snapshotted before any thread is pinned
-    std::vector<int> plan;                        ///< the aux CPUs (empty: nothing to do)
-    std::vector<int> workers;                     ///< the pool's CPUs: their threads are never touched
-    int host_cpu = -1;                            ///< the CPU the host thread is pinned to (-1: unknown)
+    std::vector<int> allowed;   ///< the process's CPUs, snapshotted before any thread is pinned
+    std::vector<int> plan;      ///< the aux CPUs (empty: nothing to do)
+    std::vector<int> workers;   ///< the pool's CPUs: their threads are never touched
+    int host_cpu = -1;          ///< the CPU the host thread is pinned to (-1: unknown)
     cpu_set_t target;
-    std::set<int> owned;                          ///< tids of pool workers and host threads
-    std::map<int, cpu_set_t> original;            ///< tid -> the mask it had before this module moved it
+    std::set<int> owned;                 ///< tids of pool workers and host threads
+    std::map<int, cpu_set_t> original;   ///< tid -> the mask it had before this module moved it
     State() { CPU_ZERO(&target); }
 };
 
@@ -181,12 +197,12 @@ inline bool move_locked(State& s, int tid) {
     CPU_ZERO(&now);
     if (sched_getaffinity(tid, sizeof now, &now) != 0) return false;
     if (same_mask(now, s.target)) return false;
-    if (CPU_COUNT(&now) == 1) {                    // pinned to one CPU of a worker by somebody: not ours
+    if (CPU_COUNT(&now) == 1) {   // pinned to one CPU of a worker by somebody: not ours
         for (int w : s.workers)
             if (CPU_ISSET(w, &now)) return false;
     }
     if (sched_setaffinity(tid, sizeof s.target, &s.target) != 0) return false;
-    s.original.emplace(tid, now);                 // the first mask only: a second move keeps the real original
+    s.original.emplace(tid, now);   // the first mask only: a second move keeps the real original
     return true;
 }
 
@@ -208,11 +224,12 @@ inline std::vector<int> task_ids() {
 
 /// Forgets the threads that have ended (their tids may come back for another thread).  Caller holds `mu`.
 inline void purge_locked(State& s) {
-    for (auto it = s.original.begin(); it != s.original.end();) it = alive(it->first) ? std::next(it) : s.original.erase(it);
+    for (auto it = s.original.begin(); it != s.original.end();)
+        it = alive(it->first) ? std::next(it) : s.original.erase(it);
     for (auto it = s.owned.begin(); it != s.owned.end();) it = alive(*it) ? std::next(it) : s.owned.erase(it);
 }
 
-}  // namespace detail
+}   // namespace detail
 
 /// Reads the CPUs the calling thread may use and the spec.  Call once, early, on the thread that has not been pinned
 /// yet (the engine's main thread, before the pool exists).  The main thread counts as the host.
@@ -309,7 +326,7 @@ inline bool off_host_target_locked(const State& s, cpu_set_t& out) {
     for (int c : s.allowed) CPU_SET(c, &out);
     return true;
 }
-}  // namespace detail
+}   // namespace detail
 
 /// Puts the calling thread off the host's core and off the pool workers' CPUs (see off_host_target_locked).  A thread
 /// the host creates inherits the host's single CPU; one that must not share that core (the concurrent prompt read's
@@ -391,7 +408,8 @@ inline std::string set_topology(int host_cpu, const std::vector<int>& worker_cpu
         s.have_plan.store(!plan.empty(), std::memory_order_release);
         for (size_t i = 0; i < plan.size(); ++i) note += (i ? "," : "") + std::to_string(plan[i]);
     }
-    if (plan.empty()) note = "none spare (every CPU is the host's, a worker's or shares a core with a worker or has no known core)";
+    if (plan.empty())
+        note = "none spare (every CPU is the host's, a worker's or shares a core with a worker or has no known core)";
     if (s.cfg.on && !plan.empty()) set_enabled(true);
     long moved;
     {
@@ -399,11 +417,12 @@ inline std::string set_topology(int host_cpu, const std::vector<int>& worker_cpu
         moved = (long) s.original.size();
     }
     return "lamina aux cpus: threads that are neither pool workers nor the host go to CPUs " + note +
-           (!s.cfg.on ? " (off at start; a request's aux_cpus=1 turns it on)"
-            : plan.empty() ? " (nothing to do)" : " (on; " + std::to_string(moved) + " threads placed so far)");
+           (!s.cfg.on      ? " (off at start; a request's aux_cpus=1 turns it on)"
+            : plan.empty() ? " (nothing to do)"
+                           : " (on; " + std::to_string(moved) + " threads placed so far)");
 }
 
-#else  // not Linux: the same names, doing nothing
+#else   // not Linux: the same names, doing nothing
 
 inline bool configure(const std::string& spec, std::string& err) {
     Config cfg;
@@ -418,8 +437,10 @@ inline bool enabled() { return false; }
 inline bool place_off_host() { return false; }   // (a new thread does not inherit the host's CPU set here)
 inline int release_host_inheritors() { return 0; }
 inline std::vector<int> plan() { return {}; }
-inline std::string set_topology(int, const std::vector<int>&) { return "lamina aux cpus: not available on this system"; }
+inline std::string set_topology(int, const std::vector<int>&) {
+    return "lamina aux cpus: not available on this system";
+}
 
 #endif
 
-}  // namespace lamina::aux_cpus
+}   // namespace lamina::aux_cpus

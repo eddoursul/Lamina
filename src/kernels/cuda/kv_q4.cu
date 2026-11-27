@@ -1,6 +1,6 @@
 // src/kernels/cuda/kv_q4.cu - see include/lamina/kernels/kv_q4.hpp.
-#include "lamina/kernels/kv_q4.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/kv_q4.hpp"
 
 #include "fwht.cuh"
 
@@ -31,13 +31,11 @@ void validate(const QsaShapes& s, const char* what) {
 // b of every lane - quantized: its value of largest magnitude (on a tie the larger value, so every lane agrees) over
 // -8 is the scale.  STEP: the position from the token's step record, else pos0 + token.
 template <bool STEP>
-__global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ k_q4, uint16_t* __restrict__ k_q4s,
-                                                          uint8_t* __restrict__ v_q4, uint16_t* __restrict__ v_q4s,
-                                                          const int32_t* __restrict__ table,
-                                                          const int32_t* __restrict__ step, int step_stride,
-                                                          int64_t pos0, const float* __restrict__ K,
-                                                          const float* __restrict__ V, int64_t ld, int kv_heads,
-                                                          int page_size) {
+__global__ void __launch_bounds__(32)
+kv_append_q4_kernel(uint8_t* __restrict__ k_q4, uint16_t* __restrict__ k_q4s, uint8_t* __restrict__ v_q4,
+                    uint16_t* __restrict__ v_q4s, const int32_t* __restrict__ table, const int32_t* __restrict__ step,
+                    int step_stride, int64_t pos0, const float* __restrict__ K, const float* __restrict__ V, int64_t ld,
+                    int kv_heads, int page_size) {
     const int t = blockIdx.x, h = blockIdx.y, lane = threadIdx.x;
     const bool is_v = blockIdx.z + (k_q4 == nullptr ? 1 : 0) == 1;
     const float* x = (is_v ? V : K) + (size_t) t * ld + (size_t) h * 256;
@@ -55,7 +53,10 @@ __global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ 
 #pragma unroll
         for (int o = 16; o > 0; o >>= 1) {
             const float a2 = __shfl_xor_sync(0xffffffffu, a, o), m2 = __shfl_xor_sync(0xffffffffu, m, o);
-            if (a2 > a || (a2 == a && m2 > m)) { a = a2; m = m2; }
+            if (a2 > a || (a2 == a && m2 > m)) {
+                a = a2;
+                m = m2;
+            }
         }
         const uint16_t db = f16_from_f32(m / -8.0f);
         const float d = f32_from_f16(db);   // quantized against the STORED scale
@@ -67,7 +68,7 @@ __global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ 
     }
 }
 
-}  // namespace
+}   // namespace
 
 void kv_append_q4_steps(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* v_q4s, const int32_t* page_table,
                         const int32_t* step, int step_stride, const float* kcur, const float* vcur, int n_tok,
@@ -76,9 +77,9 @@ void kv_append_q4_steps(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t*
     const unsigned sides = (k_q4 != nullptr ? 1u : 0u) + (v_q4 != nullptr ? 1u : 0u);
     if (n_tok < 1 || sides == 0) return;
     const dim3 grid((unsigned) n_tok, (unsigned) s.n_head_kv, sides);
-    kv_append_q4_kernel<true><<<grid, 32, 0, (cudaStream_t) stream>>>(
-        k_q4, k_q4s, v_q4, v_q4s, page_table, step, step_stride, 0, kcur, vcur, s.n_head_kv * s.head_dim,
-        (int) s.n_head_kv, (int) s.page_size);
+    kv_append_q4_kernel<true>
+        <<<grid, 32, 0, (cudaStream_t) stream>>>(k_q4, k_q4s, v_q4, v_q4s, page_table, step, step_stride, 0, kcur, vcur,
+                                                 s.n_head_kv * s.head_dim, (int) s.n_head_kv, (int) s.page_size);
     check("kv_append_q4_steps launch");
 }
 
@@ -98,4 +99,4 @@ void kv_append_q4_rows(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* 
     check("kv_append_q4_rows launch");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

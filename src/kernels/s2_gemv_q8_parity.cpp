@@ -11,8 +11,8 @@
 //      produces rather than one quoted from elsewhere.
 #include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/quantize_act.hpp"
-#include "lamina/kernels/s_gemv.hpp"
 #include "lamina/kernels/s2_gemv_q8.hpp"
+#include "lamina/kernels/s_gemv.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
@@ -28,7 +28,10 @@ int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: s2_gemv_q8_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: s2_gemv_q8_parity [--selftest]\n");
+            return 2;
+        }
     }
 
     const long long n_in = 2560, n_out = 64;
@@ -71,8 +74,11 @@ int main(int argc, char** argv) {
         const uint32_t sign = (uint32_t) (dbits & 0x8000) << 16;
         uint32_t ex = (dbits >> 10) & 0x1F, man = dbits & 0x3FF;
         uint32_t out;
-        if (ex == 0) { out = sign; }
-        else { out = sign | ((ex - 15 + 127) << 23) | (man << 13); }
+        if (ex == 0) {
+            out = sign;
+        } else {
+            out = sign | ((ex - 15 + 127) << 23) | (man << 13);
+        }
         std::memcpy(&d, &out, 4);
         return (float) ((int8_t) blk[2 + (i % 32)]) * d;
     };

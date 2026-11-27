@@ -25,13 +25,13 @@ namespace lamina::kernels {
 struct QsaAttnPools {
     const uint16_t* k_pool = nullptr;   ///< fp16 [page][kv_head][page_size][head_dim]
     const uint16_t* v_pool = nullptr;
-    const int8_t* k_q = nullptr;        ///< int8 codes, same layout
+    const int8_t* k_q = nullptr;   ///< int8 codes, same layout
     const int8_t* v_q = nullptr;
-    const uint16_t* k_scale = nullptr;  ///< fp16 [page][kv_head][page_size][head_dim / 64]
+    const uint16_t* k_scale = nullptr;   ///< fp16 [page][kv_head][page_size][head_dim / 64]
     const uint16_t* v_scale = nullptr;
-    const uint8_t* k_q4 = nullptr;      ///< 4-bit codes of rotated rows [page][kv_head][page_size][head_dim / 2]
+    const uint8_t* k_q4 = nullptr;   ///< 4-bit codes of rotated rows [page][kv_head][page_size][head_dim / 2]
     const uint8_t* v_q4 = nullptr;
-    const uint16_t* k_q4s = nullptr;    ///< fp16 [page][kv_head][page_size][head_dim / 32]
+    const uint16_t* k_q4s = nullptr;   ///< fp16 [page][kv_head][page_size][head_dim / 32]
     const uint16_t* v_q4s = nullptr;
     const int32_t* page_table = nullptr;
 };
@@ -52,4 +52,4 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
 void qsa_prefill_attn(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
                       const QsaShapes& s, float* attn, int64_t n_q, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

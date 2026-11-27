@@ -51,7 +51,8 @@ const Api& api() {
             !resolve("cuMemUnmap", a.unmap) || !resolve("cuMemSetAccess", a.access))
             return;
         int vmm = 0;
-        if (attr(&vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, (CUdevice) a.dev) != CUDA_SUCCESS || !vmm)
+        if (attr(&vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, (CUdevice) a.dev) != CUDA_SUCCESS ||
+            !vmm)
             return;
         CUmemAllocationProp prop{};
         prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -76,7 +77,7 @@ int current_device(const Api& a) {
     return d;
 }
 
-}  // namespace
+}   // namespace
 
 bool vmm_available() { return api().ok; }
 uint64_t vmm_granularity() { return api().ok ? api().gran : 0; }
@@ -159,5 +160,4 @@ VmmChunk VmmRange::unmap(int64_t i) {
     return h;
 }
 
-}  // namespace lamina::core
-
+}   // namespace lamina::core

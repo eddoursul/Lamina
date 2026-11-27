@@ -96,7 +96,10 @@ public:
     void set_sampling(const lamina::kernels::SamplerParams& sp) { sampling_ = sp; }
     /// The penalty histories for `penalty_last_n`: one row per window row, T rows of `history_len` int32 slots
     /// (`lamina::kernels::penalty_rows`), device memory staged before every window; null: no penalties.
-    void set_history(const int32_t* history, int history_len) { hist_d_ = history; hist_len_ = history_len; }
+    void set_history(const int32_t* history, int history_len) {
+        hist_d_ = history;
+        hist_len_ = history_len;
+    }
     /// Off: `run` skips the head sampling and `out` is the greedy pick (windows whose picks are discarded: a prompt
     /// read through windows commits every token).
     void set_head_sampling(bool on) { head_sampling_ = on; }
@@ -146,7 +149,10 @@ public:
     void set_pcie_mode(int mode) { sink_.pcie_mode = mode; }
     /// Whether the pool may give the GPU a PCIe share of the misses (`--pcie-frac` > 0); without one the window
     /// has no PCIe stage.  Set before the first `run`.
-    void set_pcie_share(bool on) { pcie_share_ = on; sink_.pcie = on; }
+    void set_pcie_share(bool on) {
+        pcie_share_ = on;
+        sink_.pcie = on;
+    }
     /// Diagnostics: GPU timestamps between the stages of every layer (`--window-profile`; each costs a kernel
     /// launch, ~2 us).  Set before the first `run`; `print_profile` writes the per-stage table to stdout.
     void set_profile(bool on) { profile_ = on; }
@@ -157,11 +163,18 @@ public:
     /// gets the next layer's prediction (the RAM is idle until the next ring), waited for when it comes later
     /// (`predict_late`).  Without `learn` the averages stay at their start (gates of one half, no correction), so the
     /// prediction depends on the window alone.  Windows of one token group.  Set before the first `run`.
-    void set_predict(PredictFn fn, void* user, bool learn) { predict_ = fn; predict_user_ = user; learn_ = learn; }
+    void set_predict(PredictFn fn, void* user, bool learn) {
+        predict_ = fn;
+        predict_user_ = user;
+        learn_ = learn;
+    }
     /// `fn` runs once the window's last CPU rows are in: the RAM stays idle until the next window's first pool (the
     /// head, the commit, the drafts).  The main GPU may still run the window then: `window_done` follows its graph.
     /// Set before the first `run`.
-    void set_tail(TailFn fn, void* user) { tail_ = fn; tail_user_ = user; }
+    void set_tail(TailFn fn, void* user) {
+        tail_ = fn;
+        tail_user_ = user;
+    }
     /// `fn` runs once each layer's CPU rows are in and the next layer's prediction has gone out, but the last's (the
     /// tail's): the main GPU's link then has nothing to carry until the next layer's router writes its rows to the
     /// host.  Set before the first `run`.
@@ -179,7 +192,10 @@ public:
     void set_tiers(int n) { n_tiers_ = n; }
     /// `fn` is asked every ~2 ms while the host waits for a ring: on failure the window's waits are released and `run`
     /// returns the reason.  Set before the first `run`.
-    void set_watch(WatchFn fn, void* user) { watch_ = fn; watch_user_ = user; }
+    void set_watch(WatchFn fn, void* user) {
+        watch_ = fn;
+        watch_user_ = user;
+    }
 
     /// Every window size's graph and the commit's, captured and uploaded now, not at their first window: the
     /// instantiates and the kernels they load take VRAM, which a start then counts.  After the hooks above are set.
@@ -222,44 +238,66 @@ private:
     bool commit_pending_ = false;
 
     // mapped staging (host pointer, device alias)
-    int32_t* h_tok_ = nullptr;   int32_t* m_tok_ = nullptr;     // T
-    int32_t* h_step_ = nullptr;  int32_t* m_step_ = nullptr;    // T * kStepCount
-    int32_t* h_pos_ = nullptr;   int32_t* m_pos_ = nullptr;     // T * n_head
-    int32_t* h_commit_ = nullptr; int32_t* m_commit_ = nullptr; // [n_keep, n_keep-1, pos_0 .. pos_{T-1}]
-    float* h_ple_ = nullptr;     float* m_ple_ = nullptr;       // T * n_embd
-    int32_t* h_out_ = nullptr;   int32_t* m_out_ = nullptr;     // T argmax ids
-    float* h_val_ = nullptr;     float* m_val_ = nullptr;       // their logits (a split head's merge)
-    uint32_t* h_bad_ = nullptr;  uint32_t* m_bad_ = nullptr;    // T: a NaN or an infinity among the token's logits
+    int32_t* h_tok_ = nullptr;
+    int32_t* m_tok_ = nullptr;   // T
+    int32_t* h_step_ = nullptr;
+    int32_t* m_step_ = nullptr;   // T * kStepCount
+    int32_t* h_pos_ = nullptr;
+    int32_t* m_pos_ = nullptr;   // T * n_head
+    int32_t* h_commit_ = nullptr;
+    int32_t* m_commit_ = nullptr;   // [n_keep, n_keep-1, pos_0 .. pos_{T-1}]
+    float* h_ple_ = nullptr;
+    float* m_ple_ = nullptr;   // T * n_embd
+    int32_t* h_out_ = nullptr;
+    int32_t* m_out_ = nullptr;   // T argmax ids
+    float* h_val_ = nullptr;
+    float* m_val_ = nullptr;   // their logits (a split head's merge)
+    uint32_t* h_bad_ = nullptr;
+    uint32_t* m_bad_ = nullptr;   // T: a NaN or an infinity among the token's logits
     bool nan_guard_ = true;
     uint64_t guard_calls_ = 0;
     std::vector<uint64_t> nan_inject_;
     SplitHead* shead_ = nullptr;
     bool logits_wanted_ = false;
-    int64_t head_rows_ = 0;                                     // the head's rows here: n_vocab, or the split
-    float* head_full_ = nullptr;                                // T whole logits rows (a split head, when wanted)
-    uint32_t hand_n_ = 0, done_n_ = 0;                          // the split head's counts so far
-    float* h_x_ = nullptr;       float* m_x_ = nullptr;         // doorbell payload: T * n_embd
-    int32_t* h_ids_ = nullptr;   int32_t* m_ids_ = nullptr;     // T * k
-    float* h_w_ = nullptr;       float* m_w_ = nullptr;         // T * k
-    uint32_t* h_seq_ = nullptr;  uint32_t* m_seq_ = nullptr;
-    uint32_t* h_flag_ = nullptr; uint32_t* m_flag_ = nullptr;
-    uint32_t* h_flagA_ = nullptr; uint32_t* m_flagA_ = nullptr;  // the PCIe share's plan is in place
+    int64_t head_rows_ = 0;              // the head's rows here: n_vocab, or the split
+    float* head_full_ = nullptr;         // T whole logits rows (a split head, when wanted)
+    uint32_t hand_n_ = 0, done_n_ = 0;   // the split head's counts so far
+    float* h_x_ = nullptr;
+    float* m_x_ = nullptr;   // doorbell payload: T * n_embd
+    int32_t* h_ids_ = nullptr;
+    int32_t* m_ids_ = nullptr;   // T * k
+    float* h_w_ = nullptr;
+    float* m_w_ = nullptr;   // T * k
+    uint32_t* h_seq_ = nullptr;
+    uint32_t* m_seq_ = nullptr;
+    uint32_t* h_flag_ = nullptr;
+    uint32_t* m_flag_ = nullptr;
+    uint32_t* h_flagA_ = nullptr;
+    uint32_t* m_flagA_ = nullptr;   // the PCIe share's plan is in place
     // the PCIe share's DMA copies have landed: one flag a token group (a split window's two are raised apart, the
     // second's empty share before the first's copies land)
-    uint32_t* h_flagB_ = nullptr; uint32_t* m_flagB_ = nullptr;
-    uint32_t* h_pleflag_ = nullptr; uint32_t* m_pleflag_ = nullptr;  // the PLE rows are in h_ple_
+    uint32_t* h_flagB_ = nullptr;
+    uint32_t* m_flagB_ = nullptr;
+    uint32_t* h_pleflag_ = nullptr;
+    uint32_t* m_pleflag_ = nullptr;   // the PLE rows are in h_ple_
     bool host_rows_ = false;
-    float* h_rows_ = nullptr;    float* m_rows_ = nullptr;      // T * hc * n_embd: the final rows (set_host_rows)
-    int32_t ahead_tok_[8] = {};                                   // the tokens ple_ahead read for
-    cudaStream_t copy_ = nullptr;                                 // the copy engine's stream (DMA of missed experts)
-    struct FlagSet { uint32_t* flag; uint32_t value; };
-    FlagSet flag_sets_[2 * 64 * 2] = {};                          // host-function arguments, one per (layer, group)
+    float* h_rows_ = nullptr;
+    float* m_rows_ = nullptr;       // T * hc * n_embd: the final rows (set_host_rows)
+    int32_t ahead_tok_[8] = {};     // the tokens ple_ahead read for
+    cudaStream_t copy_ = nullptr;   // the copy engine's stream (DMA of missed experts)
+    struct FlagSet {
+        uint32_t* flag;
+        uint32_t value;
+    };
+    FlagSet flag_sets_[2 * 64 * 2] = {};   // host-function arguments, one per (layer, group)
     static void fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes);
     static void raise_flag(uint32_t* flag, uint32_t value);
-    int32_t* h_plan_ = nullptr;  int32_t* m_plan_ = nullptr;     // the PCIe share's plan block per token group
+    int32_t* h_plan_ = nullptr;
+    int32_t* m_plan_ = nullptr;                                   // the PCIe share's plan block per token group
     int64_t plan_i32_ = 0, plan_ptr_off_ = 0, plan_stride_ = 0;   // a plan block's int32 words, its ptr field, the
                                                                   // device blocks' stride (see `init`)
-    int32_t* h_res_ = nullptr;   int32_t* m_res_ = nullptr;      // the residency snapshot (`residency`)
+    int32_t* h_res_ = nullptr;
+    int32_t* m_res_ = nullptr;   // the residency snapshot (`residency`)
     int64_t res_words_ = 0;
     GpuPlanSink sink_;
     uint32_t cur_layer_ = 0;
@@ -269,22 +307,27 @@ private:
     bool split_ = false;   // opt-in (--spec-split): exact but slower, see the overlap study
     bool pcie_share_ = true;
     int groups_[9] = {};
-    float* h_ymiss_ = nullptr;   float* m_ymiss_ = nullptr;     // T * k * n_embd
+    float* h_ymiss_ = nullptr;
+    float* m_ymiss_ = nullptr;   // T * k * n_embd
     // the FFN input as the router kernel writes it: Q8_K rows `xk_stride_` bytes apart for the layers the pool takes
     // them (xk_layer_), q8_1 rows for the GPU tiers
-    std::vector<uint8_t> xk_layer_, x1_layer_;   // x1_layer_: the pool takes the q8_1 rows (pool_takes_q8_1)
-    float* xr_ = nullptr;                        // Hadamard-folded layers: the FFN input rotated (T rows)
-    const float* had_sx_ = nullptr, *had_sh_ = nullptr;   // their sign vectors on this GPU, n_embd and n_ff floats
+    std::vector<uint8_t> xk_layer_, x1_layer_;            // x1_layer_: the pool takes the q8_1 rows (pool_takes_q8_1)
+    float* xr_ = nullptr;                                 // Hadamard-folded layers: the FFN input rotated (T rows)
+    const float *had_sx_ = nullptr, *had_sh_ = nullptr;   // their sign vectors on this GPU, n_embd and n_ff floats
     int64_t xk_stride_ = 0;
-    uint8_t* h_xk_ = nullptr;    uint8_t* m_xk_ = nullptr;      // T rows
-    uint8_t* h_xq1_ = nullptr;   uint8_t* m_xq1_ = nullptr;     // T rows of n_embd / 32 blocks
+    uint8_t* h_xk_ = nullptr;
+    uint8_t* m_xk_ = nullptr;   // T rows
+    uint8_t* h_xq1_ = nullptr;
+    uint8_t* m_xq1_ = nullptr;   // T rows of n_embd / 32 blocks
     // the GPU tiers' shares (set_tiers), per token group: the flag each raises (64 bytes apart; token group g, tier t
     // at line g * kMaxGpuTiers + t) and their entries, [n, each tier's end, entries] (mapped; `list2_` their device
     // copies, which the combine reads)
     int n_tiers_ = 0;
-    uint32_t* h_flag2_ = nullptr; uint32_t* m_flag2_ = nullptr;
+    uint32_t* h_flag2_ = nullptr;
+    uint32_t* m_flag2_ = nullptr;
     uint32_t* tier_flag(int grp, int t) const { return h_flag2_ + (size_t) (grp * kMaxGpuTiers + t) * 16; }
-    int32_t* h_list2_ = nullptr; int32_t* m_list2_ = nullptr;
+    int32_t* h_list2_ = nullptr;
+    int32_t* m_list2_ = nullptr;
     int32_t* list2_ = nullptr;
     int64_t list2_stride_ = 0;
     WatchFn watch_ = nullptr;
@@ -299,59 +342,65 @@ private:
     RowsFn rows_in_ = nullptr;
     bool rows_after_tiers_ = false;
     void* rows_user_ = nullptr;
-    int32_t* h_pids_ = nullptr;  int32_t* m_pids_ = nullptr;     // 2 x T * k
-    float* h_pw_ = nullptr;      float* m_pw_ = nullptr;         // 2 x T * k
-    uint32_t* h_pseq_ = nullptr; uint32_t* m_pseq_ = nullptr;
+    int32_t* h_pids_ = nullptr;
+    int32_t* m_pids_ = nullptr;   // 2 x T * k
+    float* h_pw_ = nullptr;
+    float* m_pw_ = nullptr;   // 2 x T * k
+    uint32_t* h_pseq_ = nullptr;
+    uint32_t* m_pseq_ = nullptr;
     // short branches beside the main stream: on side_ the GDN gates or the QSA indexer (the mixer) and the experts'
     // activations (beside the router), then the prediction; on shs_ the GDN gate projection or the QSA queries (the
     // mixer), then the shared expert
     cudaStream_t side_ = nullptr;
-    cudaEvent_t join_ = nullptr;                                  // the prediction's
-    cudaEvent_t bfork_ = nullptr, bjoin_ = nullptr;               // side_'s others
-    cudaEvent_t pfork_ = nullptr, pjoin_ = nullptr;               // shs_'s projections
-    cudaStream_t shs_ = nullptr;                                  // the shared expert's branch (and the snapshot's copy)
+    cudaEvent_t join_ = nullptr;                      // the prediction's
+    cudaEvent_t bfork_ = nullptr, bjoin_ = nullptr;   // side_'s others
+    cudaEvent_t pfork_ = nullptr, pjoin_ = nullptr;   // shs_'s projections
+    cudaStream_t shs_ = nullptr;                      // the shared expert's branch (and the snapshot's copy)
     cudaEvent_t shfork_ = nullptr, shjoin_ = nullptr, res_ready_ = nullptr;
-    cudaStream_t ples_ = nullptr;                                 // the PLE block's projections, beside layer 0
+    cudaStream_t ples_ = nullptr;   // the PLE block's projections, beside layer 0
     cudaEvent_t plefork_ = nullptr, plejoin_ = nullptr;
-    cudaStream_t g2s_[kMaxGpuTiers] = {};                         // each GPU tier's rows, per token group
+    cudaStream_t g2s_[kMaxGpuTiers] = {};   // each GPU tier's rows, per token group
     cudaEvent_t g2fork_ = nullptr, g2join_[2][kMaxGpuTiers] = {};
-    cudaStream_t cps_ = nullptr;                                  // the wait for the CPU's rows, per token group
+    cudaStream_t cps_ = nullptr;   // the wait for the CPU's rows, per token group
     cudaEvent_t cpfork_ = nullptr, cpjoin_[2] = {};
-    cudaStream_t kst_ = nullptr;                                  // the QSA mixer's keys
-    cudaEvent_t kjoin_ = nullptr, iproj_ = nullptr;               // and the end of its indexer's projections
-    cudaStream_t sgs_ = nullptr;                                  // the shared expert's scalar gate
+    cudaStream_t kst_ = nullptr;                      // the QSA mixer's keys
+    cudaEvent_t kjoin_ = nullptr, iproj_ = nullptr;   // and the end of its indexer's projections
+    cudaStream_t sgs_ = nullptr;                      // the shared expert's scalar gate
     cudaEvent_t sgjoin_ = nullptr;
-    cudaEvent_t efork_ = nullptr, rdone_ = nullptr;               // the FFN read's end, the router's
-    cudaEvent_t done_ = nullptr;                                  // after the last window's graph
+    cudaEvent_t efork_ = nullptr, rdone_ = nullptr;   // the FFN read's end, the router's
+    cudaEvent_t done_ = nullptr;                      // after the last window's graph
 
     // device
     void* arena_ = nullptr;
     int32_t *tok_ = nullptr, *step_ = nullptr, *pos_ = nullptr, *commit_ = nullptr;
     float *ple_ = nullptr, *emb_ = nullptr, *R_ = nullptr, *mixed_ = nullptr, *bo_ = nullptr;
     float *inj_ = nullptr, *inj2_ = nullptr, *lo_ = nullptr, *rs_ = nullptr;
-    float* grs_ = nullptr;                                    // the hyper-connection reads' scratch (zeroed with the arena)
-    uint8_t* xq_ = nullptr;                                   // T columns of q8_1
-    uint8_t* xil_ = nullptr;                                  // their interleaved copy (2+ tokens)
+    float* grs_ = nullptr;                                                              // the hyper-connection
+                                                                                        // reads' scratch (zeroed
+                                                                                        // with the arena)
+    uint8_t* xq_ = nullptr;                                                             // T columns of q8_1
+    uint8_t* xil_ = nullptr;                                                            // their interleaved
+                                                                                        // copy (2+ tokens)
     float *qkv_L_ = nullptr, *h_L_ = nullptr, *gate_L_ = nullptr, *beta_L_ = nullptr;   // per GDN layer
     float *z_ = nullptr, *y_ = nullptr;
     float *qfull_ = nullptr, *qcur_ = nullptr, *kcur_ = nullptr, *vcur_ = nullptr, *idx_raw_L_ = nullptr;
     float *qidx_ = nullptr, *scores_ = nullptr, *attn32_ = nullptr, *attn_scratch_ = nullptr;
-    float* tail_snap_ = nullptr;                              // per QSA layer
+    float* tail_snap_ = nullptr;   // per QSA layer
     int32_t* sel_ = nullptr;
     float *logits_ = nullptr, *w_ = nullptr, *shared_ = nullptr, *hit_out_ = nullptr;
     int32_t *ids_ = nullptr, *hit_slot_ = nullptr, *hit_dst_ = nullptr, *hit_count_ = nullptr;
-    unsigned* ring_count_ = nullptr;                          // verify_router's block counters: the layer's, the prediction's
-    float* plogits_ = nullptr;                                    // the predictions' logits, by layer parity
-    float* pw_ = nullptr;                                         // the next layer's router (prediction)
+    unsigned* ring_count_ = nullptr;   // verify_router's block counters: the layer's, the prediction's
+    float* plogits_ = nullptr;         // the predictions' logits, by layer parity
+    float* pw_ = nullptr;              // the next layer's router (prediction)
     int32_t* pids_ = nullptr;
-    float* pmixed_ = nullptr;                                     // its input: the next layer's FFN read, estimated
-    float* gate_ema_ = nullptr;                                   // [layer][hc][n_embd]: the FFN reads' gates, averaged
-    float* pbias_ = nullptr;                                      // [layer][n_expert]: the predictions' logit bias
-    int32_t* plan_ = nullptr;                                     // device copies of the PCIe share's plan blocks
-    int32_t* dplan_ = nullptr;                                    // the main GPU's hit plans, decided on the device
-    int32_t* res_ = nullptr;                                      // the residency snapshot, copied as a window starts
-    unsigned long long* slot_ptr_ = nullptr;                      // each VRAM slot's address
-    uint8_t* staging_ = nullptr;                                  // VRAM slots for the PCIe share of the misses
+    float* pmixed_ = nullptr;                  // its input: the next layer's FFN read, estimated
+    float* gate_ema_ = nullptr;                // [layer][hc][n_embd]: the FFN reads' gates, averaged
+    float* pbias_ = nullptr;                   // [layer][n_expert]: the predictions' logit bias
+    int32_t* plan_ = nullptr;                  // device copies of the PCIe share's plan blocks
+    int32_t* dplan_ = nullptr;                 // the main GPU's hit plans, decided on the device
+    int32_t* res_ = nullptr;                   // the residency snapshot, copied as a window starts
+    unsigned long long* slot_ptr_ = nullptr;   // each VRAM slot's address
+    uint8_t* staging_ = nullptr;               // VRAM slots for the PCIe share of the misses
     static constexpr int64_t kStagingBlobs = 16;
     uint8_t* nat_xq_ = nullptr;   // plan v0.3 P6: q8_1 activations for a native pack's grouped experts
     uint8_t* xk_dev_ = nullptr;   // --expert-math exact: the window's Q8_K rows for the hits (their own allocation)
@@ -360,7 +409,7 @@ private:
     uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' partials and counters
     int32_t* one_ = nullptr;           ///< device {1}: the n_keep of a one-token window, which commits itself
     float *sh_gate_ = nullptr, *sh_up_ = nullptr, *sh_g_ = nullptr;
-    float* hist_snap_ = nullptr;                              // T * NG_HIST * NG_HC_DIM
+    float* hist_snap_ = nullptr;   // T * NG_HIST * NG_HC_DIM
     // the PLE block's projections (keys T * NG_HC_DIM, values T * n_embd) and the rest of the block's rows
     float *ple_key_ = nullptr, *ple_val_ = nullptr, *ple_nkey_ = nullptr, *ple_norm_ = nullptr, *ple_gated_ = nullptr;
     float* ple_gate_ = nullptr;
@@ -372,12 +421,12 @@ private:
     bool profile_ = false;
     unsigned long long* stamps_ = nullptr;
     std::vector<unsigned long long> h_stamps_;
-    std::vector<double> prof_ns_;                             // [mixer kind (GDN, QSA)][stage], summed
-    double prof_window_ns_[4] = {};                           // inputs + embeddings, head, whole window, stamp gap
+    std::vector<double> prof_ns_;     // [mixer kind (GDN, QSA)][stage], summed
+    double prof_window_ns_[4] = {};   // inputs + embeddings, head, whole window, stamp gap
     int64_t prof_windows_ = 0, prof_layers_[2] = {};
-    static constexpr int kWaitBuckets = 7;                    // the wait for the CPU's rows, by bucket (us)
+    static constexpr int kWaitBuckets = 7;   // the wait for the CPU's rows, by bucket (us)
     static constexpr double kWaitEdges[kWaitBuckets - 1] = {6, 8, 12, 20, 50, 100};
     int64_t prof_wait_hist_[2][kWaitBuckets] = {};
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

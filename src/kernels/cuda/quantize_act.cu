@@ -21,8 +21,8 @@
 //      `rintf` differs from the reference wherever the f32 quotient rounds across a .5 boundary.
 //   3. The DEQUANTIZED value is `q * d16`, the fp16 scale, not `q * d32`.  The block stores fp16 and that is
 //      what a reader multiplies by.
-#include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/quantize_act.hpp"
 
 #include <cuda_runtime.h>
 
@@ -43,13 +43,11 @@ constexpr int QK8_0 = 32;
 // inf, and this file's fixture is O(1) throughout, so it passed.  A numpy-generated oracle caught it on its
 // first run.  Three copies of a converter whose failure mode is silent wrong bits was two copies too many.
 
-
-__global__ void quantize_q8_0_kernel(const float* __restrict__ x, uint8_t* __restrict__ blocks,
-                                     long long n_blocks) {
+__global__ void quantize_q8_0_kernel(const float* __restrict__ x, uint8_t* __restrict__ blocks, long long n_blocks) {
     const long long b = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_blocks) return;
     const float* xb = x + b * QK8_0;
-    uint8_t* out = blocks + b * 34;                 // { fp16 d ; int8 qs[32] }
+    uint8_t* out = blocks + b * 34;   // { fp16 d ; int8 qs[32] }
 
     float amax = 0.0f;
     for (int i = 0; i < QK8_0; ++i) amax = fmaxf(amax, fabsf(xb[i]));
@@ -128,8 +126,7 @@ __global__ void quantize_q8_0_scaled_kernel(const float* __restrict__ x, uint8_t
     out[2 + i] = (uint8_t) (int8_t) v;
 }
 
-__global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ blocks, float* __restrict__ x,
-                                    long long n_blocks) {
+__global__ void dequant_q8_0_kernel(const uint8_t* __restrict__ blocks, float* __restrict__ x, long long n_blocks) {
     const long long b = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_blocks) return;
     const uint8_t* blk = blocks + b * 34;
@@ -160,8 +157,7 @@ __device__ __forceinline__ int nearest_int_dev(float fval) {
     return (i & 0x007fffff) - 0x00400000;
 }
 
-__global__ void quantize_q8_K_kernel(const float* __restrict__ x, uint8_t* __restrict__ blocks,
-                                     long long n_blocks) {
+__global__ void quantize_q8_K_kernel(const float* __restrict__ x, uint8_t* __restrict__ blocks, long long n_blocks) {
     const long long b = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_blocks) return;
     const float* xb = x + b * QK_K;
@@ -190,7 +186,7 @@ __global__ void quantize_q8_K_kernel(const float* __restrict__ x, uint8_t* __res
         for (int j = 0; j < QK_K / 16; ++j) bsums[j] = 0;
         return;
     }
-    const float iscale = -127.0f / max;          // -127, NOT -128; see the header
+    const float iscale = -127.0f / max;   // -127, NOT -128; see the header
     for (int j = 0; j < QK_K; ++j) {
         // `__fmul_rn`, NOT `iscale * xb[j]`.  ggml computes the product, ROUNDS IT TO F32, and then adds
         // 12582912.0f inside `nearest_int`.  Written as a plain expression, nvcc CONTRACTS the multiply into
@@ -199,7 +195,7 @@ __global__ void quantize_q8_K_kernel(const float* __restrict__ x, uint8_t* __res
         // from the reference in 1 element of 524,288 for exactly this reason, and `__fmul_rn` pins the
         // rounding step the source actually performs.
         const int v = nearest_int_dev(__fmul_rn(iscale, xb[j]));
-        qs[j] = (int8_t) min(127, v);            // MIN only - the source has no lower clamp
+        qs[j] = (int8_t) min(127, v);   // MIN only - the source has no lower clamp
     }
     for (int j = 0; j < QK_K / 16; ++j) {
         int sum = 0;
@@ -209,8 +205,7 @@ __global__ void quantize_q8_K_kernel(const float* __restrict__ x, uint8_t* __res
     *d = 1.0f / iscale;
 }
 
-__global__ void dequant_q8_K_kernel(const uint8_t* __restrict__ blocks, float* __restrict__ x,
-                                    long long n_blocks) {
+__global__ void dequant_q8_K_kernel(const uint8_t* __restrict__ blocks, float* __restrict__ x, long long n_blocks) {
     const long long b = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_blocks) return;
     const uint8_t* blk = blocks + b * Q8K_BYTES;
@@ -221,7 +216,7 @@ __global__ void dequant_q8_K_kernel(const uint8_t* __restrict__ blocks, float* _
     for (int i = 0; i < QK_K; ++i) out[i] = (float) qs[i] * d;
 }
 
-}  // namespace
+}   // namespace
 
 void quantize_q8_0(const float* x, uint8_t* blocks, int64_t n, void* stream) {
     if (n <= 0) return;
@@ -287,7 +282,7 @@ void quantize_q8_K(const float* x, uint8_t* blocks, int64_t n, void* stream) {
         std::exit(1);
     }
     const long long nb = n / QK_K;
-    const int threads = 64;                       // one block per thread, and a block is 256 elements
+    const int threads = 64;   // one block per thread, and a block is 256 elements
     const unsigned grid = (unsigned) ((nb + threads - 1) / threads);
     quantize_q8_K_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(x, blocks, nb);
     const cudaError_t e = cudaGetLastError();
@@ -312,4 +307,4 @@ void dequant_q8_K(const uint8_t* blocks, float* x, int64_t n, void* stream) {
     if (stream == nullptr) cudaDeviceSynchronize();
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

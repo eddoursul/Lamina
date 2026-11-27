@@ -81,7 +81,8 @@ std::string TagTranslator::text(std::string_view s) {
 std::string qwen_to_hy4(std::string_view s, const Hy4Tags& t) {
     std::string out(s);
     auto replace = [&](std::string_view from, const std::string& to) {
-        for (size_t at = 0; (at = out.find(from, at)) != std::string::npos; at += to.size()) out.replace(at, from.size(), to);
+        for (size_t at = 0; (at = out.find(from, at)) != std::string::npos; at += to.size())
+            out.replace(at, from.size(), to);
     };
     // a named call's opening "<tool_call>\n<function=NAME>\n": Hy4's call opening and the name
     const std::string_view fs = "<tool_call>\n<function=";
@@ -208,8 +209,9 @@ json block_kwargs(const json& kwargs) {
         return out;
     }
     const json& e = jget(out, "reasoning_effort");
-    if (e.is_string() && e.get_ref<const std::string&>() == "xhigh") out["reasoning_effort"] = "high";   // Qwen's top level
+    if (e.is_string() && e.get_ref<const std::string&>() == "xhigh")
+        out["reasoning_effort"] = "high";   // Qwen's top level
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

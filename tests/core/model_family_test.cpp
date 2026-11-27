@@ -32,8 +32,9 @@ void check(bool ok, const std::string& what) {
 struct TempDir {
     fs::path path;
     TempDir() {
-        path = fs::temp_directory_path() /
-               ("lamina-model-family-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        path =
+            fs::temp_directory_path() /
+            ("lamina-model-family-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         fs::create_directories(path);
     }
     ~TempDir() {
@@ -47,8 +48,8 @@ using fixture::Tensor;
 const uint32_t F32 = 0;
 
 struct Dims {
-    uint64_t block_count, embd, heads, heads_kv, key_len, experts, used, ff, ff_sh, conv, state, groups, v_heads,
-        inner, interval, nextn, hc, hc_lr, idx_heads, idx_key;
+    uint64_t block_count, embd, heads, heads_kv, key_len, experts, used, ff, ff_sh, conv, state, groups, v_heads, inner,
+        interval, nextn, hc, hc_lr, idx_heads, idx_key;
 };
 // Qwen3.6-35B-A3B (unsloth/Qwen3.6-35B-A3B-MTP-GGUF, every quant) and Qwen3.8-Flash-Next, as their files say
 const Dims kQwen36 = {41, 2048, 16, 2, 256, 256, 8, 512, 512, 4, 128, 16, 32, 4096, 4, 1, 0, 0, 0, 0};
@@ -156,10 +157,10 @@ int real_model(const std::string& any) {
     try {
         const lamina::GgufModel m = lamina::GgufModel::open(any);
         const std::string arch = lamina::check_architecture(m.meta());
-        std::printf("  %zu shard(s); architecture guard: %s; engine guard: %s\n", m.size(),
-                    arch.empty() ? "ok" : arch.c_str(),
-                    lamina::check_engine_architecture(m.meta()).empty() ? "runs"
-                                                                         : lamina::check_engine_architecture(m.meta()).c_str());
+        std::printf(
+            "  %zu shard(s); architecture guard: %s; engine guard: %s\n", m.size(), arch.empty() ? "ok" : arch.c_str(),
+            lamina::check_engine_architecture(m.meta()).empty() ? "runs"
+                                                                : lamina::check_engine_architecture(m.meta()).c_str());
         if (!arch.empty()) return 1;
         lamina::core::ModelGeometry g;
         int64_t k = 0;
@@ -168,15 +169,16 @@ int real_model(const std::string& any) {
             std::printf("  geometry: %s\n", err.c_str());
             return 1;
         }
-        std::printf("  family %s: layers %lld (+%lld MTP), hidden %lld, attention %lld/%lld x %lld every %lld, GDN K %lld"
-                    " V %lld x %lld conv %lld (%lld), MoE %lld experts top-%lld FF %lld shared %lld, hc %lld, indexer"
-                    " %lld, vocab %lld\n",
-                    lamina::model_family_title(g.family), (long long) g.n_layers, (long long) g.n_mtp_layers,
-                    (long long) g.n_embd, (long long) g.n_head, (long long) g.n_head_kv, (long long) g.head_dim,
-                    (long long) g.qsa_interval, (long long) g.ssm_k_heads, (long long) g.ssm_v_heads,
-                    (long long) g.ssm_state_size, (long long) g.ssm_conv_channels, (long long) g.ssm_d_conv,
-                    (long long) g.n_expert, (long long) k, (long long) g.n_ff, (long long) g.n_ff_shexp,
-                    (long long) g.hc, (long long) g.idx_q_heads, (long long) g.n_vocab);
+        std::printf(
+            "  family %s: layers %lld (+%lld MTP), hidden %lld, attention %lld/%lld x %lld every %lld, GDN K %lld"
+            " V %lld x %lld conv %lld (%lld), MoE %lld experts top-%lld FF %lld shared %lld, hc %lld, indexer"
+            " %lld, vocab %lld\n",
+            lamina::model_family_title(g.family), (long long) g.n_layers, (long long) g.n_mtp_layers,
+            (long long) g.n_embd, (long long) g.n_head, (long long) g.n_head_kv, (long long) g.head_dim,
+            (long long) g.qsa_interval, (long long) g.ssm_k_heads, (long long) g.ssm_v_heads,
+            (long long) g.ssm_state_size, (long long) g.ssm_conv_channels, (long long) g.ssm_d_conv,
+            (long long) g.n_expert, (long long) k, (long long) g.n_ff, (long long) g.n_ff_shexp, (long long) g.hc,
+            (long long) g.idx_q_heads, (long long) g.n_vocab);
         const std::string mm = lamina::core::compiled_geometry_mismatch(g);
         std::printf("  compiled kernels: %s\n", mm.empty() ? "match" : mm.c_str());
         size_t n = 0;
@@ -188,7 +190,7 @@ int real_model(const std::string& any) {
         return 1;
     }
 }
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[1]) == "--real") return real_model(argv[2]);
@@ -214,10 +216,14 @@ int main(int argc, char** argv) {
         check(lamina::check_engine_architecture(b).empty(), "the engine guard runs qwen4exp");
         std::vector<Kv> kv = metadata("qwen35moe", kQwen36, 8);
         for (auto it = kv.begin(); it != kv.end(); ++it)
-            if (it->key == "qwen35moe.ssm.time_step_rank") { kv.erase(it); break; }
+            if (it->key == "qwen35moe.ssm.time_step_rank") {
+                kv.erase(it);
+                break;
+            }
         const fs::path miss = d.path / "miss.gguf";
         fixture::write(miss, kv, {});
-        check(lamina::check_architecture(lamina::GgufFile(miss.string())).find("ssm.time_step_rank") != std::string::npos,
+        check(lamina::check_architecture(lamina::GgufFile(miss.string())).find("ssm.time_step_rank") !=
+                  std::string::npos,
               "a qwen35moe file without ssm.time_step_rank is refused, naming the key");
     }
     {
@@ -232,8 +238,9 @@ int main(int argc, char** argv) {
         check(ok, "Qwen3.6 geometry reads" + (ok ? std::string() : ": " + err));
         check(g.family == lamina::ModelFamily::Qwen35Moe && g.n_layers == 40 && g.n_mtp_layers == 1 && g.n_embd == 2048,
               "Qwen3.6: 40 trunk layers + 1 MTP block, hidden 2048");
-        check(g.n_qsa_layers() == 10 && g.n_gdn_layers() == 30 && lamina::core::layer_kind(g, 3) ==
-                  lamina::core::LayerKind::Attention && lamina::core::layer_kind(g, 40) == lamina::core::LayerKind::Mtp,
+        check(g.n_qsa_layers() == 10 && g.n_gdn_layers() == 30 &&
+                  lamina::core::layer_kind(g, 3) == lamina::core::LayerKind::Attention &&
+                  lamina::core::layer_kind(g, 40) == lamina::core::LayerKind::Mtp,
               "Qwen3.6: 10 attention / 30 GDN layers, layer 40 is the MTP block");
         check(g.ssm_k_heads == 16 && g.ssm_v_heads == 32 && g.ssm_conv_channels == 8192 && g.ssm_value_dim == 4096,
               "Qwen3.6 GDN: 16 K groups, 32 V heads, conv 8192, inner 4096");
@@ -276,7 +283,10 @@ int main(int argc, char** argv) {
               "a wrong shape is refused, naming the tensor and both shapes");
         e = layout_error(d.path, "qwen35moe", kTiny36, 16, [](std::vector<Tensor>& ts) {
             for (auto it = ts.begin(); it != ts.end(); ++it)
-                if (it->name == "blk.4.nextn.eh_proj.weight") { ts.erase(it); break; }
+                if (it->name == "blk.4.nextn.eh_proj.weight") {
+                    ts.erase(it);
+                    break;
+                }
         });
         check(e == "missing blk.4.nextn.eh_proj.weight", "a missing MTP tensor is refused");
         Dims bare = kTiny36;   // converted without its MTP block: no nextn_predict_layers, block_count the trunk's
@@ -289,16 +299,19 @@ int main(int argc, char** argv) {
         check(eb.empty() && geometry_of(d.path / "meta.gguf", gb, kb, errb) && gb.n_mtp_layers == 0 && gb.n_layers == 4,
               "a qwen35moe file without nextn_predict_layers is its trunk alone, no MTP block" +
                   (eb.empty() ? std::string() : ": " + eb));
-        e = layout_error(d.path, "qwen35moe", kTiny36, 16, [](std::vector<Tensor>& ts) {
-            ts.push_back({"blk.0.hc_attn_norm.weight", {64}, F32, 99});
-        });
+        e = layout_error(d.path, "qwen35moe", kTiny36, 16,
+                         [](std::vector<Tensor>& ts) { ts.push_back({"blk.0.hc_attn_norm.weight", {64}, F32, 99}); });
         check(e.find("blk.0.hc_attn_norm.weight") != std::string::npos && e.find("not in the") != std::string::npos,
               "a tensor the qwen35moe table does not name is refused");
         e = layout_error(d.path, "qwen4exp", kTinyFlash, 16, [](std::vector<Tensor>& ts) {
             for (auto it = ts.begin(); it != ts.end(); ++it)
-                if (it->name == "blk.3.indexer.k_proj.weight") { ts.erase(it); break; }
+                if (it->name == "blk.3.indexer.k_proj.weight") {
+                    ts.erase(it);
+                    break;
+                }
         });
-        check(e == "missing blk.3.indexer.k_proj.weight", "Flash-Next: a missing indexer tensor is refused (" + e + ")");
+        check(e == "missing blk.3.indexer.k_proj.weight",
+              "Flash-Next: a missing indexer tensor is refused (" + e + ")");
     }
     std::printf(g_fail ? "FAILED (%d)\n" : "ALL PASSED\n", g_fail);
     return g_fail ? 1 : 0;

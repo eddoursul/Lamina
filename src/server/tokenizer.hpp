@@ -58,12 +58,12 @@ public:
     const std::vector<std::string>& literals() const { return literal_texts_; }
     size_t max_special_len() const { return max_special_len_; }
 
-    std::string chat_template;                 ///< tokenizer.chat_template
-    std::string pre;                           ///< tokenizer.ggml.pre
+    std::string chat_template;                    ///< tokenizer.chat_template
+    std::string pre;                              ///< tokenizer.ggml.pre
     std::map<std::string, int64_t> special_ids;   ///< tokenizer.ggml.<name>_token_id
-    std::string architecture;                  ///< general.architecture
-    std::optional<Hy4Tags> hy4;                ///< the template's tags when it is Hy4-flash's (dialect.hpp)
-    std::optional<BlockTags> blocks;           ///< the template's tags when a reply is blocks (Inkling 2's)
+    std::string architecture;                     ///< general.architecture
+    std::optional<Hy4Tags> hy4;                   ///< the template's tags when it is Hy4-flash's (dialect.hpp)
+    std::optional<BlockTags> blocks;              ///< the template's tags when a reply is blocks (Inkling 2's)
 
 private:
     void encode_plain(std::string_view text, std::vector<int32_t>& out) const;
@@ -71,16 +71,16 @@ private:
 
     struct Literal {
         int32_t id;
-        std::string text;                      ///< as written: matched on the raw text
-        bool always;                           ///< type 4: matched without parse_special
+        std::string text;   ///< as written: matched on the raw text
+        bool always;        ///< type 4: matched without parse_special
     };
-    std::vector<std::string> bytes_;           ///< each token's raw bytes
+    std::vector<std::string> bytes_;   ///< each token's raw bytes
     std::unordered_map<std::string, int32_t> literal_ids_;
     std::vector<std::string> literal_texts_, control_;
     std::vector<Literal> lits_;
-    std::array<std::vector<uint32_t>, 256> by_first_;   ///< lits_ by their first byte, longest first
+    std::array<std::vector<uint32_t>, 256> by_first_;                    ///< lits_ by their first byte, longest first
     std::unordered_map<uint64_t, std::pair<int32_t, int32_t>> merges_;   ///< (left, right) -> (rank, merged id)
-    std::array<int32_t, 256> byte_token_{};    ///< a byte's single-symbol token
+    std::array<int32_t, 256> byte_token_{};                              ///< a byte's single-symbol token
     size_t max_special_len_ = 1;
     PreTokenizer split_ = PreTokenizer::Qwen35;   ///< `pre`'s
     /// inkling2's: each token's bytes (a view of bytes_) -> the token, which such a piece is without its merges
@@ -142,7 +142,7 @@ private:
         std::vector<Span> plain;
         std::vector<int32_t> ids;
         std::vector<size_t> ends, counts;
-        size_t reply_at = SIZE_MAX;            ///< where a remembered reply starts in the text (SIZE_MAX: none)
+        size_t reply_at = SIZE_MAX;   ///< where a remembered reply starts in the text (SIZE_MAX: none)
     };
     bool straddles(const std::string& text, size_t c) const;
 
@@ -157,4 +157,4 @@ size_t common_prefix_len(std::string_view a, std::string_view b);
 /// the first position below `limit` where the plain spans of two texts differ, or `limit`
 size_t plain_agree_until(const std::vector<Span>& a, const std::vector<Span>& b, size_t limit);
 
-}  // namespace lamina
+}   // namespace lamina

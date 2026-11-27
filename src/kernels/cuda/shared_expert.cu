@@ -18,24 +18,24 @@
 // The legacy canonical projections use their explicit Q8_0/Q8_K activation images. The optional native
 // BF16 path affects only the scalar gate: it reads the original F32 input and uses pinned CUDA MMVF plus
 // an FP32 sigmoid. Native projection overrides independently select CUDA Q8_1 MMVQ and FP32 SwiGLU.
-#include "lamina/kernels/shared_expert.hpp"
-#include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/quantize_act.hpp"
 #include "lamina/kernels/s2_gemv_q8.hpp"
 #include "lamina/kernels/s_gemv.hpp"
-#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/shared_expert.hpp"
 
 #include <cuda_runtime.h>
 
-#include <cmath>
 #include <climits>
+#include <cmath>
 #include <cstdio>
-#include <string>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <string>
 
 namespace lamina::kernels {
 namespace {
@@ -51,8 +51,8 @@ bool native_bf16 = false;
 
 // silu(x) = x / (1 + exp(-x)), written as `ref/moe.py` writes it, in DOUBLE then cast - the reference works in
 // float64 and a float32 exp differs in the last bits.  The multiplication by `up` is the reference's order.
-__global__ void swiglu_kernel(const float* __restrict__ gate, const float* __restrict__ up,
-                              float* __restrict__ out, int n) {
+__global__ void swiglu_kernel(const float* __restrict__ gate, const float* __restrict__ up, float* __restrict__ out,
+                              int n) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const double x = (double) gate[i];
@@ -134,8 +134,8 @@ __global__ void native_scalar_sigmoid_kernel(float* gate) {
 
 /// The MoE block's final combination.  See the header for the two readings it exists to pin.
 __global__ void moe_combine_kernel(const float* __restrict__ parts, const float* __restrict__ weights,
-                                   const float* __restrict__ shared, float* __restrict__ y, int n_embd,
-                                   int k, int has_shared) {
+                                   const float* __restrict__ shared, float* __restrict__ y, int n_embd, int k,
+                                   int has_shared) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= n_embd) return;
     // Accumulate in DOUBLE, in the reference's own order (`for i in range(k): out[t] += w[t,i] * g[0]`).
@@ -147,7 +147,7 @@ __global__ void moe_combine_kernel(const float* __restrict__ parts, const float*
     y[j] = (float) acc;
 }
 
-}  // namespace
+}   // namespace
 
 void shared_expert_set_native_bf16(bool enabled) { native_bf16 = enabled; }
 
@@ -157,7 +157,7 @@ __global__ void scale_rows_kernel(float* __restrict__ out, const float* __restri
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) out[(size_t) t * n + i] *= g[t];
 }
-}  // namespace
+}   // namespace
 
 void shared_expert_gate_rows(float* out, float* g, int64_t n_embd, int n_tok, void* stream) {
     cudaStream_t cs = (cudaStream_t) stream;
@@ -202,12 +202,11 @@ uint64_t shared_expert_scratch_bytes(int64_t n_ff) {
 }
 
 void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* x_bf16, const SForm& gate_form,
-                   const uint8_t* gate_codes, const float* gate_scales, const float* gate_off,
-                   const SForm& up_form, const uint8_t* up_codes, const float* up_scales, const float* up_off,
-                   const SForm& down_form, const uint8_t* down_codes, const float* down_scales,
-                   const float* down_off, const uint16_t* gate_inp_bf16, float* scratch, float* out,
-                   int64_t n_embd, int64_t n_ff, int tpr, void* stream, const float* x_f32,
-                   const NativeSharedWeights* native) {
+                   const uint8_t* gate_codes, const float* gate_scales, const float* gate_off, const SForm& up_form,
+                   const uint8_t* up_codes, const float* up_scales, const float* up_off, const SForm& down_form,
+                   const uint8_t* down_codes, const float* down_scales, const float* down_off,
+                   const uint16_t* gate_inp_bf16, float* scratch, float* out, int64_t n_embd, int64_t n_ff, int tpr,
+                   void* stream, const float* x_f32, const NativeSharedWeights* native) {
     if (n_embd <= 0 || n_ff <= 0) return;
     const bool use_native = native_bf16;
     const bool native_gate = native && native->gate_data && native_mmvq_supported(native->gate_type);
@@ -218,7 +217,8 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
         throw std::invalid_argument("shared_expert native input projection requires unrounded x_f32");
     if (native_projection) {
         if (!native->q8_1 || !stream || n_embd > INT_MAX || n_ff > INT_MAX)
-            throw std::invalid_argument("shared_expert native projections require scratch, stream and int32 dimensions");
+            throw std::invalid_argument(
+                "shared_expert native projections require scratch, stream and int32 dimensions");
         // Validate every active shape before any kernel is enqueued.
         if (native_gate) native_mmvq_weight_bytes(native->gate_type, (int) n_embd, (int) n_ff);
         if (native_up) native_mmvq_weight_bytes(native->up_type, (int) n_embd, (int) n_ff);
@@ -243,8 +243,8 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
 
     // WHICH ACTIVATION THIS PROJECTION WANTS, READ FROM ITS OWN FORM.  See `SForm::act_kind`: the three
     // families cannot be told apart by the other fields, so the kind is carried rather than derived.
-    auto gemv = [&](const SForm& f, const uint8_t* codes, const float* scales, const float* off,
-                    const uint8_t* act80, const uint8_t* actq8k, float* y, int64_t nin, int64_t nout) {
+    auto gemv = [&](const SForm& f, const uint8_t* codes, const float* scales, const float* off, const uint8_t* act80,
+                    const uint8_t* actq8k, float* y, int64_t nin, int64_t nout) {
         if (f.code_bits == 2) {
             s2_gemv_q8(act80, codes, scales, y, nin, nout, tpr, stream);
         } else if (f.act_kind == 1) {
@@ -258,20 +258,15 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
     const unsigned g_embd = (unsigned) ((n_embd + THREADS - 1) / THREADS);
 
     // gate and up projections, then silu(gate) * up in place in `gate`
-    if (native_gate || native_up)
-        native_quantize_q8_1(x_f32, native->q8_1, (int) n_embd, 1, stream);
+    if (native_gate || native_up) native_quantize_q8_1(x_f32, native->q8_1, (int) n_embd, 1, stream);
     if (native_gate)
         native_mmvq(native->gate_type, native->gate_data, native->q8_1, gate, (int) n_embd, (int) n_ff, 1, stream);
-    else
-        gemv(gate_form, gate_codes, gate_scales, gate_off, x_q8_0, x_q8k, gate, n_embd, n_ff);
-    if (native_up)
-        native_mmvq(native->up_type, native->up_data, native->q8_1, up, (int) n_embd, (int) n_ff, 1, stream);
-    else
-        gemv(up_form, up_codes, up_scales, up_off, x_q8_0, x_q8k, up, n_embd, n_ff);
+    else gemv(gate_form, gate_codes, gate_scales, gate_off, x_q8_0, x_q8k, gate, n_embd, n_ff);
+    if (native_up) native_mmvq(native->up_type, native->up_data, native->q8_1, up, (int) n_embd, (int) n_ff, 1, stream);
+    else gemv(up_form, up_codes, up_scales, up_off, x_q8_0, x_q8k, up, n_embd, n_ff);
     if (native_projection)
         native_swiglu_kernel<<<g_ff, THREADS, 0, (cudaStream_t) stream>>>(gate, up, gate, (int) n_ff);
-    else
-        swiglu_kernel<<<g_ff, THREADS, 0, (cudaStream_t) stream>>>(gate, up, gate, (int) n_ff);
+    else swiglu_kernel<<<g_ff, THREADS, 0, (cudaStream_t) stream>>>(gate, up, gate, (int) n_ff);
 
     // down: (n_ff) -> (n_embd), and THE INTERMEDIATE IS QUANTIZED TO THE DOWN WEIGHT'S OWN CONTRACT - which is
     // what `ggml_mul_mat` does for every matmul in the model.  It used to be rounded to fp16 with no
@@ -281,8 +276,10 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
         native_mmvq(native->down_type, native->down_data, native->q8_1, out, (int) n_ff, (int) n_embd, 1, stream);
     } else if (down_form.act_kind == 1) {
         if (n_ff % 256 != 0) {
-            std::fprintf(stderr, "shared_expert: the down weight wants Q8_K but n_ff %lld is not a multiple "
-                                 "of 256; Q8_K is structurally impossible here\n", (long long) n_ff);
+            std::fprintf(stderr,
+                         "shared_expert: the down weight wants Q8_K but n_ff %lld is not a multiple "
+                         "of 256; Q8_K is structurally impossible here\n",
+                         (long long) n_ff);
             std::exit(1);
         }
         quantize_q8_K(gate, h_q8k, n_ff, stream);
@@ -317,8 +314,8 @@ void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* 
     }
 }
 
-void moe_combine(const float* parts, const float* weights, const float* shared, float* y, int64_t n_embd,
-                 int64_t k, void* stream) {
+void moe_combine(const float* parts, const float* weights, const float* shared, float* y, int64_t n_embd, int64_t k,
+                 void* stream) {
     if (n_embd <= 0 || k <= 0) return;
     // k > 64 is refused rather than truncated: silently summing the first 64 of a longer list would be a
     // wrong answer that looks like a right one, and no geometry in this artifact comes close to it.
@@ -327,8 +324,8 @@ void moe_combine(const float* parts, const float* weights, const float* shared, 
         std::exit(1);
     }
     const unsigned grid = (unsigned) ((n_embd + THREADS - 1) / THREADS);
-    moe_combine_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(parts, weights, shared, y, (int) n_embd,
-                                                                   (int) k, shared != nullptr);
+    moe_combine_kernel<<<grid, THREADS, 0, (cudaStream_t) stream>>>(parts, weights, shared, y, (int) n_embd, (int) k,
+                                                                    shared != nullptr);
     if (stream == nullptr) {
         const cudaError_t e = cudaDeviceSynchronize();
         if (e != cudaSuccess) {
@@ -338,4 +335,4 @@ void moe_combine(const float* parts, const float* weights, const float* shared, 
     }
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

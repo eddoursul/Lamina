@@ -33,9 +33,9 @@ constexpr int32_t kTurnId = 248045;                   // <|im_start|>: the engin
 constexpr int kYieldsMax = 2;                         // #656: how often one request's read gives way
 constexpr int kSoloAgainMax = 2;                      // how often a request left alone in a slot goes back to solo
 constexpr int64_t kSoloAgainMinLeft = 32;
-constexpr int kBgenRefusalsMax = 6;                   // #1994: tries of other slots after the engine refused a BGEN
+constexpr int kBgenRefusalsMax = 6;   // #1994: tries of other slots after the engine refused a BGEN
 constexpr double kSlotParkS = 2.0;
-constexpr double kOrphanSlotS = 3.0;                  // #1603: a busy flag nobody owns this long is a leak
+constexpr double kOrphanSlotS = 3.0;   // #1603: a busy flag nobody owns this long is a leak
 
 const std::optional<double> kEngineStallS = timeout_env("LAMINA_ENGINE_STALL_S", 90.0);
 const std::optional<double> kAdmitMaxWaitS = timeout_env("LAMINA_ADMIT_MAX_WAIT_S", 30.0);
@@ -69,9 +69,11 @@ std::string join_ids(const std::vector<int32_t>& v) {
 void carry_leg(json& carry, const json& leg) {
     auto num = [&](const char* k) { return jget(leg, k).is_number() ? leg[k].get<double>() : 0.0; };
     carry["decode_ms"] = (carry.contains("decode_ms") ? carry["decode_ms"].get<double>() : 0.0) + num("decode_ms");
-    carry["generated"] = (carry.contains("generated") ? carry["generated"].get<int64_t>() : 0) + (int64_t) num("generated");
+    carry["generated"] =
+        (carry.contains("generated") ? carry["generated"].get<int64_t>() : 0) + (int64_t) num("generated");
     if (!carry.contains("prompt_ms")) carry["prompt_ms"] = num("prompt_ms");
-    if (!jget(leg, "prompt_read").is_null() && !carry.contains("prompt_read")) carry["prompt_read"] = leg["prompt_read"];
+    if (!jget(leg, "prompt_read").is_null() && !carry.contains("prompt_read"))
+        carry["prompt_read"] = leg["prompt_read"];
 }
 
 json add_carry(const json& carry, json last) {
@@ -83,7 +85,7 @@ json add_carry(const json& carry, json last) {
     return last;
 }
 
-}  // namespace
+}   // namespace
 
 json& LaminaEngine::figures() { return batch_ ? tl_last : last; }
 void LaminaEngine::count_done() {
@@ -152,11 +154,17 @@ json LaminaEngine::slots_view() {
             continue;
         }
         const json& ft = r["first_token"];
-        view.push_back({{"slot", b}, {"state", r["state"]}, {"prompt_tokens", r["prompt_tokens"]},
-                        {"prompt_read", r["state"] == "reading" ? r["prompt_read"] : json(nullptr)}, {"generated", r["generated"]},
-                        {"elapsed_s", std::round((now - r["started"].get<double>()) * 10) / 10},
-                        {"tok_s", ft.is_number() ? json(std::round(r["generated"].get<double>() / std::max(1e-6, now - ft.get<double>()) * 10) / 10)
-                                                 : json(nullptr)}});
+        view.push_back(
+            {{"slot", b},
+             {"state", r["state"]},
+             {"prompt_tokens", r["prompt_tokens"]},
+             {"prompt_read", r["state"] == "reading" ? r["prompt_read"] : json(nullptr)},
+             {"generated", r["generated"]},
+             {"elapsed_s", std::round((now - r["started"].get<double>()) * 10) / 10},
+             {"tok_s",
+              ft.is_number()
+                  ? json(std::round(r["generated"].get<double>() / std::max(1e-6, now - ft.get<double>()) * 10) / 10)
+                  : json(nullptr)}});
     }
     return view;
 }
@@ -181,7 +189,8 @@ bool LaminaEngine::take_control(Cancel& cancel, size_t plen, std::optional<int64
         const double now = mono();
         const WaitEntry* best = nullptr;
         auto key = [&](const WaitEntry* e) {
-            const bool shortish = (int64_t) e->len <= short_first || (kAdmitMaxWaitS && now - e->since >= *kAdmitMaxWaitS);
+            const bool shortish =
+                (int64_t) e->len <= short_first || (kAdmitMaxWaitS && now - e->since >= *kAdmitMaxWaitS);
             return std::make_pair(shortish ? 0 : 1, e->since);
         };
         for (const WaitEntry* e : wait_lens_)
@@ -202,7 +211,8 @@ bool LaminaEngine::take_control(Cancel& cancel, size_t plen, std::optional<int64
         Leave leave{*this, &entry};
         for (;;) {
             const std::optional<double> deadline = cancel.queue_deadline;
-            if (deadline && mono() >= *deadline) throw QueueWaitExpired("the inference queue wait deadline expired; retry later");
+            if (deadline && mono() >= *deadline)
+                throw QueueWaitExpired("the inference queue wait deadline expired; retry later");
             if (!alive() && !starting())
                 // #1012: the engine is gone and nobody starts it again: this request was not sent, so it ends now
                 throw EngineDied("the engine stopped while this request waited; it was not sent");
@@ -291,7 +301,8 @@ void LaminaEngine::control(Cancel& cancel, const std::function<void(int32_t)>& o
             const std::vector<std::string> f = split_ws(line);
             if (f.size() >= 3 && digits(f[1]) && digits(f[2])) {
                 const std::pair<int64_t, int64_t> pp(std::atoll(f[1].c_str()), std::atoll(f[2].c_str()));
-                const double ms = f.size() >= 4 ? std::atof(f[3].c_str()) : 0.0, mean = f.size() >= 5 ? std::atof(f[4].c_str()) : -1;
+                const double ms = f.size() >= 4 ? std::atof(f[3].c_str()) : 0.0,
+                             mean = f.size() >= 5 ? std::atof(f[4].c_str()) : -1;
                 update_progress([&](Progress& p) {
                     p.read = pp;
                     p.ms = ms;
@@ -312,7 +323,8 @@ void LaminaEngine::control(Cancel& cancel, const std::function<void(int32_t)>& o
             return;
         } else if (starts_with(line, "YIELDED ")) {   // the read gave way (BYIELD): <slot> <tokens read>
             const std::vector<std::string> f = split_ws(line);
-            if (f.size() >= 3 && digits(f[2]) && (digits(f[1]) || (f[1].size() > 1 && f[1][0] == '-' && digits(f[1].substr(1)))))
+            if (f.size() >= 3 && digits(f[2]) &&
+                (digits(f[1]) || (f[1].size() > 1 && f[1][0] == '-' && digits(f[1].substr(1)))))
                 yielded_ = std::make_pair(std::stoi(f[1]), (int64_t) std::stoll(f[2]));
         } else if (starts_with(line, "CACHE ")) {   // the prompt cache's state: the Monitor's Conversation cache card
             cache_line(line);
@@ -380,8 +392,7 @@ void LaminaEngine::release_slot_when_done(int slot, std::optional<std::vector<in
     if (slot >= (int) slot_q_.size()) return;   // the engine restarted with fewer slots: this one is gone
     try {
         send("BSTOP " + std::to_string(slot));
-    } catch (const EngineDied&) {
-    }
+    } catch (const EngineDied&) {}
     auto q = slot_q_[(size_t) slot];
     auto busy = slot_busy_;
     auto holds = slot_held_;
@@ -415,7 +426,8 @@ void LaminaEngine::release_slot_when_done(int slot, std::optional<std::vector<in
         }
         {
             std::lock_guard<std::mutex> lk(slot_mu_);
-            (*holds)[(size_t) slot] = stream && !tail.empty() ? std::vector<int32_t>(tail.begin(), tail.end() - 1) : std::vector<int32_t>{};
+            (*holds)[(size_t) slot] =
+                stream && !tail.empty() ? std::vector<int32_t>(tail.begin(), tail.end() - 1) : std::vector<int32_t>{};
             (*busy)[(size_t) slot] = false;
             releasing->erase(slot);
         }
@@ -464,7 +476,8 @@ std::vector<int> LaminaEngine::reap_orphan_slots() {
     if (!freed.empty()) {
         std::string list;
         for (const int b : freed) list += (list.empty() ? "" : ", ") + std::to_string(b);
-        say("[lamina] parallel: slot(s) " + list + " were marked busy with no request using them (issue #1603); freed, the "
+        say("[lamina] parallel: slot(s) " + list +
+            " were marked busy with no request using them (issue #1603); freed, the "
             "waiting request goes on");
         slot_cv_.notify_all();
     }
@@ -479,8 +492,8 @@ std::optional<int> LaminaEngine::pick_slot(const std::vector<int32_t>& prompt) {
         if (!(*slot_busy_)[(size_t) b]) free.push_back(b);
     if (free.empty()) return std::nullopt;
     auto held_prefix = [&](int b) -> size_t {
-        // what of the prompt the slot's cache serves: its whole held stream when this prompt continues it, else its turn
-        // checkpoint (the last <|im_start|>: the chat's next turn agrees with it up to there, #2518)
+        // what of the prompt the slot's cache serves: its whole held stream when this prompt continues it, else its
+        // turn checkpoint (the last <|im_start|>: the chat's next turn agrees with it up to there, #2518)
         const std::vector<int32_t>& h = (*slot_held_)[(size_t) b];
         if (h.empty()) return 0;
         if (h.size() < prompt.size() && std::equal(h.begin(), h.end(), prompt.begin())) return h.size();
@@ -492,16 +505,18 @@ std::optional<int> LaminaEngine::pick_slot(const std::vector<int32_t>& prompt) {
     for (const int b : free)
         if (held_prefix(b) > held_prefix(best)) best = b;
     if (held_prefix(best) >= 1) return best;
-    auto key = [&](int b) { return std::make_pair(!(*slot_held_)[(size_t) b].empty(), slot_used_[(size_t) b]); };   // empty, then least recent
+    auto key = [&](int b) {
+        return std::make_pair(!(*slot_held_)[(size_t) b].empty(), slot_used_[(size_t) b]);
+    };   // empty, then least recent
     return *std::min_element(free.begin(), free.end(), [&](int a, int b) { return key(a) < key(b); });
 }
 
 bool LaminaEngine::may_go_solo(int64_t left, int times, const std::string& embeddings) {
-    // a request decoding in a slot that is alone now goes back to the solo path with its MTP drafts (the engine continues
-    // it from the slot's sessions: INFO slot_cache=1); LAMINA_PARALLEL_SOLO=0 keeps it in the slot
+    // a request decoding in a slot that is alone now goes back to the solo path with its MTP drafts (the engine
+    // continues it from the slot's sessions: INFO slot_cache=1); LAMINA_PARALLEL_SOLO=0 keeps it in the slot
     const char* off = std::getenv("LAMINA_PARALLEL_SOLO");
-    if (!embeddings.empty() || times >= kSoloAgainMax || left < kSoloAgainMinLeft || !truthy(jget(info(), "slot_cache")) ||
-        (off != nullptr && std::string(off) == "0"))
+    if (!embeddings.empty() || times >= kSoloAgainMax || left < kSoloAgainMinLeft ||
+        !truthy(jget(info(), "slot_cache")) || (off != nullptr && std::string(off) == "0"))
         return false;
     std::lock_guard<std::mutex> lk(slot_mu_);
     return std::count(slot_busy_->begin(), slot_busy_->end(), true) == 1 && waiting_ == 0;
@@ -515,8 +530,9 @@ bool LaminaEngine::shorter_waiting(size_t plen) {
     return false;
 }
 
-void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max_new, const json& sampling, Cancel& cancel,
-                                    const std::string& embeddings, const std::function<bool(int32_t)>& on_token,
+void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max_new, const json& sampling,
+                                    Cancel& cancel, const std::string& embeddings,
+                                    const std::function<bool(int32_t)>& on_token,
                                     const std::function<bool()>& on_beat) {
     if (!alive()) throw EngineDied("the engine is unavailable; this request was not sent");
     update_progress([](Progress& p) {
@@ -529,7 +545,8 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
     const std::string keys = sampling_keys(sampling);
     std::vector<int32_t> out, prompt = ids;
     int64_t left = max_new;
-    json reused0;   // the first read's reused tokens (a continued leg's count includes this request's own output)
+    json reused0;                  // the first read's reused tokens (a continued
+                                   // leg's count includes this request's own output)
     json carry = json::object();   // #1869: the legs that ended in a hand-back to the solo path
     auto beat = [&] {
         if (!on_beat()) throw ConsumerLeft();
@@ -580,8 +597,7 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                 const std::vector<std::string> f = split_ws(line);
                 if (starts_with(line, "BADM ") && f.size() > 2 && f[2] == "1") phase = "slot";
             }
-        } catch (const EngineDied&) {
-        }
+        } catch (const EngineDied&) {}
         bool bdone_in = false;
         if (phase == "slot" && slot && !out.empty() && kEosIds.count(out.back()) && gen_ == born) {
             const std::string bd = bdone_after_eos(*slot);   // (#1869) the slot's figures, not the admission's
@@ -616,8 +632,9 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
             if (phase == "slot" && bdone_in) {
                 {
                     std::lock_guard<std::mutex> lk(slot_mu_);   // as the BDONE wait leaves it
-                    (*slot_held_)[(size_t) *slot] = stream && !stream->empty() ? std::vector<int32_t>(stream->begin(), stream->end() - 1)
-                                                                               : std::vector<int32_t>{};
+                    (*slot_held_)[(size_t) *slot] = stream && !stream->empty()
+                                                        ? std::vector<int32_t>(stream->begin(), stream->end() - 1)
+                                                        : std::vector<int32_t>{};
                 }
                 free_slot(*slot);
             } else if (phase == "slot") {
@@ -661,7 +678,8 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                     return waiting_ > 0;
                 };
                 auto give_way = [&] {   // at a PP line, and between two far apart (taken at the engine's next boundary)
-                    if (reserved || !out.empty() || !embeddings.empty() || yields >= kYieldsMax || !shorter_waiting(prompt.size()))
+                    if (reserved || !out.empty() || !embeddings.empty() || yields >= kYieldsMax ||
+                        !shorter_waiting(prompt.size()))
                         return;
                     {
                         std::lock_guard<std::mutex> lk(slot_mu_);   // the slot the part read will wait in
@@ -701,9 +719,9 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
             json* live = nullptr;
             for (;;) {
                 if (!slot) {
-                    // a free slot (they free themselves at BDONE, which needs no control lines): the one that holds this
-                    // prompt's start, else the one used longest ago. With none free the control lines are given back
-                    // while waiting: a slot can be held by a read that gave way and needs them to go on
+                    // a free slot (they free themselves at BDONE, which needs no control lines): the one that holds
+                    // this prompt's start, else the one used longest ago. With none free the control lines are given
+                    // back while waiting: a slot can be held by a read that gave way and needs them to go on
                     for (;;) {
                         check_deadline();
                         {
@@ -735,19 +753,24 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                                     admit_said = true;
                                     std::string busy, claims, ending;
                                     for (int b = 0; b < batch_; ++b)
-                                        if ((*slot_busy_)[(size_t) b]) busy += (busy.empty() ? "" : ", ") + std::to_string(b);
-                                    for (const int b : slot_claims_) claims += (claims.empty() ? "" : ", ") + std::to_string(b);
-                                    for (const int b : *slot_releasing_) ending += (ending.empty() ? "" : ", ") + std::to_string(b);
+                                        if ((*slot_busy_)[(size_t) b])
+                                            busy += (busy.empty() ? "" : ", ") + std::to_string(b);
+                                    for (const int b : slot_claims_)
+                                        claims += (claims.empty() ? "" : ", ") + std::to_string(b);
+                                    for (const int b : *slot_releasing_)
+                                        ending += (ending.empty() ? "" : ", ") + std::to_string(b);
                                     char buf[64];
                                     std::snprintf(buf, sizeof buf, "%.0f", mono() - admit_since);
-                                    say(std::string("[lamina] parallel: a request has waited ") + buf + " s for a free slot (busy: [" +
-                                        busy + "], in use: [" + claims + "], ending: [" + ending + "]) (issue #1603)");
+                                    say(std::string("[lamina] parallel: a request has waited ") + buf +
+                                        " s for a free slot (busy: [" + busy + "], in use: [" + claims +
+                                        "], ending: [" + ending + "]) (issue #1603)");
                                 }
                                 reap_orphan_slots();
                             }
                             if (!pick_slot(prompt)) {
                                 const double remaining = cancel.queue_deadline ? *cancel.queue_deadline - mono() : 1.0;
-                                slot_cv_.wait_for(lk, std::chrono::duration<double>(std::min(1.0, std::max(0.0, remaining))));
+                                slot_cv_.wait_for(
+                                    lk, std::chrono::duration<double>(std::min(1.0, std::max(0.0, remaining))));
                             }
                         }
                         if (cancel.is_set()) return;
@@ -761,7 +784,9 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                 if (yielded_) {   // it gave way: the others waiting then go first
                     {
                         std::lock_guard<std::mutex> lk(slot_mu_);
-                        (*slot_held_)[(size_t) *slot] = std::vector<int32_t>(prompt.begin(), prompt.begin() + (ptrdiff_t) std::min<int64_t>(yielded_->second, (int64_t) prompt.size()));
+                        (*slot_held_)[(size_t) *slot] = std::vector<int32_t>(
+                            prompt.begin(),
+                            prompt.begin() + (ptrdiff_t) std::min<int64_t>(yielded_->second, (int64_t) prompt.size()));
                     }
                     yielded_.reset();
                     ++yields;
@@ -777,15 +802,17 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                     born = gen_;
                 }
                 slot_q_[(size_t) *slot]->clear();
-                const std::string head = embeddings.empty()
-                                             ? "BGEN " + std::to_string(*slot) + " " + std::to_string(left) + keys
-                                             : "BGENI " + std::to_string(*slot) + " " + std::to_string(left) + keys + " " + embeddings;
+                const std::string head =
+                    embeddings.empty()
+                        ? "BGEN " + std::to_string(*slot) + " " + std::to_string(left) + keys
+                        : "BGENI " + std::to_string(*slot) + " " + std::to_string(left) + keys + " " + embeddings;
                 check_deadline();
                 {
                     std::lock_guard<std::mutex> lk(slot_mu_);
-                    slot_live_[(size_t) *slot] = {{"slot", *slot}, {"request_id", cancel.request_id}, {"state", "reading"},
-                                                  {"prompt_tokens", prompt.size()}, {"prompt_read", 0}, {"generated", 0},
-                                                  {"started", wall()}, {"first_token", nullptr}};
+                    slot_live_[(size_t) *slot] = {{"slot", *slot},      {"request_id", cancel.request_id},
+                                                  {"state", "reading"}, {"prompt_tokens", prompt.size()},
+                                                  {"prompt_read", 0},   {"generated", 0},
+                                                  {"started", wall()},  {"first_token", nullptr}};
                     live = &slot_live_[(size_t) *slot];
                 }
                 last_done_.clear();   // (#879: this admission's DONE decides below)
@@ -813,14 +840,17 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                     if (read && live != nullptr && (*live)["state"] == "reading") (*live)["prompt_read"] = read->first;
                 };
                 try {
-                    control(cancel, emit, nullptr, [&] {
-                        ask();
-                        note_progress();
-                    }, [&] {
-                        ask();
-                        note_progress();
-                        beat();
-                    });
+                    control(
+                        cancel, emit, nullptr,
+                        [&] {
+                            ask();
+                            note_progress();
+                        },
+                        [&] {
+                            ask();
+                            note_progress();
+                            beat();
+                        });
                 } catch (const EngineError& e) {
                     // #1994: the engine says the slot is not free (its view and ours differ for a moment): nothing was
                     // read, so the slot is parked and another one tried - never a 400 for the conversation
@@ -845,8 +875,10 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                 }
                 cont = ctl_result_ && ctl_result_->second;
                 phase = cont ? "slot" : "none";
-                if (!cont && done_finish() == "nonfinite") throw EngineNonFinite("the engine's logits became non-finite (#879)");
-                if (!cont && yielded_ && yielded_->first == *slot && !cancel.is_set()) continue;   // gave way: again later
+                if (!cont && done_finish() == "nonfinite")
+                    throw EngineNonFinite("the engine's logits became non-finite (#879)");
+                if (!cont && yielded_ && yielded_->first == *slot && !cancel.is_set())
+                    continue;   // gave way: again later
                 break;
             }
             ctl_.unlock();
@@ -894,7 +926,8 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                         continue;
                     }
                     emit(t);
-                    if (!going_solo && !stop_sent && may_go_solo(max_new - (int64_t) out.size(), solo_again, embeddings)) {
+                    if (!going_solo && !stop_sent &&
+                        may_go_solo(max_new - (int64_t) out.size(), solo_again, embeddings)) {
                         send("BSTOP " + std::to_string(*slot));   // alone now: on with the drafts (below)
                         going_solo = true;
                     }
@@ -910,12 +943,15 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                             h = prompt;
                             h.insert(h.end(), out.begin() + (ptrdiff_t) *gen0, out.end() - 1);
                         }
-                        (*slot_held_)[(size_t) *slot] = f.size() > 3 && f[3] == "nonfinite" ? std::vector<int32_t>{} : h;
+                        (*slot_held_)[(size_t) *slot] =
+                            f.size() > 3 && f[3] == "nonfinite" ? std::vector<int32_t>{} : h;
                     }
-                    if (f.size() > 3 && f[3] == "nonfinite") throw EngineNonFinite("the engine's logits became non-finite (#879)");
-                    if (going_solo && f.size() > 3 && f[3] == "cancel" && !cancel.is_set() && (int64_t) out.size() < max_new &&
-                        !(!out.empty() && kEosIds.count(out.back()))) {
-                        // the solo path continues it: the engine copies the slot's sessions back and decodes with drafts
+                    if (f.size() > 3 && f[3] == "nonfinite")
+                        throw EngineNonFinite("the engine's logits became non-finite (#879)");
+                    if (going_solo && f.size() > 3 && f[3] == "cancel" && !cancel.is_set() &&
+                        (int64_t) out.size() < max_new && !(!out.empty() && kEosIds.count(out.back()))) {
+                        // the solo path continues it: the engine copies
+                        // the slot's sessions back and decodes with drafts
                         carry_leg(carry, tl_last);   // #1869: the solo DONE replaces these figures
                         {
                             std::lock_guard<std::mutex> lk(slot_mu_);
@@ -949,4 +985,4 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
     held.reset();
 }
 
-}  // namespace lamina
+}   // namespace lamina

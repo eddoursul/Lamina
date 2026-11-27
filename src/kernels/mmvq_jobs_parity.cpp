@@ -18,7 +18,10 @@
 namespace {
 
 void ck(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 uint16_t half_bits(float f) {   // a normal value's half (no rounding cases among those used)
     uint32_t u;
@@ -26,7 +29,7 @@ uint16_t half_bits(float f) {   // a normal value's half (no rounding cases amon
     return (uint16_t) (((u >> 16) & 0x8000) | ((((u >> 23) & 0xff) - 112) << 10) | ((u >> 13) & 0x3ff));
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     using namespace lamina::kernels;
@@ -125,7 +128,8 @@ int main() {
             checked += (long long) T * n_outs[j];
         }
         std::printf("%d interleaved columns, 5 products in a launch: %lld values differ from a launch each; the copy's "
-                    "parts: %lld differ from the image\n", T, d, dv);
+                    "parts: %lld differ from the image\n",
+                    T, d, dv);
         diff += d + dv;
         for (int i = 0; i < 2; ++i) ck(cudaFree(xil[i]), "free");
     }
@@ -157,7 +161,8 @@ int main() {
             ck(cudaMemcpy(a.data(), ya[j], a.size() * 4, cudaMemcpyDeviceToHost), "down");
             ck(cudaMemcpy(b.data(), yb[j], b.size() * 4, cudaMemcpyDeviceToHost), "down");
             for (size_t i = 0; i < (size_t) T * n_outs[j]; ++i) d += a[i] != b[i];
-            for (size_t i = (size_t) T * n_outs[j]; i < b.size(); ++i) d += b[i] != 0xeeeeeeeeu;   // (nothing past the columns)
+            for (size_t i = (size_t) T * n_outs[j]; i < b.size(); ++i)
+                d += b[i] != 0xeeeeeeeeu;   // (nothing past the columns)
             checked += (long long) T * n_outs[j];
         }
         std::printf("%d columns, 5 products in a launch: %lld values differ from a launch each\n", T, d);
@@ -166,7 +171,8 @@ int main() {
     {   // declined: a K-quant, more jobs than the table holds, a short row
         MmvqJob one{w[0], xq[0], yb[0], n_outs[0]}, many[kMmvqJobs + 1];
         for (auto& m : many) m = one;
-        const bool k = native_mmvq_jobs(12, &one, 1, n_in, 1, s), m = native_mmvq_jobs(8, many, kMmvqJobs + 1, n_in, 1, s);
+        const bool k = native_mmvq_jobs(12, &one, 1, n_in, 1, s),
+                   m = native_mmvq_jobs(8, many, kMmvqJobs + 1, n_in, 1, s);
         const bool sh = native_mmvq_jobs(8, &one, 1, 512, 1, s);
         std::printf("declined: a Q4_K matrix %s, %d jobs %s, a row of 16 blocks %s\n", k ? "NO" : "yes", kMmvqJobs + 1,
                     m ? "NO" : "yes", sh ? "NO" : "yes");

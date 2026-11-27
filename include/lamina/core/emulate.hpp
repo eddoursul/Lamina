@@ -32,4 +32,4 @@ inline int smem_optin_of(int real) {
     }
 }
 
-}  // namespace lamina
+}   // namespace lamina

@@ -71,4 +71,4 @@ private:
 void set_native_embed(const NativeEmbed* e);
 const NativeEmbed* native_embed();
 
-}  // namespace lamina::core
+}   // namespace lamina::core

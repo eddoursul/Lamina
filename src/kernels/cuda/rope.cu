@@ -25,15 +25,15 @@
 // `freq_scale`; YaRN blends extrapolation and interpolation along the pairs (ggml's `rope_yarn`) and folds
 // the mscale magnitude correction into the same cos/sin values.  All of it float64, in the reference's
 // order, so `rope_parity` can hold every variant to a bit-exact float64 transcription of the same spec.
-#include "lamina/kernels/rope.hpp"
 #include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/rope.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cmath>
-#include <vector>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 namespace lamina::kernels {
 
@@ -41,7 +41,7 @@ namespace {
 // The process's rope config (rope_scaling.hpp).  One writer - the engine's startup thread, before
 // session_init builds any table or captures any graph - and readers after it.
 RopeScaling g_rope_scaling;
-}  // namespace
+}   // namespace
 
 void rope_scaling_set(const RopeScaling& scaling) { g_rope_scaling = scaling; }
 const RopeScaling& rope_scaling() { return g_rope_scaling; }
@@ -98,17 +98,16 @@ namespace {
 //
 // A row is head_dim floats (256 here) and there are batch x heads of them, so one thread per row is a
 // handful of threads for a token and removes the ordering question entirely rather than synchronising it.
-__global__ void rope_neox_kernel(const float* __restrict__ x, float* __restrict__ out, long long rows,
-                                 int head_dim, int n_rot, const float* __restrict__ cos_tab,
-                                 const float* __restrict__ sin_tab, const int* __restrict__ pos,
-                                 const int32_t* __restrict__ mtab) {
+__global__ void rope_neox_kernel(const float* __restrict__ x, float* __restrict__ out, long long rows, int head_dim,
+                                 int n_rot, const float* __restrict__ cos_tab, const float* __restrict__ sin_tab,
+                                 const int* __restrict__ pos, const int32_t* __restrict__ mtab) {
     const long long r = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= rows) return;
     const int half = n_rot / 2;
     const float* xr = x + r * head_dim;
     float* orow = out + r * head_dim;
 
-    for (int d = n_rot; d < head_dim; ++d) orow[d] = xr[d];      // the PARTIAL rotation's untouched tail
+    for (int d = n_rot; d < head_dim; ++d) orow[d] = xr[d];   // the PARTIAL rotation's untouched tail
     for (int i = 0; i < half; ++i) {
         const size_t toff = (size_t) mrope_pos(mtab, pos[r], i) * half;   // the image path's per-pair position
         // THE PAIRING AND THE SIGNS COME FROM `rope_neox_pair`, shared with the indexer's pooling kernel.
@@ -116,7 +115,7 @@ __global__ void rope_neox_kernel(const float* __restrict__ x, float* __restrict_
     }
 }
 
-}  // namespace
+}   // namespace
 
 void rope_neox_apply(const float* x, float* out, int64_t rows, int head_dim, int n_rot, const float* cos_tab,
                      const float* sin_tab, const int* pos, void* stream) {
@@ -127,8 +126,8 @@ void rope_neox_apply(const float* x, float* out, int64_t rows, int head_dim, int
     }
     const int threads = 128;
     const unsigned grid = (unsigned) ((rows + threads - 1) / threads);
-    rope_neox_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(x, out, rows, head_dim, n_rot, cos_tab,
-                                                                 sin_tab, pos, mrope_table());
+    rope_neox_kernel<<<grid, threads, 0, (cudaStream_t) stream>>>(x, out, rows, head_dim, n_rot, cos_tab, sin_tab, pos,
+                                                                  mrope_table());
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "rope_neox_apply launch: %s\n", cudaGetErrorString(e));
@@ -137,4 +136,4 @@ void rope_neox_apply(const float* x, float* out, int64_t rows, int head_dim, int
     if (stream == nullptr) cudaDeviceSynchronize();
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

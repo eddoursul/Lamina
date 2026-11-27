@@ -86,4 +86,4 @@ bool SafeTensors::read(const std::string& name, std::vector<float>& out, std::ve
     return true;
 }
 
-}  // namespace lamina
+}   // namespace lamina

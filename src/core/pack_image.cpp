@@ -53,12 +53,11 @@ bool expected_bytes(const TensorInfo& t, uint64_t& out) {
 /// The GGML type names (tools/gguf_reader.py's GGML_TYPES), for the messages.
 std::string type_str(uint32_t t) {
     static const char* const names[] = {
-        "F32",     "F16",      "Q4_0",     "Q4_1",       "Q4_2",       "Q4_3",       "Q5_0",   "Q5_1",
-        "Q8_0",    "Q8_1",     "Q2_K",     "Q3_K",       "Q4_K",       "Q5_K",       "Q6_K",   "Q8_K",
-        "IQ2_XXS", "IQ2_XS",   "IQ3_XXS",  "IQ1_S",      "IQ4_NL",     "IQ3_S",      "IQ2_S",  "IQ4_XS",
-        "I8",      "I16",      "I32",      "I64",        "F64",        "IQ1_M",      "BF16",   "Q4_0_4_4",
-        "Q4_0_4_8", "Q4_0_8_8", "TQ1_0",   "TQ2_0",      "IQ4_NL_4_4", "IQ4_NL_4_8", "IQ4_NL_8_8", "MXFP4",
-        "NVFP4",   "Q1_0",     "Q2_0",
+        "F32",        "F16",        "Q4_0",       "Q4_1",  "Q4_2",     "Q4_3",     "Q5_0",     "Q5_1",    "Q8_0",
+        "Q8_1",       "Q2_K",       "Q3_K",       "Q4_K",  "Q5_K",     "Q6_K",     "Q8_K",     "IQ2_XXS", "IQ2_XS",
+        "IQ3_XXS",    "IQ1_S",      "IQ4_NL",     "IQ3_S", "IQ2_S",    "IQ4_XS",   "I8",       "I16",     "I32",
+        "I64",        "F64",        "IQ1_M",      "BF16",  "Q4_0_4_4", "Q4_0_4_8", "Q4_0_8_8", "TQ1_0",   "TQ2_0",
+        "IQ4_NL_4_4", "IQ4_NL_4_8", "IQ4_NL_8_8", "MXFP4", "NVFP4",    "Q1_0",     "Q2_0",
     };
     if (t < sizeof names / sizeof names[0]) return names[t];
     switch (t) {
@@ -75,10 +74,7 @@ std::string type_str(uint32_t t) {
 
 bool is_float(uint32_t t) { return t == kF32 || t == kF16 || t == kBf16; }
 
-template <size_t N>
-bool one_of(uint32_t t, const uint32_t (&set)[N]) {
-    return std::find(set, set + N, t) != set + N;
-}
+template <size_t N> bool one_of(uint32_t t, const uint32_t (&set)[N]) { return std::find(set, set + N, t) != set + N; }
 
 bool starts_with(const std::string& s, const char* p) { return s.compare(0, std::strlen(p), p) == 0; }
 bool ends_with(const std::string& s, const char* p) {
@@ -89,9 +85,11 @@ bool ends_with(const std::string& s, const char* p) {
 /// is_expert: the routed experts, which native_experts.txt describes and the engine reads from the GGUF.
 bool is_expert(const std::string& name) { return starts_with(name, "blk.") && ends_with(name, "_exps.weight"); }
 
-/// prism.hadamard.*, what a Hadamard-folded file says of its experts (hadamard.hpp): into `h` (block 0 without the metadata), or
-/// false with the reason.  What this engine cannot apply is refused: a folded weight run unrotated computes plausible garbage.
-bool read_hadamard(const lamina::GgufFile& meta, int64_t n_layers, lamina::kernels::cpu::HadamardSpec& h, std::string& err) {
+/// prism.hadamard.*, what a Hadamard-folded file says of its experts (hadamard.hpp): into `h` (block 0 without the
+/// metadata), or false with the reason.  What this engine cannot apply
+/// is refused: a folded weight run unrotated computes plausible garbage.
+bool read_hadamard(const lamina::GgufFile& meta, int64_t n_layers, lamina::kernels::cpu::HadamardSpec& h,
+                   std::string& err) {
     using lamina::MetaType;
     const auto text = [&](const char* key) -> std::string {
         const lamina::MetaValue* v = meta.get(key);
@@ -124,14 +122,17 @@ bool read_hadamard(const lamina::GgufFile& meta, int64_t n_layers, lamina::kerne
         return false;
     }
     const lamina::MetaValue* names = meta.get("prism.hadamard.weight_names");
-    if (names == nullptr || names->type != MetaType::ARRAY || names->items.size() != names->count || names->count == 0) {
+    if (names == nullptr || names->type != MetaType::ARRAY || names->items.size() != names->count ||
+        names->count == 0) {
         err = "prism.hadamard: no list of folded weights";
         return false;
     }
     h.roles.assign((size_t) n_layers, 0);
     for (const lamina::MetaValue& n : names->items) {
-        static const struct { const char* suffix; uint8_t bit; } roles[] = {
-            {".ffn_gate_exps.weight", 1}, {".ffn_up_exps.weight", 2}, {".ffn_down_exps.weight", 4}};
+        static const struct {
+            const char* suffix;
+            uint8_t bit;
+        } roles[] = {{".ffn_gate_exps.weight", 1}, {".ffn_up_exps.weight", 2}, {".ffn_down_exps.weight", 4}};
         uint8_t bit = 0;
         for (const auto& r : roles)
             if (ends_with(n.s, r.suffix)) bit = r.bit;
@@ -158,7 +159,8 @@ bool read_hadamard(const lamina::GgufFile& meta, int64_t n_layers, lamina::kerne
         uint64_t at = 0;
         for (const lamina::MetaValue& w : sw->items) {
             const uint64_t width = w.u;
-            if (width == 0 || width % (uint64_t) block != 0 || at + width > sv->count || h.signs.count((int) width) != 0) {
+            if (width == 0 || width % (uint64_t) block != 0 || at + width > sv->count ||
+                h.signs.count((int) width) != 0) {
                 err = "prism.hadamard: sign widths and values that do not fit";
                 return false;
             }
@@ -191,16 +193,21 @@ int form_of(const std::string& name) {
         uint32_t type;
     };
     static const F forms[] = {
-        {"ffn_gate_inp.weight", kBf16},   {"ffn_gate_inp_shexp.weight", kBf16}, {"hc_attn_down.weight", kBf16},
-        {"hc_attn_up.weight", kBf16},     {"hc_attn_inject.weight", kBf16},     {"hc_ffn_down.weight", kBf16},
-        {"hc_ffn_up.weight", kBf16},      {"hc_ffn_inject.weight", kBf16},      {"output_hc_down.weight", kBf16},
-        {"output_hc_up.weight", kBf16},   {"indexer.k_proj.weight", kBf16},     {"indexer.q_proj.weight", kBf16},
-        {"ssm_alpha.weight", kBf16},      {"ssm_beta.weight", kBf16},           {"ple_key.weight", kBf16},
-        {"ple_value.weight", kBf16},      {"ple_conv1d.weight", kF16},          {"attn_q_norm.weight", kF32},
-        {"attn_k_norm.weight", kF32},     {"hc_attn_norm.weight", kF32},        {"hc_ffn_norm.weight", kF32},
-        {"output_hc_norm.weight", kF32},  {"indexer.q_norm.weight", kF32},      {"indexer.k_norm.weight", kF32},
-        {"ple_norm_conv.weight", kF32},   {"ple_norm_key.weight", kF32},        {"ple_norm_query.weight", kF32},
-        {"ssm_a", kF32},                  {"ssm_conv1d.weight", kF32},          {"ssm_dt.bias", kF32},
+        {"ffn_gate_inp.weight", kBf16},   {"ffn_gate_inp_shexp.weight", kBf16},
+        {"hc_attn_down.weight", kBf16},   {"hc_attn_up.weight", kBf16},
+        {"hc_attn_inject.weight", kBf16}, {"hc_ffn_down.weight", kBf16},
+        {"hc_ffn_up.weight", kBf16},      {"hc_ffn_inject.weight", kBf16},
+        {"output_hc_down.weight", kBf16}, {"output_hc_up.weight", kBf16},
+        {"indexer.k_proj.weight", kBf16}, {"indexer.q_proj.weight", kBf16},
+        {"ssm_alpha.weight", kBf16},      {"ssm_beta.weight", kBf16},
+        {"ple_key.weight", kBf16},        {"ple_value.weight", kBf16},
+        {"ple_conv1d.weight", kF16},      {"attn_q_norm.weight", kF32},
+        {"attn_k_norm.weight", kF32},     {"hc_attn_norm.weight", kF32},
+        {"hc_ffn_norm.weight", kF32},     {"output_hc_norm.weight", kF32},
+        {"indexer.q_norm.weight", kF32},  {"indexer.k_norm.weight", kF32},
+        {"ple_norm_conv.weight", kF32},   {"ple_norm_key.weight", kF32},
+        {"ple_norm_query.weight", kF32},  {"ssm_a", kF32},
+        {"ssm_conv1d.weight", kF32},      {"ssm_dt.bias", kF32},
         {"ssm_norm.weight", kF32},
     };
     std::string s = name;   // re.sub(r"^blk\.\d+\.", "", name)
@@ -222,9 +229,10 @@ const uint32_t kMmvqTypes[] = {2, 6, 8, 11, 12, 13, 14, 20, 23, 42, 16, 17, 18, 
 /// NativeEmbed's (iq_supported).
 std::string native_problem(const std::string& name, uint32_t type) {
     static const uint32_t embed[] = {16, 17, 18, 20, 21, 22, 23, 19, 29, 42, 11, 12, 13, 14, 7, 8};
-    static const char* const dense[] = {".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight",
-                                        ".attn_q.weight", ".attn_k.weight", ".attn_v.weight", ".attn_output.weight",
-                                        ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight", ".ffn_down_shexp.weight"};
+    static const char* const dense[] = {".attn_qkv.weight",      ".attn_gate.weight",      ".ssm_out.weight",
+                                        ".attn_q.weight",        ".attn_k.weight",         ".attn_v.weight",
+                                        ".attn_output.weight",   ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight",
+                                        ".ffn_down_shexp.weight"};
     bool served = false;
     if (name == "token_embd.weight") {
         if (one_of(type, embed)) return {};
@@ -255,9 +263,7 @@ bool dequantizable(uint32_t type) {
 /// `n` values of a `type` tensor's whole blocks at `src` as f32: floats exactly, quantized ones through ggml.
 void decode(uint32_t type, const uint8_t* src, size_t n, float* out) {
     switch (type) {
-        case kF32:
-            std::memcpy(out, src, n * 4);
-            return;
+        case kF32: std::memcpy(out, src, n * 4); return;
         case kF16:
             for (size_t i = 0; i < n; ++i) {
                 uint16_t h;
@@ -313,11 +319,8 @@ bool encode(const PackImage::Piece& p, const float* v, size_t n, uint8_t* out, s
                 std::memcpy(out + i * 2, &h, 2);
             }
             return true;
-        case PackImage::Conv::ToF32:
-            std::memcpy(out, v, n * 4);
-            return true;
-        case PackImage::Conv::Copy:
-            break;
+        case PackImage::Conv::ToF32: std::memcpy(out, v, n * 4); return true;
+        case PackImage::Conv::Copy: break;
     }
     return false;
 }
@@ -383,7 +386,7 @@ std::string file_name(const std::string& path) {
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
-}  // namespace
+}   // namespace
 
 bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::string& err) {
     PackImage img;
@@ -458,8 +461,8 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
                 uint64_t bytes = 0;
                 if (!expected_bytes(*ts[r], bytes) || ts[r]->shape.size() != 3 ||
                     (int64_t) ts[r]->shape[2] != n_expert) {
-                    err = "layer " + std::to_string(l) + ": an expert tensor is not [*, *, " + std::to_string(n_expert) +
-                          "] of whole blocks";
+                    err = "layer " + std::to_string(l) + ": an expert tensor is not [*, *, " +
+                          std::to_string(n_expert) + "] of whole blocks";
                     return false;
                 }
                 per[r] = bytes / (uint64_t) n_expert;
@@ -486,17 +489,21 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
             total += blob * (uint64_t) n_expert;
         }
         img.experts_ = "# lamina native experts v3: layer gu_type d_type offset blob_bytes (n_expert " +
-                       std::to_string(n_expert) + ", total " + std::to_string(total) + "; the engine takes the "
-                       "experts from " + img.source_ + " by tensor name)\n" + lines;
+                       std::to_string(n_expert) + ", total " + std::to_string(total) +
+                       "; the engine takes the "
+                       "experts from " +
+                       img.source_ + " by tensor name)\n" + lines;
         if (!read_hadamard(model.meta(), n_layers, img.hadamard_, err)) return false;
         // the kernels: trellis experts rotated, and only they
         for (int64_t l = 0; l < n_layers; ++l) {
             const uint32_t gt = model.find("blk." + std::to_string(l) + ".ffn_gate_exps.weight")->type;
             const uint32_t dt = model.find("blk." + std::to_string(l) + ".ffn_down_exps.weight")->type;
-            const bool tg = lamina::kernels::cpu::tq_supported((int) gt), td = lamina::kernels::cpu::tq_supported((int) dt);
+            const bool tg = lamina::kernels::cpu::tq_supported((int) gt),
+                       td = lamina::kernels::cpu::tq_supported((int) dt);
             if (tg != img.hadamard_.gu(l) || td != img.hadamard_.down(l)) {
                 err = "layer " + std::to_string(l) + ": " + type_str(gt) + " / " + type_str(dt) + " experts" +
-                      (img.hadamard_.any() ? " folded otherwise than their formats" : " without prism.hadamard's rotation") +
+                      (img.hadamard_.any() ? " folded otherwise than their formats"
+                                           : " without prism.hadamard's rotation") +
                       "; this engine rotates the trellis formats, and only them";
                 return false;
             }
@@ -534,8 +541,10 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
                     std::string why = native_problem(t.name, t.type);
                     if (!why.empty()) problems.push_back(std::move(why));
                 } else if (!is_float(t.type) && !dequantizable(t.type)) {
-                    problems.push_back(t.name + " is " + type_str(t.type) + ", which this engine cannot dequantize to "
-                                       "the " + type_str((uint32_t) form) + " it reads");
+                    problems.push_back(t.name + " is " + type_str(t.type) +
+                                       ", which this engine cannot dequantize to "
+                                       "the " +
+                                       type_str((uint32_t) form) + " it reads");
                 }
                 todo.push_back({&t, s, native, form});
             }
@@ -551,7 +560,8 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
         uint64_t at = 0, pool = 0;
         for (const Todo& d : todo) {
             const TensorInfo& t = *d.t;
-            const std::string shape = std::to_string(t.shape[0]) + " " + std::to_string(t.shape.size() > 1 ? t.shape[1] : 0);
+            const std::string shape =
+                std::to_string(t.shape[0]) + " " + std::to_string(t.shape.size() > 1 ? t.shape[1] : 0);
             if (d.native) {
                 ++img.served_;
                 rows += t.name + " 0 0 0 0 " + std::to_string(pool) + " 0 " + shape + " 8 0 32 0 0 0 0 0 0 0\n";
@@ -608,8 +618,8 @@ bool PackImage::read(uint64_t offset, size_t n, void* dst, std::string& err) con
     uint64_t at = offset;
     size_t left = n;
     // the first piece that ends past `offset`; between pieces (and after the last) the padding is zeros
-    auto it = std::partition_point(pieces_.begin(), pieces_.end(),
-                                   [&](const Piece& p) { return p.off + p.bytes <= offset; });
+    auto it =
+        std::partition_point(pieces_.begin(), pieces_.end(), [&](const Piece& p) { return p.off + p.bytes <= offset; });
     while (left > 0) {
         if (it == pieces_.end() || at < it->off) {
             const size_t z = (size_t) std::min<uint64_t>(left, (it == pieces_.end() ? dense_bytes_ : it->off) - at);
@@ -629,4 +639,4 @@ bool PackImage::read(uint64_t offset, size_t n, void* dst, std::string& err) con
     return true;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

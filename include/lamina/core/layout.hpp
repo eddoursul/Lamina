@@ -69,4 +69,4 @@ bool check_layer(const WeightTable& table, const ModelGeometry& g, int64_t layer
 /// indices, every GDN layer having the GDN set and no QSA tensor, and vice versa.  Returns the first failure.
 bool check_all(const WeightTable& table, const ModelGeometry& g, std::string& err);
 
-}  // namespace lamina::core
+}   // namespace lamina::core

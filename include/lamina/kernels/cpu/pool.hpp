@@ -102,7 +102,7 @@ public:
 private:
     int quiet_processor(int from, const std::vector<double>& load) const;
     std::vector<std::vector<int>> cores_;
-    std::vector<int> core_of_;     // logical processor -> physical core, -1 when unknown
+    std::vector<int> core_of_;   // logical processor -> physical core, -1 when unknown
     int host_ = -1;
     std::vector<int> workers_;
     std::vector<uint64_t> busy_;   // each processor's interrupt and DPC time at the last sample (100 ns units)
@@ -270,8 +270,8 @@ private:
     std::vector<SplitBuf> split_;
     // the native runs' state: mode 5 = gate/up row parts, 6 = down row parts, 7 = both in one phase
     ExpertJobMulti* mjobs_ = nullptr;
-    int64_t mrows_ = 0;     // rows of the current multi phase across all its experts (n * n_ff, then n * n_embd)
-    int mtasks_ = 1;        // equal row ranges the phase is cut into
+    int64_t mrows_ = 0;   // rows of the current multi phase across all its experts (n * n_ff, then n * n_embd)
+    int mtasks_ = 1;      // equal row ranges the phase is cut into
     struct SplitBufMulti {
         alignas(64) float ff[MAXT][kNativeFF];
         ActQ a2[MAXT];
@@ -294,4 +294,4 @@ private:
 #pragma warning(pop)
 #endif
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

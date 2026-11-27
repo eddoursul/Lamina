@@ -1,5 +1,5 @@
-#include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
 #include "mmvf_multi.cuh"
 
 #include <cuda_runtime.h>
@@ -35,8 +35,8 @@ namespace {
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 template <int BLOCK_SIZE>
-__global__ void bf16_f32_mmvf_kernel(const float* __restrict__ x, const uint16_t* __restrict__ w,
-                                    float* __restrict__ y, int n_in) {
+__global__ void bf16_f32_mmvf_kernel(const float* __restrict__ x, const uint16_t* __restrict__ w, float* __restrict__ y,
+                                     int n_in) {
     const int t = threadIdx.x;
     const uint16_t* row = w + (size_t) blockIdx.x * n_in;
     const uint32_t* weights2 = reinterpret_cast<const uint32_t*>(row);
@@ -98,19 +98,17 @@ int mmvf_block_size(int64_t n_in) {
     return best;
 }
 
-}  // namespace
+}   // namespace
 
-void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
-                         int64_t n_in, int64_t n_out, void* stream) {
-    if (n_in <= 0 || (n_in & 1) != 0 || n_in > std::numeric_limits<int>::max() ||
-        n_out <= 0 || n_out > std::numeric_limits<int>::max())
+void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y, int64_t n_in, int64_t n_out, void* stream) {
+    if (n_in <= 0 || (n_in & 1) != 0 || n_in > std::numeric_limits<int>::max() || n_out <= 0 ||
+        n_out > std::numeric_limits<int>::max())
         throw std::invalid_argument("bf16_gemv_fp32_mmvf: require positive even n_in and positive n_out <= INT_MAX");
-    if (x == nullptr || w == nullptr || y == nullptr ||
-        (reinterpret_cast<uintptr_t>(x) & 7u) != 0 ||
-        (reinterpret_cast<uintptr_t>(w) & 3u) != 0 ||
-        (reinterpret_cast<uintptr_t>(y) & 3u) != 0)
+    if (x == nullptr || w == nullptr || y == nullptr || (reinterpret_cast<uintptr_t>(x) & 7u) != 0 ||
+        (reinterpret_cast<uintptr_t>(w) & 3u) != 0 || (reinterpret_cast<uintptr_t>(y) & 3u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf: null or misaligned pointer");
     const cudaStream_t st = (cudaStream_t) stream;
+    // clang-format off
 #define LAMINA_MMVF_CASE(N) case N: \
     bf16_f32_mmvf_kernel<N><<<(unsigned) n_out, N, 0, st>>>(x, w, y, (int) n_in); break
     switch (mmvf_block_size(n_in)) {
@@ -128,19 +126,19 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
     if (result != cudaSuccess)
         throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf launch: ") + cudaGetErrorString(result));
 }
-
+// clang-format on
 
 void bf16_gemv_fp32_mmvf_multi(const float* x, const uint16_t* w, float* y, int64_t n_in, int64_t n_out, int n_tok,
                                void* stream, const uint16_t* w2, float* y2, int64_t n_out2) {
-    if (n_tok < 1 || n_tok > kMultiT)
-        throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: 1..8 activation rows");
-    if (n_in <= 0 || (n_in & 1) != 0 || n_in > std::numeric_limits<int>::max() ||
-        n_out <= 0 || n_out2 < 0 || n_out + n_out2 > std::numeric_limits<int>::max())
-        throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: require positive even n_in and positive n_out <= INT_MAX");
+    if (n_tok < 1 || n_tok > kMultiT) throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: 1..8 activation rows");
+    if (n_in <= 0 || (n_in & 1) != 0 || n_in > std::numeric_limits<int>::max() || n_out <= 0 || n_out2 < 0 ||
+        n_out + n_out2 > std::numeric_limits<int>::max())
+        throw std::invalid_argument(
+            "bf16_gemv_fp32_mmvf_multi: require positive even n_in and positive n_out <= INT_MAX");
     if (x == nullptr || w == nullptr || y == nullptr || (n_out2 > 0 && (w2 == nullptr || y2 == nullptr)) ||
-        (reinterpret_cast<uintptr_t>(x) & 7u) != 0 ||
-        (reinterpret_cast<uintptr_t>(w) & 3u) != 0 || (reinterpret_cast<uintptr_t>(w2) & 3u) != 0 ||
-        (reinterpret_cast<uintptr_t>(y) & 3u) != 0 || (reinterpret_cast<uintptr_t>(y2) & 3u) != 0)
+        (reinterpret_cast<uintptr_t>(x) & 7u) != 0 || (reinterpret_cast<uintptr_t>(w) & 3u) != 0 ||
+        (reinterpret_cast<uintptr_t>(w2) & 3u) != 0 || (reinterpret_cast<uintptr_t>(y) & 3u) != 0 ||
+        (reinterpret_cast<uintptr_t>(y2) & 3u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: null or misaligned pointer");
     if (n_tok == 1 && n_out2 == 0) {   // the same sums: a row a block streams the weights faster
         bf16_gemv_fp32_mmvf(x, w, y, n_in, n_out, stream);
@@ -148,6 +146,7 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, const uint16_t* w, float* y, int6
     }
     const cudaStream_t st = (cudaStream_t) stream;
     const unsigned blocks = (unsigned) ((n_out + kRows - 1) / kRows + (n_out2 + kRows - 1) / kRows);
+    // clang-format off
 #define LAMINA_MMVF_CASE(N) case N: \
     bf16_f32_mmvf_multi_kernel<N><<<blocks, N, 0, st>>>(x, w, y, (int) n_in, (int) n_out, n_tok, w2, y2, (int) n_out2); \
     break
@@ -166,5 +165,6 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, const uint16_t* w, float* y, int6
     if (result != cudaSuccess)
         throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
 }
+// clang-format on
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

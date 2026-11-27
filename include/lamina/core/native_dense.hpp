@@ -23,8 +23,8 @@ public:
               bool include_ple_key = false);
     /// Plan v0.3 P1: the canonical tensor names `load` would serve natively from these shards (eligible name,
     /// supported type, 2-D), read from the GGUF headers only - so the canonical arena can skip them.
-    static bool served_names(const std::vector<std::string>& shards, bool include_ple_key,
-                             std::set<std::string>& out, std::string& err);
+    static bool served_names(const std::vector<std::string>& shards, bool include_ple_key, std::set<std::string>& out,
+                             std::string& err);
     uint64_t weight_bytes() const { return bytes_; }
     size_t tensor_count() const { return weights_.size(); }
 
@@ -55,4 +55,4 @@ private:
     uint64_t bytes_ = 0;
     size_t q8_0_ = 0;
 };
-} // namespace lamina::core
+}   // namespace lamina::core

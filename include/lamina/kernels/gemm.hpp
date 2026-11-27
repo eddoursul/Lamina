@@ -31,7 +31,7 @@ struct Gemm16 {
     void* y = nullptr;             // [T][N] floats, or halves (y_half)
     int64_t T = 0, N = 0, K = 0, ldx = 0, ldy = 0;
     float alpha = 1.0f, beta = 0.0f;
-    bool bf16 = false;             // x and w are BF16 (else halves)
+    bool bf16 = false;   // x and w are BF16 (else halves)
     bool y_half = false;
 };
 void gemm16(const Gemm16& p, const GemmScratch& scratch, void* stream);
@@ -49,8 +49,8 @@ void gemm16_form(int form, int splits, bool x_inner, const Gemm16& p, const Gemm
 
 /// n products of one N and K in one launch: problem i is x[i] [rows[i]][K] . w[i] [N][K]^T into y[i] [rows[i]][N]
 /// (floats); x, w and y are arrays of n pointers in device memory, rows is host memory.  K is not split.
-void gemm16_grouped(const uint16_t* const* x, const uint16_t* const* w, float* const* y, const int* rows, int n, int64_t N,
-                    int64_t K, bool bf16, void* stream);
+void gemm16_grouped(const uint16_t* const* x, const uint16_t* const* w, float* const* y, const int* rows, int n,
+                    int64_t N, int64_t K, bool bf16, void* stream);
 
 struct Gemm32 {
     const float* x = nullptr;   // [T][K]
@@ -70,4 +70,4 @@ void gemm32_form(int form, int splits, bool x_inner, const Gemm32& p, const Gemm
 /// The scratch a product of T x N outputs can use at most (bytes).
 size_t gemm_scratch_bytes(int64_t T, int64_t N);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

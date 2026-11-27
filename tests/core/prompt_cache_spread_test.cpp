@@ -55,7 +55,7 @@ double worst(const std::vector<int64_t>& pos, int64_t lo, int64_t hi, int64_t st
     return w;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     std::printf("prompt_cache_spread_test\n");
@@ -63,7 +63,8 @@ int main() {
         const std::vector<int64_t> lru = converse(false, 16, 3000, 1000, 200);
         const std::vector<int64_t> spread = converse(true, 16, 3000, 1000, 200);
         check(lru.size() == 16 && spread.size() == 16, "16 checkpoints kept either way");
-        check(reread(lru, 10000) == lru.back(), "least recent use: an edit 10K back reads the whole conversation again");
+        check(reread(lru, 10000) == lru.back(),
+              "least recent use: an edit 10K back reads the whole conversation again");
         check(spread.front() == 3000, "spread: the first prompt's end (the root) stays");
         check(reread(spread, 500) <= 1000, "spread: the turn before is still there");
         check(worst(spread, 1000, spread.back() - 3000, 250) < 2.0,

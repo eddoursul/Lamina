@@ -13,12 +13,12 @@ uint64_t mix(uint64_t x) {
     x *= 0xc4ceb9fe1a85ec53ull;
     return x ^ (x >> 33);
 }
-}  // namespace
+}   // namespace
 
 SuffixDrafter::SuffixDrafter(int min_match, int max_match, size_t capacity_tokens)
     : min_match_(std::max(3, min_match)), max_match_(std::max(min_match, max_match)) {
     size_t cap = 16;
-    while (cap < capacity_tokens * 2) cap <<= 1;          // load factor <= 0.5 at the nominal capacity
+    while (cap < capacity_tokens * 2) cap <<= 1;   // load factor <= 0.5 at the nominal capacity
     table_.assign(cap, Slot{});
     mask_ = cap - 1;
     hist_.reserve(capacity_tokens);
@@ -39,7 +39,7 @@ uint64_t SuffixDrafter::key_at(size_t end) const {
 }
 
 SuffixDrafter::Slot* SuffixDrafter::find_slot(uint64_t key, bool insert) {
-    for (size_t i = key & mask_;; i = (i + 1) & mask_) {    // never full: rebuilt at half load
+    for (size_t i = key & mask_;; i = (i + 1) & mask_) {   // never full: rebuilt at half load
         Slot& s = table_[i];
         if (s.key == key) return &s;
         if (s.key == 0) {
@@ -105,11 +105,14 @@ int SuffixDrafter::propose(int max_k, int32_t* out) {
     const size_t cur = n - 1;
     size_t best_end = 0;
     int best_len = 0;
-    int32_t p = prev_[cur];                                 // the current trigram's earlier occurrences, newest first
+    int32_t p = prev_[cur];   // the current trigram's earlier occurrences, newest first
     for (int w = 0; w < WAYS && p >= 0; ++w, p = prev_[(size_t) p]) {
         int len = 0;
         while (len < max_match_ && len <= p && hist_[(size_t) (p - len)] == hist_[cur - len]) ++len;
-        if (len > best_len) { best_len = len; best_end = (size_t) p; }   // most recent first, so ties keep the newer
+        if (len > best_len) {
+            best_len = len;
+            best_end = (size_t) p;
+        }   // most recent first, so ties keep the newer
         if (best_len == max_match_) break;
     }
     if (best_len < min_match_) return 0;
@@ -120,4 +123,4 @@ int SuffixDrafter::propose(int max_k, int32_t* out) {
     return k;
 }
 
-}  // namespace lamina::spec
+}   // namespace lamina::spec

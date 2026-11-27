@@ -26,9 +26,9 @@ const int32_t* mrope_table();
 
 /// #280, opt-in (LAMINA_ROPE_TABLE=1): the rotation angles, 32 pairs of a 64-wide rotary slice, from the session's
 /// float64 table (build_rope_table, [max_pos][32] cos and sin in VRAM, the rope scaling inside) of the CURRENT
-/// device.  With it the rope kernels rotate by the table's exact angles; without it they compute pos * powf(...) with cosf/sinf, which under
-/// --use_fast_math is 0.0014 rad off at 32K and ~0.02 at 262K, and the prompt path (precise libm) and decode
-/// (fast-math) disagree with each other.
+/// device.  With it the rope kernels rotate by the table's exact angles; without it they compute pos * powf(...) with
+/// cosf/sinf, which under --use_fast_math is 0.0014 rad off at 32K and ~0.02 at 262K, and the prompt path (precise
+/// libm) and decode (fast-math) disagree with each other.
 struct RopeTab {
     const float* cos = nullptr;   ///< null: no table, the kernels compute the angle as they always did
     const float* sin = nullptr;
@@ -79,4 +79,4 @@ __device__ __forceinline__ void rope_cs(const RopeTab& rt, const RopeKernelArgs&
 }
 #endif
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

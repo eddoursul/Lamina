@@ -85,12 +85,14 @@ private:
     std::unique_ptr<Loaded> loaded_;   ///< the resident encoder; a borrowing one's lease, for a request's pictures
     std::unique_ptr<Loaded> cpu_;      ///< borrowing: the CPU's encoder, once a picture found no VRAM
     bool lend_ = false;
-    int holds_ = 0;                    ///< encode_all runs: a lease stays for its pictures
+    int holds_ = 0;   ///< encode_all runs: a lease stays for its pictures
     Lend lender_;
     std::function<void()> unlender_;
     std::atomic<bool> alive_{false};
-    std::mutex mu_;   ///< the encoder and the cache: a picture at a time
-    std::vector<std::pair<std::string, std::pair<std::string, int64_t>>> cache_;   ///< key -> (file, tokens), oldest first
+    std::mutex mu_;                                                                ///< the encoder and the cache:
+                                                                                   ///< a picture at a time
+    std::vector<std::pair<std::string, std::pair<std::string, int64_t>>> cache_;   ///< key -> (file,
+                                                                                   ///< tokens), oldest first
 };
 
 /// whether this build has the image encoder (LAMINA_BUILD_VISION)
@@ -117,4 +119,4 @@ void write_temporary(const std::string& path, const std::vector<std::string>& pa
 /// a timeout from the environment (LAMINA_ENGINE_STALL_S ...): seconds, nullopt for no limit (0 or less)
 std::optional<double> timeout_env(const char* name, double dflt);
 
-}  // namespace lamina
+}   // namespace lamina

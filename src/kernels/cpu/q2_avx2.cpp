@@ -42,10 +42,10 @@ inline void unpack64(const uint8_t* codes, __m256i& lo, __m256i& hi) {
     const __m128i c1 = _mm_and_si128(_mm_srli_epi16(b, 2), m3);
     const __m128i c2 = _mm_and_si128(_mm_srli_epi16(b, 4), m3);
     const __m128i c3 = _mm_and_si128(_mm_srli_epi16(b, 6), m3);
-    const __m128i a0 = _mm_unpacklo_epi8(c0, c1), a1 = _mm_unpacklo_epi8(c2, c3);   // bytes 0..7
-    const __m128i b0 = _mm_unpackhi_epi8(c0, c1), b1 = _mm_unpackhi_epi8(c2, c3);   // bytes 8..15
-    lo = _mm256_set_m128i(_mm_unpackhi_epi16(a0, a1), _mm_unpacklo_epi16(a0, a1));  // values 0..31
-    hi = _mm256_set_m128i(_mm_unpackhi_epi16(b0, b1), _mm_unpacklo_epi16(b0, b1));  // values 32..63
+    const __m128i a0 = _mm_unpacklo_epi8(c0, c1), a1 = _mm_unpacklo_epi8(c2, c3);    // bytes 0..7
+    const __m128i b0 = _mm_unpackhi_epi8(c0, c1), b1 = _mm_unpackhi_epi8(c2, c3);    // bytes 8..15
+    lo = _mm256_set_m128i(_mm_unpackhi_epi16(a0, a1), _mm_unpacklo_epi16(a0, a1));   // values 0..31
+    hi = _mm256_set_m128i(_mm_unpackhi_epi16(b0, b1), _mm_unpacklo_epi16(b0, b1));   // values 32..63
 }
 
 // ---- the row kernel, twice: the AVX2 form and the AVX-VNNI one (q2_avx2_rows.inl)
@@ -53,16 +53,16 @@ namespace plain {
 #define LAMINA_ROWS_VNNI 0
 #define LAMINA_ROWS_FN
 #include "q2_avx2_rows.inl"
-}  // namespace plain
+}   // namespace plain
 #if LAMINA_AVXVNNI
 namespace vnni {
 #define LAMINA_ROWS_VNNI 1
 #define LAMINA_ROWS_FN LAMINA_AVXVNNI_FN
 #include "q2_avx2_rows.inl"
-}  // namespace vnni
+}   // namespace vnni
 #endif
 
-// ================================ the "bit-plane" row dot (opt-in: LAMINA_Q2_BITPLANE=1) ================================
+// ============================== the "bit-plane" row dot (opt-in: LAMINA_Q2_BITPLANE=1) ===============================
 //
 // The kernel above spends, per 32-value chunk and token, a maddubs, a madd, a convert, a scalar d*scale product
 // broadcast into an FMA, and a scalar correction FMA; plus a 14-op interleave to unpack 64 codes.  Here:
@@ -83,8 +83,7 @@ namespace vnni {
 // token's operations are the same whatever the group width, so a token's rows are bitwise the same alone or in a
 // verify window.  It changes the last bits of a Q2_0 expert on AVX2-only CPUs, so it is OFF by default
 // (LAMINA_Q2_BITPLANE=1 turns it on; unset: the kernel above, exactly as before).
-template <int NT>
-inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m256* acc) {
+template <int NT> inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m256* acc) {
     for (int t = 0; t < NT; ++t) acc[t] = _mm256_setzero_ps();
     const __m256i m3 = _mm256_set1_epi8(3);
     const __m256i ones = _mm256_set1_epi16(1);
@@ -108,8 +107,8 @@ inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m
             s = _mm256_add_epi16(s, _mm256_maddubs_epi16(c1, _mm256_load_si256((const __m256i*) (q + 32))));
             s = _mm256_add_epi16(s, _mm256_maddubs_epi16(c2, _mm256_load_si256((const __m256i*) (q + 64))));
             s = _mm256_add_epi16(s, _mm256_maddubs_epi16(c3, _mm256_load_si256((const __m256i*) (q + 96))));
-            const __m256i i32 = _mm256_sub_epi32(_mm256_madd_epi16(s, ones),
-                                                 _mm256_load_si256((const __m256i*) (a[t]->psum + p * 8)));
+            const __m256i i32 =
+                _mm256_sub_epi32(_mm256_madd_epi16(s, ones), _mm256_load_si256((const __m256i*) (a[t]->psum + p * 8)));
             const __m256 v = _mm256_mul_ps(_mm256_cvtepi32_ps(i32), _mm256_load_ps(a[t]->pscale + p * 8));
             acc[t] = _mm256_fmadd_ps(dp, v, acc[t]);
         }
@@ -148,7 +147,7 @@ const bool kBitplane = [] {
     return e != nullptr && e[0] == '1';
 }();
 
-}  // namespace
+}   // namespace
 
 void q2_0_gguf_rows_multi_avx2_v(bool vnni_rows, const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
                                  int nt, float* const* out, int r0, int r1) {
@@ -191,7 +190,7 @@ void q2_0_gguf_rows_multi_avx2(const uint8_t* w, size_t row_bytes, int nblocks, 
 
 namespace {
 #include "q2_bitplane.inc"
-}  // namespace
+}   // namespace
 
 void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) {
     a.nchunks = n / QKA;
@@ -235,4 +234,4 @@ void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) {
     else a.bp_pairs = 0;
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

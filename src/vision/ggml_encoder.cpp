@@ -58,7 +58,7 @@ struct Layer {
     ggml_tensor* ln_2_b = nullptr;
     ggml_tensor* qkv_w = nullptr;   // the three projections as one matrix (Qwen's files) ...
     ggml_tensor* qkv_b = nullptr;
-    ggml_tensor* q_w = nullptr;     // ... or each its own (Hy4's)
+    ggml_tensor* q_w = nullptr;   // ... or each its own (Hy4's)
     ggml_tensor* q_b = nullptr;
     ggml_tensor* k_w = nullptr;
     ggml_tensor* k_b = nullptr;
@@ -90,7 +90,7 @@ struct Model : ProjectorParams {
     ggml_tensor* mm_1_b = nullptr;
     ggml_tensor* mm_pre_norm_w = nullptr;   // Hy4's adapter
     ggml_tensor* image_newline = nullptr;
-    ggml_tensor* class_embd = nullptr;      // Inkling 2's class token and its position
+    ggml_tensor* class_embd = nullptr;   // Inkling 2's class token and its position
     ggml_tensor* class_pos_embd = nullptr;
 };
 
@@ -128,10 +128,9 @@ struct Graph {
     Graph(const Model& model, ggml_context* ctx, int w, int h, bool flash_attention, int pad)
         : m(model), ctx0(ctx), gf(ggml_new_graph_custom(ctx, kMaxNodes, false)), img_w(w), img_h(h),
           patch_size(model.patch_size), n_patches_x(w / model.patch_size), n_patches_y(h / model.patch_size),
-          n_patches(n_patches_x * n_patches_y), n_embd(model.n_embd), n_head(model.n_head),
-          n_head_kv(model.n_head_kv), d_head(model.d_head()),
-          n_layer(model.n_layer), eps(model.eps), kq_scale(1.0f / sqrtf((float) d_head)), flash(flash_attention),
-          head_pad(pad) {}
+          n_patches(n_patches_x * n_patches_y), n_embd(model.n_embd), n_head(model.n_head), n_head_kv(model.n_head_kv),
+          d_head(model.d_head()), n_layer(model.n_layer), eps(model.eps), kq_scale(1.0f / sqrtf((float) d_head)),
+          flash(flash_attention), head_pad(pad) {}
 
     ggml_tensor* build_inp_raw() {
         inp_raw = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, img_w, img_h, 3, n_batch);
@@ -148,8 +147,8 @@ struct Graph {
     }
 
     // up, GELU (the tanh form, ggml_gelu; `erf`: the exact one), down
-    ggml_tensor* build_ffn(ggml_tensor* cur, ggml_tensor* up, ggml_tensor* up_b, ggml_tensor* down,
-                           ggml_tensor* down_b, bool erf = false) const {
+    ggml_tensor* build_ffn(ggml_tensor* cur, ggml_tensor* up, ggml_tensor* up_b, ggml_tensor* down, ggml_tensor* down_b,
+                           bool erf = false) const {
         ggml_tensor* tmp = ggml_mul_mat(ctx0, up, cur);
         if (up_b) tmp = ggml_add(ctx0, tmp, up_b);
         cur = erf ? ggml_gelu_erf(ctx0, tmp) : ggml_gelu(ctx0, tmp);
@@ -226,8 +225,8 @@ struct Graph {
         inp = ggml_add(ctx0, inp, m.patch_bias);
 
         // the learned position table at the picture's grid, in the same grouping
-        ggml_tensor* learned_pos_embd = resize_position_embeddings((uint32_t) GGML_SCALE_MODE_BILINEAR |
-                                                                   (uint32_t) GGML_SCALE_FLAG_ALIGN_CORNERS);
+        ggml_tensor* learned_pos_embd =
+            resize_position_embeddings((uint32_t) GGML_SCALE_MODE_BILINEAR | (uint32_t) GGML_SCALE_FLAG_ALIGN_CORNERS);
         learned_pos_embd = ggml_cont_4d(ctx0, learned_pos_embd, n_embd * 2, n_patches_x / 2, n_patches_y, batch_size);
         learned_pos_embd =
             ggml_reshape_4d(ctx0, learned_pos_embd, n_embd * 2, n_patches_x / 2, 2, batch_size * (n_patches_y / 2));
@@ -256,8 +255,8 @@ struct Graph {
                 cur = ggml_mul_mat(ctx0, layer.qkv_w, cur);
                 cur = ggml_add(ctx0, cur, layer.qkv_b);
 
-                ggml_tensor* Qcur = ggml_view_3d(ctx0, cur, d_head, n_head, n_pos, ggml_row_size(cur->type, d_head),
-                                                 cur->nb[1], 0);
+                ggml_tensor* Qcur =
+                    ggml_view_3d(ctx0, cur, d_head, n_head, n_pos, ggml_row_size(cur->type, d_head), cur->nb[1], 0);
                 ggml_tensor* Kcur = ggml_view_3d(ctx0, cur, d_head, n_head, n_pos, ggml_row_size(cur->type, d_head),
                                                  cur->nb[1], ggml_row_size(cur->type, n_embd));
                 ggml_tensor* Vcur = ggml_view_3d(ctx0, cur, d_head, n_head, n_pos, ggml_row_size(cur->type, d_head),
@@ -302,11 +301,11 @@ struct Graph {
         const int n_per_side = (int) std::sqrt(pos->ne[1]);
         if (height == n_per_side && width == n_per_side) return pos;
 
-        pos = ggml_reshape_3d(ctx0, pos, n_embd, n_per_side, n_per_side);   // -> (n_embd, n_per_side, n_per_side)
-        pos = ggml_permute(ctx0, pos, 2, 0, 1, 3);                         // -> (n_per_side, n_per_side, n_embd)
-        pos = ggml_interpolate(ctx0, pos, width, height, n_embd, 1, mode);  // -> (width, height, n_embd)
-        pos = ggml_permute(ctx0, pos, 1, 2, 0, 3);                         // -> (n_embd, width, height)
-        pos = ggml_cont_2d(ctx0, pos, n_embd, width * height);             // -> (n_embd, width * height)
+        pos = ggml_reshape_3d(ctx0, pos, n_embd, n_per_side, n_per_side);    // -> (n_embd, n_per_side, n_per_side)
+        pos = ggml_permute(ctx0, pos, 2, 0, 1, 3);                           // -> (n_per_side, n_per_side, n_embd)
+        pos = ggml_interpolate(ctx0, pos, width, height, n_embd, 1, mode);   // -> (width, height, n_embd)
+        pos = ggml_permute(ctx0, pos, 1, 2, 0, 3);                           // -> (n_embd, width, height)
+        pos = ggml_cont_2d(ctx0, pos, n_embd, width * height);               // -> (n_embd, width * height)
         return pos;
     }
 
@@ -517,7 +516,8 @@ public:
     void open(const EncoderParams& p) {
         flash_ = p.flash_attention != FlashAttention::off;
         // without a number of threads: one a core, at most 16 (a 256-thread server does not need 128 of them)
-        threads_ = p.threads > 0 ? p.threads : (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency() / 2));
+        threads_ =
+            p.threads > 0 ? p.threads : (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency() / 2));
 
         backend_ = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         if (backend_ == nullptr) throw std::runtime_error("ggml's CPU backend did not start");
@@ -538,7 +538,8 @@ public:
             if (const char* s = std::getenv("LAMINA_VISION_HEAD_PAD")) to = std::max(d_head, std::atoi(s));
             head_pad_ = to - d_head;
         }
-        compute_meta_.resize((size_t) kMaxNodes * ggml_tensor_overhead() + ggml_graph_overhead_custom(kMaxNodes, false));
+        compute_meta_.resize((size_t) kMaxNodes * ggml_tensor_overhead() +
+                             ggml_graph_overhead_custom(kMaxNodes, false));
     }
 
     int n_embd() const override { return m_.projection_dim; }
@@ -558,8 +559,9 @@ private:
     void load() {
         // the weights: each tensor's description copied into a context of its own, then allocated on the backend
         const int64_t n_tensors = gguf_get_n_tensors(proj_.gguf());
-        ggml_init_params ip = {/*.mem_size =*/ (size_t) (n_tensors + 1) * ggml_tensor_overhead(), /*.mem_buffer =*/ nullptr,
-                               /*.no_alloc =*/ true};
+        ggml_init_params ip = {/*.mem_size =*/(size_t) (n_tensors + 1) * ggml_tensor_overhead(),
+                               /*.mem_buffer =*/nullptr,
+                               /*.no_alloc =*/true};
         data_.reset(ggml_init(ip));
         if (!data_) throw std::runtime_error("no memory for the projector's tensors");
         std::vector<ggml_tensor*> to_load;
@@ -633,11 +635,13 @@ private:
                 throw std::runtime_error("its position table is not a square grid of the tower's width");
         }
         // the rows' width is the projection's
-        const int64_t width = m_.kind == Kind::qwen3vl ? m_.mm_1_b->ne[0]
-                              : m_.kind == Kind::inkling2v ? m_.mm_1_w->ne[1] : m_.mm_1_w->ne[3];
+        const int64_t width = m_.kind == Kind::qwen3vl     ? m_.mm_1_b->ne[0]
+                              : m_.kind == Kind::inkling2v ? m_.mm_1_w->ne[1]
+                                                           : m_.mm_1_w->ne[3];
         if (width != m_.projection_dim) throw std::runtime_error("its adapter's output is not its projection_dim wide");
 
-        buf_.reset(ggml_backend_alloc_ctx_tensors_from_buft(data_.get(), ggml_backend_get_default_buffer_type(backend_)));
+        buf_.reset(
+            ggml_backend_alloc_ctx_tensors_from_buft(data_.get(), ggml_backend_get_default_buffer_type(backend_)));
         if (!buf_) throw std::runtime_error("the projector's weights do not fit the RAM");
         ggml_backend_buffer_set_usage(buf_.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         for (ggml_tensor* t : to_load) {
@@ -654,8 +658,8 @@ private:
 
     // ---- a picture -------------------------------------------------------------------------------------------------
     ggml_cgraph* build(ggml_context_ptr& ctx0, std::unique_ptr<Graph>& g, int w, int h, bool flash) {
-        ggml_init_params ip = {/*.mem_size =*/ compute_meta_.size(), /*.mem_buffer =*/ compute_meta_.data(),
-                               /*.no_alloc =*/ true};
+        ggml_init_params ip = {/*.mem_size =*/compute_meta_.size(), /*.mem_buffer =*/compute_meta_.data(),
+                               /*.no_alloc =*/true};
         ctx0.reset(ggml_init(ip));
         g = std::make_unique<Graph>(m_, ctx0.get(), w, h, flash, head_pad_);
         g->dump = std::getenv("LAMINA_VISION_DUMP") != nullptr;
@@ -728,7 +732,8 @@ private:
         const int n = (int) rows->ne[1];
         const int merged_x = pw / m_.n_merge, merged_y = ph / m_.n_merge;
         const int expected = m_.kind == Kind::hy4 ? (merged_x + 1) * merged_y : merged_x * merged_y;
-        if (rows->ne[0] != m_.projection_dim || n != expected || ggml_nelements(rows) != (int64_t) n * m_.projection_dim)
+        if (rows->ne[0] != m_.projection_dim || n != expected ||
+            ggml_nelements(rows) != (int64_t) n * m_.projection_dim)
             throw std::runtime_error("the encoder gave " + std::to_string(n) + " rows of " +
                                      std::to_string(rows->ne[0]) + " where " + std::to_string(expected) + " of " +
                                      std::to_string(m_.projection_dim) + " were due");
@@ -759,7 +764,7 @@ private:
     bool allocated_ = false;
 };
 
-}  // namespace
+}   // namespace
 
 std::unique_ptr<Encoder> open_ggml_encoder(const EncoderParams& params, std::string& err) {
     backends_init();
@@ -773,4 +778,4 @@ std::unique_ptr<Encoder> open_ggml_encoder(const EncoderParams& params, std::str
     return enc;
 }
 
-}  // namespace lamina::vision
+}   // namespace lamina::vision

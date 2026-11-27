@@ -1,8 +1,8 @@
 // src/kernels/cuda/qsa_decode_attn.cu - see include/lamina/kernels/qsa_decode_attn.hpp.
-#include "lamina/kernels/qsa_decode_attn.hpp"
-#include "lamina/kernels/warp.cuh"
 #include "lamina/kernels/kv_q4.hpp"
 #include "lamina/kernels/kv_q8.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/warp.cuh"
 
 #include "fwht.cuh"
 
@@ -18,12 +18,12 @@
 namespace lamina::kernels {
 namespace {
 
-constexpr int HD = 256;          // head_dim
-constexpr int G = 12;            // query heads per KV head (24 / 2)
+constexpr int HD = 256;   // head_dim
+constexpr int G = 12;     // query heads per KV head (24 / 2)
 constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
-constexpr int PT = 64;           // cells per tile
-constexpr int SPLIT_MAX = 20;    // a decode query's splits at most
+constexpr int PT = 64;          // cells per tile
+constexpr int SPLIT_MAX = 20;   // a decode query's splits at most
 
 // The decode's partial results, per query `stride` floats: [split][head][HD] sums of p * v (p relative to the split's
 // maximum), then at `m` and `l` (offsets from `acc`) [split][head] maxima and sums of p.
@@ -44,11 +44,10 @@ __host__ __device__ __forceinline__ int split_cells(int n, int splits) {
 // thread (dimension pair, cell parity) accumulates its two dimensions of the 12 heads over every other cell; the
 // parities are added at the end.
 template <bool SPLIT>
-__global__ void __launch_bounds__(THREADS) attn_f16_kernel(const float* __restrict__ q, QsaAttnPools p,
-                                                           const int32_t* __restrict__ ids,
-                                                           const int32_t* __restrict__ steps, int n_kv_heads,
-                                                           int page_size, float scale, float* __restrict__ attn,
-                                                           int cap, Partials part) {
+__global__ void __launch_bounds__(THREADS)
+attn_f16_kernel(const float* __restrict__ q, QsaAttnPools p, const int32_t* __restrict__ ids,
+                const int32_t* __restrict__ steps, int n_kv_heads, int page_size, float scale, float* __restrict__ attn,
+                int cap, Partials part) {
     const int kvh = blockIdx.x;
     const size_t qi = blockIdx.y;
     const size_t head0 = qi * (size_t) (n_kv_heads * G) + (size_t) kvh * G;
@@ -62,16 +61,19 @@ __global__ void __launch_bounds__(THREADS) attn_f16_kernel(const float* __restri
         ids += c0;
         n_ids = min(c, n_ids - c0);
     }
-    __shared__ __align__(16) float sq[G][HD];      // 12 KB: this KV head's query heads
-    __shared__ __align__(16) float spart[4][G][PT];  // 12 KB: the quarters' partial scores; the parity sums at the end
-    __shared__ __align__(16) float sp[PT][G];      // probabilities, cell-major
+    __shared__ __align__(16) float sq[G][HD];         // 12 KB: this KV head's query heads
+    __shared__ __align__(16) float spart[4][G][PT];   // 12 KB: the quarters' partial scores; the parity sums at the end
+    __shared__ __align__(16) float sp[PT][G];         // probabilities, cell-major
     __shared__ long long srow[PT];
     __shared__ float s_alpha[G], s_m[G], s_l[G];
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     for (int i = t; i < G * HD; i += THREADS) sq[i / HD][i % HD] = q[i];
-    if (t < G) { s_m[t] = -FLT_MAX; s_l[t] = 0.0f; }
+    if (t < G) {
+        s_m[t] = -FLT_MAX;
+        s_l[t] = 0.0f;
+    }
     const int quarter = warp >> 1, cell = ((warp & 1) << 5) | lane;   // scores
-    const int parity = t >> 7, d0 = 2 * (t & 127);                     // values
+    const int parity = t >> 7, d0 = 2 * (t & 127);                    // values
     float acc0[G], acc1[G];
 #pragma unroll
     for (int h = 0; h < G; ++h) acc0[h] = acc1[h] = 0.0f;
@@ -129,9 +131,12 @@ __global__ void __launch_bounds__(THREADS) attn_f16_kernel(const float* __restri
         // online softmax: warp w takes heads w and w + 8, a lane cells lane and lane + 32
         for (int h = warp; h < G; h += WARPS) {
             float a = -FLT_MAX, b = -FLT_MAX;
-            if (lane < n_here) a = (spart[0][h][lane] + spart[1][h][lane] + spart[2][h][lane] + spart[3][h][lane]) * scale;
+            if (lane < n_here)
+                a = (spart[0][h][lane] + spart[1][h][lane] + spart[2][h][lane] + spart[3][h][lane]) * scale;
             if (lane + 32 < n_here)
-                b = (spart[0][h][lane + 32] + spart[1][h][lane + 32] + spart[2][h][lane + 32] + spart[3][h][lane + 32]) * scale;
+                b = (spart[0][h][lane + 32] + spart[1][h][lane + 32] + spart[2][h][lane + 32] +
+                     spart[3][h][lane + 32]) *
+                    scale;
             const float m_old = s_m[h];
             const float m_new = fmaxf(m_old, warp_max(fmaxf(a, b)));
             const float ea = lane < n_here ? __expf(a - m_new) : 0.0f;
@@ -222,8 +227,14 @@ namespace pf {
 constexpr int NT = 384;
 constexpr int KS = 2, VS = 3;   // slots of the K and V rings
 enum : int {
-    END = 0, FULL_K = 1, EMPTY_K = FULL_K + KS, FULL_V = EMPTY_K + KS, EMPTY_V = FULL_V + VS, FULL_P = EMPTY_V + VS,
-    EMPTY_P = FULL_P + 2, SRED = EMPTY_P + 2
+    END = 0,
+    FULL_K = 1,
+    EMPTY_K = FULL_K + KS,
+    FULL_V = EMPTY_K + KS,
+    EMPTY_V = FULL_V + VS,
+    FULL_P = EMPTY_V + VS,
+    EMPTY_P = FULL_P + 2,
+    SRED = EMPTY_P + 2
 };
 static_assert(SRED < 16, "sixteen named barriers");
 constexpr int NKB = 128 + 128, NVB = 128 + 128, NPB = 128 + 128;   // threads at the K, V, P barriers (END as P)
@@ -231,22 +242,21 @@ static_assert(KV_Q8_GROUP == 64 && HD == 256, "four 64-dim scale groups a row");
 constexpr int MAGIC = 0x4B400000;   // 1.5 * 2^23 as float bits: an int x (|x| < 2^22) added gives 1.5 * 2^23 + x
 constexpr float MAGIC_F = 12582912.0f;
 
-template <bool KQ4, bool VQ4>
-struct __align__(16) Smem {
+template <bool KQ4, bool VQ4> struct __align__(16) Smem {
     static constexpr int KB = KQ4 ? HD / 2 : HD, VB = VQ4 ? HD / 2 : HD;   // a cell's code bytes
-    using KSc = typename std::conditional<KQ4, uint4, uint2>::type;   // a cell's scales: 8 blocks of 32 or 4 of 64
+    using KSc = typename std::conditional<KQ4, uint4, uint2>::type;        // a cell's scales: 8 blocks of 32 or 4 of 64
     using VSc = typename std::conditional<VQ4, uint4, uint2>::type;
     uint8_t k[KS][PT * KB];   // K codes, 16-byte chunk j of cell c at j ^ ksw(c)
     uint8_t v[VS][PT * VB];   // V codes, chunk j of cell c at j ^ (c & 7)
     KSc ks[KS][PT];           // FP16 scales of a cell's dim groups
     VSc vs[VS][PT];
-    float p[2][16][PT];       // probabilities, float4 i of row r at i ^ ((r & 1) << 2)
-    float alpha[2][16];       // a row's rescale of the running sums, and the tile's largest probability
+    float p[2][16][PT];   // probabilities, float4 i of row r at i ^ ((r & 1) << 2)
+    float alpha[2][16];   // a row's rescale of the running sums, and the tile's largest probability
     float pmax[2][16];
-    float red[2][4][16];      // the score warps' tile maxima
+    float red[2][4][16];   // the score warps' tile maxima
     float lsum[4][16];
     float qmax[16], qsc[16];
-    float mfin[16];           // SPLIT: the rows' final maxima
+    float mfin[16];                        // SPLIT: the rows' final maxima
     float qr[KQ4 ? G : 1][KQ4 ? HD : 4];   // KQ4: the query rows rotated
 };
 
@@ -262,17 +272,19 @@ __device__ __forceinline__ void bar_arrive(int id, int n) {
 // where cell c of probability row r lives in Smem::p
 __device__ __forceinline__ int p_at(int r, int c) { return (((c >> 2) ^ ((r & 1) << 2)) << 2) | (c & 3); }
 __device__ __forceinline__ void mma_u8s8(int (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-                 : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+    asm volatile(
+        "mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 __device__ __forceinline__ void mma_s8s8(int (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-                 : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+    asm volatile(
+        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 __device__ __forceinline__ int exp_of(float x) { return (__float_as_int(x) >> 23) & 255; }   // x < 2^(E - 126)
-__device__ __forceinline__ float pow2f(int e) { return __int_as_float((e + 127) << 23); }     // -126 <= e <= 127
+__device__ __forceinline__ float pow2f(int e) { return __int_as_float((e + 127) << 23); }    // -126 <= e <= 127
 // w (65536 r2 + 256 r1 + r0) from three limbs' sums (|r| < 2^21), w a power of two and wk = -65793 C w: the first
 // multiply-add is exact, the other two round
 __device__ __forceinline__ float limbs3(int r0, int r1, int r2, float w65536, float w256, float w, float wk) {
@@ -304,14 +316,13 @@ __device__ __forceinline__ void scales_in(uint2* d, const uint16_t* src, bool ok
     if (ok) cp_async8(d, src);
     else *d = make_uint2(0u, 0u);
 }
-}  // namespace pf
+}   // namespace pf
 
 template <bool SPLIT, bool KQ4, bool VQ4>
-__global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __restrict__ q, QsaAttnPools p,
-                                                             const int32_t* __restrict__ ids,
-                                                             const int32_t* __restrict__ steps, int n_kv_heads,
-                                                             int page_size, float scale, float* __restrict__ attn,
-                                                             int cap, Partials part) {
+__global__ void __launch_bounds__(pf::NT, 1)
+attn_mma_kernel(const float* __restrict__ q, QsaAttnPools p, const int32_t* __restrict__ ids,
+                const int32_t* __restrict__ steps, int n_kv_heads, int page_size, float scale, float* __restrict__ attn,
+                int cap, Partials part) {
     using namespace pf;
     using SM = Smem<KQ4, VQ4>;
     extern __shared__ __align__(16) uint8_t smem_raw[];
@@ -353,7 +364,10 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
                     sm.qsc[r] = mx > 0.0f ? pow2f(exp_of(mx) - 126 - 23) * scale : 0.0f;
                 }
             }
-            if (warp == 0 && lane >= G && lane < 16) { sm.qmax[lane] = 0.0f; sm.qsc[lane] = 0.0f; }
+            if (warp == 0 && lane >= G && lane < 16) {
+                sm.qmax[lane] = 0.0f;
+                sm.qsc[lane] = 0.0f;
+            }
         }
     } else if (t < 256) {
         const int r = t >> 4, ch = t & 15;
@@ -426,11 +440,10 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
                     }
                 }
             }
-            const bool vl = lane >= 16;                        // lanes 0-15 a cell's K scales, 16-31 its V scales
+            const bool vl = lane >= 16;   // lanes 0-15 a cell's K scales, 16-31 its V scales
             if constexpr (!KQ4 && !VQ4) {
                 uint2* sd = vl ? &sm.vs[sv][cl] : &sm.ks[sk][cl];
-                if (cl < n_here)
-                    cp_async8(sd, (vl ? p.v_scale : p.k_scale) + (size_t) row * (HD / KV_Q8_GROUP));
+                if (cl < n_here) cp_async8(sd, (vl ? p.v_scale : p.k_scale) + (size_t) row * (HD / KV_Q8_GROUP));
                 else *sd = make_uint2(0u, 0u);   // no scale for the multiply of a missing cell's stale codes
             } else if (vl) {
                 scales_in(&sm.vs[sv][cl], cl < n_here ? p.v_q4s + (size_t) row * (HD / KV_Q4_GROUP) : nullptr,
@@ -485,7 +498,8 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
 #pragma unroll
                         for (int e = 0; e < 4; ++e)
                             u[e] = (unsigned) max(-8388607, min(8388607, __float2int_rn(fv[e] * inv[r])));
-                        pack3(u[0], u[1], u[2], u[3], qa[0][ks][r + 2 * hf], qa[1][ks][r + 2 * hf], qa[2][ks][r + 2 * hf]);
+                        pack3(u[0], u[1], u[2], u[3], qa[0][ks][r + 2 * hf], qa[1][ks][r + 2 * hf],
+                              qa[2][ks][r + 2 * hf]);
                     }
         }
         const float qs[2] = {sm.qsc[gid], sm.qsc[gid + 8]};
@@ -535,11 +549,11 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
                         for (int n = 0; n < 2; ++n)
 #pragma unroll
                             for (int ii = 0; ii < 4; ++ii)
-                                sv[n][ii] = fmaf(limbs3(acc[0][n][ii], acc[1][n][ii], acc[2][n][ii], 65536.0f, 256.0f,
-                                                        1.0f, kS),
-                                                 __half2float(__ushort_as_half((unsigned short) (kw[2 * n + (ii & 1)] >>
-                                                                                                 (16 * kk)))),
-                                                 sv[n][ii]);
+                                sv[n][ii] = fmaf(
+                                    limbs3(acc[0][n][ii], acc[1][n][ii], acc[2][n][ii], 65536.0f, 256.0f, 1.0f, kS),
+                                    __half2float(
+                                        __ushort_as_half((unsigned short) (kw[2 * n + (ii & 1)] >> (16 * kk)))),
+                                    sv[n][ii]);
                     }
                 } else {
                     unsigned b[2][4];
@@ -568,9 +582,9 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
                     for (int n = 0; n < 2; ++n)
 #pragma unroll
                         for (int ii = 0; ii < 4; ++ii)
-                            sv[n][ii] = fmaf(limbs3(acc[0][n][ii], acc[1][n][ii], acc[2][n][ii], 65536.0f, 256.0f, 1.0f,
-                                                    kS),
-                                             scale_of(kr[2 * n + (ii & 1)], g), sv[n][ii]);
+                            sv[n][ii] =
+                                fmaf(limbs3(acc[0][n][ii], acc[1][n][ii], acc[2][n][ii], 65536.0f, 256.0f, 1.0f, kS),
+                                     scale_of(kr[2 * n + (ii & 1)], g), sv[n][ii]);
                 }
             }
             if (i + KS < n_tiles) bar_arrive(EMPTY_K + s, NKB);
@@ -590,14 +604,17 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
                 mx[r] = fmaxf(mx[r], __shfl_xor_sync(0xffffffffu, mx[r], 1));
                 mx[r] = fmaxf(mx[r], __shfl_xor_sync(0xffffffffu, mx[r], 2));
             }
-            if (tig == 0) { sm.red[sp][w][gid] = mx[0]; sm.red[sp][w][gid + 8] = mx[1]; }
+            if (tig == 0) {
+                sm.red[sp][w][gid] = mx[0];
+                sm.red[sp][w][gid + 8] = mx[1];
+            }
             bar_sync(SRED, 128);
             float al[2], pm[2], pv[2][4];
 #pragma unroll
             for (int r = 0; r < 2; ++r) {
                 const int row = gid + 8 * r;
-                const float tmax = fmaxf(fmaxf(sm.red[sp][0][row], sm.red[sp][1][row]),
-                                         fmaxf(sm.red[sp][2][row], sm.red[sp][3][row]));
+                const float tmax =
+                    fmaxf(fmaxf(sm.red[sp][0][row], sm.red[sp][1][row]), fmaxf(sm.red[sp][2][row], sm.red[sp][3][row]));
                 const float m_new = fmaxf(m_run[r], tmax);
                 al[r] = __expf(m_run[r] - m_new);
                 pm[r] = __expf(tmax - m_new);
@@ -620,8 +637,10 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
                     make_float4(pv[r][0], pv[r][1], pv[r][2], pv[r][3]);
             }
             if (w == 0 && tig == 0) {
-                sm.alpha[sp][gid] = al[0]; sm.alpha[sp][gid + 8] = al[1];
-                sm.pmax[sp][gid] = pm[0]; sm.pmax[sp][gid + 8] = pm[1];
+                sm.alpha[sp][gid] = al[0];
+                sm.alpha[sp][gid + 8] = al[1];
+                sm.pmax[sp][gid] = pm[0];
+                sm.pmax[sp][gid + 8] = pm[1];
             }
             bar_arrive(FULL_P + sp, NPB);
         }
@@ -630,8 +649,14 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
             lp[r] += __shfl_xor_sync(0xffffffffu, lp[r], 1);
             lp[r] += __shfl_xor_sync(0xffffffffu, lp[r], 2);
         }
-        if (tig == 0) { sm.lsum[w][gid] = lp[0]; sm.lsum[w][gid + 8] = lp[1]; }
-        if (SPLIT && w == 0 && tig == 0) { sm.mfin[gid] = m_run[0]; sm.mfin[gid + 8] = m_run[1]; }
+        if (tig == 0) {
+            sm.lsum[w][gid] = lp[0];
+            sm.lsum[w][gid + 8] = lp[1];
+        }
+        if (SPLIT && w == 0 && tig == 0) {
+            sm.mfin[gid] = m_run[0];
+            sm.mfin[gid + 8] = m_run[1];
+        }
         bar_sync(END, NPB);
     } else {
         // ======== values: dims 64g .. 64g+63 as 16-dim blocks db; n-tile (db, par) column j is dim
@@ -843,8 +868,9 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
 #pragma unroll
                 for (int db = 0; db < 4; ++db) {   // dims 64g + 16db + 4tig + {0, 1, 2, 3}
                     float4 out = make_float4(0.f, 0.f, 0.f, 0.f);
-                    if (l > 0.0f) out = make_float4(o[db][0][2 * r] / l, o[db][1][2 * r] / l, o[db][0][2 * r + 1] / l,
-                                                    o[db][1][2 * r + 1] / l);
+                    if (l > 0.0f)
+                        out = make_float4(o[db][0][2 * r] / l, o[db][1][2 * r] / l, o[db][0][2 * r + 1] / l,
+                                          o[db][1][2 * r + 1] / l);
                     *reinterpret_cast<float4*>(&rows[(size_t) row * HD + 64 * g + 16 * db + 4 * tig]) = out;
                 }
             }
@@ -975,10 +1001,10 @@ Kv kv_of(const QsaAttnPools& p) {
 }
 bool kv_complete(const QsaAttnPools& p, Kv kv) {
     switch (kv) {
-    case Kv::Q4: return p.k_q4s && p.v_q4 && p.v_q4s;
-    case Kv::I8Q4: return p.k_scale && p.v_q4s;
-    case Kv::I8: return p.v_q && p.k_scale && p.v_scale;
-    default: return p.k_pool && p.v_pool;
+        case Kv::Q4: return p.k_q4s && p.v_q4 && p.v_q4s;
+        case Kv::I8Q4: return p.k_scale && p.v_q4s;
+        case Kv::I8: return p.v_q && p.k_scale && p.v_scale;
+        default: return p.k_pool && p.v_pool;
     }
 }
 
@@ -1008,7 +1034,7 @@ void launch_kv(Kv kv, dim3 grid, cudaStream_t st, const float* q, const QsaAttnP
                                                          scale, attn, (int) cap, part);
 }
 
-}  // namespace
+}   // namespace
 
 void qsa_prefill_attn(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
                       const QsaShapes& s, float* attn, int64_t n_q, void* stream) {
@@ -1065,4 +1091,4 @@ uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s) {
     return (uint64_t) max_splits(cap) * (uint64_t) s.n_head * (HD + 2) + 64;
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

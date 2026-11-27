@@ -30,4 +30,4 @@ struct MmaJob {
 };
 bool native_mma_q8_0(const MmaJob* jobs, int n_jobs, int n_in, int ncols, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

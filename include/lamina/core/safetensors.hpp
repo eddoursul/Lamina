@@ -14,8 +14,8 @@ namespace lamina {
 class SafeTensors {
 public:
     struct Tensor {
-        std::string dtype;           // "BF16", "F32", ...
-        std::vector<int64_t> shape;  // outermost first
+        std::string dtype;            // "BF16", "F32", ...
+        std::vector<int64_t> shape;   // outermost first
         uint64_t begin = 0, end = 0;
     };
     bool open(const std::string& path, std::string& err);
@@ -32,4 +32,4 @@ private:
     uint64_t data_ = 0;
 };
 
-}  // namespace lamina
+}   // namespace lamina

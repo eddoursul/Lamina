@@ -14,8 +14,8 @@ int main(int argc, char** argv) {
         lamina::GgufFile g(argv[1]);
         std::printf("%s\n", argv[1]);
         std::printf("  version %u   tensors %zu   metadata %zu   data_start %llu   size %llu\n", g.version(),
-                    g.tensors().size(), g.metadata().size(), (unsigned long long)g.data_start(),
-                    (unsigned long long)g.file_size());
+                    g.tensors().size(), g.metadata().size(), (unsigned long long) g.data_start(),
+                    (unsigned long long) g.file_size());
 
         if (check) {
             // Independent expectations, all established by earlier phases.
@@ -23,8 +23,8 @@ int main(int argc, char** argv) {
             for (const auto& t : g.tensors())
                 if (t.name.rfind("blk.", 0) == 0) ++n_blk;
             std::printf("  blk.* tensors %zu   globals %zu\n", n_blk, g.tensors().size() - n_blk);
-            std::printf("  Q2_0 %llu   BF16 %llu   F32 %llu\n", (unsigned long long)g.count_type("Q2_0"),
-                        (unsigned long long)g.count_type("BF16"), (unsigned long long)g.count_type("F32"));
+            std::printf("  Q2_0 %llu   BF16 %llu   F32 %llu\n", (unsigned long long) g.count_type("Q2_0"),
+                        (unsigned long long) g.count_type("BF16"), (unsigned long long) g.count_type("F32"));
 
             // Every tensor's byte size must land inside the gap to the next tensor's offset, since
             // GGUF aligns every tensor. That is the same bracket test tools/verify_q2_0_geometry.py
@@ -40,11 +40,11 @@ int main(int argc, char** argv) {
                     ++unknown;
                     continue;
                 }
-                if (t->elements() % (uint64_t)el) {
+                if (t->elements() % (uint64_t) el) {
                     ++bad;
                     continue;
                 }
-                const uint64_t nb = t->elements() / (uint64_t)el * (uint64_t)by;
+                const uint64_t nb = t->elements() / (uint64_t) el * (uint64_t) by;
                 // The bracket is on the GAP to the next tensor's offset, not on that offset itself -
                 // offsets are relative to data_start, so the gap is a difference. Comparing against
                 // the raw offset flagged almost every tensor (213/214) while the same test in Python
@@ -64,4 +64,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
-#endif // LAMINA_GGUF_MAIN_DISABLED
+#endif   // LAMINA_GGUF_MAIN_DISABLED

@@ -70,7 +70,8 @@ const Card& card() {
         int sms = 0, major = 0;
         if (const cudaError_t e = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev); e != cudaSuccess)
             die("the card's SM count", e);
-        if (const cudaError_t e = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev); e != cudaSuccess)
+        if (const cudaError_t e = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+            e != cudaSuccess)
             die("the card's architecture", e);
         cards[dev].sms = std::max(1, sms);   // (two threads may write the same values)
         cards[dev].m = major >= 9 ? &kBlackwell : &kAmpere;
@@ -99,11 +100,11 @@ struct SmemOnce {
 
 // ---- an instance as the model prices it
 struct Form {
-    int bm, bn;          // rows of X and of W a block
-    int warps, smem;     // a block's warps and shared memory
-    int bk, es;          // a slab of K; bytes a value
-    double work;         // a slab's: products of 16 x 8 x 16, or float multiply-adds in thousands
-    double rate, share;  // of the card's rate with an SM's units busy; of that with four warps an SM
+    int bm, bn;           // rows of X and of W a block
+    int warps, smem;      // a block's warps and shared memory
+    int bk, es;           // a slab of K; bytes a value
+    double work;          // a slab's: products of 16 x 8 x 16, or float multiply-adds in thousands
+    double rate, share;   // of the card's rate with an SM's units busy; of that with four warps an SM
 };
 
 /// An instance's time (us) at a split count by the model: its blocks in rounds over the SMs - as many at once as an
@@ -140,26 +141,39 @@ struct TcCfg {
     constexpr int bm() const { return 16 * MT * WM; }
     constexpr int bn() const { return 16 * NT * WN; }
     Form form(int gen) const {
-        return {bm(), bn(), WM * WN, ST * (bm() + bn()) * BK * 2, BK, 2, (double) (bm() / 16) * (bn() / 8) * (BK / 16), rate[gen],
+        return {bm(),
+                bn(),
+                WM * WN,
+                ST * (bm() + bn()) * BK * 2,
+                BK,
+                2,
+                (double) (bm() / 16) * (bn() / 8) * (BK / 16),
+                rate[gen],
                 share[gen]};
     }
     void name(char* out, size_t n) const { std::snprintf(out, n, "%d.%d.%d.%d.%d.%d", MT, NT, WM, WN, BK, ST); }
 };
-template <bool BF, int MT, int NT, int WM, int WN, int BK, int ST, bool PL> void run_tc(const TcArgs& a, dim3 grid, cudaStream_t st) {
+template <bool BF, int MT, int NT, int WM, int WN, int BK, int ST, bool PL>
+void run_tc(const TcArgs& a, dim3 grid, cudaStream_t st) {
     static SmemOnce once;
     constexpr int smem = tc_smem_bytes<MT, NT, WM, WN, BK, ST>();
     once(tc_kernel<BF, MT, NT, WM, WN, BK, ST, PL>, smem);
     tc_kernel<BF, MT, NT, WM, WN, BK, ST, PL><<<grid, 32 * WM * WN, smem, st>>>(a);
 }
-#define LAMINA_TC(MT, NT, WM, WN, BK, ST, R86, E86, R120, E120) \
-    TcCfg { MT, NT, WM, WN, BK, ST, {R86, R120}, {E86, E120}, \
-            {&run_tc<false, MT, NT, WM, WN, BK, ST, false>, &run_tc<true, MT, NT, WM, WN, BK, ST, false>} }
+#define LAMINA_TC(MT, NT, WM, WN, BK, ST, R86, E86, R120, E120)                                                        \
+    TcCfg {                                                                                                            \
+        MT, NT, WM, WN, BK, ST, {R86, R120}, {E86, E120}, {                                                            \
+            &run_tc<false, MT, NT, WM, WN, BK, ST, false>, &run_tc<true, MT, NT, WM, WN, BK, ST, false>                \
+        }                                                                                                              \
+    }
 constexpr TcCfg kTc[] = {
 #include "gemm_tc_cfgs.inc"
 };
 // rows that are not 16-byte aligned: plain loads, one tile
-constexpr TcCfg kTcPlain{2, 2, 2, 2, 32, 3, {0.0, 0.0}, {0.0, 0.0},
-                         {&run_tc<false, 2, 2, 2, 2, 32, 3, true>, &run_tc<true, 2, 2, 2, 2, 32, 3, true>}};
+constexpr TcCfg kTcPlain{
+    2,          2,          2,
+    2,          32,         3,
+    {0.0, 0.0}, {0.0, 0.0}, {&run_tc<false, 2, 2, 2, 2, 32, 3, true>, &run_tc<true, 2, 2, 2, 2, 32, 3, true>}};
 
 // ---- the FP32 instances: GM x GN threads of TM x TN sums
 struct SgCfg {
@@ -169,7 +183,14 @@ struct SgCfg {
     constexpr int bm() const { return GM * TM; }
     constexpr int bn() const { return GN * TN; }
     Form form(int gen) const {
-        return {bm(), bn(), GM * GN / 32, ST * (bm() + bn()) * kSgK * 4, kSgK, 4, (double) bm() * bn() * kSgK / 1000.0, rate[gen],
+        return {bm(),
+                bn(),
+                GM * GN / 32,
+                ST * (bm() + bn()) * kSgK * 4,
+                kSgK,
+                4,
+                (double) bm() * bn() * kSgK / 1000.0,
+                rate[gen],
                 share[gen]};
     }
     void name(char* out, size_t n) const { std::snprintf(out, n, "s%d.%d.%d.%d.%d", GM, GN, TM, TN, ST); }
@@ -180,7 +201,7 @@ template <int GM, int GN, int TM, int TN, int ST, bool PL> void run_sg(const SgA
     once(sg_kernel<GM, GN, TM, TN, ST, PL>, smem);
     sg_kernel<GM, GN, TM, TN, ST, PL><<<grid, GM * GN, smem, st>>>(a);
 }
-#define LAMINA_SG(GM, GN, TM, TN, ST, R86, E86, R120, E120) \
+#define LAMINA_SG(GM, GN, TM, TN, ST, R86, E86, R120, E120)                                                            \
     SgCfg { GM, GN, TM, TN, ST, {R86, R120}, {E86, E120}, &run_sg<GM, GN, TM, TN, ST, false> }
 constexpr SgCfg kSg[] = {
 #include "gemm_sg_cfgs.inc"
@@ -208,7 +229,8 @@ Plan plan(const Card& c, const Cfg (&list)[n], int64_t T, int64_t N, int64_t K, 
     thread_local int filled = 0, next = 0;
     const int dev = device();
     for (int i = 0; i < filled; ++i)
-        if (cache[i].T == T && cache[i].N == N && cache[i].K == K && cache[i].scratch == scratch_bytes && cache[i].dev == dev)
+        if (cache[i].T == T && cache[i].N == N && cache[i].K == K && cache[i].scratch == scratch_bytes &&
+            cache[i].dev == dev)
             return cache[i].p;
     Plan best;
     double best_t = other;
@@ -256,8 +278,8 @@ int whole_slabs(int64_t K, int splits, int slab, int64_t& kz) {
     return (int) ((K + kz - 1) / kz);
 }
 
-void launch_tc(const TcCfg& f, int splits, bool t_inner, const Gemm16& p, int64_t ldx, int64_t ldy, const GemmScratch& scratch,
-               cudaStream_t st) {
+void launch_tc(const TcCfg& f, int splits, bool t_inner, const Gemm16& p, int64_t ldx, int64_t ldy,
+               const GemmScratch& scratch, cudaStream_t st) {
     const int BM = f.bm(), BN = f.bn();
     const int nT = (int) ((p.T + BM - 1) / BM), nN = (int) ((p.N + BN - 1) / BN);
     TcArgs a{};
@@ -288,11 +310,11 @@ void launch_tc(const TcCfg& f, int splits, bool t_inner, const Gemm16& p, int64_
         const long long n4 = (p.T * p.N + 3) / 4;
         const unsigned blocks = (unsigned) ((n4 + 255) / 256);
         if (p.y_half)
-            tc_reduce_kernel<true><<<blocks, 256, 0, st>>>((const float*) scratch.p, p.y, ldy, zs, (int) p.T, (int) p.N, splits,
-                                                          p.alpha, p.beta);
+            tc_reduce_kernel<true><<<blocks, 256, 0, st>>>((const float*) scratch.p, p.y, ldy, zs, (int) p.T, (int) p.N,
+                                                           splits, p.alpha, p.beta);
         else
-            tc_reduce_kernel<false><<<blocks, 256, 0, st>>>((const float*) scratch.p, p.y, ldy, zs, (int) p.T, (int) p.N, splits,
-                                                           p.alpha, p.beta);
+            tc_reduce_kernel<false><<<blocks, 256, 0, st>>>((const float*) scratch.p, p.y, ldy, zs, (int) p.T,
+                                                            (int) p.N, splits, p.alpha, p.beta);
     } else {
         a.y = p.y;
         a.ldy = ldy;
@@ -304,8 +326,8 @@ void launch_tc(const TcCfg& f, int splits, bool t_inner, const Gemm16& p, int64_
     }
 }
 
-void launch_sg(const SgCfg& f, int splits, bool t_inner, const Gemm32& p, int64_t ldx, int64_t ldy, const GemmScratch& scratch,
-               cudaStream_t st) {
+void launch_sg(const SgCfg& f, int splits, bool t_inner, const Gemm32& p, int64_t ldx, int64_t ldy,
+               const GemmScratch& scratch, cudaStream_t st) {
     const int BM = f.bm(), BN = f.bn();
     const int nT = (int) ((p.T + BM - 1) / BM), nN = (int) ((p.N + BN - 1) / BN);
     SgArgs a{};
@@ -332,8 +354,8 @@ void launch_sg(const SgCfg& f, int splits, bool t_inner, const Gemm32& p, int64_
         a.flags = (t_inner ? kTInner : 0) | (aligned16(scratch.p) && p.N % 4 == 0 ? kYQuad : 0);
         f.run(a, dim3((unsigned) (nT * nN), 1, (unsigned) splits), st);
         const long long n4 = (p.T * p.N + 3) / 4;
-        tc_reduce_kernel<false><<<(unsigned) ((n4 + 255) / 256), 256, 0, st>>>((const float*) scratch.p, p.y, ldy, zs, (int) p.T,
-                                                                              (int) p.N, splits, p.alpha, p.beta);
+        tc_reduce_kernel<false><<<(unsigned) ((n4 + 255) / 256), 256, 0, st>>>(
+            (const float*) scratch.p, p.y, ldy, zs, (int) p.T, (int) p.N, splits, p.alpha, p.beta);
     } else {
         a.y = p.y;
         a.ldy = ldy;
@@ -355,12 +377,12 @@ int plain_splits(const Card& c, int64_t T, int64_t N, int64_t K, const GemmScrat
 }
 
 [[noreturn]] void bad_form(const char* what, int form, int splits, int64_t T, int64_t N, int64_t K) {
-    std::fprintf(stderr, "%s: instance %d, %d splits of %lld x %lld x %lld\n", what, form, splits, (long long) T, (long long) N,
-                 (long long) K);
+    std::fprintf(stderr, "%s: instance %d, %d splits of %lld x %lld x %lld\n", what, form, splits, (long long) T,
+                 (long long) N, (long long) K);
     std::exit(1);
 }
 
-}  // namespace
+}   // namespace
 
 size_t gemm_scratch_bytes(int64_t T, int64_t N) { return std::min<size_t>(32 * part_bytes(T, N), (size_t) 32 << 20); }
 
@@ -420,16 +442,16 @@ int gemm16_forms(int form, char* name, size_t name_size) {
 void gemm16_form(int form, int splits, bool x_inner, const Gemm16& p, const GemmScratch& scratch, void* stream) {
     if (p.T <= 0 || p.N <= 0) return;
     const int64_t ldx = p.ldx > 0 ? p.ldx : p.K, ldy = p.ldy > 0 ? p.ldy : p.N;
-    if (form < 0 || form >= gemm16_forms(-1, nullptr, 0) || p.K <= 0 || !aligned16(p.x) || !aligned16(p.w) || ldx % 8 != 0 ||
-        p.K % 8 != 0 || splits < 1 ||
+    if (form < 0 || form >= gemm16_forms(-1, nullptr, 0) || p.K <= 0 || !aligned16(p.x) || !aligned16(p.w) ||
+        ldx % 8 != 0 || p.K % 8 != 0 || splits < 1 ||
         (splits > 1 && (scratch.p == nullptr || scratch.bytes / part_bytes(p.T, p.N) < (size_t) splits)))
         bad_form("gemm16_form", form, splits, p.T, p.N, p.K);
     launch_tc(kTc[form], splits, x_inner, p, ldx, ldy, scratch, (cudaStream_t) stream);
     check("gemm16_form");
 }
 
-void gemm16_grouped(const uint16_t* const* x, const uint16_t* const* w, float* const* y, const int* rows, int n, int64_t N,
-                    int64_t K, bool bf16, void* stream) {
+void gemm16_grouped(const uint16_t* const* x, const uint16_t* const* w, float* const* y, const int* rows, int n,
+                    int64_t N, int64_t K, bool bf16, void* stream) {
     if (n <= 0 || N <= 0) return;
     if (K <= 0 || K % 8 != 0 || N > INT32_MAX || K > INT32_MAX) {
         std::fprintf(stderr, "gemm16_grouped: %lld x %lld (K a multiple of 8)\n", (long long) N, (long long) K);
@@ -501,12 +523,12 @@ int gemm32_forms(int form, char* name, size_t name_size) {
 void gemm32_form(int form, int splits, bool x_inner, const Gemm32& p, const GemmScratch& scratch, void* stream) {
     if (p.T <= 0 || p.N <= 0) return;
     const int64_t ldx = p.ldx > 0 ? p.ldx : p.K, ldy = p.ldy > 0 ? p.ldy : p.N;
-    if (form < 0 || form >= gemm32_forms(-1, nullptr, 0) || p.K <= 0 || !aligned16(p.x) || !aligned16(p.w) || ldx % 4 != 0 ||
-        p.K % 4 != 0 || splits < 1 ||
+    if (form < 0 || form >= gemm32_forms(-1, nullptr, 0) || p.K <= 0 || !aligned16(p.x) || !aligned16(p.w) ||
+        ldx % 4 != 0 || p.K % 4 != 0 || splits < 1 ||
         (splits > 1 && (scratch.p == nullptr || scratch.bytes / part_bytes(p.T, p.N) < (size_t) splits)))
         bad_form("gemm32_form", form, splits, p.T, p.N, p.K);
     launch_sg(kSg[form], splits, x_inner, p, ldx, ldy, scratch, (cudaStream_t) stream);
     check("gemm32_form");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

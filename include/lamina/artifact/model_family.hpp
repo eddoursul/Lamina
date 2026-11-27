@@ -19,8 +19,10 @@ enum class ModelFamily {
     Qwen4Exp,    ///< Qwen3.8-Flash-Next and its fine-tunes / pruned variants (Swift 1.5, the Coder)
     Qwen35Moe,   ///< Qwen3.6-35B-A3B (Unsloth's MTP GGUFs): plain pre-norm residual, dense attention, nextn MTP block
     Qwen35,      ///< Qwen3.8-27B: Qwen3.6's layers with a dense FFN in place of the experts (Unsloth's GGUFs)
-    HyV4Flash,   ///< Tencent's Hy4-flash: gated MLA, sparse and window layers, iHC, Engram, latent experts (AngelSlim's GGUFs)
-    Inkling2,    ///< Thinking Machines Lab's Inkling 2 Mini: looped layers, a distance bias, NVFP4 experts (unsloth's GGUFs)
+    HyV4Flash,   ///< Tencent's Hy4-flash: gated MLA, sparse and window
+                 ///< layers, iHC, Engram, latent experts (AngelSlim's GGUFs)
+    Inkling2,    ///< Thinking Machines Lab's Inkling 2 Mini: looped layers,
+                 ///< a distance bias, NVFP4 experts (unsloth's GGUFs)
 };
 
 inline ModelFamily model_family_from_arch(const std::string& arch) {
@@ -36,36 +38,24 @@ inline ModelFamily model_family_from_arch(const std::string& arch) {
 /// The GGUF architecture string (also the metadata key prefix: "<arch>.block_count").
 inline const char* model_family_arch(ModelFamily f) {
     switch (f) {
-    case ModelFamily::Qwen4Exp:
-        return "qwen4exp";
-    case ModelFamily::Qwen35Moe:
-        return "qwen35moe";
-    case ModelFamily::Qwen35:
-        return "qwen35";
-    case ModelFamily::HyV4Flash:
-        return "hy_v4_flash";
-    case ModelFamily::Inkling2:
-        return "inkling2";   // unsloth's files; mainline's layout says inkling2_loop
-    default:
-        return "";
+        case ModelFamily::Qwen4Exp: return "qwen4exp";
+        case ModelFamily::Qwen35Moe: return "qwen35moe";
+        case ModelFamily::Qwen35: return "qwen35";
+        case ModelFamily::HyV4Flash: return "hy_v4_flash";
+        case ModelFamily::Inkling2: return "inkling2";   // unsloth's files; mainline's layout says inkling2_loop
+        default: return "";
     }
 }
 
 /// The model's name for messages.
 inline const char* model_family_title(ModelFamily f) {
     switch (f) {
-    case ModelFamily::Qwen4Exp:
-        return "Qwen3.8-Flash-Next";
-    case ModelFamily::Qwen35Moe:
-        return "Qwen3.6-35B-A3B";
-    case ModelFamily::Qwen35:
-        return "Qwen3.8-27B";
-    case ModelFamily::HyV4Flash:
-        return "Hy4-flash";
-    case ModelFamily::Inkling2:
-        return "Inkling 2 Mini";
-    default:
-        return "an unknown model";
+        case ModelFamily::Qwen4Exp: return "Qwen3.8-Flash-Next";
+        case ModelFamily::Qwen35Moe: return "Qwen3.6-35B-A3B";
+        case ModelFamily::Qwen35: return "Qwen3.8-27B";
+        case ModelFamily::HyV4Flash: return "Hy4-flash";
+        case ModelFamily::Inkling2: return "Inkling 2 Mini";
+        default: return "an unknown model";
     }
 }
 
@@ -83,4 +73,4 @@ inline std::string model_family_not_supported(ModelFamily f) {
            "file";
 }
 
-}  // namespace lamina
+}   // namespace lamina

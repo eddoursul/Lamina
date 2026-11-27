@@ -19,8 +19,8 @@
 // activation precision must be pinned with the oracle backend and batch geometry, not inferred from weights.
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
 namespace lamina::kernels {
 
@@ -74,7 +74,10 @@ struct GrWorkspace {
 /// Carves `base` (which must be DEVICE memory, or null to size only) into `out` and returns the bytes needed.
 /// 16-byte aligned between regions.
 size_t gr_workspace_init(const GrShapes& s, void* base, GrWorkspace& out);
-inline size_t gr_workspace_bytes(const GrShapes& s) { GrWorkspace w; return gr_workspace_init(s, nullptr, w); }
+inline size_t gr_workspace_bytes(const GrShapes& s) {
+    GrWorkspace w;
+    return gr_workspace_init(s, nullptr, w);
+}
 
 /// `build_hc_mix`.  ONE token: `R` is (hc, n_embd) with n_embd fastest, i.e. stream c starts at c*n_embd.
 ///
@@ -108,8 +111,8 @@ inline size_t gr_workspace_bytes(const GrShapes& s) { GrWorkspace w; return gr_w
 /// row for each of the two projections, and one block-tile for the mean.  The transposes are gone because the
 /// warp-per-row mapping makes them unnecessary.
 void gr_read(const float* R, const float* w_norm, const uint16_t* w_down, const uint16_t* w_up,
-             const uint16_t* w_inject, float eps, const GrShapes& s, const GrWorkspace& ws, float* mixed,
-             float* inject, void* stream);
+             const uint16_t* w_inject, float eps, const GrShapes& s, const GrWorkspace& ws, float* mixed, float* inject,
+             void* stream);
 
 /// `build_hc_combine`.  `R_out[i] = R[i] + block_out[d] * w[c]` with `w[c] = 2*sigmoid(inject[c]/hc)`.
 ///
@@ -119,4 +122,4 @@ void gr_read(const float* R, const float* w_norm, const uint16_t* w_down, const 
 void gr_write(const float* R, const float* block_out, const float* inject, const GrShapes& s, float* R_out,
               void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

@@ -43,12 +43,12 @@ class NativeHead;
 struct MtpPromptKv {
     const float *norm_emb = nullptr, *norm_hidden = nullptr;   ///< [n_embd], [hc * n_embd]
     const void *fc_emb = nullptr, *fc_hidden = nullptr;        ///< Q8_0 [n_embd, n_embd]
-    const float* hc_norm = nullptr;                             ///< [hc * n_embd]
-    const uint16_t *hc_down = nullptr, *hc_up = nullptr;        ///< BF16 [hc_lr, hc * n_embd], [hc * n_embd, hc_lr]
-    const void *k_proj = nullptr, *v_proj = nullptr;            ///< Q8_0 [n_head_kv * head_dim, n_embd]
-    const float* k_norm = nullptr;                              ///< [head_dim]
-    QsaState* kv = nullptr;                                     ///< the layer's K/V cells
-    int64_t first_cell = 0;                                     ///< cells before it the window never reaches again
+    const float* hc_norm = nullptr;                            ///< [hc * n_embd]
+    const uint16_t *hc_down = nullptr, *hc_up = nullptr;       ///< BF16 [hc_lr, hc * n_embd], [hc * n_embd, hc_lr]
+    const void *k_proj = nullptr, *v_proj = nullptr;           ///< Q8_0 [n_head_kv * head_dim, n_embd]
+    const float* k_norm = nullptr;                             ///< [head_dim]
+    QsaState* kv = nullptr;                                    ///< the layer's K/V cells
+    int64_t first_cell = 0;                                    ///< cells before it the window never reaches again
 };
 
 class MtpDrafter {
@@ -141,26 +141,30 @@ private:
     const NativeHead* head_ = nullptr;
     const float* window_R_ = nullptr;
     int max_t_ = 0, max_drafts_ = 0;
-    bool pass_ = false;                              // a sampled request: the drafts' chances to pass (set_sampling)
+    bool pass_ = false;   // a sampled request: the drafts' chances to pass (set_sampling)
     uint64_t pass_seed_ = 0;
     float pass_temperature_ = 0.0f;
-    float pass_min_p_ = -1.0f, pass_floor_[3] = {};  // min_p's floors on the chance, per chain step (draft)
+    float pass_min_p_ = -1.0f, pass_floor_[3] = {};   // min_p's floors on the chance, per chain step (draft)
     float chances_[9] = {};
     int64_t n_vocab_ = 0;
     uint64_t vram_ = 0;
     cudaStream_t cs_ = nullptr;
-    cudaStream_t side_ = nullptr;                    // the shared expert's branch of the draft graphs
+    cudaStream_t side_ = nullptr;   // the shared expert's branch of the draft graphs
     cudaEvent_t sh_fork_ = nullptr, sh_join_ = nullptr;
-    uint32_t* rseq_ = nullptr;                       // verify_router's sequence word and counter (device)
+    uint32_t* rseq_ = nullptr;   // verify_router's sequence word and counter (device)
     unsigned* rcount_ = nullptr;
     cudaGraphExec_t round_exec_[9] = {};
 
-    struct Tensor { std::string name, kind; int64_t rows = 0, cols = 0; uint64_t off = 0, bytes = 0; };
+    struct Tensor {
+        std::string name, kind;
+        int64_t rows = 0, cols = 0;
+        uint64_t off = 0, bytes = 0;
+    };
     std::vector<Tensor> tensors_;
     uint8_t* dense_ = nullptr;
     uint8_t* experts_ = nullptr;
-    uint64_t blob_ = 0;                               // bytes per expert
-    lamina::kernels::NativeExpertLayout nat_;         // gu_type >= 0: GGUF blocks; else the Q2_0 blobs
+    uint64_t blob_ = 0;                         // bytes per expert
+    lamina::kernels::NativeExpertLayout nat_;   // gu_type >= 0: GGUF blocks; else the Q2_0 blobs
     void* state_arena_ = nullptr;
     QsaState st_;
     void* arena_ = nullptr;
@@ -178,14 +182,15 @@ private:
     int64_t n_dvocab_ = 0;
     uint8_t* proxy_ = nullptr;   ///< the draft head's 2-bit copy (draft_proxy.hpp); null: the exact head over every row
     void* proxy_scratch_ = nullptr;
-    int64_t window_ = 0;        // attention over the last window_ cells (0 = every cell)
+    int64_t window_ = 0;   // attention over the last window_ cells (0 = every cell)
     int64_t prompt_len_ = 0;
     float* probs_ = nullptr;
     uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' and row_top_prob_split's partials and counters
     uint8_t* top_scratch_ = nullptr;
     // device
     int32_t *tok_ = nullptr, *step_ = nullptr, *pos_ = nullptr, *row_ = nullptr, *ident_ = nullptr;
-    float *Rin_ = nullptr, *R_ = nullptr, *emb_ = nullptr, *en_ = nullptr, *e2_ = nullptr, *hn_ = nullptr, *h2_ = nullptr;
+    float *Rin_ = nullptr, *R_ = nullptr, *emb_ = nullptr, *en_ = nullptr, *e2_ = nullptr, *hn_ = nullptr,
+          *h2_ = nullptr;
     float *mixed_ = nullptr, *inj_ = nullptr, *inj2_ = nullptr, *lo_ = nullptr, *rs_ = nullptr, *bo_ = nullptr;
     float* grs_ = nullptr;   // the hyper-connection reads' scratch (zeroed with the arena)
     uint8_t* xq_ = nullptr;
@@ -205,4 +210,4 @@ private:
     int64_t cap_ = 0, attn_scratch_floats_ = 0;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

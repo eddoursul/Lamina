@@ -29,7 +29,8 @@ inline const std::vector<std::string>& drafter_flags() {
 /// the Qwen3.6 and Qwen3.8-27B path's earlier draft count (--drafts-per-step N)
 inline bool is_drafter_flag(const std::string& flag, const std::string& value) {
     if (flag == "--mtp")
-        return value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); });
+        return value.empty() ||
+               !std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); });
     for (const std::string& n : drafter_flags())
         if (flag == n) return true;
     return false;
@@ -50,8 +51,10 @@ inline std::string drafter_arg(const std::vector<std::string>& args, size_t* at 
 enum class DrafterKind {
     Missing,      ///< no such file or folder
     Other,        ///< no drafter of the kinds below: another GGUF (a model, a projector), another safetensors file
-    DraftLayer,   ///< Qwen3.8-Flash-Next's draft layer: the GGUF tools/mtp_rt.py writes, or a folder of its earlier layout
-    DSpark,       ///< Inkling 2's block drafter: a dflash GGUF with the Markov head's table, or the checkpoint's mtp.safetensors
+    DraftLayer,   ///< Qwen3.8-Flash-Next's draft layer: the GGUF
+                  ///< tools/mtp_rt.py writes, or a folder of its earlier layout
+    DSpark,       ///< Inkling 2's block drafter: a dflash GGUF with the Markov
+                  ///< head's table, or the checkpoint's mtp.safetensors
     DFly2,        ///< Hy4-flash's DFly2: the tencent/Hy4-flash checkpoint's last shard (model.dfly_layers.*)
 };
 
@@ -71,7 +74,8 @@ inline DrafterKind drafter_kind(const std::string& path) {
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path p(std::u8string(path.begin(), path.end()));
-    if (fs::is_directory(p, ec)) return fs::is_regular_file(p / "dense.txt", ec) ? DrafterKind::DraftLayer : DrafterKind::Other;
+    if (fs::is_directory(p, ec))
+        return fs::is_regular_file(p / "dense.txt", ec) ? DrafterKind::DraftLayer : DrafterKind::Other;
     if (!fs::is_regular_file(p, ec)) return DrafterKind::Missing;
     if (const std::string h = safetensors_header(path); !h.empty()) {
         if (h.find("\"markov_head.markov_w1.weight\"") != std::string::npos) return DrafterKind::DSpark;
@@ -84,27 +88,26 @@ inline DrafterKind drafter_kind(const std::string& path) {
         if (a == nullptr) return DrafterKind::Other;
         if (a->s == kDraftLayerArch) return DrafterKind::DraftLayer;
         if (a->s == "dflash" && f.find("markov_w1.weight") != nullptr) return DrafterKind::DSpark;
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
     return DrafterKind::Other;
 }
 
 /// The model a drafter of that kind is for, and what it is
 inline const char* drafter_kind_name(DrafterKind k) {
     switch (k) {
-    case DrafterKind::DraftLayer: return "Qwen3.8-Flash-Next's draft layer";
-    case DrafterKind::DSpark: return "Inkling 2's block drafter (DSpark)";
-    case DrafterKind::DFly2: return "Hy4-flash's drafter (DFly2)";
-    case DrafterKind::Missing: return "not there";
-    default: return "no drafter this engine reads";
+        case DrafterKind::DraftLayer: return "Qwen3.8-Flash-Next's draft layer";
+        case DrafterKind::DSpark: return "Inkling 2's block drafter (DSpark)";
+        case DrafterKind::DFly2: return "Hy4-flash's drafter (DFly2)";
+        case DrafterKind::Missing: return "not there";
+        default: return "no drafter this engine reads";
     }
 }
 
 /// A path's refusal of the file `flag` names, where it is not there or is another model's drafter: "" where it is of
 /// the kind `want`, or of no kind another path takes (the path's own loader says then what is wrong with it).
 /// `model`: the path's model; `its`: what its drafter is.
-inline std::string drafter_mismatch(const std::string& flag, const std::string& path, DrafterKind want, const char* model,
-                                    const char* its) {
+inline std::string drafter_mismatch(const std::string& flag, const std::string& path, DrafterKind want,
+                                    const char* model, const char* its) {
     const DrafterKind k = drafter_kind(path);
     if (k == DrafterKind::Missing) return flag + " " + path + " is not there";
     if (k == want || k == DrafterKind::Other) return {};
@@ -157,7 +160,8 @@ inline GgufDrafter gguf_drafter(const std::string& path) {
                 if (any && !trunk) d.what = "MTP head, " + arch + "'s next-token layers alone";
             }
             if (d.what.empty() && model_family_from_arch(arch) == ModelFamily::Unknown) {
-                const std::u8string file = std::filesystem::path(std::u8string(path.begin(), path.end())).filename().u8string();
+                const std::u8string file =
+                    std::filesystem::path(std::u8string(path.begin(), path.end())).filename().u8string();
                 std::string name(file.begin(), file.end());
                 for (char& c : name) c = (char) std::tolower((unsigned char) c);
                 for (const char* side : {"mtp-", "eagle3-", "dflash-", "dspark-"})
@@ -165,9 +169,8 @@ inline GgufDrafter gguf_drafter(const std::string& path) {
                         d.what = "named as llama.cpp names a drafter, architecture " + arch;
             }
         }
-    } catch (const std::exception&) {
-    }
+    } catch (const std::exception&) {}
     return d;
 }
 
-}  // namespace lamina
+}   // namespace lamina

@@ -64,4 +64,4 @@ void KeepAwake::loop() {
 #endif
 }
 
-}  // namespace lamina
+}   // namespace lamina

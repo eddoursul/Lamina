@@ -10,12 +10,12 @@
 using lamina::json;
 
 static int fails = 0;
-#define CHECK(c)                                                                  \
-    do {                                                                          \
-        if (!(c)) {                                                               \
-            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);   \
-            ++fails;                                                              \
-        }                                                                         \
+#define CHECK(c)                                                                                                       \
+    do {                                                                                                               \
+        if (!(c)) {                                                                                                    \
+            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);                                          \
+            ++fails;                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 static const json kTool = json::parse(R"({"name": "Agent", "parameters": {"type": "object", "properties": {
@@ -28,12 +28,12 @@ static const std::string kBody =
     "</parameter>\n<parameter=odd>\nmaybe\n</parameter>\n</function>";
 
 static void check_args(const json& a) {
-    CHECK(a["prompt"] == "False");                 // a string is the text
-    CHECK(a["run_in_background"] == false);        // Python's False for a boolean
-    CHECK(a["count"] == 3);                        // JSON as before
-    CHECK(a["either"] == true);                    // a type list that has boolean, any case
-    CHECK(a["nothing"].is_null());                 // Python's None for null
-    CHECK(a["odd"] == "maybe");                    // not a boolean spelling: the text, as before
+    CHECK(a["prompt"] == "False");            // a string is the text
+    CHECK(a["run_in_background"] == false);   // Python's False for a boolean
+    CHECK(a["count"] == 3);                   // JSON as before
+    CHECK(a["either"] == true);               // a type list that has boolean, any case
+    CHECK(a["nothing"].is_null());            // Python's None for null
+    CHECK(a["odd"] == "maybe");               // not a boolean spelling: the text, as before
 }
 
 int main() {

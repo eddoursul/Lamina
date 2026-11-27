@@ -1,9 +1,9 @@
 // src/prefill/gr_upmix_parity.cu - the hyper-connection read's fused up projection + mix (gr_upmix) against the pair it
 // replaces (Gemm::bf16, with the prompt path's scratch, writing `gated`, then gr_mix_r), on synthetic inputs of the
 // model's shapes (N = 2560, 4 streams, K = 320).  Where the product sums K in one pass, as the fused kernel does, the
-// outputs are the same bits; where it splits K, FP32 rounding.  Every token count of a sub-chunk (1-2048) on the current GPU:
-// which are bitwise, and the least count from which all are (the prompt path's kUpmixMinTokens must not be below it);
-// at a few counts also max |diff| / max |value| and both paths against an FP64 reference on sampled tokens.
+// outputs are the same bits; where it splits K, FP32 rounding.  Every token count of a sub-chunk (1-2048) on the
+// current GPU: which are bitwise, and the least count from which all are (the prompt path's kUpmixMinTokens must not be
+// below it); at a few counts also max |diff| / max |value| and both paths against an FP64 reference on sampled tokens.
 //   gr_upmix_parity            the checks
 //   gr_upmix_parity --bench    and the timings of the pair and the fused kernel at T = 256 / 2048
 #include "lamina/prefill/gemm.hpp"
@@ -57,9 +57,9 @@ struct Inputs {
         std::mt19937 g(seed);
         std::normal_distribution<float> nd(0.0f, 1.0f);
         lo16.resize((size_t) TMAX * LR);
-        for (auto& x : lo16) x = to_bf16(nd(g) * 0.5f);            // silu outputs: O(1) and below
+        for (auto& x : lo16) x = to_bf16(nd(g) * 0.5f);   // silu outputs: O(1) and below
         wu.resize((size_t) D * LR);
-        for (auto& x : wu) x = to_bf16(nd(g) * 0.12f);              // gated ~ N(0, ~1): sigmoid in its live range
+        for (auto& x : wu) x = to_bf16(nd(g) * 0.12f);   // gated ~ N(0, ~1): sigmoid in its live range
         R.resize((size_t) TMAX * D);
         for (auto& x : R) x = nd(g) * 3.0f;
         rs.resize((size_t) TMAX * HC);
@@ -77,7 +77,13 @@ struct Inputs {
         cudaMemcpy(d_rs, rs.data(), rs.size() * 4, cudaMemcpyHostToDevice);
         cudaMemcpy(d_w, w.data(), w.size() * 4, cudaMemcpyHostToDevice);
     }
-    ~Inputs() { cudaFree(d_lo16); cudaFree(d_wu); cudaFree(d_R); cudaFree(d_rs); cudaFree(d_w); }
+    ~Inputs() {
+        cudaFree(d_lo16);
+        cudaFree(d_wu);
+        cudaFree(d_R);
+        cudaFree(d_rs);
+        cudaFree(d_w);
+    }
 };
 
 struct Outputs {
@@ -88,7 +94,11 @@ struct Outputs {
         bf = dalloc<uint16_t>((size_t) TMAX * N);
         h = dalloc<uint16_t>((size_t) TMAX * N);
     }
-    ~Outputs() { cudaFree(mixed); cudaFree(bf); cudaFree(h); }
+    ~Outputs() {
+        cudaFree(mixed);
+        cudaFree(bf);
+        cudaFree(h);
+    }
 };
 
 // mixed[t][d] in FP64 from the same BF16 inputs (the exact result both GPU paths round)
@@ -116,7 +126,10 @@ Result check(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inp
     gm.bf16(in.d_lo16, in.d_wu, gated, T, D, LR);
     lamina::prefill::gr_mix_r(in.d_R, in.d_rs, in.d_w, gated, ref.mixed, ref.bf, T, st, ref.h);
     lamina::prefill::gr_upmix(in.d_lo16, in.d_wu, in.d_R, in.d_rs, in.d_w, got.mixed, got.bf, T, st, got.h);
-    if (!ck(cudaStreamSynchronize(st), "run")) { res.bad = true; return res; }
+    if (!ck(cudaStreamSynchronize(st), "run")) {
+        res.bad = true;
+        return res;
+    }
     const size_t n = (size_t) T * N;
     std::vector<float> a(n), b(n);
     std::vector<uint16_t> abf(n), bbf(n), ah(n), bh(n);
@@ -155,9 +168,9 @@ Result check(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inp
     }
     res.bad = res.bad || eb > 2.0 * ea + 1e-6 * ev;
     std::printf("%s T=%-5lld %s mixed max |diff| / max |value| %.2e, BF16 / FP16 images differing %.4f%% / %.4f%%; "
-                "vs FP64 (sampled): product + mix %.2e, fused %.2e\n", res.bad ? "FAIL" : "ok  ", (long long) T,
-                res.bitwise ? "bitwise " : "        ", rel, 100.0 * (double) bf_diff / (double) n,
-                100.0 * (double) h_diff / (double) n, ea / ev, eb / ev);
+                "vs FP64 (sampled): product + mix %.2e, fused %.2e\n",
+                res.bad ? "FAIL" : "ok  ", (long long) T, res.bitwise ? "bitwise " : "        ", rel,
+                100.0 * (double) bf_diff / (double) n, 100.0 * (double) h_diff / (double) n, ea / ev, eb / ev);
     return res;
 }
 
@@ -193,7 +206,11 @@ void bench(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Input
                 float ms, msg;
                 cudaEventElapsedTime(&ms, e0, e1);
                 cudaEventElapsedTime(&msg, e0, em);
-                if (i >= 3) { tp.push_back(ms); tg.push_back(msg); tm.push_back(ms - msg); }
+                if (i >= 3) {
+                    tp.push_back(ms);
+                    tg.push_back(msg);
+                    tm.push_back(ms - msg);
+                }
             }
         }
     }
@@ -201,14 +218,14 @@ void bench(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Input
     // the fused kernel's bytes: R and the two 16-bit outputs, lo16 and w_up once
     const double bytes = (double) T * D * 4 + (double) T * N * 4 + (double) T * LR * 2 + (double) D * LR * 2;
     std::printf("  T=%-5lld the pair %.3f ms (up GEMM %.3f + gr_mix_r %.3f) | fused %.3f ms: %.2fx  "
-                "(fused: %.0f GB/s of its bytes)\n", (long long) T, p, median(tg), median(tm), f, p / f,
-                bytes / f / 1e6);
+                "(fused: %.0f GB/s of its bytes)\n",
+                (long long) T, p, median(tg), median(tm), f, p / f, bytes / f / 1e6);
     cudaEventDestroy(e0);
     cudaEventDestroy(e1);
     cudaEventDestroy(em);
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     int dev = 0, major = 0, minor = 0;
@@ -218,7 +235,10 @@ int main(int argc, char** argv) {
         std::printf("gr_upmix_parity: no CUDA device, skipped\n");
         return 77;
     }
-    if (major < 8) { std::printf("gr_upmix_parity: sm_%d%d, the fused read needs sm_80+: skipped\n", major, minor); return 77; }
+    if (major < 8) {
+        std::printf("gr_upmix_parity: sm_%d%d, the fused read needs sm_80+: skipped\n", major, minor);
+        return 77;
+    }
     cudaDeviceProp prop{};
     cudaGetDeviceProperties(&prop, dev);
     std::printf("gr_upmix_parity on %s (sm_%d%d)\n", prop.name, major, minor);
@@ -241,14 +261,18 @@ int main(int argc, char** argv) {
         cudaFree(ws);
         return 0;
     }
-    int64_t from = -1;           // the least T from which every T up to TMAX is bitwise
-    std::vector<int64_t> other;  // the T that are not
+    int64_t from = -1;            // the least T from which every T up to TMAX is bitwise
+    std::vector<int64_t> other;   // the T that are not
     for (int64_t T = 1; T <= TMAX; ++T) {
         const bool detail = T == 1 || T == 32 || T == 33 || T == 128 || T == 600 || T == TMAX;
         const Result r = check(gm, st, gated, in, ref, got, T, detail);
         fails += r.bad;
-        if (r.bitwise) { if (from < 0) from = T; }
-        else { from = -1; other.push_back(T); }
+        if (r.bitwise) {
+            if (from < 0) from = T;
+        } else {
+            from = -1;
+            other.push_back(T);
+        }
     }
     std::printf("bitwise at every T from %lld to %lld; not bitwise at %zu counts", (long long) from, (long long) TMAX,
                 other.size());

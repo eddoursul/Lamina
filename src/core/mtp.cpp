@@ -7,14 +7,14 @@
 #include "lamina/core/draft_pass.hpp"
 #include "lamina/core/native_head.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
-#include "lamina/kernels/draft_proxy.hpp"
 #include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/draft_proxy.hpp"
 #include "lamina/kernels/elementwise.hpp"
 #include "lamina/kernels/fused_gr.hpp"
 #include "lamina/kernels/gr.hpp"
 #include "lamina/kernels/kv_q8.hpp"
-#include "lamina/kernels/native_moe.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_moe.hpp"
 #include "lamina/kernels/native_qsa.hpp"
 #include "lamina/kernels/native_rope.hpp"
 #include "lamina/kernels/native_router.hpp"
@@ -82,12 +82,14 @@ void q2_blob(const uint8_t* gu, const uint8_t* dn, uint8_t* blob) {
     }
 }
 
-}  // namespace
+}   // namespace
 
 MtpDrafter::~MtpDrafter() {
     if (cs_) cudaStreamSynchronize(cs_);
-    for (auto& e : round_exec_) if (e) cudaGraphExecDestroy(e);
-    for (auto& e : step_exec_) if (e) cudaGraphExecDestroy(e);
+    for (auto& e : round_exec_)
+        if (e) cudaGraphExecDestroy(e);
+    for (auto& e : step_exec_)
+        if (e) cudaGraphExecDestroy(e);
     if (cs_) cudaStreamDestroy(cs_);
     if (side_) cudaStreamDestroy(side_);
     if (sh_fork_) cudaEventDestroy(sh_fork_);
@@ -102,20 +104,24 @@ MtpDrafter::~MtpDrafter() {
     if (proxy_) cudaFree(proxy_);
     if (proxy_scratch_) cudaFree(proxy_scratch_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_};
-    for (void* h : hosts) if (h) cudaFreeHost(h);
+    for (void* h : hosts)
+        if (h) cudaFreeHost(h);
     qsa_state_free(st_);
 }
 
 const float* MtpDrafter::f32(const char* name) const {
-    for (const auto& t : tensors_) if (t.name == name && t.kind == "f32") return (const float*) (dense_ + t.off);
+    for (const auto& t : tensors_)
+        if (t.name == name && t.kind == "f32") return (const float*) (dense_ + t.off);
     return nullptr;
 }
 const uint16_t* MtpDrafter::bf16(const char* name) const {
-    for (const auto& t : tensors_) if (t.name == name && t.kind == "bf16") return (const uint16_t*) (dense_ + t.off);
+    for (const auto& t : tensors_)
+        if (t.name == name && t.kind == "bf16") return (const uint16_t*) (dense_ + t.off);
     return nullptr;
 }
 const void* MtpDrafter::q8(const char* name) const {
-    for (const auto& t : tensors_) if (t.name == name && t.kind == "q8_0") return dense_ + t.off;
+    for (const auto& t : tensors_)
+        if (t.name == name && t.kind == "q8_0") return dense_ + t.off;
     return nullptr;
 }
 
@@ -124,23 +130,39 @@ bool MtpDrafter::load(const std::string& path, const ModelGeometry& g, SessionSt
     g_ = &g;
     ss_ = &ss;
     max_t_ = max_t;
-    if (max_t < 1 || max_t > lamina::kernels::kVerifyMaxT) { err = "mtp: max_t out of range"; return false; }
+    if (max_t < 1 || max_t > lamina::kernels::kVerifyMaxT) {
+        err = "mtp: max_t out of range";
+        return false;
+    }
     const Clock::time_point t_load = Clock::now();
     uint64_t dense_bytes = 0;
     std::error_code ec;
     if (!(std::filesystem::is_directory(path, ec) ? load_folder(path, g, dense_bytes, err)
                                                   : load_file(path, g, dense_bytes, err)))
         return false;
-    const char* required[] = {"fc_embedding.weight", "fc_hidden.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight",
-                              "self_attn.v_proj.weight", "self_attn.o_proj.weight", "mlp.shared_expert.gate_proj.weight",
-                              "mlp.shared_expert.up_proj.weight", "mlp.shared_expert.down_proj.weight"};
-    for (const char* n : required) if (!q8(n)) { err = std::string("mtp: ") + n + " is missing (q8_0)"; return false; }
+    const char* required[] = {"fc_embedding.weight",
+                              "fc_hidden.weight",
+                              "self_attn.q_proj.weight",
+                              "self_attn.k_proj.weight",
+                              "self_attn.v_proj.weight",
+                              "self_attn.o_proj.weight",
+                              "mlp.shared_expert.gate_proj.weight",
+                              "mlp.shared_expert.up_proj.weight",
+                              "mlp.shared_expert.down_proj.weight"};
+    for (const char* n : required)
+        if (!q8(n)) {
+            err = std::string("mtp: ") + n + " is missing (q8_0)";
+            return false;
+        }
 
     // ---- the layer's own K/V (dense attention: no indexer state is read), FP16 or INT8 (qsa_draft_kv_format)
     const lamina::kernels::QsaShapes s = lamina::kernels::qsa_shapes(g);
     const int64_t max_cells = ss.qsa_states[0].max_cells;
     const uint64_t sb = qsa_state_bytes(g, max_cells, false, qsa_draft_kv_format());
-    if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
+    if (cudaMalloc(&state_arena_, sb) != cudaSuccess) {
+        err = "mtp: the K/V state does not fit";
+        return false;
+    }
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[0], qsa_draft_kv_format()) == 0) {
         err = "mtp: state init failed";
         return false;
@@ -162,34 +184,58 @@ bool MtpDrafter::load(const std::string& path, const ModelGeometry& g, SessionSt
               mapped(64, (void**) &h_row_, (void**) &m_row_) &&
               mapped(T * 4 + 64, (void**) &h_out_, (void**) &m_out_) &&
               mapped(T * 4 + 64, (void**) &h_prob_, (void**) &m_prob_);
-    if (!ok) { err = "mtp: mapped staging failed"; return false; }
+    if (!ok) {
+        err = "mtp: mapped staging failed";
+        return false;
+    }
     auto carve = [&](Bump& b) {
-        tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(R2 * 4); pos_ = b.take<int32_t>(R2 * NH); row_ = b.take<int32_t>(4);
+        tok_ = b.take<int32_t>(T);
+        step_ = b.take<int32_t>(R2 * 4);
+        pos_ = b.take<int32_t>(R2 * NH);
+        row_ = b.take<int32_t>(4);
         ident_ = b.take<int32_t>(T * (uint64_t) cap_);
-        Rin_ = b.take<float>(T * HC * N); R_ = b.take<float>(T * HC * N);
-        emb_ = b.take<float>(T * N); en_ = b.take<float>(T * N); e2_ = b.take<float>(T * N);
-        hn_ = b.take<float>(T * HC * N); h2_ = b.take<float>(T * HC * N);
-        mixed_ = b.take<float>(T * N); inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
-        lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC); bo_ = b.take<float>(T * N);
+        Rin_ = b.take<float>(T * HC * N);
+        R_ = b.take<float>(T * HC * N);
+        emb_ = b.take<float>(T * N);
+        en_ = b.take<float>(T * N);
+        e2_ = b.take<float>(T * N);
+        hn_ = b.take<float>(T * HC * N);
+        h2_ = b.take<float>(T * HC * N);
+        mixed_ = b.take<float>(T * N);
+        inj_ = b.take<float>(T * HC);
+        inj2_ = b.take<float>(T * HC);
+        lo_ = b.take<float>(T * (uint64_t) g.hc_lr);
+        rs_ = b.take<float>(T * HC);
+        bo_ = b.take<float>(T * N);
         grs_ = (float*) b.take<uint8_t>(lamina::kernels::fused_gr_scratch_bytes());
         xq_ = b.take<uint8_t>(lamina::kernels::native_q8_1_bytes((int) (NH * HD), 8));
-        qfull_ = b.take<float>(T * NH * 2 * HD); qcur_ = b.take<float>(T * NH * HD);
-        kcur_ = b.take<float>(T * NKV * HD); vcur_ = b.take<float>(T * NKV * HD);
+        qfull_ = b.take<float>(T * NH * 2 * HD);
+        qcur_ = b.take<float>(T * NH * HD);
+        kcur_ = b.take<float>(T * NKV * HD);
+        vcur_ = b.take<float>(T * NKV * HD);
         attn32_ = b.take<float>(T * NH * HD);
         attn_scratch_ = b.take<float>((uint64_t) attn_scratch_floats_);   // the full layer runs one row at a time
-        logits_ = b.take<float>(T * (uint64_t) g.n_expert); w_ = b.take<float>(T * K); ids_ = b.take<int32_t>(T * K);
-        shared_ = b.take<float>(T * N); parts_ = b.take<float>(T * K * N); y_ = b.take<float>(T * N);
+        logits_ = b.take<float>(T * (uint64_t) g.n_expert);
+        w_ = b.take<float>(T * K);
+        ids_ = b.take<int32_t>(T * K);
+        shared_ = b.take<float>(T * N);
+        parts_ = b.take<float>(T * K * N);
+        y_ = b.take<float>(T * N);
         sample_ = b.take<float>(T * N);
-        hit_slot_ = b.take<int32_t>(T * K); hit_dst_ = b.take<int32_t>(T * K); hit_count_ = b.take<int32_t>(4);
-        grp_ptr_ = b.take<unsigned long long>(T * K); grp_start_ = b.take<int32_t>(T * K + 1);
+        hit_slot_ = b.take<int32_t>(T * K);
+        hit_dst_ = b.take<int32_t>(T * K);
+        hit_count_ = b.take<int32_t>(4);
+        grp_ptr_ = b.take<unsigned long long>(T * K);
+        grp_start_ = b.take<int32_t>(T * K + 1);
         grp_counts_ = b.take<int32_t>(4);
-        hit_xq_ = b.take<uint8_t>(T * (N / 32) * 34); hit_xs_ = b.take<float>(T * (N / 32));
+        hit_xq_ = b.take<uint8_t>(T * (N / 32) * 34);
+        hit_xs_ = b.take<float>(T * (N / 32));
         nat_xq_ = b.take<uint8_t>(T * (N / 32) * 36);
         rseq_ = b.take<uint32_t>(4);
         rcount_ = b.take<unsigned>(4);
-        hit_scratch_ = b.take<uint8_t>(std::max<uint64_t>(
-            lamina::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
-            lamina::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
+        hit_scratch_ = b.take<uint8_t>(
+            std::max<uint64_t>(lamina::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
+                               lamina::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
         sh_scratch_ = (float*) b.take<uint8_t>(lamina::kernels::shared_expert_scratch_bytes(g.n_ff));
         x_bf16_ = b.take<uint16_t>(N);
         out_ids_ = b.take<int32_t>(T + 4);
@@ -200,7 +246,10 @@ bool MtpDrafter::load(const std::string& path, const ModelGeometry& g, SessionSt
     };
     Bump count;
     carve(count);
-    if (cudaMalloc(&arena_, count.used) != cudaSuccess) { err = "mtp: buffers do not fit"; return false; }
+    if (cudaMalloc(&arena_, count.used) != cudaSuccess) {
+        err = "mtp: buffers do not fit";
+        return false;
+    }
     cudaMemset(arena_, 0, count.used);
     Bump real;
     real.base = (uint8_t*) arena_;
@@ -221,9 +270,10 @@ bool MtpDrafter::load(const std::string& path, const ModelGeometry& g, SessionSt
     }
     char fmts[48] = "Q2_0 blobs";
     if (nat_.gu_type >= 0) std::snprintf(fmts, sizeof fmts, "ggml types %d/%d", nat_.gu_type, nat_.d_type);
-    std::fprintf(stderr, "lamina mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f as %s, dense %.0f), in %.2f s\n",
-                 (double) vram_ / 1048576.0, (double) g.n_expert * blob_ / 1048576.0, fmts, (double) dense_bytes / 1048576.0,
-                 std::chrono::duration<double>(Clock::now() - t_load).count());
+    std::fprintf(stderr,
+                 "lamina mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f as %s, dense %.0f), in %.2f s\n",
+                 (double) vram_ / 1048576.0, (double) g.n_expert * blob_ / 1048576.0, fmts,
+                 (double) dense_bytes / 1048576.0, std::chrono::duration<double>(Clock::now() - t_load).count());
     return true;
 }
 
@@ -237,7 +287,8 @@ bool MtpDrafter::load_file(const std::string& path, const ModelGeometry& g, uint
     }
     const MetaValue* arch = f->get("general.architecture");
     const MetaValue* ver = f->get("lamina.mtp.version");
-    if (arch == nullptr || arch->s != kDraftLayerArch || ver == nullptr || !ver->is_num() || ver->u != kDraftLayerVersion) {
+    if (arch == nullptr || arch->s != kDraftLayerArch || ver == nullptr || !ver->is_num() ||
+        ver->u != kDraftLayerVersion) {
         err = "mtp: " + path + " is not a draft layer this engine reads (general.architecture " + kDraftLayerArch +
               ", lamina.mtp.version " + std::to_string(kDraftLayerVersion) + ": tools/mtp_rt.py writes one)";
         return false;
@@ -255,12 +306,14 @@ bool MtpDrafter::load_file(const std::string& path, const ModelGeometry& g, uint
         std::vector<const TensorInfo*> dense;
         for (const TensorInfo& t : f->tensors())
             if (&t != gu && &t != dn && &t != dv) dense.push_back(&t);
-        std::sort(dense.begin(), dense.end(), [](const TensorInfo* a, const TensorInfo* b) { return a->offset < b->offset; });
+        std::sort(dense.begin(), dense.end(),
+                  [](const TensorInfo* a, const TensorInfo* b) { return a->offset < b->offset; });
         for (const TensorInfo* t : dense) {
             const char* kind = t->type == 0 ? "f32" : t->type == 30 ? "bf16" : t->type == GGML_Q8_0 ? "q8_0" : nullptr;
             const uint64_t b = bytes_of(*t);
             if (kind == nullptr || t->shape.size() > 2 || b == 0) {
-                err = "mtp: " + path + ": " + t->name + " (" + t->type_name() + ") is not a dense tensor the layer "
+                err = "mtp: " + path + ": " + t->name + " (" + t->type_name() +
+                      ") is not a dense tensor the layer "
                       "takes (F32, BF16 or Q8_0, one or two dimensions, inside the file)";
                 return false;
             }
@@ -284,9 +337,9 @@ bool MtpDrafter::load_file(const std::string& path, const ModelGeometry& g, uint
         const uint64_t E = (uint64_t) g.n_expert, N = (uint64_t) g.n_embd, F = (uint64_t) g.n_ff;
         if (gu == nullptr || dn == nullptr || gu->shape != std::vector<uint64_t>{N, 2 * F, E} ||
             dn->shape != std::vector<uint64_t>{F, N, E} || bytes_of(*gu) == 0 || bytes_of(*dn) == 0) {
-            err = "mtp: " + path + " has no mlp.experts.gate_up_proj [" + std::to_string(N) + ", " + std::to_string(2 * F) +
-                  ", " + std::to_string(E) + "] and mlp.experts.down_proj [" + std::to_string(F) + ", " + std::to_string(N) +
-                  ", " + std::to_string(E) + "] of a known format";
+            err = "mtp: " + path + " has no mlp.experts.gate_up_proj [" + std::to_string(N) + ", " +
+                  std::to_string(2 * F) + ", " + std::to_string(E) + "] and mlp.experts.down_proj [" +
+                  std::to_string(F) + ", " + std::to_string(N) + ", " + std::to_string(E) + "] of a known format";
             return false;
         }
         const bool q2 = gu->type == 42 && dn->type == 42;
@@ -304,9 +357,15 @@ bool MtpDrafter::load_file(const std::string& path, const ModelGeometry& g, uint
             blob_ = nat_.bytes;
         }
         const uint64_t gu_e = bytes_of(*gu) / E, dn_e = bytes_of(*dn) / E;   // an expert's bytes of each
-        if (blob_ != gu_e + dn_e) { err = "mtp: the experts' blocks do not make the expert layout's blobs"; return false; }
+        if (blob_ != gu_e + dn_e) {
+            err = "mtp: the experts' blocks do not make the expert layout's blobs";
+            return false;
+        }
         const uint64_t bytes = E * blob_;
-        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
+        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) {
+            err = "mtp: the 512 experts do not fit in VRAM";
+            return false;
+        }
         const uint8_t* gsrc = f->tensor_data(*gu);
         const uint8_t* dsrc = f->tensor_data(*dn);
         constexpr uint64_t kPer = 32;   // experts a copy
@@ -345,8 +404,9 @@ bool MtpDrafter::load_folder(const std::string& dir, const ModelGeometry& g, uin
     {
         std::ifstream idx(dir + "/dense.txt");
         if (!idx) {
-            err = "mtp: " + dir + " is a folder without dense.txt: --drafter takes the draft layer's file, " + kDraftLayerFile +
-                  " (" + kDraftLayerScript + " downloads it), or a folder of its earlier layout (dense.txt, dense.bin, "
+            err = "mtp: " + dir + " is a folder without dense.txt: --drafter takes the draft layer's file, " +
+                  kDraftLayerFile + " (" + kDraftLayerScript +
+                  " downloads it), or a folder of its earlier layout (dense.txt, dense.bin, "
                   "experts.bin, draft_vocab.bin)";
             return false;
         }
@@ -356,24 +416,36 @@ bool MtpDrafter::load_folder(const std::string& dir, const ModelGeometry& g, uin
             std::istringstream is(line);
             Tensor t;
             is >> t.name >> t.kind >> t.rows >> t.cols >> t.off >> t.bytes;
-            if (!is) { err = "mtp: malformed dense.txt line: " + line; return false; }
+            if (!is) {
+                err = "mtp: malformed dense.txt line: " + line;
+                return false;
+            }
             tensors_.push_back(t);
         }
         std::vector<uint8_t> blob;
-        if (!read_file(dir + "/dense.bin", blob)) { err = "mtp: cannot read " + dir + "/dense.bin"; return false; }
+        if (!read_file(dir + "/dense.bin", blob)) {
+            err = "mtp: cannot read " + dir + "/dense.bin";
+            return false;
+        }
         // each entry of its kind's size, aligned, inside dense.bin: a broken folder is refused, not read past
         for (const Tensor& t : tensors_) {
             const uint64_t n = t.rows > 0 && t.cols > 0 ? (uint64_t) t.rows * (uint64_t) t.cols : 0;
-            const uint64_t want = t.kind == "f32" ? n * 4 : t.kind == "bf16" ? n * 2
-                                  : t.kind == "q8_0" && t.cols % 32 == 0 ? n / 32 * 34 : 0;
-            if (want == 0 || t.bytes != want || t.off % 4 != 0 || t.off > blob.size() || t.bytes > blob.size() - t.off) {
+            const uint64_t want = t.kind == "f32"                        ? n * 4
+                                  : t.kind == "bf16"                     ? n * 2
+                                  : t.kind == "q8_0" && t.cols % 32 == 0 ? n / 32 * 34
+                                                                         : 0;
+            if (want == 0 || t.bytes != want || t.off % 4 != 0 || t.off > blob.size() ||
+                t.bytes > blob.size() - t.off) {
                 err = "mtp: dense.txt's " + t.name + " (" + t.kind + " " + std::to_string(t.rows) + " x " +
                       std::to_string(t.cols) + ", " + std::to_string(t.bytes) + " bytes at " + std::to_string(t.off) +
                       ") is not a tensor of dense.bin's " + std::to_string(blob.size()) + " bytes";
                 return false;
             }
         }
-        if (cudaMalloc((void**) &dense_, blob.size()) != cudaSuccess) { err = "mtp: dense weights do not fit"; return false; }
+        if (cudaMalloc((void**) &dense_, blob.size()) != cudaSuccess) {
+            err = "mtp: dense weights do not fit";
+            return false;
+        }
         cudaMemcpy(dense_, blob.data(), blob.size(), cudaMemcpyHostToDevice);
         dense_bytes = blob.size();
         vram_ += blob.size();
@@ -394,14 +466,26 @@ bool MtpDrafter::load_folder(const std::string& dir, const ModelGeometry& g, uin
         }
         const uint64_t bytes = (uint64_t) g.n_expert * blob_;
         std::ifstream f(dir + "/experts.bin", std::ios::binary | std::ios::ate);
-        if (!f) { err = "mtp: cannot open " + dir + "/experts.bin"; return false; }
-        if ((uint64_t) f.tellg() != bytes) { err = "mtp: experts.bin does not match its format"; return false; }
+        if (!f) {
+            err = "mtp: cannot open " + dir + "/experts.bin";
+            return false;
+        }
+        if ((uint64_t) f.tellg() != bytes) {
+            err = "mtp: experts.bin does not match its format";
+            return false;
+        }
         f.seekg(0);
-        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
+        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) {
+            err = "mtp: the 512 experts do not fit in VRAM";
+            return false;
+        }
         std::vector<uint8_t> chunk(64u << 20);
         for (uint64_t off = 0; off < bytes;) {
             const uint64_t n = std::min<uint64_t>(chunk.size(), bytes - off);
-            if (!f.read((char*) chunk.data(), (std::streamsize) n)) { err = "mtp: experts.bin is truncated"; return false; }
+            if (!f.read((char*) chunk.data(), (std::streamsize) n)) {
+                err = "mtp: experts.bin is truncated";
+                return false;
+            }
             cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice);
             off += n;
         }
@@ -421,9 +505,15 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
     head_ = head;
     window_R_ = window_R;
     const WeightRef* wo = wt.find("output.weight");
-    if (!wo) { err = "mtp: output.weight is missing"; return false; }
+    if (!wo) {
+        err = "mtp: output.weight is missing";
+        return false;
+    }
     n_vocab_ = wo->ne1;
-    if (head == nullptr || !head->loaded()) { err = "mtp: the draft layer needs the native head (--native)"; return false; }
+    if (head == nullptr || !head->loaded()) {
+        err = "mtp: the draft layer needs the native head (--native)";
+        return false;
+    }
     if (dhead_ == nullptr && !bind_head(head, err)) return false;
     if (dhead_ == nullptr && head->rows() != n_vocab_) {
         err = "mtp: the main head holds part of the vocabulary and the draft layer has no draft head of its own";
@@ -460,7 +550,8 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
                 return false;
             }
             cudaMemcpy(dvocab_, dvocab_ids_.data(), ids_bytes, cudaMemcpyHostToDevice);
-            lamina::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
+            lamina::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_,
+                                         nullptr);
             cudaDeviceSynchronize();
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + ids_bytes;
             std::fprintf(stderr, "lamina mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
@@ -492,7 +583,10 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
 bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::string& err) {
     // step_row0 >= 0: the full layer on step rows [step_row0, +T); step_row0 < 0: K/V only on rows [-1 - step_row0, +T)
     const bool full = step_row0 >= 0;
-    if (full && T != 1) { err = "mtp: the full layer runs one row at a time (its attention scratch is sized for one)"; return false; }
+    if (full && T != 1) {
+        err = "mtp: the full layer runs one row at a time (its attention scratch is sized for one)";
+        return false;
+    }
     if (!record_front(T, full ? step_row0 : -1 - step_row0, cs, err)) return false;
     return !full || record_rest(step_row0, cs, err);
 }
@@ -521,13 +615,18 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         {
             FusedGrArgs fa[kFusedGrMaxT];
             for (int t = 0; t < T; ++t) {
-                fa[t].R = R_ + (size_t) t * HC * N; fa[t].R_out = R_ + (size_t) t * HC * N; fa[t].apply = false;
+                fa[t].R = R_ + (size_t) t * HC * N;
+                fa[t].R_out = R_ + (size_t) t * HC * N;
+                fa[t].apply = false;
                 fa[t].w_norm = f32("attn_hyper_connection.hc_norm.weight");
                 fa[t].w_down = bf16("attn_hyper_connection.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("attn_hyper_connection.input_mix_weight_up.weight");
                 fa[t].w_inject = bf16("attn_hyper_connection.block_inject_weight.weight");
-                fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC;
-                fa[t].inject_out = inj_ + t * HC; fa[t].mixed = mixed_ + t * N;
+                fa[t].eps = EPS;
+                fa[t].lo = lo_ + t * g.hc_lr;
+                fa[t].rs = rs_ + t * HC;
+                fa[t].inject_out = inj_ + t * HC;
+                fa[t].mixed = mixed_ + t * N;
             }
             fused_gr_read_multi(fa, T, grs_, cs);
         }
@@ -582,8 +681,15 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         }
         QsaAttnPools pools;
         pools.page_table = st_.page_table;
-        if (st_.kv_int8) { pools.k_q = st_.k_q; pools.v_q = st_.v_q; pools.k_scale = st_.k_scale; pools.v_scale = st_.v_scale; }
-        else { pools.k_pool = st_.k_pool; pools.v_pool = st_.v_pool; }
+        if (st_.kv_int8) {
+            pools.k_q = st_.k_q;
+            pools.v_q = st_.v_q;
+            pools.k_scale = st_.k_scale;
+            pools.v_scale = st_.v_scale;
+        } else {
+            pools.k_pool = st_.k_pool;
+            pools.v_pool = st_.v_pool;
+        }
         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
         qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn32_, T, cs, qfull_);
         native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
@@ -592,23 +698,32 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         {
             FusedGrArgs fa[kFusedGrMaxT];
             for (int t = 0; t < T; ++t) {
-                fa[t].R = R_ + (size_t) t * HC * N; fa[t].R_out = R_ + (size_t) t * HC * N; fa[t].apply = true;
-                fa[t].bo_prev = bo_ + t * N; fa[t].inj_prev = inj_ + t * HC;
+                fa[t].R = R_ + (size_t) t * HC * N;
+                fa[t].R_out = R_ + (size_t) t * HC * N;
+                fa[t].apply = true;
+                fa[t].bo_prev = bo_ + t * N;
+                fa[t].inj_prev = inj_ + t * HC;
                 fa[t].w_norm = f32("mlp_hyper_connection.hc_norm.weight");
                 fa[t].w_down = bf16("mlp_hyper_connection.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("mlp_hyper_connection.input_mix_weight_up.weight");
                 fa[t].w_inject = bf16("mlp_hyper_connection.block_inject_weight.weight");
-                fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC;
-                fa[t].inject_out = inj2_ + t * HC; fa[t].mixed = mixed_ + t * N;
+                fa[t].eps = EPS;
+                fa[t].lo = lo_ + t * g.hc_lr;
+                fa[t].rs = rs_ + t * HC;
+                fa[t].inject_out = inj2_ + t * HC;
+                fa[t].mixed = mixed_ + t * N;
             }
             fused_gr_read_multi(fa, T, grs_, cs);
         }
         // ---- MoE: the shared expert on a branch beside the router and the 512 resident experts, then the combine
         // and the write
         NativeSharedWeights nsw;
-        nsw.gate_type = GGML_Q8_0; nsw.gate_data = q8("mlp.shared_expert.gate_proj.weight");
-        nsw.up_type = GGML_Q8_0; nsw.up_data = q8("mlp.shared_expert.up_proj.weight");
-        nsw.down_type = GGML_Q8_0; nsw.down_data = q8("mlp.shared_expert.down_proj.weight");
+        nsw.gate_type = GGML_Q8_0;
+        nsw.gate_data = q8("mlp.shared_expert.gate_proj.weight");
+        nsw.up_type = GGML_Q8_0;
+        nsw.up_data = q8("mlp.shared_expert.up_proj.weight");
+        nsw.down_type = GGML_Q8_0;
+        nsw.down_data = q8("mlp.shared_expert.down_proj.weight");
         nsw.q8_1 = xq_;   // the routed experts read nat_xq_ / hit_xq_
         const SForm none{};
         if (cudaEventRecord(sh_fork_, cs) != cudaSuccess || cudaStreamWaitEvent(side_, sh_fork_, 0) != cudaSuccess) {
@@ -617,16 +732,26 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         }
         for (int t = 0; t < T; ++t) {
             f32_to_bf16_bulk(mixed_ + t * N, x_bf16_, N, side_);
-            shared_expert(nullptr, nullptr, x_bf16_, none, nullptr, nullptr, nullptr, none, nullptr, nullptr, nullptr, none,
-                          nullptr, nullptr, nullptr, bf16("mlp.shared_expert_gate.weight"), sh_scratch_, shared_ + t * N,
-                          N, g.n_ff, 32, side_, mixed_ + t * N, &nsw);
+            shared_expert(nullptr, nullptr, x_bf16_, none, nullptr, nullptr, nullptr, none, nullptr, nullptr, nullptr,
+                          none, nullptr, nullptr, nullptr, bf16("mlp.shared_expert_gate.weight"), sh_scratch_,
+                          shared_ + t * N, N, g.n_ff, 32, side_, mixed_ + t * N, &nsw);
         }
-        if (cudaEventRecord(sh_join_, side_) != cudaSuccess) { err = "mtp: the shared expert's branch"; return false; }
+        if (cudaEventRecord(sh_join_, side_) != cudaSuccess) {
+            err = "mtp: the shared expert's branch";
+            return false;
+        }
         VerifyRouterArgs ra;
-        ra.x = mixed_; ra.w = bf16("mlp.gate.weight"); ra.logits = logits_; ra.ids = ids_; ra.weights = w_;
+        ra.x = mixed_;
+        ra.w = bf16("mlp.gate.weight");
+        ra.logits = logits_;
+        ra.ids = ids_;
+        ra.weights = w_;
         ra.xq1 = nat_.gu_type >= 0 ? nat_xq_ : nullptr;   // the native experts' q8_1 rows
-        ra.seq = rseq_; ra.counter = rcount_;
-        ra.n_tok = T; ra.n_embd = (int) N; ra.n_expert = (int) g.n_expert;
+        ra.seq = rseq_;
+        ra.counter = rcount_;
+        ra.n_tok = T;
+        ra.n_embd = (int) N;
+        ra.n_expert = (int) g.n_expert;
         verify_router(ra, cs);
         moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) blob_, grp_ptr_, grp_start_, grp_counts_,
                            hit_dst_, hit_slot_, cs);
@@ -638,7 +763,10 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             moe_grouped_s2(grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_, (int64_t) T * K, (int64_t) T * K,
                            hit_xq_, hit_xs_, hit_scratch_, parts_, cs);
         }
-        if (cudaStreamWaitEvent(cs, sh_join_, 0) != cudaSuccess) { err = "mtp: the shared expert's join"; return false; }
+        if (cudaStreamWaitEvent(cs, sh_join_, 0) != cudaSuccess) {
+            err = "mtp: the shared expert's join";
+            return false;
+        }
         for (int t = 0; t < T; ++t) {
             native_moe_combine(parts_ + (size_t) t * K * N, w_ + t * K, shared_ + t * N, y_ + t * N, N, K, cs);
             gr_write(R_ + (size_t) t * HC * N, y_ + t * N, inj2_ + t * HC, gs, R_ + (size_t) t * HC * N, cs);
@@ -647,11 +775,16 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         {
             FusedGrArgs fa[kFusedGrMaxT];
             for (int t = 0; t < T; ++t) {
-                fa[t].R = R_ + (size_t) t * HC * N; fa[t].R_out = R_ + (size_t) t * HC * N; fa[t].apply = false;
+                fa[t].R = R_ + (size_t) t * HC * N;
+                fa[t].R_out = R_ + (size_t) t * HC * N;
+                fa[t].apply = false;
                 fa[t].w_norm = f32("hyper_connection_mixer.hc_norm.weight");
                 fa[t].w_down = bf16("hyper_connection_mixer.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("hyper_connection_mixer.input_mix_weight_up.weight");
-                fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC; fa[t].mixed = sample_ + t * N;
+                fa[t].eps = EPS;
+                fa[t].lo = lo_ + t * g.hc_lr;
+                fa[t].rs = rs_ + t * HC;
+                fa[t].mixed = sample_ + t * N;
             }
             fused_gr_read_multi(fa, T, grs_, cs);
         }
@@ -692,7 +825,7 @@ bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char*
     cudaStreamSynchronize(cs);
     return true;
 }
-}  // namespace
+}   // namespace
 
 bool MtpDrafter::capture_all(std::string& err) {
     for (int T = 1; T <= max_t_; ++T)
@@ -706,15 +839,22 @@ bool MtpDrafter::capture_round(int T, std::string& err) {
     if (round_exec_[T]) return true;
     using namespace lamina::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
-    if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
+    if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+        err = "mtp: begin capture";
+        return false;
+    }
     bool ok = true;
     // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
     // a's intermediates copied to row 0, at the cell the host staged in step row 2*max_t - 1; the draft chain is
     // one graph per step (`capture_step`) so the host can stop it when a draft is unlikely
     const int ra = 2 * max_t_ - 1;
     const int64_t N = g_->n_embd, NH = g_->n_head;
-    const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
-                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
+    const MappedCopy in[7] = {{tok_, m_tok_, T},
+                              {step_, m_step_, (int64_t) 2 * T * 4},
+                              {pos_, m_pos_, 2 * T * NH},
+                              {row_, m_row_, 2},
+                              {Rin_, window_R_, T * HCN},
+                              {step_ + ra * 4, m_step_ + ra * 4, 4},
                               {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
     copy_from_mapped_multi(in, 7, cs_);
     ok = record_front(T, 0, cs_, err);
@@ -736,7 +876,10 @@ bool MtpDrafter::capture_step(int j, std::string& err) {
     using namespace lamina::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
     const int row = max_t_ + j - 1;
-    if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
+    if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
+        err = "mtp: begin capture";
+        return false;
+    }
     const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
                               {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
     copy_from_mapped_multi(in, 2, cs_);
@@ -773,8 +916,8 @@ void MtpDrafter::set_sampling(const lamina::kernels::SamplerParams& sp) {
         const char* e = std::getenv("LAMINA_DRAFT_PASS");
         return e == nullptr || std::atoi(e) != 0;
     }();
-    const bool penalties = sp.penalty_last_n > 0 &&
-                           (sp.penalty_repeat != 1.0f || sp.penalty_freq != 0.0f || sp.penalty_present != 0.0f);
+    const bool penalties =
+        sp.penalty_last_n > 0 && (sp.penalty_repeat != 1.0f || sp.penalty_freq != 0.0f || sp.penalty_present != 0.0f);
     // a temperature the sampler takes for greedy (sample_tokens) draws nothing; penalties move the verifier's
     // logits where the draft layer's stay
     pass_ = on && !sp.greedy && sp.temperature >= 1e-30f && !penalties && sp.logit_bias == nullptr;
@@ -783,9 +926,12 @@ void MtpDrafter::set_sampling(const lamina::kernels::SamplerParams& sp) {
     pass_min_p_ = -1.0f;   // the floors follow the temperature
 }
 
-bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
-                       float* probs, float min_p, int* n_drafts, int* n_kept) {
-    if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
+bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err, float* probs,
+                       float min_p, int* n_drafts, int* n_kept) {
+    if (T < 1 || T > max_t_ || a < 0 || a >= T) {
+        err = "mtp: draft arguments out of range";
+        return false;
+    }
     // the accepted rows' K/V and row a's layer: no read reaches a cell past the one being drafted, and the chain or the
     // next round writes the rejected rows' cells first
     T = a + 1;
@@ -850,7 +996,11 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         ++n;
         nk += kept ? 1 : 0;
     }
-    for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; chances_[j] = 0.0f; if (probs) probs[j] = 0.0f; }
+    for (int j = n; j < max_t_ - 1; ++j) {
+        drafts[j] = 0;
+        chances_[j] = 0.0f;
+        if (probs) probs[j] = 0.0f;
+    }
     if (n_drafts) *n_drafts = n;
     if (n_kept) *n_kept = nk;
     ms_draft += ms_since(t0);
@@ -860,12 +1010,12 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
 
 bool MtpDrafter::draft_first(const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                              float* probs, float min_p, int* n_drafts, int* n_kept) {
-    if (cudaMemcpy((void*) window_R_, R_row, (size_t) (g_->hc * g_->n_embd) * sizeof(float), cudaMemcpyDeviceToDevice) !=
-        cudaSuccess) {
+    if (cudaMemcpy((void*) window_R_, R_row, (size_t) (g_->hc * g_->n_embd) * sizeof(float),
+                   cudaMemcpyDeviceToDevice) != cudaSuccess) {
         err = "mtp: staging the first residual failed";
         return false;
     }
     return draft(1, &token, cell, 0, drafts, err, probs, min_p, n_drafts, n_kept);
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

@@ -1,6 +1,6 @@
 // src/kernels/cuda/kv_q8.cu - see include/lamina/kernels/kv_q8.hpp.
-#include "lamina/kernels/kv_q8.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/kv_q8.hpp"
 
 #include <cuda_runtime.h>
 
@@ -27,11 +27,11 @@ void validate(const QsaShapes& s, const char* what) {
 }
 
 // One block = one 64-value group of one KV head of K (blockIdx.z = 0) or V (1); 64 threads, one value each.
-__global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q,
-                                    uint16_t* __restrict__ k_scale, uint16_t* __restrict__ v_scale,
-                                    const int32_t* __restrict__ table, const int32_t* __restrict__ step,
-                                    const float* __restrict__ kcur, const float* __restrict__ vcur, int kv_heads,
-                                    int head_dim, int page_size, int step_stride, int sides) {
+__global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q, uint16_t* __restrict__ k_scale,
+                                    uint16_t* __restrict__ v_scale, const int32_t* __restrict__ table,
+                                    const int32_t* __restrict__ step, const float* __restrict__ kcur,
+                                    const float* __restrict__ vcur, int kv_heads, int head_dim, int page_size,
+                                    int step_stride, int sides) {
     // blockIdx.z = 2 * token + (0 K, 1 V), or the token when one side is appended
     const int tok = sides == 3 ? blockIdx.z >> 1 : blockIdx.z;
     step += (size_t) tok * step_stride;
@@ -50,7 +50,7 @@ __global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict
     __syncthreads();
     const float amax = fmaxf(warp_max[0], warp_max[1]);
     const uint16_t sbits = f16_from_f32(amax / 127.0f);
-    const float sf = f32_from_f16(sbits);                          // quantize against the STORED scale
+    const float sf = f32_from_f16(sbits);   // quantize against the STORED scale
     int q = 0;
     if (sf > 0.0f) {
         q = __float2int_rn(x / sf);
@@ -86,16 +86,20 @@ __global__ void kv_gather_q8_kernel(const int8_t* __restrict__ k_q, const int8_t
     const char4 kc = reinterpret_cast<const char4*>(k_q + row * head_dim)[q4];
     const char4 vc = reinterpret_cast<const char4*>(v_q + row * head_dim)[q4];
     ushort4 ko, vo;
-    ko.x = f16_from_f32((float) kc.x * ks); ko.y = f16_from_f32((float) kc.y * ks);
-    ko.z = f16_from_f32((float) kc.z * ks); ko.w = f16_from_f32((float) kc.w * ks);
-    vo.x = f16_from_f32((float) vc.x * vs); vo.y = f16_from_f32((float) vc.y * vs);
-    vo.z = f16_from_f32((float) vc.z * vs); vo.w = f16_from_f32((float) vc.w * vs);
+    ko.x = f16_from_f32((float) kc.x * ks);
+    ko.y = f16_from_f32((float) kc.y * ks);
+    ko.z = f16_from_f32((float) kc.z * ks);
+    ko.w = f16_from_f32((float) kc.w * ks);
+    vo.x = f16_from_f32((float) vc.x * vs);
+    vo.y = f16_from_f32((float) vc.y * vs);
+    vo.z = f16_from_f32((float) vc.z * vs);
+    vo.w = f16_from_f32((float) vc.w * vs);
     const long long dst = (id * kv_heads + h) * (long long) per + q4;
     reinterpret_cast<ushort4*>(k_scratch)[dst] = ko;
     reinterpret_cast<ushort4*>(v_scratch)[dst] = vo;
 }
 
-}  // namespace
+}   // namespace
 
 void kv_append_q8_step(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale, const int32_t* page_table,
                        const int32_t* step, const float* kcur, const float* vcur, const QsaShapes& s, void* stream) {
@@ -108,7 +112,8 @@ void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v
                         const QsaShapes& s, void* stream, int sides) {
     validate(s, "kv_append_q8");
     if (n_tok < 1 || sides < 1 || sides > 3) return;
-    const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / KV_Q8_GROUP), (unsigned) ((sides == 3 ? 2 : 1) * n_tok));
+    const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / KV_Q8_GROUP),
+                    (unsigned) ((sides == 3 ? 2 : 1) * n_tok));
     kv_append_q8_kernel<<<grid, KV_Q8_GROUP, 0, (cudaStream_t) stream>>>(
         k_q, v_q, k_scale, v_scale, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim,
         (int) s.page_size, step_stride, sides);
@@ -122,10 +127,10 @@ void kv_gather_q8_step(const int8_t* k_q, const int8_t* v_q, const uint16_t* k_s
     if (max_ids <= 0) return;
     const long long total = max_ids * s.n_head_kv * (s.head_dim / 4);
     const unsigned blocks = (unsigned) ((total + 255) / 256);
-    kv_gather_q8_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(
-        k_q, v_q, k_scale, v_scale, page_table, ids, step, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size,
-        k_scratch, v_scratch);
+    kv_gather_q8_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(k_q, v_q, k_scale, v_scale, page_table, ids, step,
+                                                                   (int) s.n_head_kv, (int) s.head_dim,
+                                                                   (int) s.page_size, k_scratch, v_scratch);
     check("kv_gather_q8 launch");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

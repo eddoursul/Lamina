@@ -1,6 +1,6 @@
 // src/kernels/cuda/elementwise.cu - P2.S5's glue kernels.  See the header for why each exists.
-#include "lamina/kernels/elementwise.hpp"
 #include "lamina/kernels/dp4a.hpp"
+#include "lamina/kernels/elementwise.hpp"
 
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/f16_bits.hpp"
@@ -16,11 +16,9 @@ namespace {
 
 constexpr int THREADS = 256;
 
-__global__ void embedding_gather_kernel(const uint8_t* __restrict__ codes,
-                                       const float* __restrict__ scales,
-                                       const float* __restrict__ offsets, int64_t n,
-                                       int code_bits, int code_bias, int group_elems,
-                                       float* __restrict__ out) {
+__global__ void embedding_gather_kernel(const uint8_t* __restrict__ codes, const float* __restrict__ scales,
+                                        const float* __restrict__ offsets, int64_t n, int code_bits, int code_bias,
+                                        int group_elems, float* __restrict__ out) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const int per_byte = 8 / code_bits;
@@ -76,9 +74,8 @@ inline unsigned grid_for(int64_t n) { return (unsigned) ((n + THREADS - 1) / THR
 /// One WARP per row, reduced through shuffles.  The rows here are short and few - (24, 256), (2, 256),
 /// (4, 128) - so a block-per-row tree would spend its time in `__syncthreads` for 8 warps of 32, and the whole
 /// call is 30 rows.  A warp reduction with NO shared memory and NO barrier is the shape that fits.
-__global__ void rms_norm_weighted_kernel(float* __restrict__ x, const float* __restrict__ w, int64_t rows,
-                                         int64_t cols, float eps) {
-
+__global__ void rms_norm_weighted_kernel(float* __restrict__ x, const float* __restrict__ w, int64_t rows, int64_t cols,
+                                         float eps) {
     const int lane = threadIdx.x & 31;
     const int64_t row = ((int64_t) blockIdx.x * (blockDim.x >> 5)) + (threadIdx.x >> 5);
     // **THE ROW GUARD IS NOT DECORATION, AND ITS ABSENCE WAS THE QSA BUG.**  The launcher rounds the grid up to
@@ -119,19 +116,18 @@ bool check_launch(const char* what) {
     return true;
 }
 
-}  // namespace
+}   // namespace
 
-void embedding_gather(const uint8_t* codes, const float* scales, const float* offsets,
-                      int64_t n, int code_bits, int code_bias, int group_elems,
-                      float* out, void* stream) {
+void embedding_gather(const uint8_t* codes, const float* scales, const float* offsets, int64_t n, int code_bits,
+                      int code_bias, int group_elems, float* out, void* stream) {
     if (n <= 0) return;
-    embedding_gather_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(
-        codes, scales, offsets, n, code_bits, code_bias, group_elems, out);
+    embedding_gather_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(codes, scales, offsets, n, code_bits,
+                                                                                code_bias, group_elems, out);
     check_launch("embedding_gather");
 }
 
-void gdn_gate(const float* alpha, const float* dt, const float* ssm_a, float* gate, int64_t n_tokens,
-              int64_t h_v, void* stream) {
+void gdn_gate(const float* alpha, const float* dt, const float* ssm_a, float* gate, int64_t n_tokens, int64_t h_v,
+              void* stream) {
     if (n_tokens <= 0 || h_v <= 0) return;
     const int64_t n = n_tokens * h_v;
     gdn_gate_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(alpha, dt, ssm_a, gate, n, h_v);
@@ -190,7 +186,10 @@ __global__ void doorbell_publish_kernel(const float* __restrict__ x, const int32
                                         const float* __restrict__ w, int n, int k, float* x_out, int32_t* ids_out,
                                         float* w_out, uint32_t* seq) {
     for (int i = threadIdx.x; i < n; i += blockDim.x) x_out[i] = x[i];
-    if ((int) threadIdx.x < k) { ids_out[threadIdx.x] = ids[threadIdx.x]; w_out[threadIdx.x] = w[threadIdx.x]; }
+    if ((int) threadIdx.x < k) {
+        ids_out[threadIdx.x] = ids[threadIdx.x];
+        w_out[threadIdx.x] = w[threadIdx.x];
+    }
     __threadfence_system();
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -201,9 +200,12 @@ __global__ void doorbell_publish_kernel(const float* __restrict__ x, const int32
 
 void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
-    if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }
+    if (k > 1024) {
+        std::fprintf(stderr, "doorbell_publish: k too large\n");
+        std::exit(1);
+    }
     doorbell_publish_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, weights, (int) n, (int) k, x_out, ids_out,
-                                                                    weights_out, d_seq);
+                                                                   weights_out, d_seq);
     check_launch("doorbell_publish");
 }
 
@@ -229,7 +231,10 @@ __global__ void copy_from_mapped_multi_kernel(MappedCopies a) {
 
 void copy_from_mapped_multi(const MappedCopy* copies, int n, void* stream) {
     if (n <= 0) return;
-    if (n > 8) { std::fprintf(stderr, "copy_from_mapped_multi: at most 8 copies\n"); std::exit(1); }
+    if (n > 8) {
+        std::fprintf(stderr, "copy_from_mapped_multi: at most 8 copies\n");
+        std::exit(1);
+    }
     MappedCopies a;
     int64_t most = 0;
     for (int i = 0; i < n; ++i) {
@@ -259,4 +264,4 @@ void rms_norm_weighted(float* x, const float* w, int64_t rows, int64_t cols, flo
     sync_if_needed(stream, "rms_norm_weighted");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

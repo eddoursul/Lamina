@@ -1,9 +1,9 @@
 // src/kernels/cpu/tq_avx2.cpp - Gyro-L's expert rows on AVX2 + FMA (tq_cpu.hpp), reached behind cpu_avx2_ok() only.
 //
-// Per 128-weight block: the 64 states from the lanes' words in scalar code, their table entries into YMMs (eight states make
-// the 16 int16 weights of a register, two registers a q8_1 block's 32), then per token VPMADDWD against the sign-extended
-// int8 activations, one exact int32 sum per q8_1 block, and the scalar kernel's float steps lane for lane.  The weights are
-// decoded once per block for all the tokens of the group.
+// Per 128-weight block: the 64 states from the lanes' words in scalar code, their table entries into YMMs (eight states
+// make the 16 int16 weights of a register, two registers a q8_1 block's 32), then per token VPMADDWD against the
+// sign-extended int8 activations, one exact int32 sum per q8_1 block, and the scalar kernel's float steps lane for
+// lane.  The weights are decoded once per block for all the tokens of the group.
 #include "lamina/kernels/cpu/tq_cpu.hpp"
 
 #include "tq_states.hpp"
@@ -13,8 +13,7 @@
 namespace lamina::kernels::cpu::tq_detail {
 namespace {
 
-template <int KB>
-inline __m256i lane_weights(const uint32_t* tab, uint64_t word) {
+template <int KB> inline __m256i lane_weights(const uint32_t* tab, uint64_t word) {
     const auto at = [&](int j) { return tab[(uint32_t) (word >> ((7 - j) * KB)) & kTqStateMask]; };
     return _mm256_set_epi32((int) at(7), (int) at(6), (int) at(5), (int) at(4), (int) at(3), (int) at(2), (int) at(1),
                             (int) at(0));
@@ -62,7 +61,7 @@ void rows_t(const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, f
     }
 }
 
-}  // namespace
+}   // namespace
 
 void tq_rows_avx2(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct* a, int nt, float* const* out, int r0,
                   int r1) {
@@ -71,4 +70,4 @@ void tq_rows_avx2(int kb, const uint8_t* w, size_t row_bytes, int n, const TqAct
     else rows_t<7>(w, row_bytes, n, a, nt, out, r0, r1);
 }
 
-}  // namespace lamina::kernels::cpu::tq_detail
+}   // namespace lamina::kernels::cpu::tq_detail

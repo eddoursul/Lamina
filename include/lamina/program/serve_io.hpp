@@ -60,8 +60,8 @@ struct VisionImage {
     int64_t n, nx, ny;
     size_t off;
 };
-/// Reads the image encoder's file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, a picture
-/// each, in prompt order), appending the rows to `rows` and the pictures to `imgs`: "" or the error.
+/// Reads the image encoder's file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, a
+/// picture each, in prompt order), appending the rows to `rows` and the pictures to `imgs`: "" or the error.
 std::string read_vision_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
                                 std::vector<VisionImage>& imgs);
 /// What the conversation cache compares: a picture is its grid and the server's key for it (`key`), or else its
@@ -80,4 +80,4 @@ struct ImageCells {
 std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int32_t pad, int64_t n_embd,
                         const std::vector<uint64_t>& keys, ImageCells& r);
 
-}  // namespace lamina::program
+}   // namespace lamina::program

@@ -37,16 +37,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 #include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace {
 
 struct Case {
     const char* name;
-    int type;          // stable GGML type id, from the list in native_mmvq.hpp
+    int type;   // stable GGML type id, from the list in native_mmvq.hpp
     int n_in;
     int n_out;
     int block_elems;   // elements per weight block
@@ -56,12 +56,12 @@ struct Case {
 
 // the types a head or a projection can have in this model
 const Case CASES[] = {
-    {"Q4_0", 2, 2048, 512, 32, 18, {0, -1}},          // Q40Block: half d
-    {"Q8_0", 8, 2048, 512, 32, 34, {0, -1}},          // Q80Block: half d
-    {"Q4_K", 12, 2048, 512, 256, 144, {0, 2}},        // Q4KBlock: half2 dm
-    {"Q5_K", 13, 2048, 512, 256, 176, {0, 2}},        // Q5KBlock: half2 dm
-    {"Q6_K", 14, 2048, 512, 256, 210, {208, -1}},     // Q6KBlock: half d after ql, qh, scales
-    {"IQ4_XS", 23, 4096, 512, 256, 136, {0, -1}},     // IQ4XSBlock: half d; n_in 4096, see THE NEGATIVE CONTROL
+    {"Q4_0", 2, 2048, 512, 32, 18, {0, -1}},        // Q40Block: half d
+    {"Q8_0", 8, 2048, 512, 32, 34, {0, -1}},        // Q80Block: half d
+    {"Q4_K", 12, 2048, 512, 256, 144, {0, 2}},      // Q4KBlock: half2 dm
+    {"Q5_K", 13, 2048, 512, 256, 176, {0, 2}},      // Q5KBlock: half2 dm
+    {"Q6_K", 14, 2048, 512, 256, 210, {208, -1}},   // Q6KBlock: half d after ql, qh, scales
+    {"IQ4_XS", 23, 4096, 512, 256, 136, {0, -1}},   // IQ4XSBlock: half d; n_in 4096, see THE NEGATIVE CONTROL
     {"Q5_K wide", 13, 4096, 2048, 256, 176, {0, 2}},
 };
 
@@ -92,7 +92,8 @@ long long compare(const Case& c, int T, cudaStream_t s, long long& nonfinite, lo
     const std::size_t qall = lamina::kernels::native_q8_1_bytes(c.n_in, T);
     if (qall != qcol * (std::size_t) T) {
         std::printf("%-12s T=%d: the Q8_1 bytes of T columns (%zu) are not T times those of one (%zu): the test "
-                    "assumes contiguous columns and they are not\n", c.name, T, qall, qcol);
+                    "assumes contiguous columns and they are not\n",
+                    c.name, T, qall, qcol);
         return -1;
     }
 
@@ -101,8 +102,8 @@ long long compare(const Case& c, int T, cudaStream_t s, long long& nonfinite, lo
     for (auto& b : w) b = (uint8_t) (rng() & 0xff);
     const std::size_t n_blocks = (std::size_t) c.n_out * (std::size_t) (c.n_in / c.block_elems);
     if (n_blocks * (std::size_t) c.block_bytes != wbytes) {
-        std::printf("%-12s T=%d: %zu blocks of %d bytes are not the %zu weight bytes native_mmvq expects\n", c.name,
-                    T, n_blocks, c.block_bytes, wbytes);
+        std::printf("%-12s T=%d: %zu blocks of %d bytes are not the %zu weight bytes native_mmvq expects\n", c.name, T,
+                    n_blocks, c.block_bytes, wbytes);
         return -1;
     }
     for (std::size_t k = 0; k < n_blocks; ++k)
@@ -163,15 +164,20 @@ long long compare(const Case& c, int T, cudaStream_t s, long long& nonfinite, lo
             if (both_finite) ++diff_finite;
         }
     }
-    cudaFree(dw); cudaFree(xq); cudaFree(dx); cudaFree(dmulti); cudaFree(dsingle);
+    cudaFree(dw);
+    cudaFree(xq);
+    cudaFree(dx);
+    cudaFree(dmulti);
+    cudaFree(dsingle);
     ran = true;
     return diff;
 }
 
 struct Totals {
     long long checked = 0, diff = 0, diff_finite = 0, nonfinite = 0;   // all widths
-    long long diff_finite_wide = 0;                                     // T > COINCIDE_MAX_T only
-    int powerless_cases = 0;   // cases where the control found no difference at any T > COINCIDE_MAX_T
+    long long diff_finite_wide = 0;                                    // T > COINCIDE_MAX_T only
+    int powerless_cases = 0;                                           // cases where the control found no
+                                                                       // difference at any T > COINCIDE_MAX_T
 };
 
 int sweep(bool exact, cudaStream_t s, Totals& t) {
@@ -189,13 +195,19 @@ int sweep(bool exact, cudaStream_t s, Totals& t) {
             long long nf = 0, dfin = 0;
             bool ran = false;
             const long long diff = compare(c, T, s, nf, dfin, ran);
-            if (!ran) { ++bad; continue; }
+            if (!ran) {
+                ++bad;
+                continue;
+            }
             const long long n = (long long) T * c.n_out;
             t.checked += n;
             t.diff += diff;
             t.diff_finite += dfin;
             t.nonfinite += nf;
-            if (T > COINCIDE_MAX_T) { t.diff_finite_wide += dfin; case_wide += dfin; }
+            if (T > COINCIDE_MAX_T) {
+                t.diff_finite_wide += dfin;
+                case_wide += dfin;
+            }
             const char* verdict;
             if (exact) verdict = diff == 0 ? "ok" : "FAIL";
             else if (dfin > 0) verdict = "control sees it";
@@ -208,7 +220,7 @@ int sweep(bool exact, cudaStream_t s, Totals& t) {
     return bad;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     cudaStream_t s;
@@ -219,14 +231,16 @@ int main() {
     const int bad_off = sweep(false, s, off);
     lamina::kernels::native_mmvq_set_multi_exact(true);   // back to the default
 
-    std::printf("\nmulti_exact on:   %lld outputs compared, %lld differ bitwise, %lld non-finite\n",
-                on.checked, on.diff, on.nonfinite);
-    std::printf("multi_exact off:  %lld outputs compared, %lld differ bitwise (%lld on finite outputs, %lld at T > %d)\n",
-                off.checked, off.diff, off.diff_finite, off.diff_finite_wide, COINCIDE_MAX_T);
+    std::printf("\nmulti_exact on:   %lld outputs compared, %lld differ bitwise, %lld non-finite\n", on.checked,
+                on.diff, on.nonfinite);
+    std::printf(
+        "multi_exact off:  %lld outputs compared, %lld differ bitwise (%lld on finite outputs, %lld at T > %d)\n",
+        off.checked, off.diff, off.diff_finite, off.diff_finite_wide, COINCIDE_MAX_T);
 
     if (on.nonfinite != 0 || off.nonfinite != 0) {
         std::printf("\nmmvq_multi_parity: FAILED. %lld non-finite outputs from finite scales and activations: the "
-                    "bit comparison is only meaningful on finite outputs.\n", on.nonfinite + off.nonfinite);
+                    "bit comparison is only meaningful on finite outputs.\n",
+                    on.nonfinite + off.nonfinite);
         return 1;
     }
     if (bad != 0 || bad_off != 0) {
@@ -241,8 +255,8 @@ int main() {
     if (off.powerless_cases != 0) {
         std::printf("\nmmvq_multi_parity: FAILED (no power). In %d case(s) no output differs with multi_exact off at "
                     "any T > %d, where the generic layout is not the exact one: for those cases this comparison "
-                    "cannot tell the two layouts apart, so their pass above proves nothing.\n", off.powerless_cases,
-                    COINCIDE_MAX_T);
+                    "cannot tell the two layouts apart, so their pass above proves nothing.\n",
+                    off.powerless_cases, COINCIDE_MAX_T);
         return 1;
     }
     std::printf("\nmmvq_multi_parity: ok. With multi_exact on every column is bitwise equal to a single-column "

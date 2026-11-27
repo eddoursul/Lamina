@@ -38,4 +38,4 @@ void kv_append_q4_rows(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* 
                        int64_t pos0, int64_t T, const float* K, const float* V, int64_t ld, const QsaShapes& s,
                        void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

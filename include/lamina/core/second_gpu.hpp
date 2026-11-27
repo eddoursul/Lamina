@@ -42,21 +42,24 @@ public:
     /// Room for `slots` prefetched experts (at most 16) of up to `blob_bytes`.  After init().
     bool init_prefetch(int slots, uint64_t blob_bytes, std::string& err);
     int prefetch_slots() const { return pre_max_; }
-    /// Starts copying `layer`'s experts ids[0..n) (n <= prefetch_slots(), `bytes` each from the pinned blobs `src`) into
-    /// the prefetch slots, once the last submitted layer is done with them.
-    bool prefetch(int64_t layer, const int32_t* ids, const uint8_t* const* src, int n, uint64_t bytes, std::string& err);
+    /// Starts copying `layer`'s experts ids[0..n) (n <= prefetch_slots(), `bytes` each from the pinned blobs `src`)
+    /// into the prefetch slots, once the last submitted layer is done with them.
+    bool prefetch(int64_t layer, const int32_t* ids, const uint8_t* const* src, int n, uint64_t bytes,
+                  std::string& err);
     /// The prefetch slot holding (`layer`, `expert`), or -1; submit() takes prefetch slot p as slot -2 - p.
     int prefetched(int64_t layer, int32_t expert) const {
         if (layer != pre_layer_) return -1;
-        for (int p = 0; p < pre_n_; ++p) if (pre_ids_[p] == expert) return p;
+        for (int p = 0; p < pre_n_; ++p)
+            if (pre_ids_[p] == expert) return p;
         return -1;
     }
 
     /// One layer's share: `x` holds the window's native gate/up activation rows and `x_stride` is the source row
     /// stride.  Native K layers use Q8_K rows; legacy layers use q8_1 rows.  Entry i's row goes to row i of `out`
     /// (n_embd floats, mapped host memory), and then `*flag` is set to `ring`.
-    bool submit(int64_t layer, const uint8_t* x, int64_t x_stride, int n_tok, int64_t k, const int32_t* slots, const int32_t* starts,
-                const int32_t* entries, int n_groups, float* out, uint32_t* flag, uint32_t ring, std::string& err);
+    bool submit(int64_t layer, const uint8_t* x, int64_t x_stride, int n_tok, int64_t k, const int32_t* slots,
+                const int32_t* starts, const int32_t* entries, int n_groups, float* out, uint32_t* flag, uint32_t ring,
+                std::string& err);
     /// False, with the reason, when its work so far failed; does not wait.
     bool healthy(std::string& err) const;
     /// Recorded after the last submitted share: the last work that may read its cache and prefetch slots.
@@ -78,11 +81,15 @@ private:
     uint8_t *h_x_ = nullptr, *m_x_ = nullptr;
     uint8_t *h_plan_ = nullptr, *m_plan_ = nullptr;
     uint8_t *d_xq_ = nullptr, *d_plan_ = nullptr, *d_scratch_ = nullptr;
-    float* d_rows_ = nullptr;        // the rows, then copied out in full transactions
-    unsigned* d_count_ = nullptr;    // the rows-out kernel's block counter
+    float* d_rows_ = nullptr;       // the rows, then copied out in full transactions
+    unsigned* d_count_ = nullptr;   // the rows-out kernel's block counter
     // part 0: the experts in its cache, launched at once; part 1: the prefetched ones, after their copies.  `prep`: the
     // graph copies the plan and the activations in (the first launch of a layer)
-    struct Graph { int gu, d, gu_act, d_act, groups, part; bool prep; cudaGraphExec_t exec; };
+    struct Graph {
+        int gu, d, gu_act, d_act, groups, part;
+        bool prep;
+        cudaGraphExec_t exec;
+    };
     std::vector<Graph> graphs_;
     // prefetch slots, their copy stream, and the event of the last copies
     static constexpr int kPrefetchMax = 16;
@@ -95,4 +102,4 @@ private:
     cudaEvent_t pre_ev_ = nullptr;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

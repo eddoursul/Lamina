@@ -28,16 +28,15 @@ namespace lamina::kernels {
 /// The optional offset defaults to +0. Multiplication and addition round separately,
 /// matching the former CPU decoder. Launches asynchronously on the supplied stream.
 /// The caller validates positive, divisible dimensions and row/plane bounds.
-void embedding_gather(const uint8_t* codes, const float* scales, const float* offsets,
-                      int64_t n, int code_bits, int code_bias, int group_elems,
-                      float* out, void* stream);
+void embedding_gather(const uint8_t* codes, const float* scales, const float* offsets, int64_t n, int code_bits,
+                      int code_bias, int group_elems, float* out, void* stream);
 
 /// `y[t][h] = softplus(alpha[t][h] + dt[h]) * ssm_a[h]`, one thread per (t, h).  In place is not possible:
 /// `alpha` is read and `gate` is written, and they are different buffers by construction.
 ///
 /// `h_v` is the number of v heads (48) and `n_tokens` the leading dimension; the real call is (1, 48).
-void gdn_gate(const float* alpha, const float* dt, const float* ssm_a, float* gate, int64_t n_tokens,
-              int64_t h_v, void* stream);
+void gdn_gate(const float* alpha, const float* dt, const float* ssm_a, float* gate, int64_t n_tokens, int64_t h_v,
+              void* stream);
 
 /// `x[i] *= s`, in place.
 void scale_inplace(float* x, int64_t n, float s, void* stream);
@@ -95,4 +94,4 @@ struct MappedCopy {
 };
 void copy_from_mapped_multi(const MappedCopy* copies, int n, void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

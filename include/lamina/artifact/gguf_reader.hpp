@@ -20,22 +20,22 @@
 //
 // Build: scripts/build_artifact.bat        Run: gguf_reader.exe <file.gguf> [--check]
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
-#include <memory>
-#include <string>
-#include <vector>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
-#include <algorithm>
+#include <string>
+#include <vector>
 
 #include "lamina/artifact/gguf_split.hpp"
-#include "lamina/core/geometry.hpp"
 #include "lamina/artifact/model_family.hpp"
+#include "lamina/core/geometry.hpp"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -55,87 +55,47 @@ namespace lamina {
 // ---- ggml type ids we care about. 42 = Q2_0, the PrismML ternary 2-bit encoding this engine targets.
 inline const char* ggml_type_name(uint32_t t) {
     switch (t) {
-    case 0:
-        return "F32";
-    case 1:
-        return "F16";
-    case 2:
-        return "Q4_0";
-    case 3:
-        return "Q4_1";
-    case 6:
-        return "Q5_0";
-    case 7:
-        return "Q5_1";
-    case 8:
-        return "Q8_0";
-    case 9:
-        return "Q8_1";
-    case 10:
-        return "Q2_K";
-    case 11:
-        return "Q3_K";
-    case 12:
-        return "Q4_K";
-    case 13:
-        return "Q5_K";
-    case 14:
-        return "Q6_K";
-    case 15:
-        return "Q8_K";
-    case 16:
-        return "IQ2_XXS";
-    case 17:
-        return "IQ2_XS";
-    case 18:
-        return "IQ3_XXS";
-    case 19:
-        return "IQ1_S";
-    case 20:
-        return "IQ4_NL";
-    case 21:
-        return "IQ3_S";
-    case 22:
-        return "IQ2_S";
-    case 23:
-        return "IQ4_XS";
-    case 24:
-        return "I8";
-    case 26:
-        return "I32";
-    case 30:
-        return "BF16";
-    case 34:
-        return "TQ1_0";
-    case 35:
-        return "TQ2_0";
-    case 39:
-        return "MXFP4";
-    case 40:
-        return "NVFP4";
-    case 41:
-        return "Q1_0";
-    case 42:
-        return "Q2_0";
-    case 43:
-        return "F8_E4M3";
-    // Agention's llama.cpp fork: the APR trellis expert types (the engine's kernels: 147-149, Gyro-L's)
-    case 143:
-        return "PTQ1_0";
-    case 144:
-        return "TQ2_T";
-    case 145:
-        return "TQK6";
-    case 146:
-        return "TQK7";
-    case 147:
-        return "TQP5";
-    case 148:
-        return "TQP6";
-    case 149:
-        return "TQP7";
-    default:
-        return "?";
+        case 0: return "F32";
+        case 1: return "F16";
+        case 2: return "Q4_0";
+        case 3: return "Q4_1";
+        case 6: return "Q5_0";
+        case 7: return "Q5_1";
+        case 8: return "Q8_0";
+        case 9: return "Q8_1";
+        case 10: return "Q2_K";
+        case 11: return "Q3_K";
+        case 12: return "Q4_K";
+        case 13: return "Q5_K";
+        case 14: return "Q6_K";
+        case 15: return "Q8_K";
+        case 16: return "IQ2_XXS";
+        case 17: return "IQ2_XS";
+        case 18: return "IQ3_XXS";
+        case 19: return "IQ1_S";
+        case 20: return "IQ4_NL";
+        case 21: return "IQ3_S";
+        case 22: return "IQ2_S";
+        case 23: return "IQ4_XS";
+        case 24: return "I8";
+        case 26: return "I32";
+        case 30: return "BF16";
+        case 34: return "TQ1_0";
+        case 35: return "TQ2_0";
+        case 39: return "MXFP4";
+        case 40: return "NVFP4";
+        case 41: return "Q1_0";
+        case 42: return "Q2_0";
+        case 43: return "F8_E4M3";
+        // Agention's llama.cpp fork: the APR trellis expert types (the engine's kernels: 147-149, Gyro-L's)
+        case 143: return "PTQ1_0";
+        case 144: return "TQ2_T";
+        case 145: return "TQK6";
+        case 146: return "TQK7";
+        case 147: return "TQP5";
+        case 148: return "TQP6";
+        case 149: return "TQP7";
+        default: return "?";
     }
 }
 
@@ -143,163 +103,162 @@ inline const char* ggml_type_name(uint32_t t) {
 // own offset brackets in P0.S6 and recorded in docs/q2_0-contract.md.
 inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
     switch (t) {
-    case 0:
-        elems = 1;
-        bytes = 4;
-        return true;
-    case 1:
-    case 30:
-        elems = 1;
-        bytes = 2;
-        return true;
-    case 2:
-        elems = 32;
-        bytes = 18;
-        return true;
-    case 3:
-        elems = 32;
-        bytes = 20;
-        return true;
-    case 6:
-        elems = 32;
-        bytes = 22;
-        return true;
-    case 7:
-        elems = 32;
-        bytes = 24;
-        return true;
-    case 8:
-        elems = 32;
-        bytes = 34;
-        return true;
-    case 9:
-        elems = 32;
-        bytes = 36;
-        return true;
-    case 10:
-        elems = 256;
-        bytes = 84;
-        return true;
-    case 11:
-        elems = 256;
-        bytes = 110;
-        return true;
-    case 12:
-        elems = 256;
-        bytes = 144;
-        return true;
-    case 13:
-        elems = 256;
-        bytes = 176;
-        return true;
-    case 14:
-        elems = 256;
-        bytes = 210;
-        return true;
-    case 15:   // Q8_K
-        elems = 256;
-        bytes = 292;
-        return true;
-    case 16:
-        elems = 256;
-        bytes = 66;
-        return true;
-    case 17:
-        elems = 256;
-        bytes = 74;
-        return true;
-    case 18:
-        elems = 256;
-        bytes = 98;
-        return true;
-    case 19:   // IQ1_S
-        elems = 256;
-        bytes = 50;
-        return true;
-    case 20:
-        elems = 32;
-        bytes = 18;
-        return true;
-    case 21:   // IQ3_S
-        elems = 256;
-        bytes = 110;
-        return true;
-    case 22:   // IQ2_S
-        elems = 256;
-        bytes = 82;
-        return true;
-    case 23:
-        elems = 256;
-        bytes = 136;
-        return true;
-    case 29:   // IQ1_M
-        elems = 256;
-        bytes = 56;
-        return true;
-    case 24:   // I8: raw bytes (the FP8 PLE table of tools/ple_fp8_pack.py)
-    case 43:   // F8_E4M3: one byte a value, no scale (Hy4-flash's Engram table)
-        elems = 1;
-        bytes = 1;
-        return true;
-    case 26:   // I32: the draft layer's draft_vocab (tools/mtp_rt.py)
-        elems = 1;
-        bytes = 4;
-        return true;
-    case 28:   // F64
-        elems = 1;
-        bytes = 8;
-        return true;
-    case 40:   // NVFP4: 64 values = 4 UE4M3 sub-block scales + 32 bytes of E2M1 codes
-        elems = 64;
-        bytes = 36;
-        return true;
-    case 39:   // MXFP4: one E8M0 scale + 16 bytes of 4-bit values (Qwen3.6's MXFP4_MOE experts)
-        elems = 32;
-        bytes = 17;
-        return true;
-    case 42:
-        elems = 64;
-        bytes = 18;
-        return true;
-    // APR trellis types: 128 values = fp16 scale + 32 steps of K bits (K = 8 TQ2_T, 6 TQK6, 7 TQK7);
-    // PTQ1_0 = 26 B of base-3 digits + fp16 scale
-    case 143:
-        elems = 128;
-        bytes = 28;
-        return true;
-    case 144:
-        elems = 128;
-        bytes = 34;
-        return true;
-    case 145:
-        elems = 128;
-        bytes = 26;
-        return true;
-    case 146:
-        elems = 128;
-        bytes = 30;
-        return true;
-    // the pair trellis: fp16 scale + 64 steps of K bits (K = 5, 6, 7)
-    case 147:
-        elems = 128;
-        bytes = 42;
-        return true;
-    case 148:
-        elems = 128;
-        bytes = 50;
-        return true;
-    case 149:
-        elems = 128;
-        bytes = 58;
-        return true;
-    default:
-        return false;
+        case 0:
+            elems = 1;
+            bytes = 4;
+            return true;
+        case 1:
+        case 30:
+            elems = 1;
+            bytes = 2;
+            return true;
+        case 2:
+            elems = 32;
+            bytes = 18;
+            return true;
+        case 3:
+            elems = 32;
+            bytes = 20;
+            return true;
+        case 6:
+            elems = 32;
+            bytes = 22;
+            return true;
+        case 7:
+            elems = 32;
+            bytes = 24;
+            return true;
+        case 8:
+            elems = 32;
+            bytes = 34;
+            return true;
+        case 9:
+            elems = 32;
+            bytes = 36;
+            return true;
+        case 10:
+            elems = 256;
+            bytes = 84;
+            return true;
+        case 11:
+            elems = 256;
+            bytes = 110;
+            return true;
+        case 12:
+            elems = 256;
+            bytes = 144;
+            return true;
+        case 13:
+            elems = 256;
+            bytes = 176;
+            return true;
+        case 14:
+            elems = 256;
+            bytes = 210;
+            return true;
+        case 15:   // Q8_K
+            elems = 256;
+            bytes = 292;
+            return true;
+        case 16:
+            elems = 256;
+            bytes = 66;
+            return true;
+        case 17:
+            elems = 256;
+            bytes = 74;
+            return true;
+        case 18:
+            elems = 256;
+            bytes = 98;
+            return true;
+        case 19:   // IQ1_S
+            elems = 256;
+            bytes = 50;
+            return true;
+        case 20:
+            elems = 32;
+            bytes = 18;
+            return true;
+        case 21:   // IQ3_S
+            elems = 256;
+            bytes = 110;
+            return true;
+        case 22:   // IQ2_S
+            elems = 256;
+            bytes = 82;
+            return true;
+        case 23:
+            elems = 256;
+            bytes = 136;
+            return true;
+        case 29:   // IQ1_M
+            elems = 256;
+            bytes = 56;
+            return true;
+        case 24:   // I8: raw bytes (the FP8 PLE table of tools/ple_fp8_pack.py)
+        case 43:   // F8_E4M3: one byte a value, no scale (Hy4-flash's Engram table)
+            elems = 1;
+            bytes = 1;
+            return true;
+        case 26:   // I32: the draft layer's draft_vocab (tools/mtp_rt.py)
+            elems = 1;
+            bytes = 4;
+            return true;
+        case 28:   // F64
+            elems = 1;
+            bytes = 8;
+            return true;
+        case 40:   // NVFP4: 64 values = 4 UE4M3 sub-block scales + 32 bytes of E2M1 codes
+            elems = 64;
+            bytes = 36;
+            return true;
+        case 39:   // MXFP4: one E8M0 scale + 16 bytes of 4-bit values (Qwen3.6's MXFP4_MOE experts)
+            elems = 32;
+            bytes = 17;
+            return true;
+        case 42:
+            elems = 64;
+            bytes = 18;
+            return true;
+        // APR trellis types: 128 values = fp16 scale + 32 steps of K bits (K = 8 TQ2_T, 6 TQK6, 7 TQK7);
+        // PTQ1_0 = 26 B of base-3 digits + fp16 scale
+        case 143:
+            elems = 128;
+            bytes = 28;
+            return true;
+        case 144:
+            elems = 128;
+            bytes = 34;
+            return true;
+        case 145:
+            elems = 128;
+            bytes = 26;
+            return true;
+        case 146:
+            elems = 128;
+            bytes = 30;
+            return true;
+        // the pair trellis: fp16 scale + 64 steps of K bits (K = 5, 6, 7)
+        case 147:
+            elems = 128;
+            bytes = 42;
+            return true;
+        case 148:
+            elems = 128;
+            bytes = 50;
+            return true;
+        case 149:
+            elems = 128;
+            bytes = 58;
+            return true;
+        default: return false;
     }
 }
 
 struct TensorInfo {
     std::string name;
-    std::vector<uint64_t> shape; // GGUF order: dim 0 varies fastest
+    std::vector<uint64_t> shape;   // GGUF order: dim 0 varies fastest
     uint32_t type = 0;
     uint64_t offset = 0;
     uint64_t elements() const {
@@ -332,9 +291,9 @@ public:
     }
     std::string str() {
         const uint64_t n = read<uint64_t>();
-        need((size_t)n);
-        std::string s(reinterpret_cast<const char*>(base_ + pos_), (size_t)n);
-        pos_ += (size_t)n;
+        need((size_t) n);
+        std::string s(reinterpret_cast<const char*>(base_ + pos_), (size_t) n);
+        pos_ += (size_t) n;
         return s;
     }
     size_t pos() const { return pos_; }
@@ -347,18 +306,19 @@ private:
 
 enum class MetaType : uint32_t { U8 = 0, I8, U16, I16, U32, I32, F32, BOOL, STRING, ARRAY, U64, I64, F64 };
 
-inline constexpr uint64_t kMetaArrayKept = 8192;   // of an array's values; prism.hadamard's are read whole (3,200 signs)
+inline constexpr uint64_t kMetaArrayKept = 8192;   // of an array's values; prism.hadamard's
+                                                   // are read whole (3,200 signs)
 struct MetaValue {
     MetaType type = MetaType::U32;
-    uint64_t u = 0;                // integer payloads
-    double f = 0;                  // float payloads
-    std::string s;                 // string payloads
-    MetaType elem = MetaType::U32; // arrays
+    uint64_t u = 0;                  // integer payloads
+    double f = 0;                    // float payloads
+    std::string s;                   // string payloads
+    MetaType elem = MetaType::U32;   // arrays
     uint64_t count = 0;
     std::vector<MetaValue> items;
-    uint64_t data = 0;             // an array's first element: its byte offset in the file (GgufFile::numbers)
+    uint64_t data = 0;   // an array's first element: its byte offset in the file (GgufFile::numbers)
     bool is_num() const { return type != MetaType::STRING && type != MetaType::ARRAY; }
-    double num() const { return (type == MetaType::F32 || type == MetaType::F64) ? f : (double)u; }
+    double num() const { return (type == MetaType::F32 || type == MetaType::F64) ? f : (double) u; }
 };
 
 inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
@@ -366,59 +326,37 @@ inline MetaValue read_value(Cursor& c, MetaType t, int depth = 0) {
     MetaValue v;
     v.type = t;
     switch (t) {
-    case MetaType::U8:
-        v.u = c.read<uint8_t>();
-        break;
-    case MetaType::I8:
-        v.u = (uint64_t)(int64_t)c.read<int8_t>();
-        break;
-    case MetaType::U16:
-        v.u = c.read<uint16_t>();
-        break;
-    case MetaType::I16:
-        v.u = (uint64_t)(int64_t)c.read<int16_t>();
-        break;
-    case MetaType::U32:
-        v.u = c.read<uint32_t>();
-        break;
-    case MetaType::I32:
-        v.u = (uint64_t)(int64_t)c.read<int32_t>();
-        break;
-    case MetaType::F32: {
-        float x = c.read<float>();
-        v.f = x;
-        v.u = 0;
-        break;
-    }
-    case MetaType::BOOL:
-        v.u = c.read<uint8_t>() ? 1 : 0;
-        break;
-    case MetaType::STRING:
-        v.s = c.str();
-        break;
-    case MetaType::U64:
-        v.u = c.read<uint64_t>();
-        break;
-    case MetaType::I64:
-        v.u = (uint64_t)c.read<int64_t>();
-        break;
-    case MetaType::F64:
-        v.f = c.read<double>();
-        break;
-    case MetaType::ARRAY: {
-        v.elem = (MetaType)c.read<uint32_t>();
-        v.count = c.read<uint64_t>();
-        if (v.count > (1u << 24)) throw std::runtime_error("GGUF: implausible array length");
-        v.data = c.pos();
-        v.items.reserve((size_t)std::min<uint64_t>(v.count, kMetaArrayKept));
-        for (uint64_t i = 0; i < v.count; ++i) {
-            MetaValue e = read_value(c, v.elem, depth + 1);
-            if (i < kMetaArrayKept) v.items.push_back(std::move(e)); // a sample: of the vocabulary the count is what matters
+        case MetaType::U8: v.u = c.read<uint8_t>(); break;
+        case MetaType::I8: v.u = (uint64_t) (int64_t) c.read<int8_t>(); break;
+        case MetaType::U16: v.u = c.read<uint16_t>(); break;
+        case MetaType::I16: v.u = (uint64_t) (int64_t) c.read<int16_t>(); break;
+        case MetaType::U32: v.u = c.read<uint32_t>(); break;
+        case MetaType::I32: v.u = (uint64_t) (int64_t) c.read<int32_t>(); break;
+        case MetaType::F32: {
+            float x = c.read<float>();
+            v.f = x;
+            v.u = 0;
+            break;
         }
-        break;
-    }
-    default:
-        throw std::runtime_error("GGUF: unknown metadata value type");
+        case MetaType::BOOL: v.u = c.read<uint8_t>() ? 1 : 0; break;
+        case MetaType::STRING: v.s = c.str(); break;
+        case MetaType::U64: v.u = c.read<uint64_t>(); break;
+        case MetaType::I64: v.u = (uint64_t) c.read<int64_t>(); break;
+        case MetaType::F64: v.f = c.read<double>(); break;
+        case MetaType::ARRAY: {
+            v.elem = (MetaType) c.read<uint32_t>();
+            v.count = c.read<uint64_t>();
+            if (v.count > (1u << 24)) throw std::runtime_error("GGUF: implausible array length");
+            v.data = c.pos();
+            v.items.reserve((size_t) std::min<uint64_t>(v.count, kMetaArrayKept));
+            for (uint64_t i = 0; i < v.count; ++i) {
+                MetaValue e = read_value(c, v.elem, depth + 1);
+                if (i < kMetaArrayKept)
+                    v.items.push_back(std::move(e));   // a sample: of the vocabulary the count is what matters
+            }
+            break;
+        }
+        default: throw std::runtime_error("GGUF: unknown metadata value type");
     }
     return v;
 }
@@ -458,7 +396,8 @@ inline void read_gguf_header(const uint8_t* base, uint64_t size, const std::stri
     for (uint64_t i = 0; i < n_tensors; ++i) {
         TensorInfo t;
         t.name = c.str();
-        if (!names.insert(t.name).second) throw std::runtime_error("GGUF: duplicate tensor name '" + t.name + "' in " + path);
+        if (!names.insert(t.name).second)
+            throw std::runtime_error("GGUF: duplicate tensor name '" + t.name + "' in " + path);
         const uint32_t nd = c.read<uint32_t>();
         if (nd == 0 || nd > 4) throw std::runtime_error("GGUF: bad n_dims for " + t.name);
         t.shape.resize(nd);
@@ -468,7 +407,8 @@ inline void read_gguf_header(const uint8_t* base, uint64_t size, const std::stri
         h.tensors.push_back(std::move(t));
     }
     h.alignment = 32;
-    if (const auto a = h.meta.find("general.alignment"); a != h.meta.end()) {   // as llama.cpp's gguf takes it: a uint32 power of two
+    if (const auto a = h.meta.find("general.alignment"); a != h.meta.end()) {   // as llama.cpp's gguf takes
+                                                                                // it: a uint32 power of two
         if (a->second.type != MetaType::U32 || a->second.u == 0 || (a->second.u & (a->second.u - 1)) != 0)
             throw std::runtime_error("GGUF: general.alignment is not a power-of-two uint32 in " + path);
         h.alignment = a->second.u;
@@ -492,8 +432,12 @@ inline uint64_t gguf_header_length(const uint8_t* p, uint64_t n) {
 class GgufFile {
 public:
     explicit GgufFile(const std::string& path) : path_(path) {
-        try { open(); }
-        catch (...) { close(); throw; }
+        try {
+            open();
+        } catch (...) {
+            close();
+            throw;
+        }
     }
     ~GgufFile() { close(); }
     GgufFile(const GgufFile&) = delete;
@@ -530,11 +474,18 @@ public:
         if (v == nullptr || v->type != MetaType::ARRAY) return false;
         size_t sz = 0;
         switch (v->elem) {
-        case MetaType::U8: case MetaType::I8: case MetaType::BOOL: sz = 1; break;
-        case MetaType::U16: case MetaType::I16: sz = 2; break;
-        case MetaType::U32: case MetaType::I32: case MetaType::F32: sz = 4; break;
-        case MetaType::U64: case MetaType::I64: case MetaType::F64: sz = 8; break;
-        default: return false;
+            case MetaType::U8:
+            case MetaType::I8:
+            case MetaType::BOOL: sz = 1; break;
+            case MetaType::U16:
+            case MetaType::I16: sz = 2; break;
+            case MetaType::U32:
+            case MetaType::I32:
+            case MetaType::F32: sz = 4; break;
+            case MetaType::U64:
+            case MetaType::I64:
+            case MetaType::F64: sz = 8; break;
+            default: return false;
         }
         if (v->data + v->count * sz > size_) return false;
         if (ints) ints->resize((size_t) v->count);
@@ -544,23 +495,52 @@ public:
             uint64_t u = 0;
             double f = 0;
             switch (v->elem) {
-            case MetaType::U8: u = *p; break;
-            case MetaType::BOOL: u = *p ? 1 : 0; break;
-            case MetaType::I8: u = (uint64_t) (int64_t) (int8_t) *p; break;
-            case MetaType::U16: { uint16_t x; std::memcpy(&x, p, 2); u = x; break; }
-            case MetaType::I16: { int16_t x; std::memcpy(&x, p, 2); u = (uint64_t) (int64_t) x; break; }
-            case MetaType::U32: { uint32_t x; std::memcpy(&x, p, 4); u = x; break; }
-            case MetaType::I32: { int32_t x; std::memcpy(&x, p, 4); u = (uint64_t) (int64_t) x; break; }
-            case MetaType::U64: case MetaType::I64: std::memcpy(&u, p, 8); break;
-            case MetaType::F32: { float x; std::memcpy(&x, p, 4); f = x; break; }
-            case MetaType::F64: std::memcpy(&f, p, 8); break;
-            default: break;
+                case MetaType::U8: u = *p; break;
+                case MetaType::BOOL: u = *p ? 1 : 0; break;
+                case MetaType::I8: u = (uint64_t) (int64_t) (int8_t) *p; break;
+                case MetaType::U16: {
+                    uint16_t x;
+                    std::memcpy(&x, p, 2);
+                    u = x;
+                    break;
+                }
+                case MetaType::I16: {
+                    int16_t x;
+                    std::memcpy(&x, p, 2);
+                    u = (uint64_t) (int64_t) x;
+                    break;
+                }
+                case MetaType::U32: {
+                    uint32_t x;
+                    std::memcpy(&x, p, 4);
+                    u = x;
+                    break;
+                }
+                case MetaType::I32: {
+                    int32_t x;
+                    std::memcpy(&x, p, 4);
+                    u = (uint64_t) (int64_t) x;
+                    break;
+                }
+                case MetaType::U64:
+                case MetaType::I64: std::memcpy(&u, p, 8); break;
+                case MetaType::F32: {
+                    float x;
+                    std::memcpy(&x, p, 4);
+                    f = x;
+                    break;
+                }
+                case MetaType::F64: std::memcpy(&f, p, 8); break;
+                default: break;
             }
             const bool real = v->elem == MetaType::F32 || v->elem == MetaType::F64;
             if (ints) (*ints)[(size_t) i] = real ? (uint64_t) (int64_t) f : u;
-            if (reals) (*reals)[(size_t) i] = real ? f : (v->elem == MetaType::I8 || v->elem == MetaType::I16 ||
-                                                         v->elem == MetaType::I32 || v->elem == MetaType::I64)
-                                                            ? (double) (int64_t) u : (double) u;
+            if (reals)
+                (*reals)[(size_t) i] = real ? f
+                                       : (v->elem == MetaType::I8 || v->elem == MetaType::I16 ||
+                                          v->elem == MetaType::I32 || v->elem == MetaType::I64)
+                                           ? (double) (int64_t) u
+                                           : (double) u;
         }
         return true;
     }
@@ -591,13 +571,13 @@ private:
         if (h == INVALID_HANDLE_VALUE) throw std::runtime_error("cannot open " + path_);
         LARGE_INTEGER li{};
         GetFileSizeEx(h, &li);
-        size_ = (uint64_t)li.QuadPart;
+        size_ = (uint64_t) li.QuadPart;
         HANDLE m = CreateFileMappingA(h, nullptr, PAGE_READONLY, 0, 0, nullptr);
         if (!m) {
             CloseHandle(h);
             throw std::runtime_error("CreateFileMapping failed");
         }
-        base_ = (const uint8_t*)MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
+        base_ = (const uint8_t*) MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
         if (!base_) {
             CloseHandle(m);
             CloseHandle(h);
@@ -611,20 +591,20 @@ private:
         fd_ = fd;
         struct stat st{};
         if (fstat(fd, &st) != 0) throw std::runtime_error("fstat failed");
-        size_ = (uint64_t)st.st_size;
+        size_ = (uint64_t) st.st_size;
         void* p = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
         if (p == MAP_FAILED) throw std::runtime_error("mmap failed");
-        base_ = (const uint8_t*)p;
+        base_ = (const uint8_t*) p;
 #endif
         parse();
     }
     void close() {
 #ifdef _WIN32
         if (base_) UnmapViewOfFile(base_);
-        if (map_) CloseHandle((HANDLE)map_);
-        if (file_) CloseHandle((HANDLE)file_);
+        if (map_) CloseHandle((HANDLE) map_);
+        if (file_) CloseHandle((HANDLE) file_);
 #else
-        if (base_) munmap((void*)base_, size_);
+        if (base_) munmap((void*) base_, size_);
         if (fd_ >= 0) ::close(fd_);
 #endif
     }
@@ -699,8 +679,8 @@ public:
                 const auto ins = index_.emplace(t.name, std::make_pair(i, &t));
                 if (!ins.second)
                     throw std::runtime_error("GGUF: tensor " + t.name + " is in two shards (" +
-                                             shards_[ins.first->second.first]->path() + " and " +
-                                             shards_[i]->path() + ")");
+                                             shards_[ins.first->second.first]->path() + " and " + shards_[i]->path() +
+                                             ")");
             }
     }
     /// Opens every shard of the model that `any_shard` belongs to (throws when one is missing).
@@ -736,7 +716,8 @@ private:
             return;
         }
         if (!shards_[0]->get("general.architecture"))
-            throw std::runtime_error("GGUF: " + shards_[0]->path() + " has no general.architecture; the first shard "
+            throw std::runtime_error("GGUF: " + shards_[0]->path() +
+                                     " has no general.architecture; the first shard "
                                      "of a split model carries the metadata");
         const MetaValue* total = shards_[0]->get("split.tensors.count");
         uint64_t tensors = 0;
@@ -746,8 +727,9 @@ private:
             const MetaValue* no = g.get("split.no");
             const MetaValue* tc = g.get("split.tensors.count");
             if (!count || !no || count->u != n || no->u != i || (total && (!tc || tc->u != total->u)))
-                throw std::runtime_error("GGUF: " + g.path() + " does not declare itself shard " + std::to_string(i + 1) +
-                                         " of " + std::to_string(n) + " of this model (split.count / split.no / "
+                throw std::runtime_error("GGUF: " + g.path() + " does not declare itself shard " +
+                                         std::to_string(i + 1) + " of " + std::to_string(n) +
+                                         " of this model (split.count / split.no / "
                                          "split.tensors.count)");
             tensors += g.tensors().size();
         }
@@ -772,12 +754,15 @@ inline ModelFamily model_family(const GgufFile& g) {
 /// fine-tune's) has none, as llama.cpp reads it.
 inline std::string check_architecture_qwen35(const GgufFile& g, const std::string& arch, bool moe) {
     static const char* const common[] = {
-        "block_count", "embedding_length", "attention.head_count", "attention.head_count_kv", "attention.key_length",
-        "attention.value_length", "ssm.conv_kernel", "ssm.state_size", "ssm.group_count", "ssm.time_step_rank",
-        "ssm.inner_size", "full_attention_interval",
+        "block_count",          "embedding_length",       "attention.head_count", "attention.head_count_kv",
+        "attention.key_length", "attention.value_length", "ssm.conv_kernel",      "ssm.state_size",
+        "ssm.group_count",      "ssm.time_step_rank",     "ssm.inner_size",       "full_attention_interval",
     };
     static const char* const experts[] = {
-        "expert_count", "expert_used_count", "expert_feed_forward_length", "expert_shared_feed_forward_length",
+        "expert_count",
+        "expert_used_count",
+        "expert_feed_forward_length",
+        "expert_shared_feed_forward_length",
     };
     static const char* const dense[] = {"feed_forward_length"};
     auto need = [&](const char* k) -> std::string {
@@ -842,7 +827,7 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
     };
     struct Key {
         const char* key;
-        int64_t core::ModelGeometry::*field;
+        int64_t core::ModelGeometry::* field;
         bool required;
     };
     const Key keys[] = {
@@ -875,8 +860,9 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
         !read_int("expert_shared_feed_forward_length", ff_shexp, false))
         return err;
     if (value_length != g.head_dim)
-        return p + "attention.value_length = " + std::to_string(value_length) + " and attention.key_length = " +
-               std::to_string(g.head_dim) + ": the attention kernels use one head width for both";
+        return p + "attention.value_length = " + std::to_string(value_length) +
+               " and attention.key_length = " + std::to_string(g.head_dim) +
+               ": the attention kernels use one head width for both";
     if (ff_shexp != g.n_ff)
         return p + "expert_shared_feed_forward_length = " + std::to_string(ff_shexp) +
                " and expert_feed_forward_length = " + std::to_string(g.n_ff) +
@@ -891,12 +877,13 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
     }
 
     if (g.n_head % g.n_head_kv != 0)
-        return p + "attention.head_count = " + std::to_string(g.n_head) + " is not a multiple of head_count_kv = " +
-               std::to_string(g.n_head_kv);
+        return p + "attention.head_count = " + std::to_string(g.n_head) +
+               " is not a multiple of head_count_kv = " + std::to_string(g.n_head_kv);
     // GDN's value heads are as wide as its key heads (the state is square)
     if (g.ssm_value_dim != g.ssm_state_size * g.ssm_v_heads)
-        return p + "ssm.inner_size = " + std::to_string(g.ssm_value_dim) + ", but ssm.state_size x ssm.time_step_rank = " +
-               std::to_string(g.ssm_state_size * g.ssm_v_heads) + ": the GDN kernels take square heads";
+        return p + "ssm.inner_size = " + std::to_string(g.ssm_value_dim) +
+               ", but ssm.state_size x ssm.time_step_rank = " + std::to_string(g.ssm_state_size * g.ssm_v_heads) +
+               ": the GDN kernels take square heads";
     g.ssm_conv_channels = 2 * g.ssm_state_size * g.ssm_k_heads + g.ssm_value_dim;
     if (g.n_expert_used > g.n_expert || g.n_expert_used > 64)
         return p + "expert_used_count = " + std::to_string(g.n_expert_used) + ", the router takes 1.." +
@@ -919,8 +906,9 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
             static bool said = false;   // the guard runs several times in one process: one line
             if (!said) {
                 said = true;
-                std::fprintf(stderr, "lamina: %sattention.compress_ratios is all zeros (a converter's placeholder): "
-                                     "using the compiled pooling block of %lld cells (#2396)\n",
+                std::fprintf(stderr,
+                             "lamina: %sattention.compress_ratios is all zeros (a converter's placeholder): "
+                             "using the compiled pooling block of %lld cells (#2396)\n",
                              p.c_str(), (long long) g.idx_block);
             }
             return {};
@@ -948,7 +936,7 @@ inline std::string geometry_unsupported(const core::ModelGeometry& g) {
     const core::ModelGeometry& c = core::kCompiledGeometry;
     struct Pin {
         const char* key;
-        int64_t core::ModelGeometry::*field;
+        int64_t core::ModelGeometry::* field;
     };
     const Pin pins[] = {
         {"block_count", &core::ModelGeometry::n_layers},
@@ -979,8 +967,9 @@ inline std::string geometry_unsupported(const core::ModelGeometry& g) {
     // one constant in the norm kernels; the files carry it as an f32, so compare at f32 precision
     if (std::abs(g.rms_eps - c.rms_eps) > 1e-6 * c.rms_eps) {
         char buf[160];
-        std::snprintf(buf, sizeof buf, "qwen4exp.attention.layer_norm_rms_epsilon = %g, the kernels are compiled for %g",
-                      g.rms_eps, c.rms_eps);
+        std::snprintf(buf, sizeof buf,
+                      "qwen4exp.attention.layer_norm_rms_epsilon = %g, the kernels are compiled for %g", g.rms_eps,
+                      c.rms_eps);
         return buf;
     }
     return {};
@@ -994,11 +983,25 @@ inline std::string geometry_unsupported(const core::ModelGeometry& g) {
 inline std::string check_architecture_hy4(const GgufFile& g) {
     const std::string a = "hy_v4_flash.";
     static const char* const nums[] = {
-        "block_count", "embedding_length", "attention.head_count_kv", "attention.q_lora_rank", "attention.kv_lora_rank",
-        "attention.key_length_mla", "attention.value_length_mla", "rope.dimension_count", "expert_count",
-        "expert_used_count", "expert_feed_forward_length", "expert_shared_count", "leading_dense_block_count",
-        "feed_forward_length", "hyper_connection.count", "attention.sliding_window", "rope.freq_base",
-        "rope.freq_base_swa", "attention.layer_norm_rms_epsilon",
+        "block_count",
+        "embedding_length",
+        "attention.head_count_kv",
+        "attention.q_lora_rank",
+        "attention.kv_lora_rank",
+        "attention.key_length_mla",
+        "attention.value_length_mla",
+        "rope.dimension_count",
+        "expert_count",
+        "expert_used_count",
+        "expert_feed_forward_length",
+        "expert_shared_count",
+        "leading_dense_block_count",
+        "feed_forward_length",
+        "hyper_connection.count",
+        "attention.sliding_window",
+        "rope.freq_base",
+        "rope.freq_base_swa",
+        "attention.layer_norm_rms_epsilon",
     };
     for (const char* k : nums) {
         const MetaValue* v = g.get(a + k);
@@ -1021,11 +1024,27 @@ inline std::string check_architecture_inkling2(const GgufFile& f) {
     if (!arch || (arch->s != "inkling2" && arch->s != "inkling2_loop")) return "not an Inkling 2 model";
     const std::string a = arch->s + ".";
     static const char* const nums[] = {
-        "block_count", "embedding_length", "expert_count", "expert_used_count", "expert_feed_forward_length",
-        "attention.key_length", "attention.value_length", "attention.layer_norm_rms_epsilon", "attention.sliding_window",
-        "attention.relative_length", "attention.relative_extent", "attention.qk_clip", "attention.relative_clip",
-        "attention.log_scale_floor", "attention.log_scale_alpha", "shortconv.l_cache", "attn_res.block_size",
-        "activation.situ_beta", "activation.situ_linear_beta", "vocab_size", "vocab_size_unpadded",
+        "block_count",
+        "embedding_length",
+        "expert_count",
+        "expert_used_count",
+        "expert_feed_forward_length",
+        "attention.key_length",
+        "attention.value_length",
+        "attention.layer_norm_rms_epsilon",
+        "attention.sliding_window",
+        "attention.relative_length",
+        "attention.relative_extent",
+        "attention.qk_clip",
+        "attention.relative_clip",
+        "attention.log_scale_floor",
+        "attention.log_scale_alpha",
+        "shortconv.l_cache",
+        "attn_res.block_size",
+        "activation.situ_beta",
+        "activation.situ_linear_beta",
+        "vocab_size",
+        "vocab_size_unpadded",
     };
     for (const char* k : nums) {
         const MetaValue* v = f.get(a + k);
@@ -1059,4 +1078,4 @@ inline std::string check_engine_architecture(const GgufFile& g) {
     return model_family_not_supported(model_family(g));
 }
 
-} // namespace lamina
+}   // namespace lamina

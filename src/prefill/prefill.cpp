@@ -6,8 +6,8 @@
 #include "lamina/kernels/cvec.hpp"
 #include "lamina/kernels/dequant_bf16.hpp"
 #include "lamina/kernels/kv_q4.hpp"
-#include "lamina/kernels/native_qsa_indexer.hpp"
 #include "lamina/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
 #include "lamina/kernels/ngram.hpp"
 #include "lamina/kernels/qsa.hpp"
 #include "lamina/kernels/qsa_decode_attn.hpp"
@@ -33,8 +33,8 @@ using Clock = std::chrono::steady_clock;
 constexpr float EPS = 1e-6f;
 constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
 constexpr int64_t C = 10240, ZV = 6144, HV = 48;
-constexpr int64_t SUB = 2048;                 // tokens of a sub-chunk: everything but the routed experts
-constexpr int64_t SEL_BATCH = 256;            // queries per block-score launch
+constexpr int64_t SUB = 2048;        // tokens of a sub-chunk: everything but the routed experts
+constexpr int64_t SEL_BATCH = 256;   // queries per block-score launch
 // a hyper-connection read's up projection and mix in one kernel (gr_upmix) from this many tokens: bitwise the
 // product + gr_mix_r pair wherever the product keeps K whole (gr_upmix_parity: every count up to a sub-chunk's on an
 // RTX 3090 and an RTX 5070 Ti), and from here the faster of the two on both
@@ -42,7 +42,7 @@ constexpr int64_t UPMIX_MIN = 512;
 // A layer's quantized projections, dequantized to FP16 once for all its sub-chunks: the PLE key, or the mixer's
 // (GDN: qkv, gate, out; QSA: q, k, v, out) and the shared expert's
 constexpr int64_t W16 = std::max(D * N, std::max(C + ZV + ZV, 12288 + 512 + 512 + ZV) * N + 3 * 640 * N);
-constexpr size_t GEMM_WS = 32u << 20;         // the products' scratch: the partial sums of a K split
+constexpr size_t GEMM_WS = 32u << 20;   // the products' scratch: the partial sums of a K split
 constexpr int GGML_Q8_0 = 8;
 
 // Bump allocation from a region; without one it only counts (bytes_needed).
@@ -85,8 +85,8 @@ struct Bufs {
     int32_t* sel_ids = nullptr;
     float *logits = nullptr, *sgate = nullptr, *sup = nullptr, *sg = nullptr;
     uint16_t* sh_h = nullptr;
-    uint8_t* xq = nullptr;        // a dense projection's input rounded to q8_1 for MMQ
-    uint8_t* local = nullptr;     // this GPU's expert runner
+    uint8_t* xq = nullptr;      // a dense projection's input rounded to q8_1 for MMQ
+    uint8_t* local = nullptr;   // this GPU's expert runner
     uint64_t local_bytes = 0;
 };
 
@@ -119,26 +119,48 @@ Bufs layout(Alloc& a, int64_t T, int64_t cap, int64_t max_blocks, bool offload, 
     b.xq = a.take<uint8_t>(mmq::q8_bytes((int64_t) p, ZV));   // the widest input: 6144
     const uint64_t u0 = a.used;
     uint64_t u1 = u0;
-    auto next = [&] { u1 = std::max(u1, a.used); a.used = u0; };
+    auto next = [&] {
+        u1 = std::max(u1, a.used);
+        a.used = u0;
+    };
     b.emb = a.take<float>(p * N);
     next();   // the hyper-connection read
-    b.xn = a.take<float>(p * D); b.xn16 = a.take<uint16_t>(p * D); b.lo = a.take<float>(p * LR);
-    b.lo16 = a.take<uint16_t>(p * LR); b.gated = a.take<float>(p * D);
+    b.xn = a.take<float>(p * D);
+    b.xn16 = a.take<uint16_t>(p * D);
+    b.lo = a.take<float>(p * LR);
+    b.lo16 = a.take<uint16_t>(p * LR);
+    b.gated = a.take<float>(p * D);
     next();   // the PLE block
-    b.ple_kp = a.take<float>(p * D); b.ple_key = a.take<float>(p * D);
-    b.ple_q = a.take<float>(p * D); b.ple_gated = a.take<float>(p * D);
+    b.ple_kp = a.take<float>(p * D);
+    b.ple_key = a.take<float>(p * D);
+    b.ple_q = a.take<float>(p * D);
+    b.ple_gated = a.take<float>(p * D);
     next();   // GDN
-    b.qkv = a.take<float>(p * C); b.z = a.take<float>(p * ZV); b.ab = a.take<float>(p * 2 * HV);
-    b.gate = a.take<float>(p * HV); b.beta = a.take<float>(p * HV); b.hbuf = a.take<float>(p * C);
-    b.y = a.take<float>(p * ZV); b.y_h = a.take<uint16_t>(p * ZV);
+    b.qkv = a.take<float>(p * C);
+    b.z = a.take<float>(p * ZV);
+    b.ab = a.take<float>(p * 2 * HV);
+    b.gate = a.take<float>(p * HV);
+    b.beta = a.take<float>(p * HV);
+    b.hbuf = a.take<float>(p * C);
+    b.y = a.take<float>(p * ZV);
+    b.y_h = a.take<uint16_t>(p * ZV);
     next();   // QSA
-    b.Kc = a.take<float>(p * 512); b.Vc = a.take<float>(p * 512); b.Qf = a.take<float>(p * 12288);
-    b.q = a.take<float>(p * ZV); b.idx_raw = a.take<float>(p * 128); b.q_idx = a.take<float>(p * 512);
-    b.attn = a.take<float>(p * ZV); b.attn_h = a.take<uint16_t>(p * ZV); b.sel_ids = a.take<int32_t>(p * (size_t) cap);
+    b.Kc = a.take<float>(p * 512);
+    b.Vc = a.take<float>(p * 512);
+    b.Qf = a.take<float>(p * 12288);
+    b.q = a.take<float>(p * ZV);
+    b.idx_raw = a.take<float>(p * 128);
+    b.q_idx = a.take<float>(p * 512);
+    b.attn = a.take<float>(p * ZV);
+    b.attn_h = a.take<uint16_t>(p * ZV);
+    b.sel_ids = a.take<int32_t>(p * (size_t) cap);
     b.sel_scores = a.take<float>((size_t) SEL_BATCH * (size_t) max_blocks);
     next();   // the router and the shared expert
-    b.logits = a.take<float>(p * NE); b.sgate = a.take<float>(p * 640); b.sup = a.take<float>(p * 640);
-    b.sh_h = a.take<uint16_t>(p * 640); b.sg = a.take<float>(p);
+    b.logits = a.take<float>(p * NE);
+    b.sgate = a.take<float>(p * 640);
+    b.sup = a.take<float>(p * 640);
+    b.sh_h = a.take<uint16_t>(p * 640);
+    b.sg = a.take<float>(p);
     next();   // the routed experts
     b.local_bytes = ExpertRunner::bytes_needed(T, NE, false, !offload);
     b.local = a.take<uint8_t>(b.local_bytes);
@@ -152,21 +174,21 @@ void append_kv(const core::QsaState& st, const float* Kr, const float* Vr, int64
                const lamina::kernels::QsaShapes& s, cudaStream_t cs) {
     using lamina::kernels::kv_append_q4_rows;
     switch (st.kv) {
-    case core::KvFormat::Q4:
-        kv_append_q4_rows(st.k_q4, st.k_q4s, st.v_q4, st.v_q4s, st.page_table, pos0, T, Kr, Vr, 512, s, cs);
-        break;
-    case core::KvFormat::K8V4:
-        kv_append(Kr, Vr, T, pos0, st.page_table, s.page_size, nullptr, nullptr, st.k_q, nullptr, st.k_scale, nullptr, cs,
-                  1);
-        kv_append_q4_rows(nullptr, nullptr, st.v_q4, st.v_q4s, st.page_table, pos0, T, Kr, Vr, 512, s, cs);
-        break;
-    default:
-        kv_append(Kr, Vr, T, pos0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
-                  st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, cs);
+        case core::KvFormat::Q4:
+            kv_append_q4_rows(st.k_q4, st.k_q4s, st.v_q4, st.v_q4s, st.page_table, pos0, T, Kr, Vr, 512, s, cs);
+            break;
+        case core::KvFormat::K8V4:
+            kv_append(Kr, Vr, T, pos0, st.page_table, s.page_size, nullptr, nullptr, st.k_q, nullptr, st.k_scale,
+                      nullptr, cs, 1);
+            kv_append_q4_rows(nullptr, nullptr, st.v_q4, st.v_q4s, st.page_table, pos0, T, Kr, Vr, 512, s, cs);
+            break;
+        default:
+            kv_append(Kr, Vr, T, pos0, st.page_table, s.page_size, st.kv_int8 ? nullptr : st.k_pool,
+                      st.kv_int8 ? nullptr : st.v_pool, st.k_q, st.v_q, st.k_scale, st.v_scale, cs);
     }
 }
 
-}  // namespace
+}   // namespace
 
 struct Prefill::Impl {
     const core::WeightTable* wt = nullptr;
@@ -185,12 +207,14 @@ struct Prefill::Impl {
     // the second GPU's share, a sub-chunk at a time: the input goes out on `xfer`, the sums come back on `xsum`
     cudaStream_t xfer = nullptr, xsum = nullptr;
     cudaEvent_t ev_mixed = nullptr, ev_routed = nullptr;   // ev_routed: a layer's routing is in host memory
-    std::vector<cudaEvent_t> ev_in, ev_piece;   // a sub-chunk's input is in host memory, its sums on this GPU
-    std::vector<int32_t> order;                 // per layer its experts, the likeliest first (set_order)
-    std::vector<uint32_t> routed;               // per layer and expert: the routed entries since clear_routed
+    std::vector<cudaEvent_t> ev_in, ev_piece;              // a sub-chunk's input is in host
+                                                           // memory, its sums on this GPU
+    std::vector<int32_t> order;                            // per layer its experts, the likeliest first (set_order)
+    std::vector<uint32_t> routed;                          // per layer and expert: the routed
+                                                           // entries since clear_routed
     Gemm gemm;
     std::unique_ptr<mmq::Context> mmq;   // the dense projections of 2048+ rows (null: no MMQ in this build)
-    void* owned = nullptr;   // the buffers' own allocation (no region)
+    void* owned = nullptr;               // the buffers' own allocation (no region)
     uint64_t owned_bytes = 0;
     Bufs b;
     std::vector<std::pair<const void*, const uint16_t*>> w16_have;   // this layer's dequantized weights
@@ -205,10 +229,10 @@ struct Prefill::Impl {
         std::vector<int32_t> ex[2], off[2], src[2];
         std::vector<float> w[2];
     } hshare[Prefill::kMaxHelpers];
-    double shift = 0.0;              // set_shift
-    std::vector<uint8_t> shifted;    // per expert of the layer: held here, computed by the second GPU (set_shift)
-    std::vector<uint8_t> both;           // per expert of the layer: the second GPU's second pass reads it
-    std::vector<int32_t> kept;           // the experts both of its passes read, in the first one's order
+    double shift = 0.0;             // set_shift
+    std::vector<uint8_t> shifted;   // per expert of the layer: held here, computed by the second GPU (set_shift)
+    std::vector<uint8_t> both;      // per expert of the layer: the second GPU's second pass reads it
+    std::vector<int32_t> kept;      // the experts both of its passes read, in the first one's order
     std::vector<float> w1, w2[2];
     // a chunk's PLE rows, read on a thread while the chunk before runs: two pinned buffers, their row indices
     float* ple_host[2] = {};
@@ -248,10 +272,12 @@ Prefill::~Prefill() {
     if (m.ck_ev) cudaEventDestroy(m.ck_ev);
     if (m.ck_s) cudaStreamDestroy(m.ck_s);
     for (auto* v : {&m.ev_in, &m.ev_piece, &m.ev_written, &m.ev_out, &m.pace_ev})
-        for (cudaEvent_t e : *v) if (e) cudaEventDestroy(e);
+        for (cudaEvent_t e : *v)
+            if (e) cudaEventDestroy(e);
     if (m.xfer) cudaStreamDestroy(m.xfer);
     if (m.xsum) cudaStreamDestroy(m.xsum);
-    for (float* h : m.ple_host) if (h) cudaFreeHost(h);
+    for (float* h : m.ple_host)
+        if (h) cudaFreeHost(h);
     if (m.ids_host) cudaFreeHost(m.ids_host);
     if (m.w_host) cudaFreeHost(m.w_host);
     if (m.owned) cudaFree(m.owned);
@@ -261,10 +287,18 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
                    core::ExpertSource* src, const core::ExpertCache* cache, const int32_t* host_res, int64_t max_chunk,
                    void* stream, ExpertRunner* offload, std::string& err) {
     Impl& m = *impl_;
-    m.wt = &wt; m.g = &g; m.ss = &ss; m.src = src; m.cache = cache; m.host_res = host_res; m.offload = offload;
-    m.max_chunk = max_chunk; m.cs = (cudaStream_t) stream;
+    m.wt = &wt;
+    m.g = &g;
+    m.ss = &ss;
+    m.src = src;
+    m.cache = cache;
+    m.host_res = host_res;
+    m.offload = offload;
+    m.max_chunk = max_chunk;
+    m.cs = (cudaStream_t) stream;
     if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert != NE || ss.k != K) {
-        err = "prefill: geometry differs from the artifact's"; return false;
+        err = "prefill: geometry differs from the artifact's";
+        return false;
     }
     m.s = lamina::kernels::qsa_shapes(g);
     m.cap = lamina::kernels::qsa_selection_width(lamina::kernels::kTopkMaxCells, m.s);
@@ -392,7 +426,8 @@ bool Prefill::bind(void* region, uint64_t bytes, int64_t chunk, std::string& err
         bytes = m.owned_bytes;
     }
     if (chunk <= 0 || chunk > m.max_chunk) {
-        err = "prefill: a chunk of " + std::to_string(chunk) + " tokens (set up for " + std::to_string(m.max_chunk) + ")";
+        err =
+            "prefill: a chunk of " + std::to_string(chunk) + " tokens (set up for " + std::to_string(m.max_chunk) + ")";
         return false;
     }
     Alloc a;
@@ -432,7 +467,7 @@ bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y, 
     return true;
 }
 
-}  // namespace
+}   // namespace
 
 bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
     Impl& m = *impl_;
@@ -441,7 +476,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     core::SessionState& ss = *m.ss;
     const lamina::kernels::QsaShapes& s = m.s;
     constexpr int64_t SC = lamina::kernels::kStepCount;
-    if (m.T <= 0) { err = "prefill: no buffers bound"; return false; }
+    if (m.T <= 0) {
+        err = "prefill: no buffers bound";
+        return false;
+    }
     const auto t_start = Clock::now();
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
@@ -468,8 +506,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         }
         const uint16_t* W = w->native_data ? w16(w->native_type, w->native_data, w->ne1, w->ne0) : nullptr;
         if (W == nullptr) {
-            e = "prefill: " + name + (w->native_data ? " does not fit the dequantization buffer"
-                                                     : " has no native GGUF blocks (run with --native)");
+            e = "prefill: " + name +
+                (w->native_data ? " does not fit the dequantization buffer"
+                                : " has no native GGUF blocks (run with --native)");
             return false;
         }
         m.gemm.f16(X, W, Y, T, w->ne1, w->ne0);
@@ -501,13 +540,20 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 return;
             }
             if (m.fast_local && m.local.prefetch_left() && m.local.prefetch_pending() < 2) {
-                if (!m.local.prefetch_next(err)) { paced_ok = false; return; }
+                if (!m.local.prefetch_next(err)) {
+                    paced_ok = false;
+                    return;
+                }
             } else {
                 std::this_thread::yield();
             }
         }
     };
-    m.local.set_pace(m.pacing > 0 ? std::function<bool()>([&] { pace(); return paced_ok; }) : nullptr);
+    m.local.set_pace(m.pacing > 0 ? std::function<bool()>([&] {
+        pace();
+        return paced_ok;
+    })
+                                  : nullptr);
     struct ClearPace {
         ExpertRunner& r;
         ~ClearPace() { r.set_pace(nullptr); }
@@ -584,7 +630,9 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             if (!ok) e = err;
             return ok;
         }
-        ~PleRead() { if (th.joinable()) th.join(); }
+        ~PleRead() {
+            if (th.joinable()) th.join();
+        }
     } ple_read;
     int32_t pa[2] = {prev[0], prev[1]};   // the rows' tokens before the next chunk to read
     int ple_cur = 0;
@@ -615,7 +663,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     int64_t c0 = 0;
     for (; c0 < n; c0 += m.T) {
         if (should_stop && should_stop()) break;   // the chunks before stay: `prev` and the state hold them
-        if (trace) { std::fprintf(stderr, "lamina trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
+        if (trace) {
+            std::fprintf(stderr, "lamina trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n);
+            std::fflush(stderr);
+        }
         const int64_t T = std::min(m.T, n - c0), p0 = pos0 + c0;
         ++stats_.chunks;
         // ---- a sub-chunk's residual before the first layer here reads it: the embeddings broadcast to the four
@@ -632,7 +683,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             if (embd_rows)
                 for (int64_t t = t0; t < t0 + P; ++t)
                     if (const float* row = embd_rows[p0 + t];
-                        row && cudaMemcpyAsync(b.emb + (t - t0) * N, row, (size_t) N * 4, cudaMemcpyHostToDevice, m.cs) != cudaSuccess) {
+                        row && cudaMemcpyAsync(b.emb + (t - t0) * N, row, (size_t) N * 4, cudaMemcpyHostToDevice,
+                                               m.cs) != cudaSuccess) {
                         err = "prefill: the image embedding upload failed";
                         return false;
                     }
@@ -646,10 +698,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             m.tok_host.resize((size_t) T);
             for (int64_t t = 0; t < T; ++t) {
                 const bool image = embd_rows && embd_rows[p0 + t];
-                if (!image && tokens[c0 + t] < 0) { err = "prefill: a negative token id"; return false; }
+                if (!image && tokens[c0 + t] < 0) {
+                    err = "prefill: a negative token id";
+                    return false;
+                }
                 m.tok_host[(size_t) t] = image ? 0 : (int32_t) tokens[c0 + t];
             }
-            cudaMemcpyAsync(b.tok, m.tok_host.data(), (size_t) T * 4, cudaMemcpyHostToDevice, m.cs);   // pageable: staged now
+            cudaMemcpyAsync(b.tok, m.tok_host.data(), (size_t) T * 4, cudaMemcpyHostToDevice, m.cs);   // pageable:
+                                                                                                       // staged now
         }
 
         // ---- a layer's FFN write, deferred to the sub-chunk that reads its rows next: the second GPU's sums come back
@@ -667,9 +723,18 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             }
             if (pending_cv != nullptr) {
                 lamina::kernels::CvecRows r;
-                r.R = R; r.T = P; r.n_embd = N; r.hc = HC;
-                r.bo = bo; r.partial = part; r.inj = inj; r.inj_ld = HC;
-                r.w_norm = norm; r.eps = EPS; r.rs = b.rs; r.xn16 = b.xn16;
+                r.R = R;
+                r.T = P;
+                r.n_embd = N;
+                r.hc = HC;
+                r.bo = bo;
+                r.partial = part;
+                r.inj = inj;
+                r.inj_ld = HC;
+                r.w_norm = norm;
+                r.eps = EPS;
+                r.rs = b.rs;
+                r.xn16 = b.xn16;
                 try {
                     lamina::kernels::cvec_apply(r, pending_cv, m.cs);
                 } catch (const std::exception& e) {
@@ -716,7 +781,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             m.ex1.clear();
             for (int32_t i = 0; i < NE; ++i) {
                 const int32_t e = m.order.empty() ? i : m.order[(size_t) l * NE + i];
-                const bool held = m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0 && !m.shifted[(size_t) e];
+                const bool held =
+                    m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0 && !m.shifted[(size_t) e];
                 if (!held && (m.shifted[(size_t) e] || helper_of(e) < 0)) m.ex1.push_back(e);
             }
             if (!streamer->prefetch_begin(l, T, m.ex1, err)) return false;
@@ -739,8 +805,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     to_bf16(ple_emb, b.mixed_bf, P * N, m.cs);
                     if (pw.key_bf16 != nullptr) {
                         m.gemm.bf16(b.mixed_bf, pw.key_bf16, b.ple_kp, P, D, N);
-                    } else if (const uint16_t* W = pw.key_native_data ? w16(pw.key_native_type, pw.key_native_data, D, N)
-                                                                      : nullptr) {
+                    } else if (const uint16_t* W =
+                                   pw.key_native_data ? w16(pw.key_native_type, pw.key_native_data, D, N) : nullptr) {
                         to_f16(ple_emb, b.mixed_h, P * N, m.cs);
                         m.gemm.f16(b.mixed_h, W, b.ple_kp, P, D, N);
                     } else {
@@ -752,7 +818,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         lamina::kernels::native_ple_postops_tokens(
                             b.ple_kp, b.R + t0 * D, b.bo, ss.ple.hist, pw,
                             {b.ple_key, b.ple_q, b.inj_a, b.ple_gated, b.ple_q, b.R + t0 * D}, (int) P, m.cs);
-                    } catch (const std::exception& e) { err = std::string("prefill PLE: ") + e.what(); return false; }
+                    } catch (const std::exception& e) {
+                        err = std::string("prefill PLE: ") + e.what();
+                        return false;
+                    }
                 }
                 pending = false;
                 new_layer();
@@ -762,13 +831,17 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 !(wsg = need(v, "ffn_gate_shexp.weight", err)) || !(wsu = need(v, "ffn_up_shexp.weight", err)) ||
                 !(wsd = need(v, "ffn_down_shexp.weight", err)))
                 return false;
-            if (wgi->kind != core::WeightKind::Bf16InF32) { err = "prefill: shared gate is not BF16"; return false; }
+            if (wgi->kind != core::WeightKind::Bf16InF32) {
+                err = "prefill: shared gate is not BF16";
+                return false;
+            }
             // the hyper-connection matrices kept only in 8 bits, in BF16 for this layer
             const uint16_t* hc16[2][2] = {};   // [half][down, up]
             for (int h = 0; h < 2; ++h)
                 for (int k = 0; k < 2; ++k) {
-                    const core::WeightRef* w = v.get((std::string(h == 0 ? "hc_attn_" : "hc_ffn_") +
-                                                      (k == 0 ? "down.weight" : "up.weight")).c_str());
+                    const core::WeightRef* w =
+                        v.get((std::string(h == 0 ? "hc_attn_" : "hc_ffn_") + (k == 0 ? "down.weight" : "up.weight"))
+                                  .c_str());
                     if (w != nullptr && w->data == nullptr && w->hc_codes != nullptr) {
                         uint16_t* dst = b.hc16 + (size_t) (2 * h + k) * LR * D;
                         q8_to_bf16(w->hc_codes, w->hc_scales, w->ne0 * w->ne1, dst, m.cs);
@@ -802,8 +875,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     if (!bf16_proj(m.gemm, wi, b.xn16, inj, P, si, err)) return false;
                     const uint16_t* wu16 = hc16[half][1] ? hc16[half][1] : (const uint16_t*) wu->data;
                     if (P >= UPMIX_MIN && wu->kind == core::WeightKind::Bf16InF32 && wu16 != nullptr) {
-                        gr_upmix(b.lo16, wu16, b.R + t0 * D, b.rs, (const float*) wn->data, nullptr, b.mixed_bf, P, m.cs,
-                                 mixed_h);
+                        gr_upmix(b.lo16, wu16, b.R + t0 * D, b.rs, (const float*) wn->data, nullptr, b.mixed_bf, P,
+                                 m.cs, mixed_h);
                     } else {
                         if (!bf16_proj(m.gemm, wu, b.lo16, b.gated, P, su, err, 0, hc16[half][1])) return false;
                         gr_mix_r(b.R + t0 * D, b.rs, (const float*) wn->data, b.gated, nullptr, b.mixed_bf, P, m.cs,
@@ -813,19 +886,24 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
 
                     if (!qsa) {
                         // ======================= GDN =======================
-                        const core::WeightRef *wqkv = need(v, "attn_qkv.weight", err), *wg = need(v, "attn_gate.weight", err),
-                                              *wo = need(v, "ssm_out.weight", err), *wa = need(v, "ssm_alpha.weight", err),
-                                              *wb = need(v, "ssm_beta.weight", err), *wc = need(v, "ssm_conv1d.weight", err),
-                                              *wnm = need(v, "ssm_norm.weight", err), *wdt = need(v, "ssm_dt.bias", err),
-                                              *wsa = need(v, "ssm_a", err);
+                        const core::WeightRef *wqkv = need(v, "attn_qkv.weight", err),
+                                              *wg = need(v, "attn_gate.weight", err),
+                                              *wo = need(v, "ssm_out.weight", err),
+                                              *wa = need(v, "ssm_alpha.weight", err),
+                                              *wb = need(v, "ssm_beta.weight", err),
+                                              *wc = need(v, "ssm_conv1d.weight", err),
+                                              *wnm = need(v, "ssm_norm.weight", err),
+                                              *wdt = need(v, "ssm_dt.bias", err), *wsa = need(v, "ssm_a", err);
                         if (!wqkv || !wg || !wo || !wa || !wb || !wc || !wnm || !wdt || !wsa) return false;
                         mark(kPsGdn);
                         float* state = ss.gdn_state + (size_t) gdn_index * gdn_floats;
                         float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
                         if (!native_proj(wqkv, mixed_h, b.qkv, P, v.name("attn_qkv.weight"), err)) return false;
                         if (!native_proj(wg, mixed_h, b.z, P, v.name("attn_gate.weight"), err)) return false;
-                        if (!bf16_proj(m.gemm, wa, b.mixed_bf, b.ab, P, v.name("ssm_alpha.weight"), err, 2 * HV)) return false;
-                        if (!bf16_proj(m.gemm, wb, b.mixed_bf, b.ab + HV, P, v.name("ssm_beta.weight"), err, 2 * HV)) return false;
+                        if (!bf16_proj(m.gemm, wa, b.mixed_bf, b.ab, P, v.name("ssm_alpha.weight"), err, 2 * HV))
+                            return false;
+                        if (!bf16_proj(m.gemm, wb, b.mixed_bf, b.ab + HV, P, v.name("ssm_beta.weight"), err, 2 * HV))
+                            return false;
                         gdn_gates(b.ab, (const float*) wdt->data, (const float*) wsa->data, b.gate, b.beta, P, m.cs);
                         mark(kPsGdnConv);
                         gdn_conv(conv, b.qkv, (const float*) wc->data, b.hbuf, P, EPS, m.cs);
@@ -839,10 +917,12 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         // ======================= QSA =======================
                         const core::QsaState& st = ss.qsa_states[qsa_index];
                         const core::WeightRef *wq = need(v, "attn_q.weight", err), *wk = need(v, "attn_k.weight", err),
-                                              *wv = need(v, "attn_v.weight", err), *wo = need(v, "attn_output.weight", err),
+                                              *wv = need(v, "attn_v.weight", err),
+                                              *wo = need(v, "attn_output.weight", err),
                                               *wik = need(v, "indexer.k_proj.weight", err),
                                               *wiq = need(v, "indexer.q_proj.weight", err),
-                                              *wqn = need(v, "attn_q_norm.weight", err), *wkn = need(v, "attn_k_norm.weight", err),
+                                              *wqn = need(v, "attn_q_norm.weight", err),
+                                              *wkn = need(v, "attn_k_norm.weight", err),
                                               *wiqn = need(v, "indexer.q_norm.weight", err),
                                               *wikn = need(v, "indexer.k_norm.weight", err);
                         if (!wq || !wk || !wv || !wo || !wik || !wiq || !wqn || !wkn || !wiqn || !wikn) return false;
@@ -851,8 +931,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         if (!native_proj(wk, mixed_h, b.Kc, P, v.name("attn_k.weight"), err)) return false;
                         if (!native_proj(wv, mixed_h, b.Vc, P, v.name("attn_v.weight"), err)) return false;
                         if (!native_proj(wq, mixed_h, b.Qf, P, v.name("attn_q.weight"), err)) return false;
-                        if (!bf16_proj(m.gemm, wik, b.mixed_bf, b.idx_raw, P, v.name("indexer.k_proj.weight"), err)) return false;
-                        if (!bf16_proj(m.gemm, wiq, b.mixed_bf, b.q_idx, P, v.name("indexer.q_proj.weight"), err)) return false;
+                        if (!bf16_proj(m.gemm, wik, b.mixed_bf, b.idx_raw, P, v.name("indexer.k_proj.weight"), err))
+                            return false;
+                        if (!bf16_proj(m.gemm, wiq, b.mixed_bf, b.q_idx, P, v.name("indexer.q_proj.weight"), err))
+                            return false;
                         rms_rows(b.Kc, (const float*) wkn->data, P * 2, 256, 256, EPS, m.cs);
                         rope(b.Kc, P, 2, 256, 512, pp, lamina::kernels::rope_scaling(), m.cs);
                         append_kv(st, b.Kc, b.Vc, P, pp, s, m.cs);
@@ -863,21 +945,27 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         rope(b.q_idx, P, 4, 128, 512, pp, lamina::kernels::rope_scaling(), m.cs);
                         // the indexer appends of the sub-chunk; then scores + selection for many queries at once:
                         // a query reads completed blocks (final once completed) and `dead` for its own tail block
-                        const lamina::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
+                        const lamina::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled,
+                                                                    st.idx_block_pos};
                         mark(kPsQsaIndexer);
                         try {
                             lamina::kernels::native_qsa_indexer_append_multi(
                                 b.idx_raw, steps + lamina::kernels::kStepPos, (int) SC, (int) P, 0,
-                                (const float*) wikn->data, EPS, ib, s, st.max_cells, lamina::kernels::rope_scaling(), m.cs);
-                        } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
+                                (const float*) wikn->data, EPS, ib, s, st.max_cells, lamina::kernels::rope_scaling(),
+                                m.cs);
+                        } catch (const std::exception& e) {
+                            err = std::string("prefill indexer: ") + e.what();
+                            return false;
+                        }
                         mark(kPsQsaScores);
                         for (int64_t q0 = 0; q0 < P; q0 += SEL_BATCH) {
                             const int64_t nb = std::min(SEL_BATCH, P - q0);
                             // the batch's last query has completed the most blocks
                             const int64_t grid_blocks =
                                 m.steps_host[(size_t) (t0 + q0 + nb - 1) * SC + lamina::kernels::kStepNBid] + 1;
-                            lamina::kernels::qsa_block_scores(st.idx_pooled, st.idx_dead, b.q_idx + q0 * 512, steps + q0 * SC,
-                                                              nb, m.max_blocks, s, b.sel_scores, m.cs, grid_blocks);
+                            lamina::kernels::qsa_block_scores(st.idx_pooled, st.idx_dead, b.q_idx + q0 * 512,
+                                                              steps + q0 * SC, nb, m.max_blocks, s, b.sel_scores, m.cs,
+                                                              grid_blocks);
                             lamina::kernels::qsa_block_topk(b.sel_scores, steps + q0 * SC, nb, m.max_blocks, m.cap, s,
                                                             b.sel_ids + q0 * m.cap, m.cs);
                         }
@@ -974,7 +1062,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             std::fill(m.cnt.begin(), m.cnt.end(), 0);
             for (int64_t i = 0; i < T * K; ++i) {
                 const int32_t e = m.ids_host[i];
-                if (e < 0 || e >= NE) { err = "prefill: routed id out of range"; return false; }
+                if (e < 0 || e >= NE) {
+                    err = "prefill: routed id out of range";
+                    return false;
+                }
                 ++m.cnt[(size_t) e];
             }
             for (int32_t e = 0; e < NE; ++e) m.routed[(size_t) l * NE + (size_t) e] += (uint32_t) m.cnt[(size_t) e];
@@ -1020,8 +1111,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 if (m.cnt[(size_t) e] == 0) continue;
                 // held here: this GPU's; else the second GPU's where its cache holds it, else a helper's that does,
                 // else it streams (to the second GPU, or here without one)
-                const bool held = m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0 && !m.shifted[(size_t) e];
-                const int hp = held || m.shifted[(size_t) e] || (m.offload && m.offload->holds(l, e)) ? -1 : helper_of(e);
+                const bool held =
+                    m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0 && !m.shifted[(size_t) e];
+                const int hp =
+                    held || m.shifted[(size_t) e] || (m.offload && m.offload->holds(l, e)) ? -1 : helper_of(e);
                 const bool here = hp < 0 && (!m.offload || held);
                 for (int h = 0; h < (here ? 1 : 2); ++h) {
                     Impl::Share* const sh = hp >= 0 ? &m.hshare[hp] : nullptr;
@@ -1044,8 +1137,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             auto helpers_run = [&](int pass, int64_t t_begin, int64_t t_end) -> bool {
                 for (size_t h = 0; h < m.helpers.size(); ++h) {
                     const Impl::Share& sh = m.hshare[h];
-                    if (!m.helpers[h]->run_layer(l, T, t_begin, t_end, sh.ex[pass], sh.off[pass], sh.src[pass], sh.w[pass],
-                                                 SUB, nullptr, nullptr, err))
+                    if (!m.helpers[h]->run_layer(l, T, t_begin, t_end, sh.ex[pass], sh.off[pass], sh.src[pass],
+                                                 sh.w[pass], SUB, nullptr, nullptr, err))
                         return false;
                 }
                 return true;
@@ -1073,7 +1166,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             const int64_t sub0 = (th + SUB - 1) / SUB;   // the sub-chunks the first pass reads
             stage_inputs();
             if (k_in >= sub0 && !run_pass0()) return false;
-            if (!m.local.run_layer(l, T, 0, T, m.ex1, m.off1, m.src1, m.w1, SUB, b.mixed_h, b.bo_moe, err)) return false;
+            if (!m.local.run_layer(l, T, 0, T, m.ex1, m.off1, m.src1, m.w1, SUB, b.mixed_h, b.bo_moe, err))
+                return false;
             for (stage_inputs(); k_in < n_sub && in_err == cudaSuccess; stage_inputs()) {
                 if (!pass0 && k_in >= sub0 && !run_pass0()) return false;
                 std::this_thread::yield();
@@ -1150,7 +1244,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             ev.clear();
         }
         stats_.tokens += T;
-        for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
+        for (int64_t t = 0; t < T; ++t) {
+            prev[0] = prev[1];
+            prev[1] = (int32_t) tokens[c0 + t];
+        }
     }
     ss.ple_prev[0] = prev[0];
     ss.ple_prev[1] = prev[1];
@@ -1173,13 +1270,24 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
 }
 
 const char* prefill_section_name(int section) {
-    static const char* const names[kPsCount] = {
-        "PLE block", "HC read (mixer)", "GDN projections", "GDN conv", "GDN recurrence", "GDN output norm",
-        "GDN output projection",
-        "QSA projections, norms, KV", "QSA indexer appends",
-        "QSA block scores + top-k", "QSA attention", "QSA gate + output", "HC write + HC read (FFN)",
-        "router, shared expert", "grouping, experts", "combine + HC write", "draft layer K/V"};
+    static const char* const names[kPsCount] = {"PLE block",
+                                                "HC read (mixer)",
+                                                "GDN projections",
+                                                "GDN conv",
+                                                "GDN recurrence",
+                                                "GDN output norm",
+                                                "GDN output projection",
+                                                "QSA projections, norms, KV",
+                                                "QSA indexer appends",
+                                                "QSA block scores + top-k",
+                                                "QSA attention",
+                                                "QSA gate + output",
+                                                "HC write + HC read (FFN)",
+                                                "router, shared expert",
+                                                "grouping, experts",
+                                                "combine + HC write",
+                                                "draft layer K/V"};
     return section >= 0 && section < kPsCount ? names[section] : "?";
 }
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

@@ -38,43 +38,33 @@ bool native_mmvq_multi_exact();
 // hidden rows in one kernel.
 void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_1, int n_in, int ncols, void* stream);
 
-void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols,
-                          void* stream);
+void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols, void* stream);
 
-void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
-                      int n_in, int n_out, int ncols, void* stream);
+void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
 // Convenience composition: caller owns scratch sized by native_q8_1_bytes.
-void native_q5_k_f32(const void* weights, const float* x, void* scratch_q8_1,
-                     float* y, int n_in, int n_out, int ncols, void* stream);
+void native_q5_k_f32(const void* weights, const float* x, void* scratch_q8_1, float* y, int n_in, int n_out, int ncols,
+                     void* stream);
 
-void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
-                      int n_in, int n_out, int ncols, void* stream);
+void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
+void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
-void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
-                      int n_in, int n_out, int ncols, void* stream);
+void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                        void* stream);
 
-void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
-                       int n_in, int n_out, int ncols, void* stream);
+void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
-void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
-                      int n_in, int n_out, int ncols, void* stream);
+void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
-void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
-                      int n_in, int n_out, int ncols, void* stream);
+void native_q4_0_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
-void native_q4_0_mmvq(const void* weights, const void* x_q8_1, float* y,
-                       int n_in, int n_out, int ncols, void* stream);
+void native_q5_0_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
-void native_q5_0_mmvq(const void* weights, const void* x_q8_1, float* y,
-                       int n_in, int n_out, int ncols, void* stream);
+void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream);
 
-void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
-                       int n_in, int n_out, int ncols, void* stream);
-
-void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
-                       int n_in, int n_out, int ncols, void* stream);
+void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                        void* stream);
 
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
 // dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q3_K=11, Q4_K=12, Q5_K=13,
@@ -83,8 +73,8 @@ void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
 // capability query returns false.
 bool native_mmvq_supported(int ggml_type) noexcept;
 std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out);
-void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
-                 int n_in, int n_out, int ncols, void* stream);
+void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                 void* stream);
 
 // Up to kMmvqJobs products of one weight format and n_in in one launch, each with its own matrix, activations
 // (ncols columns of q8_1 blocks, as native_mmvq's) and output: job j's y[c * n_out + r] is native_mmvq's for it,
@@ -138,4 +128,4 @@ bool native_mmvq_il_takes(int ggml_type, int n_out, int ncols) noexcept;
 // rows other than 0 keep the tensor-core kernels out.
 void native_mmvq_il_tune(int rows, bool one);
 
-} // namespace lamina::kernels
+}   // namespace lamina::kernels

@@ -18,10 +18,10 @@
 //      wakes then must not join it: the host may already be writing the next phase.  Thousands of batches, with
 //      idle gaps either side of `kIdleSpin` and one-expert batches after the long ones, every output bitwise
 //      against a serial run of the same kernels.
-#include "lamina/kernels/cpu/pool.hpp"
 #include "lamina/kernels/cpu/expert.hpp"
-#include "test_blobs.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
 #include "lamina/platform/cpu_arch.hpp"
+#include "test_blobs.hpp"
 #if defined(LAMINA_NATIVE_EXPERTS)
 #include "ggml.h"
 #endif
@@ -154,11 +154,12 @@ StressStats stress_native(cpu::ExpertPool& pool, std::mt19937& rng, int iters, g
             th.emplace_back([&f, &blobs, gu, dn, b, seed = rng()] {
                 std::mt19937 r(seed);
                 uint8_t* p = blobs[(size_t) b].data();
-                ggml_quantize_chunk(gu, gauss_vec(r, (size_t) cpu::FF * cpu::H, 0.02f).data(), p, 0, cpu::FF, cpu::H, nullptr);
+                ggml_quantize_chunk(gu, gauss_vec(r, (size_t) cpu::FF * cpu::H, 0.02f).data(), p, 0, cpu::FF, cpu::H,
+                                    nullptr);
                 ggml_quantize_chunk(gu, gauss_vec(r, (size_t) cpu::FF * cpu::H, 0.02f).data(), p + f.up_off, 0, cpu::FF,
                                     cpu::H, nullptr);
-                ggml_quantize_chunk(dn, gauss_vec(r, (size_t) cpu::H * cpu::FF, 0.02f).data(), p + f.down_off, 0, cpu::H,
-                                    cpu::FF, nullptr);
+                ggml_quantize_chunk(dn, gauss_vec(r, (size_t) cpu::H * cpu::FF, 0.02f).data(), p + f.down_off, 0,
+                                    cpu::H, cpu::FF, nullptr);
             });
         for (auto& t : th) t.join();
     }
@@ -235,7 +236,11 @@ int stress(int iters) {
     std::printf("  run(): SKIPPED, the Q2_0 pack's kernel is x86-64 only\n");
 #endif
 #if defined(LAMINA_NATIVE_EXPERTS)
-    const struct { ggml_type gu, dn; bool fused; const char* name; } fmts[] = {
+    const struct {
+        ggml_type gu, dn;
+        bool fused;
+        const char* name;
+    } fmts[] = {
         {GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, false, "native rows, Q4_K / Q5_1"},             // ggml-cpu's dot products
         {GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, false, "native rows, IQ3_XXS / IQ4_NL"},   // + the AVX-512 i-quant kernel
         {GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, true, "fused native phase, Q4_K / Q5_1"},
@@ -260,7 +265,7 @@ int stress(int iters) {
     return bad ? 1 : 0;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
@@ -292,8 +297,7 @@ int main(int argc, char** argv) {
 
     const cpu::CpuFeatures feat = cpu::cpu_features();
     if (!feat.usable()) {
-        std::printf("  CPU lacks %s - the VNNI path cannot run here; pool test SKIPPED, not passed.\n",
-                    feat.reason());
+        std::printf("  CPU lacks %s - the VNNI path cannot run here; pool test SKIPPED, not passed.\n", feat.reason());
         std::printf("\npool: 0 failures, 1 SKIPPED\n");
         return 0;
     }
@@ -329,8 +333,8 @@ int main(int argc, char** argv) {
     // ---- the pool
     const std::vector<int> cores = cpu::CorePlacement(false).workers();
     const int hw = (int) std::thread::hardware_concurrency();
-    std::printf("  %-44s %d logical, %d physical (not the last, the host's)\n", "cores the pool will use",
-                hw, (int) cores.size());
+    std::printf("  %-44s %d logical, %d physical (not the last, the host's)\n", "cores the pool will use", hw,
+                (int) cores.size());
 
     cpu::ExpertPool pool;
     std::printf("  %-44s %d\n", "workers", pool.workers());
@@ -359,7 +363,10 @@ int main(int argc, char** argv) {
     for (int e = 0; e < NEXP; ++e)
         for (int i = 0; i < cpu::H; ++i) {
             const float a = ref[(size_t) e * cpu::H + i], b = got[(size_t) e * cpu::H + i];
-            if (b == SENTINEL) { ++not_run; continue; }
+            if (b == SENTINEL) {
+                ++not_run;
+                continue;
+            }
             if (std::memcmp(&a, &b, 4) != 0) ++diff;
             worst = std::fmax(worst, std::fabs(a - b));
         }
@@ -394,8 +401,8 @@ int main(int argc, char** argv) {
     // ---- 4: batch sizes either side of the worker count
     {
         int size_bad = 0;
-        for (int n : {1, 2, pool.workers() - 1 > 0 ? pool.workers() - 1 : 1, pool.workers(),
-                      pool.workers() + 1, NEXP}) {
+        for (int n :
+             {1, 2, pool.workers() - 1 > 0 ? pool.workers() - 1 : 1, pool.workers(), pool.workers() + 1, NEXP}) {
             if (n < 1 || n > NEXP) continue;
             for (int e = 0; e < n; ++e) std::fill(jobs[(size_t) e].out, jobs[(size_t) e].out + cpu::H, SENTINEL);
             pool.run(jobs.data(), n);
@@ -430,16 +437,15 @@ int main(int argc, char** argv) {
         std::sort(sorted.begin(), sorted.end());
         const double best = sorted.front(), median = sorted[sorted.size() / 2], worst = sorted.back();
         const double gbs = (double) NEXP * cpu::BLOB / (best * 1e-3) / 1e9;
-        std::printf("\n  %-44s %7.3f ms   (%.1f GB/s)\n", "10 experts, one layer (best of 20)",
-                    best, gbs);
+        std::printf("\n  %-44s %7.3f ms   (%.1f GB/s)\n", "10 experts, one layer (best of 20)", best, gbs);
         std::printf("  %-44s %7.3f / %7.3f ms   (spread %.2fx)\n", "median / worst", median, worst,
                     median / (best > 0 ? best : 1));
-        std::printf("  %-44s %7.3f ms   -> %.1f tok/s for the full 48 layers\n",
-                    "extrapolated to 48 layers", best * 48, 1000.0 / (best * 48));
+        std::printf("  %-44s %7.3f ms   -> %.1f tok/s for the full 48 layers\n", "extrapolated to 48 layers", best * 48,
+                    1000.0 / (best * 48));
         std::printf("  L9 measured 42.55 GB/s on 6 cores; this pool uses %d workers (core 0 is left to the\n",
                     pool.workers());
-        std::printf("  host loop), so %.1f GB/s x 6/%d = %.1f GB/s is the per-core comparison.\n",
-                    gbs, pool.workers(), gbs * 6.0 / pool.workers());
+        std::printf("  host loop), so %.1f GB/s x 6/%d = %.1f GB/s is the per-core comparison.\n", gbs, pool.workers(),
+                    gbs * 6.0 / pool.workers());
         if (median / (best > 0 ? best : 1) > 1.5)
             std::printf("  *** the spread is over 1.5x: this machine was CONTENDED and the median is not a\n"
                         "      property of the pool.  Re-run on a quiet machine before quoting it. ***\n");

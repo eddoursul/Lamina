@@ -25,14 +25,17 @@ void check(bool ok, const char* what) {
         ++fails;
     }
 }
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     using Pair = std::pair<int32_t, int32_t>;
     if (argc == 4) {   // a run's counts against rank.py's blend of them
         std::FILE* f = std::fopen(argv[1], "rb");
         int32_t n = 0;
-        if (f == nullptr || std::fread(&n, 4, 1, f) != 1 || n <= 0) { std::puts("FAIL: the dump"); return 1; }
+        if (f == nullptr || std::fread(&n, 4, 1, f) != 1 || n <= 0) {
+            std::puts("FAIL: the dump");
+            return 1;
+        }
         std::vector<double> heat((size_t) n);
         const bool ok = std::fread(heat.data(), 8, (size_t) n, f) == (size_t) n;
         std::fclose(f);
@@ -51,12 +54,12 @@ int main(int argc, char** argv) {
     }
     const int64_t L = 3, E = 4;   // 12 pairs, index = layer * 4 + expert
     std::vector<uint8_t> resident(12, 0);
-    resident[5] = 1;              // (1, 1)
-    resident[2] = 1;              // (0, 2)
+    resident[5] = 1;   // (1, 1)
+    resident[2] = 1;   // (0, 2)
     std::vector<double> heat(12, 0.0);
     heat[2] = 1.0;
     heat[5] = 7.0;
-    heat[11] = 9.0;               // (2, 3): the hottest, but not resident
+    heat[11] = 9.0;   // (2, 3): the hottest, but not resident
     heat[0] = 3.0;
     const std::vector<Pair> prior = {{2, 0}, {1, 3}, {0, 1}};   // a profile that ranks three pairs
     const std::vector<Pair> r = lamina::core::rank_learned_profile(L, E, resident, heat, prior);
@@ -66,8 +69,9 @@ int main(int argc, char** argv) {
         check(r[i] == head[i], "resident by heat, then the rest by heat, then the prior, then the index");
     // no counts at all: the resident ones, then the prior's order
     const std::vector<Pair> r0 = lamina::core::rank_learned_profile(L, E, resident, {}, prior);
-    check(r0.size() == 12 && r0[0] == Pair(0, 2) && r0[1] == Pair(1, 1) && r0[2] == Pair(2, 0) &&
-          r0[3] == Pair(1, 3) && r0[4] == Pair(0, 1) && r0[5] == Pair(0, 0), "without heat: resident, then prior");
+    check(r0.size() == 12 && r0[0] == Pair(0, 2) && r0[1] == Pair(1, 1) && r0[2] == Pair(2, 0) && r0[3] == Pair(1, 3) &&
+              r0[4] == Pair(0, 1) && r0[5] == Pair(0, 0),
+          "without heat: resident, then prior");
 
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "lamina_profile_save_test";
     std::filesystem::create_directories(dir);
@@ -78,10 +82,18 @@ int main(int argc, char** argv) {
     // the bytes make_profile.write_profile would write for the same ranking
     std::vector<uint8_t> want(4);
     std::memcpy(want.data(), "STRP", 4);
-    auto u32 = [&](uint32_t v) { for (int b = 0; b < 4; ++b) want.push_back((uint8_t) (v >> (8 * b))); };
-    auto u16 = [&](uint32_t v) { want.push_back((uint8_t) v); want.push_back((uint8_t) (v >> 8)); };
+    auto u32 = [&](uint32_t v) {
+        for (int b = 0; b < 4; ++b) want.push_back((uint8_t) (v >> (8 * b)));
+    };
+    auto u16 = [&](uint32_t v) {
+        want.push_back((uint8_t) v);
+        want.push_back((uint8_t) (v >> 8));
+    };
     for (uint32_t v : {1u, 3u, 4u, 12u, 12u}) u32(v);
-    for (const Pair& p : r) { u16((uint32_t) p.first); u16((uint32_t) p.second); }
+    for (const Pair& p : r) {
+        u16((uint32_t) p.first);
+        u16((uint32_t) p.second);
+    }
     std::vector<int32_t> table(12, -1);
     for (size_t i = 0; i < r.size(); ++i) table[(size_t) (r[i].first * E + r[i].second)] = (int32_t) i;
     for (int32_t v : table) u32((uint32_t) v);

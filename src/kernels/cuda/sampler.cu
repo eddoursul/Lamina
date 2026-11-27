@@ -19,8 +19,8 @@
 //     block per token, `top_k` block-argmax rounds, each over the logits after the previous pick;
 //   - `sampler_kernel` (`LAMINA_OLD_SAMPLER=1`), the kernel of engine 0.1.20, kept as the reference.
 // The two new ones share `sampled_tail_warp` (top_p / min_p / temperature / draw on one warp).
-#include "lamina/kernels/sampler.hpp"
 #include "lamina/core/emulate.hpp"
+#include "lamina/kernels/sampler.hpp"
 
 #include <cuda_runtime.h>
 
@@ -40,14 +40,15 @@ namespace {
 // vocabulary.  The presence penalty is `float(count > 0)`, a boolean, not the count.
 __device__ __forceinline__ int history_count(const int* __restrict__ h, int n, int v) {
     int c = 0;
-    for (int i = 0; i < n; ++i) if (h[i] == v) ++c;
+    for (int i = 0; i < n; ++i)
+        if (h[i] == v) ++c;
     return c;
 }
 
 __device__ __forceinline__ float apply_penalties(float logit, int count, const SamplerParams& p) {
     if (count <= 0) return logit;
     if (logit <= 0.0f) logit *= p.penalty_repeat;
-    else               logit /= p.penalty_repeat;
+    else logit /= p.penalty_repeat;
     logit -= (float) count * p.penalty_freq + (count > 0 ? 1.0f : 0.0f) * p.penalty_present;
     return logit;
 }
@@ -71,9 +72,9 @@ __device__ __forceinline__ float apply_penalties(float logit, int count, const S
 /// ascending with `if (s > bv)`, so the LOWEST index wins a tie.  Each thread keeps that rule over its own
 /// strided subset and the reduction resolves two candidates by taking the larger value and, on equality, the
 /// SMALLER index - the same total order, so `sampler_parity` and C1 see no change.
-__global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vocab,
-                                      const int* __restrict__ history, int history_len, const SamplerParams p,
-                                      int pmin, int plen, int* __restrict__ out) {
+__global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vocab, const int* __restrict__ history,
+                                      int history_len, const SamplerParams p, int pmin, int plen,
+                                      int* __restrict__ out) {
     const int t = blockIdx.x;
     const float* l = logits + (size_t) t * n_vocab;
     (void) pmin;
@@ -82,7 +83,7 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
     if (hrow) {
         hlen = plen < history_len ? plen : history_len;
         if (hlen < 0) hlen = 0;
-        hrow += history_len - hlen;          // the window is the TAIL
+        hrow += history_len - hlen;   // the window is the TAIL
     }
 
     // PENALTY MEMBERSHIP AS A BITMAP.  The history touches at most `hlen` tokens of a quarter-million
@@ -114,17 +115,26 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
     int best = n_vocab;
     for (int v = threadIdx.x; v < n_vocab; v += blockDim.x) {
         const float s = apply_penalties(p.logit_bias ? l[v] + p.logit_bias[v] : l[v], hit_count(v), p);
-        if (s > bv) { bv = s; best = v; }
+        if (s > bv) {
+            bv = s;
+            best = v;
+        }
     }
     for (int off = 16; off > 0; off >>= 1) {
         const float ov = __shfl_down_sync(0xFFFFFFFFu, bv, off);
         const int oi = __shfl_down_sync(0xFFFFFFFFu, best, off);
-        if (ov > bv || (ov == bv && oi < best)) { bv = ov; best = oi; }
+        if (ov > bv || (ov == bv && oi < best)) {
+            bv = ov;
+            best = oi;
+        }
     }
     __shared__ float sv[32];
     __shared__ int si[32];
     const int warp = (int) (threadIdx.x >> 5), lane = (int) (threadIdx.x & 31);
-    if (lane == 0) { sv[warp] = bv; si[warp] = best; }
+    if (lane == 0) {
+        sv[warp] = bv;
+        si[warp] = best;
+    }
     __syncthreads();
     if (warp == 0) {
         const int nw = (int) ((blockDim.x + 31) >> 5);
@@ -133,7 +143,10 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
         for (int off = 16; off > 0; off >>= 1) {
             const float ov = __shfl_down_sync(0xFFFFFFFFu, wv, off);
             const int oi = __shfl_down_sync(0xFFFFFFFFu, wi, off);
-            if (ov > wv || (ov == wv && oi < wi)) { wv = ov; wi = oi; }
+            if (ov > wv || (ov == wv && oi < wi)) {
+                wv = ov;
+                wi = oi;
+            }
         }
         // A tie between two `-inf` candidates leaves `wi == n_vocab`, and the serial version answered 0.
         if (lane == 0) out[t] = (wi < n_vocab) ? wi : 0;
@@ -154,19 +167,25 @@ __global__ void sampler_greedy_kernel(const float* __restrict__ logits, int n_vo
 /// Barriers: a relaxed cluster arrive at entry, waited before the remote store (CTA 0 must be running); each CTA's
 /// result goes to slot `rank` of CTA 0, released by the next arrive; CTAs 1.. then exit (a cluster wait counts the
 /// threads that have not exited) and CTA 0 waits, reads its own slots, and writes the token.
-constexpr int kAmCtas = 8;      // CTAs per token (the portable cluster size)
+constexpr int kAmCtas = 8;   // CTAs per token (the portable cluster size)
 constexpr int kAmThreads = 1024;
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 #define LAMINA_AM_CLUSTER 1
 #else
-#define LAMINA_AM_CLUSTER 0     // older targets: a trap, never launched (sample_greedy_cluster checks)
+#define LAMINA_AM_CLUSTER 0   // older targets: a trap, never launched (sample_greedy_cluster checks)
 #endif
 #if LAMINA_AM_CLUSTER
 __device__ __forceinline__ void am_take(float s, int v, float& bv, int& best) {
-    if (s > bv) { bv = s; best = v; }
+    if (s > bv) {
+        bv = s;
+        best = v;
+    }
 }
 __device__ __forceinline__ void am_merge(float ov, int oi, float& bv, int& best) {
-    if (ov > bv || (ov == bv && oi < best)) { bv = ov; best = oi; }
+    if (ov > bv || (ov == bv && oi < best)) {
+        bv = ov;
+        best = oi;
+    }
 }
 #endif
 // grid (kAmCtas, n_tokens), cluster (kAmCtas, 1, 1), kAmThreads threads
@@ -175,7 +194,7 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_cluster_kernel(cons
 #if LAMINA_AM_CLUSTER
     __shared__ float sv[32];
     __shared__ int si[32];
-    __shared__ float cv[kAmCtas];    // on CTA 0: each CTA's result
+    __shared__ float cv[kAmCtas];   // on CTA 0: each CTA's result
     __shared__ int ci[kAmCtas];
     unsigned rank;
     asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(rank));
@@ -196,7 +215,10 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_cluster_kernel(cons
     for (int off = 16; off > 0; off >>= 1)
         am_merge(__shfl_down_sync(0xFFFFFFFFu, bv, off), __shfl_down_sync(0xFFFFFFFFu, best, off), bv, best);
     const int warp = (int) (threadIdx.x >> 5), lane = (int) (threadIdx.x & 31);
-    if (lane == 0) { sv[warp] = bv; si[warp] = best; }
+    if (lane == 0) {
+        sv[warp] = bv;
+        si[warp] = best;
+    }
     __syncthreads();
     if (warp == 0) {
         bv = sv[lane];
@@ -223,7 +245,9 @@ __global__ void __launch_bounds__(kAmThreads) sampler_greedy_cluster_kernel(cons
         if (lane == 0) out[blockIdx.y] = (best < n_vocab) ? best : 0;
     }
 #else
-    (void) logits; (void) n_vocab; (void) out;
+    (void) logits;
+    (void) n_vocab;
+    (void) out;
     __trap();
 #endif
 }
@@ -264,7 +288,7 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
     if (hrow) {
         hlen = p.penalty_last_n < history_len ? p.penalty_last_n : history_len;
         if (hlen < 0) hlen = 0;
-        hrow += history_len - hlen;          // the window is the TAIL
+        hrow += history_len - hlen;   // the window is the TAIL
     }
 
     // the membership bitmap, as in `sampler_greedy_kernel` - see the cost note there.  The gate needs an
@@ -306,18 +330,31 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
         int best = n_vocab;
         for (int v = threadIdx.x; v < n_vocab; v += blockDim.x) {
             bool taken = false;
-            for (int j = 0; j < i; ++j) if (sel_ids[j] == v) { taken = true; break; }
+            for (int j = 0; j < i; ++j)
+                if (sel_ids[j] == v) {
+                    taken = true;
+                    break;
+                }
             if (taken) continue;
             const float s = apply_penalties(p.logit_bias ? l[v] + p.logit_bias[v] : l[v], hit_count(v), p);
-            if (s > bv) { bv = s; best = v; }
+            if (s > bv) {
+                bv = s;
+                best = v;
+            }
         }
         for (int off = 16; off > 0; off >>= 1) {
             const float ov = __shfl_down_sync(0xFFFFFFFFu, bv, off);
             const int oi = __shfl_down_sync(0xFFFFFFFFu, best, off);
-            if (ov > bv || (ov == bv && oi < best)) { bv = ov; best = oi; }
+            if (ov > bv || (ov == bv && oi < best)) {
+                bv = ov;
+                best = oi;
+            }
         }
         const int warp = (int) (threadIdx.x >> 5), lane = (int) (threadIdx.x & 31);
-        if (lane == 0) { sv[warp] = bv; si[warp] = best; }
+        if (lane == 0) {
+            sv[warp] = bv;
+            si[warp] = best;
+        }
         __syncthreads();
         if (warp == 0) {
             const int nw = (int) ((blockDim.x + 31) >> 5);
@@ -326,9 +363,15 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
             for (int off = 16; off > 0; off >>= 1) {
                 const float ov = __shfl_down_sync(0xFFFFFFFFu, wv, off);
                 const int oi = __shfl_down_sync(0xFFFFFFFFu, wi, off);
-                if (ov > wv || (ov == wv && oi < wi)) { wv = ov; wi = oi; }
+                if (ov > wv || (ov == wv && oi < wi)) {
+                    wv = ov;
+                    wi = oi;
+                }
             }
-            if (lane == 0) { sel_ids[i] = (wi < n_vocab) ? wi : 0; sel_logit[i] = wv; }
+            if (lane == 0) {
+                sel_ids[i] = (wi < n_vocab) ? wi : 0;
+                sel_logit[i] = wv;
+            }
         }
         __syncthreads();
     }
@@ -347,7 +390,10 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
         int cut = k;
         for (int i = 0; i < k; ++i) {
             cum += exp((double) sel_logit[i] - (double) mx) / sum;
-            if (cum >= (double) p.top_p) { cut = i + 1; break; }
+            if (cum >= (double) p.top_p) {
+                cut = i + 1;
+                break;
+            }
         }
         if (cut < p.min_keep) cut = p.min_keep < k ? p.min_keep : k;
         n_keep = cut;
@@ -359,7 +405,10 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
     if (p.min_p > 0.0f) {
         const float thresh = sel_logit[0] + logf(p.min_p);
         for (int i = 0; i < n_keep; ++i)
-            if (sel_logit[i] < thresh) { n_keep = i; break; }
+            if (sel_logit[i] < thresh) {
+                n_keep = i;
+                break;
+            }
     }
     // temperature only: the penalties were applied once, before the selection (issue #53: they were applied a
     // second time here, after the temperature scaling - llama.cpp's chain has one penalties stage)
@@ -373,7 +422,10 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
     double cum = 0.0;
     for (int i = 0; i < n_keep; ++i) {
         cum += exp((double) scaled(i) - (double) smx) / sum;
-        if ((double) u < cum) { pick = sel_ids[i]; break; }
+        if ((double) u < cum) {
+            pick = sel_ids[i];
+            break;
+        }
     }
     if (threadIdx.x == 0) out[t] = pick;
 }
@@ -386,7 +438,7 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
 // fall to the id, as there), so round i picks the i-th logit of the order.  NaN and -inf are never picked (`s > bv`
 // from -inf fails); a round that finds nothing yields the SENTINEL (-inf, n_vocab), stored as id 0.
 
-constexpr int kSelMax = 64;               // the widest top_k list, `sampler_kernel`'s KMAX
+constexpr int kSelMax = 64;   // the widest top_k list, `sampler_kernel`'s KMAX
 constexpr unsigned kFullMask = 0xFFFFFFFFu;
 
 // top_k 1..64 as given; 0 ("off") and anything wider keep 64; never more than the vocabulary
@@ -397,7 +449,10 @@ __host__ __device__ __forceinline__ int sampled_k(int top_k, int n_vocab) {
 
 // (bv, bi) <- the first of (bv, bi) and (ov, oi) in the selection order
 __device__ __forceinline__ void take_first(float& bv, int& bi, float ov, int oi) {
-    if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+    if (ov > bv || (ov == bv && oi < bi)) {
+        bv = ov;
+        bi = oi;
+    }
 }
 
 // The first of the warp's 32 candidates, left in EVERY lane.  An XOR butterfly is exact here: "the first of two" is
@@ -434,7 +489,7 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
         if (lane == 0)
             for (int i = 0; i < k; ++i) sum += ex[i];
         sum = __shfl_sync(kFullMask, sum, 0);
-        __syncwarp();                            // lane 0 has read every `ex` before it is overwritten
+        __syncwarp();   // lane 0 has read every `ex` before it is overwritten
         for (int i = lane; i < k; i += 32) ex[i] = ex[i] / sum;
         __syncwarp();
         int cut = k;
@@ -442,19 +497,25 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
             double cum = 0.0;
             for (int i = 0; i < k; ++i) {
                 cum += ex[i];
-                if (cum >= (double) p.top_p) { cut = i + 1; break; }
+                if (cum >= (double) p.top_p) {
+                    cut = i + 1;
+                    break;
+                }
             }
         }
         cut = __shfl_sync(kFullMask, cut, 0);
         if (cut < p.min_keep) cut = p.min_keep < k ? p.min_keep : k;
         n_keep = cut;
-        __syncwarp();                            // `ex` is written again below
+        __syncwarp();   // `ex` is written again below
     }
     // min_p on top_p's survivors, as in `sampler_kernel` (every lane, the same float arithmetic)
     if (p.min_p > 0.0f) {
         const float thresh = sel_logit[0] + logf(p.min_p);
         for (int i = 0; i < n_keep; ++i)
-            if (sel_logit[i] < thresh) { n_keep = i; break; }
+            if (sel_logit[i] < thresh) {
+                n_keep = i;
+                break;
+            }
     }
     // temperature, then one Philox draw
     float smx = sel_logit[0] * inv_t;
@@ -474,7 +535,10 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
         double cum = 0.0;
         for (int i = 0; i < n_keep; ++i) {
             cum += ex[i];
-            if ((double) u < cum) { pick = sel_ids[i]; break; }
+            if ((double) u < cum) {
+                pick = sel_ids[i];
+                break;
+            }
         }
         out[t] = pick;
     }
@@ -487,9 +551,9 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
 /// same list in the same order.  An empty round leaves (-inf, id 0) as before, and every round after it is empty
 /// in both versions (nothing after -inf beats -inf).  O(k x n_vocab) per row instead of O(k^2 x n_vocab), then warp
 /// 0 runs the tail.  `LAMINA_SAMPLER_ONE_BLOCK=1`, and the fallback when the split path cannot run.
-__global__ void __launch_bounds__(1024)
-sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab, const int* __restrict__ history,
-                         int history_len, const SamplerParams p, int* __restrict__ out) {
+__global__ void __launch_bounds__(1024) sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab,
+                                                                 const int* __restrict__ history, int history_len,
+                                                                 const SamplerParams p, int* __restrict__ out) {
     const int t = blockIdx.x;
     const float* l = logits + (size_t) t * n_vocab;
 
@@ -499,7 +563,7 @@ sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab, const in
     if (hrow) {
         hlen = p.penalty_last_n < history_len ? p.penalty_last_n : history_len;
         if (hlen < 0) hlen = 0;
-        hrow += history_len - hlen;          // the window is the TAIL
+        hrow += history_len - hlen;   // the window is the TAIL
     }
     extern __shared__ unsigned int penal_bits[];
     const int bits_words = (int) ((n_vocab + 31) / 32);
@@ -531,14 +595,23 @@ sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab, const in
         int best = n_vocab;
         for (int v = threadIdx.x; v < n_vocab; v += blockDim.x) {
             const float s = apply_penalties(p.logit_bias ? l[v] + p.logit_bias[v] : l[v], hit_count(v), p);
-            if ((s < prev_v || (s == prev_v && v > prev_i)) && s > bv) { bv = s; best = v; }
+            if ((s < prev_v || (s == prev_v && v > prev_i)) && s > bv) {
+                bv = s;
+                best = v;
+            }
         }
         for (int off = 16; off > 0; off >>= 1) {
             const float ov = __shfl_down_sync(0xFFFFFFFFu, bv, off);
             const int oi = __shfl_down_sync(0xFFFFFFFFu, best, off);
-            if (ov > bv || (ov == bv && oi < best)) { bv = ov; best = oi; }
+            if (ov > bv || (ov == bv && oi < best)) {
+                bv = ov;
+                best = oi;
+            }
         }
-        if (lane == 0) { sv[warp] = bv; si[warp] = best; }
+        if (lane == 0) {
+            sv[warp] = bv;
+            si[warp] = best;
+        }
         __syncthreads();
         if (warp == 0) {
             const int nw = (int) ((blockDim.x + 31) >> 5);
@@ -547,9 +620,15 @@ sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab, const in
             for (int off = 16; off > 0; off >>= 1) {
                 const float ov = __shfl_down_sync(0xFFFFFFFFu, wv, off);
                 const int oi = __shfl_down_sync(0xFFFFFFFFu, wi, off);
-                if (ov > wv || (ov == wv && oi < wi)) { wv = ov; wi = oi; }
+                if (ov > wv || (ov == wv && oi < wi)) {
+                    wv = ov;
+                    wi = oi;
+                }
             }
-            if (lane == 0) { sel_ids[i] = (wi < n_vocab) ? wi : 0; sel_logit[i] = wv; }
+            if (lane == 0) {
+                sel_ids[i] = (wi < n_vocab) ? wi : 0;
+                sel_logit[i] = wv;
+            }
         }
         __syncthreads();
         // An empty round leaves (-inf, 0): nothing comes after it, as nothing was left untaken.
@@ -565,8 +644,8 @@ sampler_one_block_kernel(const float* __restrict__ logits, int n_vocab, const in
 // 4,096 logits that merges their lists, and a row is 61 such blocks over the whole GPU; one warp per row then
 // merges the 61 lists and runs the tail.  Exact, because the first k of a union are within the first k of each part
 // and a merge of ordered lists is ordered - the selection order being a strict total order (above).
-constexpr int kSplitPerLane = 32;                               // logits per lane, in registers
-constexpr int kSplitWarpSpan = 32 * kSplitPerLane;              // 1,024 logits per warp
+constexpr int kSplitPerLane = 32;                    // logits per lane, in registers
+constexpr int kSplitWarpSpan = 32 * kSplitPerLane;   // 1,024 logits per warp
 constexpr int kSplitWarps = 4;
 constexpr int kSplitBlockSpan = kSplitWarps * kSplitWarpSpan;   // 4,096 logits per block
 constexpr int kSplitMaxBlocks = 64;                             // lists the merge holds: n_vocab <= 262,144
@@ -635,7 +714,7 @@ sampler_split_part_kernel(const float* __restrict__ logits, int n_vocab, const i
     if (hrow) {
         hlen = p.penalty_last_n < history_len ? p.penalty_last_n : history_len;
         if (hlen < 0) hlen = 0;
-        hrow += history_len - hlen;          // the window is the TAIL
+        hrow += history_len - hlen;   // the window is the TAIL
     }
     // The membership bitmap of THIS BLOCK'S 4,096 logits (512 bytes, not the vocabulary's 31 KB): the same test,
     // and a hit pays the same exact count over the whole window.
@@ -683,12 +762,18 @@ sampler_split_part_kernel(const float* __restrict__ logits, int n_vocab, const i
         for (int j = 0; j < kSplitPerLane; j += 2) {
             const int v0 = lo + 32 * j + lane, v1 = v0 + 32;
             const float x0 = s[j], x1 = s[j + 1];
-            if ((x0 < prev_v || (x0 == prev_v && v0 > prev_i)) && x0 > b0) { b0 = x0; i0 = v0; }
-            if ((x1 < prev_v || (x1 == prev_v && v1 > prev_i)) && x1 > b1) { b1 = x1; i1 = v1; }
+            if ((x0 < prev_v || (x0 == prev_v && v0 > prev_i)) && x0 > b0) {
+                b0 = x0;
+                i0 = v0;
+            }
+            if ((x1 < prev_v || (x1 == prev_v && v1 > prev_i)) && x1 > b1) {
+                b1 = x1;
+                i1 = v1;
+            }
         }
         take_first(b0, i0, b1, i1);
         warp_first(b0, i0);
-        if (i0 >= n_vocab) break;                // the same in every lane: nothing left in these 1,024 logits
+        if (i0 >= n_vocab) break;   // the same in every lane: nothing left in these 1,024 logits
         if (lane == 0) wl[warp][i] = make_int2(i0, __float_as_int(b0));
         prev_v = b0;
         prev_i = i0;
@@ -705,9 +790,9 @@ sampler_split_part_kernel(const float* __restrict__ logits, int n_vocab, const i
 
 /// **SPLIT STAGE 2: ONE WARP PER ROW MERGES THE BLOCK LISTS, THEN RUNS THE TAIL.**  The row's lists (at most 64 x
 /// 64 entries, 32 KB) are copied to shared memory, merged into the row's top_k list, and `sampled_tail_warp` picks.
-__global__ void __launch_bounds__(32)
-sampler_split_merge_kernel(const int2* __restrict__ cand, int n_blocks, int n_vocab, const SamplerParams p, int k,
-                           int* __restrict__ out) {
+__global__ void __launch_bounds__(32) sampler_split_merge_kernel(const int2* __restrict__ cand, int n_blocks,
+                                                                 int n_vocab, const SamplerParams p, int k,
+                                                                 int* __restrict__ out) {
     const int t = blockIdx.x;
     const int lane = (int) threadIdx.x;
     __shared__ int2 lists[kSplitMaxBlocks * kSelMax];
@@ -718,7 +803,10 @@ sampler_split_merge_kernel(const int2* __restrict__ cand, int n_blocks, int n_vo
     for (int e = lane; e < n_blocks * k; e += 32) lists[e] = src[e];
     __syncwarp();
     warp_merge_lists(lists, n_blocks, k, k, n_vocab, [&](int i, float v, int id) {
-        if (lane == 0) { sel_ids[i] = id < n_vocab ? id : 0; sel_logit[i] = v; }
+        if (lane == 0) {
+            sel_ids[i] = id < n_vocab ? id : 0;
+            sel_logit[i] = v;
+        }
     });
     __syncwarp();
     sampled_tail_warp(sel_ids, sel_logit, k, p, t, out, ex);
@@ -732,7 +820,6 @@ bool env_flag(const char* name) {
     const char* e = std::getenv(name);
     return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
 }
-
 
 SampledPath sampled_path() {
     static const SampledPath path = env_flag("LAMINA_OLD_SAMPLER")         ? SampledPath::Old
@@ -767,7 +854,7 @@ int2* split_scratch(void* stream, size_t entries) {
         void* stream;
         int2* ptr;
         size_t entries;
-        size_t failed;                       // the smallest size cudaMalloc refused (0: none)
+        size_t failed;   // the smallest size cudaMalloc refused (0: none)
     };
     static std::mutex mu;
     static std::vector<Slot> slots;
@@ -806,7 +893,7 @@ int2* split_scratch(void* stream, size_t entries) {
     return ptr;
 }
 
-}  // namespace
+}   // namespace
 
 bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* out, void* stream) {
     if (n_tokens <= 0 || n_vocab <= 0) return true;
@@ -816,7 +903,10 @@ bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* 
     // room for one cluster of kAmCtas CTAs.
     static int ok[64] = {};
     int dev = 0;
-    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) {
+        cudaGetLastError();
+        return false;
+    }
     cudaLaunchConfig_t cfg{};
     cudaLaunchAttribute at[1];
     at[0].id = cudaLaunchAttributeClusterDimension;
@@ -832,13 +922,13 @@ bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* 
     if (ok[dev] == 0) {
         int major = 0, clusters = 0;
         cudaFuncAttributes fa{};
-        const bool runs = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
-                          lamina::cc_major_of(major) >= 9 &&
-                          cudaFuncGetAttributes(&fa, sampler_greedy_cluster_kernel) == cudaSuccess &&
-                          fa.ptxVersion >= 90 && fa.binaryVersion >= 90 &&
-                          cudaOccupancyMaxActiveClusters(&clusters, sampler_greedy_cluster_kernel, &cfg) ==
-                              cudaSuccess &&
-                          clusters >= 1;
+        const bool runs =
+            cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+            lamina::cc_major_of(major) >= 9 &&
+            cudaFuncGetAttributes(&fa, sampler_greedy_cluster_kernel) == cudaSuccess && fa.ptxVersion >= 90 &&
+            fa.binaryVersion >= 90 &&
+            cudaOccupancyMaxActiveClusters(&clusters, sampler_greedy_cluster_kernel, &cfg) == cudaSuccess &&
+            clusters >= 1;
         cudaGetLastError();
         ok[dev] = runs ? 1 : 2;
     }
@@ -857,8 +947,8 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
     SamplerParams p = p_in;
     if (n_tokens <= 0 || n_vocab <= 0) return;
     if (p.penalty_last_n > 0 && (history == nullptr || history_len <= 0)) {
-        std::fprintf(stderr, "sample_tokens: penalty_last_n %d needs a history (got %p, len %d)\n",
-                     p.penalty_last_n, (const void*) history, history_len);
+        std::fprintf(stderr, "sample_tokens: penalty_last_n %d needs a history (got %p, len %d)\n", p.penalty_last_n,
+                     (const void*) history, history_len);
         std::exit(1);
     }
     const unsigned shmem = (history != nullptr && history_len > 0 && p.penalty_last_n > 0)
@@ -881,8 +971,8 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
     } else if (sampled_path() == SampledPath::Old) {
         // The same block-per-token shape: the selection's k argmax rounds reduce inside the block.  See
         // `sampler_kernel`'s header for what the old one-thread-per-token launch cost.
-        sampler_kernel<<<(unsigned) n_tokens, 1024, shmem, (cudaStream_t) stream>>>(
-            logits, n_vocab, n_tokens, history, history_len, p, out);
+        sampler_kernel<<<(unsigned) n_tokens, 1024, shmem, (cudaStream_t) stream>>>(logits, n_vocab, n_tokens, history,
+                                                                                    history_len, p, out);
     } else {
         // The split top_k by default: stage 1 over (61 blocks x rows) for 248,320 logits, stage 2 one warp per
         // row.  The one-block kernel when asked for, or when the split cannot run: a wider vocabulary than the merge
@@ -897,10 +987,10 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
             scratch = split_scratch(stream, (size_t) (n_tokens > 16 ? n_tokens : 16) * n_blocks * kSelMax);
         if (scratch != nullptr) {
             sampler_split_part_kernel<<<dim3((unsigned) n_blocks, (unsigned) n_tokens), kSplitWarps * 32, 0,
-                                        (cudaStream_t) stream>>>(logits, n_vocab, history, history_len, p, k,
-                                                                 n_blocks, scratch);
-            sampler_split_merge_kernel<<<(unsigned) n_tokens, 32, 0, (cudaStream_t) stream>>>(
-                scratch, n_blocks, n_vocab, p, k, out);
+                                        (cudaStream_t) stream>>>(logits, n_vocab, history, history_len, p, k, n_blocks,
+                                                                 scratch);
+            sampler_split_merge_kernel<<<(unsigned) n_tokens, 32, 0, (cudaStream_t) stream>>>(scratch, n_blocks,
+                                                                                              n_vocab, p, k, out);
         } else {
             sampler_one_block_kernel<<<(unsigned) n_tokens, 1024, shmem, (cudaStream_t) stream>>>(
                 logits, n_vocab, history, history_len, p, out);
@@ -914,7 +1004,6 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
     if (stream == nullptr) cudaDeviceSynchronize();
 }
 
-namespace {
-}  // namespace
+namespace {}   // namespace
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

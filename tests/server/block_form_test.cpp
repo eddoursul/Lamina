@@ -13,12 +13,12 @@ using lamina::Event;
 using lamina::json;
 
 static int fails = 0;
-#define CHECK(c)                                                                  \
-    do {                                                                          \
-        if (!(c)) {                                                               \
-            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);   \
-            ++fails;                                                              \
-        }                                                                         \
+#define CHECK(c)                                                                                                       \
+    do {                                                                                                               \
+        if (!(c)) {                                                                                                    \
+            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);                                          \
+            ++fails;                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 static const json kTools = json::parse(R"([{"name": "write_file", "parameters": {"type": "object", "properties": {
@@ -59,9 +59,11 @@ static Got run(const std::vector<std::string>& tokens, bool thinking, const json
 
 int main() {
     const lamina::BlockTags t;
-    const std::string body = R"({"name":"write_file","args":{"content":"a \"q\" and a \\ and {braces}\n","path":"n.txt"}})";
-    const std::vector<std::string> reply = {t.model, t.think, "Let me ", "write it.", t.end, t.model, t.text, "Here ",
-                                            "it is.", t.end, t.model, "write_file", t.call, body, t.end};
+    const std::string body =
+        R"({"name":"write_file","args":{"content":"a \"q\" and a \\ and {braces}\n","path":"n.txt"}})";
+    const std::vector<std::string> reply = {t.model, t.think,      "Let me ", "write it.", t.end,
+                                            t.model, t.text,       "Here ",   "it is.",    t.end,
+                                            t.model, "write_file", t.call,    body,        t.end};
     for (const size_t step : {(size_t) 1, (size_t) 7, (size_t) 4096}) {
         const Got g = run(reply, true, kTools, false, step);
         CHECK(g.reasoning == "Let me write it.");
@@ -78,17 +80,20 @@ int main() {
     }
     {   // no thinking block: the text is the answer, with or without thinking expected; two text blocks are paragraphs
         for (const bool thinking : {true, false}) {
-            const Got g = run({t.model, t.text, "One.", t.end, t.model, t.text, "Two.", t.end}, thinking, nullptr, false, 3);
+            const Got g =
+                run({t.model, t.text, "One.", t.end, t.model, t.text, "Two.", t.end}, thinking, nullptr, false, 3);
             CHECK(g.reasoning.empty() && g.content == "One.\n\nTwo.");
         }
     }
     {   // two thinking blocks are paragraphs of the reasoning
-        const Got g = run({t.model, t.think, "One.", t.end, t.model, t.think, "Two.", t.end, t.model, t.text, "Three.", t.end},
-                          true, nullptr, false, 3);
+        const Got g =
+            run({t.model, t.think, "One.", t.end, t.model, t.think, "Two.", t.end, t.model, t.text, "Three.", t.end},
+                true, nullptr, false, 3);
         CHECK(g.reasoning == "One.\n\nTwo." && g.content == "Three.");
     }
-    {   // a stop token drawn in a block form's reply: the open block's text alone tells whether it quotes the marker (a
-        // closed thinking block's fence is not the answer's); after a block's end, or in a block's header, the turn ends
+    {   // a stop token drawn in a block form's reply: the open block's text alone
+        // tells whether it quotes the marker (a closed thinking block's fence is not
+        // the answer's); after a block's end, or in a block's header, the turn ends
         const std::string fenced = t.model + t.think + "Like this:\n```\ncode" + t.end;
         CHECK(lamina::names_stop_marker(fenced + t.model + t.text + "Done.", "content"));   // the form unread: a fence
         CHECK(!lamina::names_stop_marker(fenced + t.model + t.text + "Done.", "content", &t));
@@ -108,8 +113,8 @@ int main() {
         CHECK(state == "call");
     }
     {   // arguments that are no object: read at the call's end, sent whole; a name in the JSON alone
-        const Got g = run({t.model, "write_file", t.call, R"({"args":"{\"path\":\"x\"}","name":"write_file"})", t.end}, false,
-                          kTools, false, 2);
+        const Got g = run({t.model, "write_file", t.call, R"({"args":"{\"path\":\"x\"}","name":"write_file"})", t.end},
+                          false, kTools, false, 2);
         const std::string whole = R"({"path": "x"})";
         CHECK(g.calls.size() == 1 && g.calls[0].second == json({{"path", "x"}}) && g.args == whole);
         const Got h = run({t.model, t.call, R"({"name":"write_file","args":{}})", t.end}, false, kTools, false, 2);
@@ -127,17 +132,21 @@ int main() {
         CHECK(g.calls.empty() && g.content == "{\"name\": oops");
     }
     {   // a request without tools gets a call block's text; the tags' characters in the model's own text are dropped
-        const Got g = run({t.model, "x", t.call, "{}", t.end, t.model, t.text, std::string("a") + lamina::kBlkCall + "b", t.end},
-                          false, nullptr, false, 1);
+        const Got g =
+            run({t.model, "x", t.call, "{}", t.end, t.model, t.text, std::string("a") + lamina::kBlkCall + "b", t.end},
+                false, nullptr, false, 1);
         CHECK(g.calls.empty() && g.content == "{}ab");
     }
     {   // a block of a kind the form has no reading for: its text is the reply's
-        const Got g = run({t.model, "tool", "<|content_invoke_tool_text|>", "raw input", t.end}, false, kTools, false, 2);
+        const Got g =
+            run({t.model, "tool", "<|content_invoke_tool_text|>", "raw input", t.end}, false, kTools, false, 2);
         CHECK(g.calls.empty() && g.content == "raw input");
     }
     // a tag the model spells in plain tokens is text: only a whole piece is a tag
-    CHECK(lamina::block_piece("<|end_", t) == "<|end_" && lamina::block_piece(t.end, t) == std::string(1, lamina::kBlkEnd));
-    CHECK(lamina::blocks_control(t.model + "f" + t.call, t) == std::string(1, lamina::kBlkModel) + "f" + lamina::kBlkCall);
+    CHECK(lamina::block_piece("<|end_", t) == "<|end_" &&
+          lamina::block_piece(t.end, t) == std::string(1, lamina::kBlkEnd));
+    CHECK(lamina::blocks_control(t.model + "f" + t.call, t) ==
+          std::string(1, lamina::kBlkModel) + "f" + lamina::kBlkCall);
     // the server's Qwen-form text as tags
     CHECK(lamina::qwen_to_blocks("<tool_call>\n<function=f>\n", t, false) == t.model + "f" + t.call);
     CHECK(lamina::qwen_to_blocks("\n\n<tool_call>\n<function=f>\n", t, true) == t.end + t.model + "f" + t.call);

@@ -18,12 +18,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "lamina/kernels/native_ple_postops.hpp"
-#include "lamina/kernels/warp.cuh"
 #include "lamina/kernels/native_gr_norm.hpp"
+#include "lamina/kernels/native_ple_postops.hpp"
 #include "lamina/kernels/ngram.hpp"
-#include <cuda_runtime.h>
+#include "lamina/kernels/warp.cuh"
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -55,7 +55,7 @@ __global__ void gate_kernel(const float* key, const float* query, float* gate, f
     sum = lane < 16 ? partials[lane] : 0.0f;
     sum = warp_sum(sum);
     if (threadIdx.x == 0) {
-        const float s = __fmaf_rn(scale, sum, 0.0f); // ggml SCALE's zero bias
+        const float s = __fmaf_rn(scale, sum, 0.0f);   // ggml SCALE's zero bias
         const float mag = sqrtf(fmaxf(fabsf(s), 1e-6f));
         const float sign = float((s > 0.0f) - (s < 0.0f));
         gate[blockIdx.x] = 1.0f / (1.0f + expf(-__fmul_rn(sign, mag)));
@@ -65,9 +65,8 @@ __global__ void broadcast_kernel(const float* value, const float* gate, float* g
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < D) gated[i] = __fmul_rn(value[i % N], gate[i / N]);
 }
-__global__ void conv_residual_kernel(const float* history, const float* normalized,
-                                    const uint16_t* weights, const float* hidden,
-                                    const float* gated, float* conv, float* result) {
+__global__ void conv_residual_kernel(const float* history, const float* normalized, const uint16_t* weights,
+                                     const float* hidden, const float* gated, float* conv, float* result) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= D) return;
     float sum = 0;
@@ -89,9 +88,8 @@ __global__ void broadcast_tokens_kernel(const float* value, const float* gate, f
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < size_t(n_tok) * D) gated[i] = __fmul_rn(value[i / D * N + i % N], gate[i / N]);
 }
-__global__ void conv_residual_tokens_kernel(const float* history, const float* normalized,
-                                           const uint16_t* weights, const float* hidden,
-                                           const float* gated, float* result, int n_tok) {
+__global__ void conv_residual_tokens_kernel(const float* history, const float* normalized, const uint16_t* weights,
+                                            const float* hidden, const float* gated, float* result, int n_tok) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(n_tok) * D) return;
     const int t = int(i / D), c = int(i % D);
@@ -129,7 +127,11 @@ __global__ void history_tokens_kernel(float* history, const float* normalized, i
         history[c * HISTORY + r] = j >= 0 ? normalized[size_t(j) * D + c] : old[r + n_tok];
     }
 }
-struct Span { const void* p; size_t bytes; size_t alignment; };
+struct Span {
+    const void* p;
+    size_t bytes;
+    size_t alignment;
+};
 bool overlaps(Span a, Span b) {
     const auto x = reinterpret_cast<uintptr_t>(a.p), y = reinterpret_cast<uintptr_t>(b.p);
     return x < y + b.bytes && y < x + a.bytes;
@@ -141,19 +143,19 @@ void validate(Span span) {
 }
 void launch_check() {
     const auto error = cudaGetLastError();
-    if (error != cudaSuccess) throw std::runtime_error(std::string("native PLE postops launch: ") + cudaGetErrorString(error));
+    if (error != cudaSuccess)
+        throw std::runtime_error(std::string("native PLE postops launch: ") + cudaGetErrorString(error));
 }
-} // namespace
+}   // namespace
 
-void native_ple_postops(const float* projected_key, const float* hidden,
-                        const float* value, const float* history,
+void native_ple_postops(const float* projected_key, const float* hidden, const float* value, const float* history,
                         const PleWeights& w, const NativePlePostopsBuffers& b, void* stream) {
     if (!stream) throw std::invalid_argument("native PLE postops require an explicit stream");
-    const Span inputs[] = {{projected_key,D*4,4}, {hidden,D*4,4}, {value,N*4,4},
-        {history,HISTORY*D*4,4}, {w.norm_key,D*4,4}, {w.norm_query,D*4,4},
-        {w.norm_conv,D*4,4}, {w.conv1d_f16,4*D*2,2}};
-    const Span outputs[] = {{b.key,D*4,4}, {b.query,D*4,4}, {b.gate,H*4,4},
-        {b.gated,D*4,4}, {b.normalized,D*4,4}, {b.conv,D*4,4}, {b.result,D*4,4}};
+    const Span inputs[] = {{projected_key, D * 4, 4},     {hidden, D * 4, 4},          {value, N * 4, 4},
+                           {history, HISTORY * D * 4, 4}, {w.norm_key, D * 4, 4},      {w.norm_query, D * 4, 4},
+                           {w.norm_conv, D * 4, 4},       {w.conv1d_f16, 4 * D * 2, 2}};
+    const Span outputs[] = {{b.key, D * 4, 4},        {b.query, D * 4, 4}, {b.gate, H * 4, 4},  {b.gated, D * 4, 4},
+                            {b.normalized, D * 4, 4}, {b.conv, D * 4, 4},  {b.result, D * 4, 4}};
     for (const auto& span : inputs) validate(span);
     for (const auto& span : outputs) validate(span);
     for (size_t i = 0; i < 7; ++i) {
@@ -164,14 +166,15 @@ void native_ple_postops(const float* projected_key, const float* hidden,
             if (!(i == 1 && j == 4 && b.query == b.normalized) && overlaps(outputs[i], outputs[j]))
                 throw std::invalid_argument("native PLE postops writable spans overlap");
     }
-    native_gr_rms_norm_weighted(projected_key,w.norm_key,b.key,N,H,NG_RMS_EPS,stream);
-    native_gr_rms_norm_weighted(hidden,w.norm_query,b.query,N,H,NG_RMS_EPS,stream);
+    native_gr_rms_norm_weighted(projected_key, w.norm_key, b.key, N, H, NG_RMS_EPS, stream);
+    native_gr_rms_norm_weighted(hidden, w.norm_query, b.query, N, H, NG_RMS_EPS, stream);
     auto st = static_cast<cudaStream_t>(stream);
-    gate_kernel<<<H,512,0,st>>>(b.key,b.query,b.gate,1.0f / std::sqrt(float(N)));
-    broadcast_kernel<<<D/256,256,0,st>>>(value,b.gate,b.gated);
+    gate_kernel<<<H, 512, 0, st>>>(b.key, b.query, b.gate, 1.0f / std::sqrt(float(N)));
+    broadcast_kernel<<<D / 256, 256, 0, st>>>(value, b.gate, b.gated);
     launch_check();
-    native_gr_rms_norm_weighted(b.gated,w.norm_conv,b.normalized,N,H,NG_RMS_EPS,stream);
-    conv_residual_kernel<<<D/256,256,0,st>>>(history,b.normalized,w.conv1d_f16,hidden,b.gated,b.conv,b.result);
+    native_gr_rms_norm_weighted(b.gated, w.norm_conv, b.normalized, N, H, NG_RMS_EPS, stream);
+    conv_residual_kernel<<<D / 256, 256, 0, st>>>(history, b.normalized, w.conv1d_f16, hidden, b.gated, b.conv,
+                                                  b.result);
     launch_check();
 }
 
@@ -180,11 +183,12 @@ void native_ple_postops_tokens(const float* projected_key, const float* hidden, 
                                float* snaps) {
     if (!stream || n_tok < 1) throw std::invalid_argument("native PLE postops: tokens need a stream and n_tok >= 1");
     const size_t rows = size_t(n_tok) * D * 4;
-    const Span inputs[] = {{projected_key,rows,4}, {hidden,rows,4}, {value,size_t(n_tok)*N*4,4},
-        {history,HISTORY*D*4,4}, {w.norm_key,D*4,4}, {w.norm_query,D*4,4},
-        {w.norm_conv,D*4,4}, {w.conv1d_f16,4*D*2,2}};
-    const Span outputs[] = {{b.key,rows,4}, {b.query,rows,4}, {b.gate,size_t(n_tok)*H*4,4},
-        {b.gated,rows,4}, {b.normalized,rows,4}, {b.result,rows,4}};
+    const Span inputs[] = {
+        {projected_key, rows, 4},      {hidden, rows, 4},           {value, size_t(n_tok) * N * 4, 4},
+        {history, HISTORY * D * 4, 4}, {w.norm_key, D * 4, 4},      {w.norm_query, D * 4, 4},
+        {w.norm_conv, D * 4, 4},       {w.conv1d_f16, 4 * D * 2, 2}};
+    const Span outputs[] = {{b.key, rows, 4},   {b.query, rows, 4},      {b.gate, size_t(n_tok) * H * 4, 4},
+                            {b.gated, rows, 4}, {b.normalized, rows, 4}, {b.result, rows, 4}};
     for (const auto& span : inputs) validate(span);
     for (const auto& span : outputs) validate(span);
     for (size_t i = 0; i < 6; ++i) {
@@ -206,14 +210,15 @@ void native_ple_postops_tokens(const float* projected_key, const float* hidden, 
     const int R = H * n_tok;
     const unsigned blocks = unsigned((size_t(n_tok) * D + 255) / 256);
     auto st = static_cast<cudaStream_t>(stream);
-    native_gr_rms_norm_weighted_repeat(projected_key,w.norm_key,b.key,N,R,H,NG_RMS_EPS,stream);
-    native_gr_rms_norm_weighted_repeat(hidden,w.norm_query,b.query,N,R,H,NG_RMS_EPS,stream);
-    gate_kernel<<<R,512,0,st>>>(b.key,b.query,b.gate,1.0f / std::sqrt(float(N)));
-    broadcast_tokens_kernel<<<blocks,256,0,st>>>(value,b.gate,b.gated,n_tok);
+    native_gr_rms_norm_weighted_repeat(projected_key, w.norm_key, b.key, N, R, H, NG_RMS_EPS, stream);
+    native_gr_rms_norm_weighted_repeat(hidden, w.norm_query, b.query, N, R, H, NG_RMS_EPS, stream);
+    gate_kernel<<<R, 512, 0, st>>>(b.key, b.query, b.gate, 1.0f / std::sqrt(float(N)));
+    broadcast_tokens_kernel<<<blocks, 256, 0, st>>>(value, b.gate, b.gated, n_tok);
     launch_check();
-    native_gr_rms_norm_weighted_repeat(b.gated,w.norm_conv,b.normalized,N,R,H,NG_RMS_EPS,stream);
-    conv_residual_tokens_kernel<<<blocks,256,0,st>>>(history,b.normalized,w.conv1d_f16,hidden,b.gated,b.result,n_tok);
-    history_tokens_kernel<<<D/256,256,0,st>>>(history,b.normalized,n_tok,snaps);
+    native_gr_rms_norm_weighted_repeat(b.gated, w.norm_conv, b.normalized, N, R, H, NG_RMS_EPS, stream);
+    conv_residual_tokens_kernel<<<blocks, 256, 0, st>>>(history, b.normalized, w.conv1d_f16, hidden, b.gated, b.result,
+                                                        n_tok);
+    history_tokens_kernel<<<D / 256, 256, 0, st>>>(history, b.normalized, n_tok, snaps);
     launch_check();
 }
-} // namespace lamina::kernels
+}   // namespace lamina::kernels

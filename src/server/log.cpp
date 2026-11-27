@@ -22,9 +22,10 @@ void write(FILE* f, std::string_view text) {
 
 thread_local SayRedirect* t_redirect = nullptr;
 
-}  // namespace
+}   // namespace
 
-SayRedirect::SayRedirect(std::function<void(std::string_view, bool)> sink) : sink_(std::move(sink)), outer_(t_redirect) {
+SayRedirect::SayRedirect(std::function<void(std::string_view, bool)> sink)
+    : sink_(std::move(sink)), outer_(t_redirect) {
     t_redirect = this;
 }
 SayRedirect::~SayRedirect() { t_redirect = outer_; }
@@ -49,4 +50,4 @@ void set_err_stream(std::FILE* f) {
     g_err = f;
 }
 
-}  // namespace lamina
+}   // namespace lamina

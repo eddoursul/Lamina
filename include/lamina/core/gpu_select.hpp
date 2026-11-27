@@ -19,7 +19,7 @@ struct GpuInfo {
     std::string bus_id;   ///< "0000:10:00.0"
     std::string uuid;     ///< "GPU-f26e9ba6-34e6-e46a-a700-b8349f7e5456", as nvidia-smi prints it
     int sms = 0;
-    int cc = 0;           ///< compute capability x 10 (86: 8.6)
+    int cc = 0;   ///< compute capability x 10 (86: 8.6)
 };
 /// The engine's devices are CUDA's first `n`: lamina narrows its process to the engine's cards
 /// (CUDA_VISIBLE_DEVICES) and adds after them a card its image encoder runs on that is none of theirs.  n < 0 (as at
@@ -127,4 +127,4 @@ private:
     State* st_ = nullptr;
 };
 
-}  // namespace lamina::core
+}   // namespace lamina::core

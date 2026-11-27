@@ -29,13 +29,11 @@ namespace {
 //
 // `decode_tbl` below reads a SHARED copy instead: 16 bytes loaded once per block, then an index into shared
 // memory that costs at most a four-way bank conflict.  The `__constant__` array stays as the source of it.
-__constant__ signed char kIq4Nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
-                                       1,   13,   25,  38,  53,  69,  89,  113};
+__constant__ signed char kIq4Nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
-template <int CODE_BITS>
-__device__ __forceinline__ float decode(int code, int bias, int codebook) {
+template <int CODE_BITS> __device__ __forceinline__ float decode(int code, int bias, int codebook) {
     if (codebook == (int) Codebook::Iq4Nl) return (float) kIq4Nl[code & 0x0F];
-    return (float) (code + bias);       // the bias is applied to the CODE, in the integer domain
+    return (float) (code + bias);   // the bias is applied to the CODE, in the integer domain
 }
 
 /// The same decode with the codebook in SHARED memory, which is what the hot kernels use - see the measurement
@@ -90,8 +88,8 @@ __device__ __forceinline__ float q8_0_at(const uint8_t* __restrict__ x, long lon
 template <int CODE_BITS>
 __global__ void s_gemv_q8k_kernel(const uint8_t* __restrict__ x, const uint8_t* __restrict__ codes,
                                   const float* __restrict__ scales, const float* __restrict__ offset,
-                                  float* __restrict__ y, long long n_in, long long n_out, int bias,
-                                  int codebook, int group_elems, int has_offset) {
+                                  float* __restrict__ y, long long n_in, long long n_out, int bias, int codebook,
+                                  int group_elems, int has_offset) {
     // THE CODEBOOK, IN SHARED MEMORY - 16 bytes, loaded once per block.  See the note on `kIq4Nl`.
     // THE LOAD AND THE BARRIER COME BEFORE THE EARLY RETURN: `o` is per-THREAD in this kernel, so a thread
     // that returned first would leave the others waiting at a barrier it never reaches.
@@ -141,9 +139,9 @@ __global__ void s_gemv_q8k_kernel(const uint8_t* __restrict__ x, const uint8_t* 
 /// decode, the quad loop, the shared codebook and the reduction are identical.
 template <int CODE_BITS, bool Q8K>
 __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint8_t* __restrict__ codes,
-                                        const float* __restrict__ scales, const float* __restrict__ offset,
-                                        float* __restrict__ y, long long n_in, long long n_out, int bias,
-                                        int codebook, int group_shift, int has_offset) {
+                                       const float* __restrict__ scales, const float* __restrict__ offset,
+                                       float* __restrict__ y, long long n_in, long long n_out, int bias, int codebook,
+                                       int group_shift, int has_offset) {
     constexpr int PER_BYTE = 8 / CODE_BITS;
     const int warps_per_block = (int) (blockDim.x >> 5);
     const long long o = (long long) blockIdx.x * warps_per_block + (threadIdx.x >> 5);
@@ -202,7 +200,7 @@ __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint
     // did: it branched on the octet's total width and so read a uint32 for S4 (whose four codes are a
     // uint16) and single bytes for S8 (whose four codes are a uint32).  `s_gemv_q8k_parity` failed on
     // exactly that, which is what it is for.
-    constexpr int QW = 4 * CODE_BITS / 8;              // 1 for S2, 2 for S4, 4 for S8
+    constexpr int QW = 4 * CODE_BITS / 8;   // 1 for S2, 2 for S4, 4 for S8
     constexpr unsigned MASK = (1u << CODE_BITS) - 1u;
     long long i = (long long) lane * QE;
     // **`#pragma unroll 4` WAS TRIED HERE AND DID NOTHING.**  Measured: 184.6 -> 183.9 GB/s at n_out 10240,
@@ -217,16 +215,27 @@ __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint
     // independent 16-bit words per lane - which an unroll cannot do because the extraction code is written for
     // exactly four codes.  That is the experiment that would settle it, and it is not this one.
     for (; i + QE <= n_in; i += 32 * QE) {
-        const long long g = i >> group_shift;          // the whole octet is in one group: group_elems % 8 == 0
+        const long long g = i >> group_shift;   // the whole octet is in one group: group_elems % 8 == 0
         const float d = s[g];
         const float b = off ? off[g] : 0.0f;
         const uint8_t* cp = c + i / PER_BYTE;
         unsigned v, v2, v3, v4;
-        if (QW == 1) { v = cp[0]; v2 = cp[1]; v3 = cp[2]; v4 = cp[3]; }
-        else if (QW == 2) { v = *(const uint16_t*) cp; v2 = *(const uint16_t*) (cp + 2);
-                            v3 = *(const uint16_t*) (cp + 4); v4 = *(const uint16_t*) (cp + 6); }
-        else { v = *(const uint32_t*) cp; v2 = *(const uint32_t*) (cp + 4);
-               v3 = *(const uint32_t*) (cp + 8); v4 = *(const uint32_t*) (cp + 12); }
+        if (QW == 1) {
+            v = cp[0];
+            v2 = cp[1];
+            v3 = cp[2];
+            v4 = cp[3];
+        } else if (QW == 2) {
+            v = *(const uint16_t*) cp;
+            v2 = *(const uint16_t*) (cp + 2);
+            v3 = *(const uint16_t*) (cp + 4);
+            v4 = *(const uint16_t*) (cp + 6);
+        } else {
+            v = *(const uint32_t*) cp;
+            v2 = *(const uint32_t*) (cp + 4);
+            v3 = *(const uint32_t*) (cp + 8);
+            v4 = *(const uint32_t*) (cp + 12);
+        }
         // ---- THE ACTIVATION BLOCK IS HOISTED OUT OF THE SIXTEEN ELEMENTS, AND THAT WAS THE KERNEL'S COST.
         //
         // `q8k_at(x, i + k)` computes `(i + k) / 256` and `(i + k) % 256` on EVERY call: a 64-bit integer
@@ -246,8 +255,7 @@ __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint
         const int blk_elems = Q8K ? Q8K_BLOCK_ELEMS : Q8_0_BLOCK_ELEMS;
         const uint8_t* xb = x + (i / blk_elems) * (Q8K ? Q8K_BLOCK_BYTES : Q8_0_BLOCK_BYTES);
         const int xi = (int) (i % blk_elems);
-        const float xd = Q8K ? __ldg((const float*) xb)
-                             : __half2float(__ushort_as_half(*(const uint16_t*) xb));
+        const float xd = Q8K ? __ldg((const float*) xb) : __half2float(__ushort_as_half(*(const uint16_t*) xb));
         const int8_t* xq = (const int8_t*) (xb + (Q8K ? 4 : 2)) + xi;
 
         const float w0 = decode_tbl<CODE_BITS>((int) (v & MASK), bias, codebook, s_iq4nl) * d + b;
@@ -266,16 +274,20 @@ __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint
         acc5 += w5 * (xd * (float) xq[5]);
         acc6 += w6 * (xd * (float) xq[6]);
         acc7 += w7 * (xd * (float) xq[7]);
-        const float w8  = decode_tbl<CODE_BITS>((int) (v3 & MASK), bias, codebook, s_iq4nl) * d + b;
-        const float w9  = decode_tbl<CODE_BITS>((int) ((v3 >> CODE_BITS) & MASK), bias, codebook, s_iq4nl) * d + b;
-        const float w10 = decode_tbl<CODE_BITS>((int) ((v3 >> (2 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
-        const float w11 = decode_tbl<CODE_BITS>((int) ((v3 >> (3 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
+        const float w8 = decode_tbl<CODE_BITS>((int) (v3 & MASK), bias, codebook, s_iq4nl) * d + b;
+        const float w9 = decode_tbl<CODE_BITS>((int) ((v3 >> CODE_BITS) & MASK), bias, codebook, s_iq4nl) * d + b;
+        const float w10 =
+            decode_tbl<CODE_BITS>((int) ((v3 >> (2 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
+        const float w11 =
+            decode_tbl<CODE_BITS>((int) ((v3 >> (3 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
         const float w12 = decode_tbl<CODE_BITS>((int) (v4 & MASK), bias, codebook, s_iq4nl) * d + b;
         const float w13 = decode_tbl<CODE_BITS>((int) ((v4 >> CODE_BITS) & MASK), bias, codebook, s_iq4nl) * d + b;
-        const float w14 = decode_tbl<CODE_BITS>((int) ((v4 >> (2 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
-        const float w15 = decode_tbl<CODE_BITS>((int) ((v4 >> (3 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
-        acc8  += w8  * (xd * (float) xq[8]);
-        acc9  += w9  * (xd * (float) xq[9]);
+        const float w14 =
+            decode_tbl<CODE_BITS>((int) ((v4 >> (2 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
+        const float w15 =
+            decode_tbl<CODE_BITS>((int) ((v4 >> (3 * CODE_BITS)) & MASK), bias, codebook, s_iq4nl) * d + b;
+        acc8 += w8 * (xd * (float) xq[8]);
+        acc9 += w9 * (xd * (float) xq[9]);
         acc10 += w10 * (xd * (float) xq[10]);
         acc11 += w11 * (xd * (float) xq[11]);
         acc12 += w12 * (xd * (float) xq[12]);
@@ -289,7 +301,8 @@ __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint
             const long long e = i + k;
             const long long g = e >> group_shift;
             const int code = (c[e / PER_BYTE] >> ((int) (e % PER_BYTE) * CODE_BITS)) & MASK;
-            acc0 += (decode_tbl<CODE_BITS>(code, bias, codebook, s_iq4nl) * s[g] + (off ? off[g] : 0.0f)) * (Q8K ? q8k_at(x, e) : q8_0_at(x, e));
+            acc0 += (decode_tbl<CODE_BITS>(code, bias, codebook, s_iq4nl) * s[g] + (off ? off[g] : 0.0f)) *
+                    (Q8K ? q8k_at(x, e) : q8_0_at(x, e));
         }
     }
     float acc = (((acc0 + acc1) + (acc2 + acc3)) + ((acc4 + acc5) + (acc6 + acc7))) +
@@ -300,9 +313,9 @@ __global__ void s_gemv_q8_split_kernel(const uint8_t* __restrict__ x, const uint
 
 template <int CODE_BITS>
 __global__ void s_gemv_kernel(const uint16_t* __restrict__ x, const uint8_t* __restrict__ codes,
-                              const float* __restrict__ scales, const float* __restrict__ offset,
-                              float* __restrict__ y, long long n_in, long long n_out, int bias, int codebook,
-                              int group_elems, int has_offset) {
+                              const float* __restrict__ scales, const float* __restrict__ offset, float* __restrict__ y,
+                              long long n_in, long long n_out, int bias, int codebook, int group_elems,
+                              int has_offset) {
     // THE CODEBOOK, IN SHARED MEMORY - 16 bytes, loaded once per block.  See the note on `kIq4Nl`.
     // THE LOAD AND THE BARRIER COME BEFORE THE EARLY RETURN: `o` is per-THREAD in this kernel, so a thread
     // that returned first would leave the others waiting at a barrier it never reaches.
@@ -339,10 +352,10 @@ __global__ void s_gemv_kernel(const uint16_t* __restrict__ x, const uint8_t* __r
     y[o] = acc;
 }
 
-}  // namespace
+}   // namespace
 
-void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset, float* y,
-            int64_t n_in, int64_t n_out, const SForm& form) {
+void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset, float* y, int64_t n_in,
+            int64_t n_out, const SForm& form) {
     if (n_in <= 0 || n_out <= 0) return;
     if (form.group_elems <= 0 || n_in % form.group_elems != 0) {
         std::fprintf(stderr, "s_gemv: n_in %lld is not a multiple of group_elems %d\n", (long long) n_in,
@@ -358,23 +371,18 @@ void s_gemv(const uint16_t* x, const uint8_t* codes, const float* scales, const 
     const int cb = (int) form.codebook;
     switch (form.code_bits) {
         case 2:
-            s_gemv_kernel<2><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out,
-                                                             form.code_bias, cb, form.group_elems,
-                                                             form.has_offset ? 1 : 0);
+            s_gemv_kernel<2><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out, form.code_bias,
+                                                             cb, form.group_elems, form.has_offset ? 1 : 0);
             break;
         case 4:
-            s_gemv_kernel<4><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out,
-                                                             form.code_bias, cb, form.group_elems,
-                                                             form.has_offset ? 1 : 0);
+            s_gemv_kernel<4><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out, form.code_bias,
+                                                             cb, form.group_elems, form.has_offset ? 1 : 0);
             break;
         case 8:
-            s_gemv_kernel<8><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out,
-                                                             form.code_bias, cb, form.group_elems,
-                                                             form.has_offset ? 1 : 0);
+            s_gemv_kernel<8><<<(unsigned) blocks, threads>>>(x, codes, scales, offset, y, n_in, n_out, form.code_bias,
+                                                             cb, form.group_elems, form.has_offset ? 1 : 0);
             break;
-        default:
-            std::fprintf(stderr, "s_gemv: unsupported code_bits %d\n", form.code_bits);
-            std::exit(1);
+        default: std::fprintf(stderr, "s_gemv: unsupported code_bits %d\n", form.code_bits); std::exit(1);
     }
     const cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
@@ -400,9 +408,8 @@ namespace {
 template <int CODE_BITS>
 __global__ void s_gemv_split_kernel(const uint16_t* __restrict__ x, const uint8_t* __restrict__ codes,
                                     const float* __restrict__ scales, const float* __restrict__ offset,
-                                    float* __restrict__ y, long long n_in, long long n_out, int bias,
-                                    int codebook, int group_elems, int group_shift, int has_offset,
-                                    int threads_per_row) {
+                                    float* __restrict__ y, long long n_in, long long n_out, int bias, int codebook,
+                                    int group_elems, int group_shift, int has_offset, int threads_per_row) {
     extern __shared__ float partial[];
     // THE CODEBOOK, IN SHARED MEMORY - 16 bytes, loaded once per block.  See the note on `kIq4Nl`.
     // THE LOAD AND THE BARRIER COME BEFORE THE EARLY RETURN: `o` is per-THREAD in this kernel, so a thread
@@ -433,7 +440,7 @@ __global__ void s_gemv_split_kernel(const uint16_t* __restrict__ x, const uint8_
     // THIS KERNEL IS THE ONE `attn_output` AND `shared_expert` USE, so the fix has to exist in both or half the
     // model keeps the old instruction count.
     constexpr int QE = 4;
-    constexpr int QB = QE * CODE_BITS / 8;             // 1 for S2, 2 for S4, 4 for S8
+    constexpr int QB = QE * CODE_BITS / 8;   // 1 for S2, 2 for S4, 4 for S8
     constexpr unsigned MASK = (1u << CODE_BITS) - 1u;
     float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
     long long i = (long long) tid * QE;
@@ -473,11 +480,11 @@ __global__ void s_gemv_split_kernel(const uint16_t* __restrict__ x, const uint8_
     if (tid == 0) y[o] = partial[0];
 }
 
-}  // namespace
+}   // namespace
 
-static void s_gemv_split_impl(const uint16_t* x, const uint8_t* codes, const float* scales,
-                               const float* offset, float* y, int64_t n_in, int64_t n_out, const SForm& form,
-                               int threads_per_row, cudaStream_t stream, bool sync) {
+static void s_gemv_split_impl(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset,
+                              float* y, int64_t n_in, int64_t n_out, const SForm& form, int threads_per_row,
+                              cudaStream_t stream, bool sync) {
     if (n_in <= 0 || n_out <= 0) return;
     if (threads_per_row < 1 || (threads_per_row & (threads_per_row - 1)) != 0 || threads_per_row > 1024) {
         std::fprintf(stderr, "s_gemv_split: threads_per_row must be a power of two in 1..1024, got %d\n",
@@ -504,22 +511,20 @@ static void s_gemv_split_impl(const uint16_t* x, const uint8_t* codes, const flo
     switch (form.code_bits) {
         case 2:
             s_gemv_split_kernel<2><<<grid, threads_per_row, smem, stream>>>(
-                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
-                group_shift, form.has_offset ? 1 : 0, threads_per_row);
+                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, group_shift,
+                form.has_offset ? 1 : 0, threads_per_row);
             break;
         case 4:
             s_gemv_split_kernel<4><<<grid, threads_per_row, smem, stream>>>(
-                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
-                group_shift, form.has_offset ? 1 : 0, threads_per_row);
+                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, group_shift,
+                form.has_offset ? 1 : 0, threads_per_row);
             break;
         case 8:
             s_gemv_split_kernel<8><<<grid, threads_per_row, smem, stream>>>(
-                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems,
-                group_shift, form.has_offset ? 1 : 0, threads_per_row);
+                x, codes, scales, offset, y, n_in, n_out, form.code_bias, cb, form.group_elems, group_shift,
+                form.has_offset ? 1 : 0, threads_per_row);
             break;
-        default:
-            std::fprintf(stderr, "s_gemv_split: unsupported code_bits %d\n", form.code_bits);
-            std::exit(1);
+        default: std::fprintf(stderr, "s_gemv_split: unsupported code_bits %d\n", form.code_bits); std::exit(1);
     }
     if (sync) {
         const cudaError_t e = cudaDeviceSynchronize();
@@ -530,11 +535,10 @@ static void s_gemv_split_impl(const uint16_t* x, const uint8_t* codes, const flo
     }
 }
 
-void s_gemv_split(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset,
-                  float* y, int64_t n_in, int64_t n_out, const SForm& form, int threads_per_row) {
+void s_gemv_split(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                  int64_t n_in, int64_t n_out, const SForm& form, int threads_per_row) {
     s_gemv_split_impl(x, codes, scales, offset, y, n_in, n_out, form, threads_per_row, (cudaStream_t) 0, true);
 }
-
 
 // ---- the Q8_K entry points -----------------------------------------------------------------------------
 
@@ -569,7 +573,7 @@ void finish(const char* who, void* stream) {
     }
 }
 
-}  // namespace
+}   // namespace
 
 void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset, float* y,
                 int64_t n_in, int64_t n_out, const SForm& form, void* stream) {
@@ -591,15 +595,17 @@ void s_gemv_q8k(const uint8_t* x_q8k, const uint8_t* codes, const float* scales,
         default:
             // 2-bit S2 never has a Q8_K activation: its `vec_dot_type` is Q8_0.  Refusing is better than
             // running a kernel that would be numerically wrong in a way the caller cannot see.
-            std::fprintf(stderr, "s_gemv_q8k: code_bits %d has no Q8_K contract "
-                                 "(S2 uses Q8_0; see docs/activation-contract.md)\n", form.code_bits);
+            std::fprintf(stderr,
+                         "s_gemv_q8k: code_bits %d has no Q8_K contract "
+                         "(S2 uses Q8_0; see docs/activation-contract.md)\n",
+                         form.code_bits);
             std::exit(1);
     }
     finish("s_gemv_q8k", stream);
 }
 
-void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset,
-                      float* y, int64_t n_in, int64_t n_out, const SForm& form, void* stream) {
+void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                      int64_t n_in, int64_t n_out, const SForm& form, void* stream) {
     if (n_in <= 0 || n_out <= 0) return;
     if (!q8k_form_ok(form, n_in, "s_gemv_q8k_split")) std::exit(1);
     // THE GROUP SIZE IS PASSED AS ITS LOGARITHM: see the note on the kernel.  A non-power-of-two group would
@@ -638,8 +644,8 @@ void s_gemv_q8k_split(const uint8_t* x_q8k, const uint8_t* codes, const float* s
     finish("s_gemv_q8k_split", stream);
 }
 
-void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float* scales, const float* offset,
-                       float* y, int64_t n_in, int64_t n_out, const SForm& form, void* stream) {
+void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float* scales, const float* offset, float* y,
+                       int64_t n_in, int64_t n_out, const SForm& form, void* stream) {
     if (n_in <= 0 || n_out <= 0) return;
     // THE ACTIVATION IS `block_q8_0`, 32 elements per block, so `n_in` must be a multiple of 32 - which is a
     // WEAKER requirement than Q8_K's 256 and is exactly why this kernel has to exist: `ffn_down_shexp` has
@@ -651,8 +657,7 @@ void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float*
     }
     // the same two checks `s_gemv_q8k_split` makes, for the same reasons - see the notes there
     if (form.group_elems <= 0 || (form.group_elems & (form.group_elems - 1)) != 0) {
-        std::fprintf(stderr, "s_gemv_q8_0_split: group_elems must be a power of two, got %d\n",
-                     form.group_elems);
+        std::fprintf(stderr, "s_gemv_q8_0_split: group_elems must be a power of two, got %d\n", form.group_elems);
         std::exit(1);
     }
     // SIXTEEN, NOT FOUR: a lane-iteration takes QE = 16 consecutive elements under ONE scale (see the kernel),
@@ -685,4 +690,4 @@ void s_gemv_q8_0_split(const uint8_t* x_q8_0, const uint8_t* codes, const float*
     finish("s_gemv_q8_0_split", stream);
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

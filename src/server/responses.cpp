@@ -49,7 +49,8 @@ json py_add(const json& a, const json& b) {
     if (a.is_string() && b.is_string()) return a.get<std::string>() + b.get<std::string>();
     if (a.is_string()) throw Malformed("TypeError: can only concatenate str (not \"" + py_type_name(b) + "\") to str");
     if (a.is_array()) throw Malformed("TypeError: can only concatenate list (not \"" + py_type_name(b) + "\") to list");
-    throw Malformed("TypeError: unsupported operand type(s) for +: '" + py_type_name(a) + "' and '" + py_type_name(b) + "'");
+    throw Malformed("TypeError: unsupported operand type(s) for +: '" + py_type_name(a) + "' and '" + py_type_name(b) +
+                    "'");
 }
 
 /// a += s: a list takes the characters of s, one by one
@@ -190,7 +191,8 @@ json content_of(const json& content, const std::string& param) {
             parts.push_back({{"type", "input_image"}, {"image_url", part["image_url"]}});
             image = true;
         } else {
-            throw ResponsesError("content parts of type " + py_repr_value(kind) + " are not supported (text and images are)",
+            throw ResponsesError("content parts of type " + py_repr_value(kind) +
+                                     " are not supported (text and images are)",
                                  at + ".type", "unsupported_parameter");
         }
     }
@@ -295,7 +297,8 @@ void order_tool_results(json& messages) {
         for (size_t k = i; k < j; ++k) messages[k] = std::move(run[k - i].second);
         i = j;
     }
-    for (json& m : messages) {   // (the ids as the chat converter passes them: a template may name a result by its call's)
+    for (json& m : messages) {   // (the ids as the chat converter passes them:
+                                 // a template may name a result by its call's)
         if (const json id = jget(m, "_call_id"); id.is_string()) m["tool_call_id"] = id;
         m.erase("_call_id");
         const auto calls = m.find("tool_calls");
@@ -356,7 +359,10 @@ KeptPromptTools& kept_prompt_tools() {
 }
 
 json message_item() {
-    return {{"id", new_id("msg")}, {"type", "message"}, {"status", "in_progress"}, {"role", "assistant"},
+    return {{"id", new_id("msg")},
+            {"type", "message"},
+            {"status", "in_progress"},
+            {"role", "assistant"},
             {"content", json::array()}};
 }
 
@@ -412,7 +418,7 @@ std::string title_text(const json& req) {
     return cut.empty() ? "Untitled" : cut;
 }
 
-}  // namespace
+}   // namespace
 
 // ---------------------------------------------------------------------------------------------- errors
 ResponsesError::ResponsesError(const std::string& message_, std::string param_, std::string code_, int status_,
@@ -425,8 +431,8 @@ json ResponsesError::body() const {
                       code.empty() ? json(nullptr) : json(code));
 }
 
-Malformed::Malformed(const std::string& error_) : ResponsesError("the request is malformed (" + error_ + ")"),
-                                                  error(error_) {}
+Malformed::Malformed(const std::string& error_)
+    : ResponsesError("the request is malformed (" + error_ + ")"), error(error_) {}
 
 json error_body(const std::string& message, const std::string& kind, const json& param, const json& code) {
     return {{"error", {{"message", message}, {"type", kind}, {"param", param}, {"code", code}}}};
@@ -437,20 +443,20 @@ json input_messages(const json& req) {
     json messages = json::array();
     const json& instructions = jget(req, "instructions");
     if (!instructions.is_null() && !is_str(instructions, ""))
-        messages.push_back({{"role", "system"},
-                            {"content", instructions.is_string() ? instructions
-                                                                 : content_of(instructions, "instructions")}});
+        messages.push_back(
+            {{"role", "system"},
+             {"content", instructions.is_string() ? instructions : content_of(instructions, "instructions")}});
     const json& given = jget(req, "input");
     if (given.is_null())
         throw ResponsesError("input is required: a string or an array of input items", "input",
                              "missing_required_parameter");
     if (!given.is_string() && !given.is_array())
         throw ResponsesError("input must be a string or an array of input items", "input");
-    const json one = given.is_string() ? json::array({{{"type", "message"}, {"role", "user"}, {"content", given}}})
-                                       : json::array();
+    const json one =
+        given.is_string() ? json::array({{{"type", "message"}, {"role", "user"}, {"content", given}}}) : json::array();
     const json& items = given.is_string() ? one : given;
-    std::vector<json> thinking;          // reasoning waiting for the assistant turn it belongs to
-    std::optional<size_t> open_turn;     // the assistant message the next function_call joins
+    std::vector<json> thinking;        // reasoning waiting for the assistant turn it belongs to
+    std::optional<size_t> open_turn;   // the assistant message the next function_call joins
     const auto turn = [&](json content) {
         json t = {{"role", "assistant"}, {"content", std::move(content)}};
         if (!thinking.empty()) {
@@ -483,8 +489,8 @@ json input_messages(const json& req) {
             } else {
                 open_turn.reset();
                 thinking.clear();
-                messages.push_back({{"role", is_str(role, "developer") ? json("system") : role},
-                                    {"content", std::move(content)}});
+                messages.push_back(
+                    {{"role", is_str(role, "developer") ? json("system") : role}, {"content", std::move(content)}});
             }
         } else if (is_str(kind, "reasoning")) {
             json text = reasoning_text(item, param);
@@ -577,7 +583,7 @@ RequestTools request_tools(const json& req) {
             const json& fmt = jget(tool, "format");
             if (fmt.is_object() && is_str(jget(fmt, "type"), "grammar") && truthy(jget(fmt, "definition")))
                 py_iadd(description, "\n\nThe input must follow this " + py_str(get_or(fmt, "syntax", "")) +
-                                      " grammar:\n" + py_str(fmt["definition"]));
+                                         " grammar:\n" + py_str(fmt["definition"]));
             json input = {{"type", "string"}, {"description", "the raw input"}};
             params = {{"type", "object"}, {"properties", {{"input", input}}}, {"required", json::array({"input"})}};
         }
@@ -604,7 +610,8 @@ RequestTools request_tools(const json& req) {
             if (!truthy(members)) continue;
             if (members.is_string() || members.is_object())   // iterated, its first character or key is no tool
                 throw ResponsesError("a namespace holds function tools", param + ".tools[0]");
-            if (!members.is_array()) throw Malformed("TypeError: '" + py_type_name(members) + "' object is not iterable");
+            if (!members.is_array())
+                throw Malformed("TypeError: '" + py_type_name(members) + "' object is not iterable");
             const json& ns_description = truthy(jget(tool, "description")) ? tool["description"] : json("");
             for (size_t j = 0; j < members.size(); ++j) {
                 const json& member = members[j];
@@ -694,15 +701,15 @@ void check_request(const json& req) {
         throw ResponsesError("this server keeps no conversations (stateless): send the whole conversation in input",
                              "conversation", "unsupported_parameter");
     if (truthy(jget(req, "background")))
-        throw ResponsesError("background responses are not supported: use stream or wait for the answer",
-                             "background", "unsupported_parameter");
+        throw ResponsesError("background responses are not supported: use stream or wait for the answer", "background",
+                             "unsupported_parameter");
     if (truthy(jget(req, "prompt")))
         throw ResponsesError("stored prompt templates are not supported: send instructions and input", "prompt",
                              "unsupported_parameter");
     const json& n = jget(req, "max_output_tokens");
     // a whole number (not a bool, not a float), at least 1
-    const bool positive = n.is_number_unsigned() ? n.get<uint64_t>() >= 1
-                                                 : n.is_number_integer() && n.get<int64_t>() >= 1;
+    const bool positive =
+        n.is_number_unsigned() ? n.get<uint64_t>() >= 1 : n.is_number_integer() && n.get<int64_t>() >= 1;
     if (!n.is_null() && !positive)
         throw ResponsesError("max_output_tokens must be a positive whole number", "max_output_tokens");
     const json& reasoning = jget(req, "reasoning");
@@ -805,10 +812,10 @@ std::vector<json> Assembler::close(const std::string& status) {
     if (type == "message") {
         const json part = it["content"][0];
         out.push_back(event("response.output_text.done", {{"item_id", it["id"]},
-                                                           {"output_index", at},
-                                                           {"content_index", 0},
-                                                           {"text", part["text"]},
-                                                           {"logprobs", json::array()}}));
+                                                          {"output_index", at},
+                                                          {"content_index", 0},
+                                                          {"text", part["text"]},
+                                                          {"logprobs", json::array()}}));
         out.push_back(event("response.content_part.done",
                             {{"item_id", it["id"]}, {"output_index", at}, {"content_index", 0}, {"part", part}}));
     } else if (type == "reasoning") {
@@ -818,10 +825,9 @@ std::vector<json> Assembler::close(const std::string& status) {
         if (encrypted_)
             it["encrypted_content"] = std::string(kEncryptedPrefix) + b64encode(py_dumps(json{{"text", text}}, false));
     } else if (type == "function_call") {
-        out.push_back(event("response.function_call_arguments.done", {{"item_id", it["id"]},
-                                                                      {"output_index", at},
-                                                                      {"name", it["name"]},
-                                                                      {"arguments", it["arguments"]}}));
+        out.push_back(
+            event("response.function_call_arguments.done",
+                  {{"item_id", it["id"]}, {"output_index", at}, {"name", it["name"]}, {"arguments", it["arguments"]}}));
     } else if (type == "custom_tool_call") {
         out.push_back(event("response.custom_tool_call_input.done",
                             {{"item_id", it["id"]}, {"output_index", at}, {"input", it["input"]}}));
@@ -838,15 +844,16 @@ std::vector<json> Assembler::feed(const Event& ev) {
         if (!item_ || !is_str(item()["type"], "reasoning")) {
             append(out, close());
             json content = json::array({{{"type", "reasoning_text"}, {"text", ""}}});
-            append(out, open({{"id", new_id("rs")}, {"type", "reasoning"}, {"status", "in_progress"},
-                              {"summary", json::array()}, {"content", content}}));
+            append(out, open({{"id", new_id("rs")},
+                              {"type", "reasoning"},
+                              {"status", "in_progress"},
+                              {"summary", json::array()},
+                              {"content", content}}));
         }
         item()["content"][0]["text"].get_ref<std::string&>() += ev.text;
-        out.push_back(event("response.reasoning_text.delta",
-                            {{"item_id", item()["id"]},
-                             {"output_index", index()},
-                             {"content_index", 0},
-                             {"delta", ev.text}}));
+        out.push_back(
+            event("response.reasoning_text.delta",
+                  {{"item_id", item()["id"]}, {"output_index", index()}, {"content_index", 0}, {"delta", ev.text}}));
     } else if (kind == "content") {
         if (ev.text.empty()) return out;
         if (json_mode_) {   // sent once it is checked (finish)
@@ -860,10 +867,10 @@ std::vector<json> Assembler::feed(const Event& ev) {
         }
         item()["content"][0]["text"].get_ref<std::string&>() += ev.text;
         out.push_back(event("response.output_text.delta", {{"item_id", item()["id"]},
-                                                            {"output_index", index()},
-                                                            {"content_index", 0},
-                                                            {"delta", ev.text},
-                                                            {"logprobs", json::array()}}));
+                                                           {"output_index", index()},
+                                                           {"content_index", 0},
+                                                           {"delta", ev.text},
+                                                           {"logprobs", json::array()}}));
     } else if (kind == "tool_start") {
         append(out, close());
         append(out, call_started());
@@ -907,10 +914,10 @@ std::vector<json> Assembler::release(const std::string& text) {
     std::vector<json> out = open(message_item());
     item()["content"][0]["text"] = text;
     out.push_back(event("response.output_text.delta", {{"item_id", item()["id"]},
-                                                        {"output_index", index()},
-                                                        {"content_index", 0},
-                                                        {"delta", text},
-                                                        {"logprobs", json::array()}}));
+                                                       {"output_index", index()},
+                                                       {"content_index", 0},
+                                                       {"delta", text},
+                                                       {"logprobs", json::array()}}));
     append(out, close());
     return out;
 }
@@ -935,9 +942,12 @@ json Assembler::call_item(const ToolCall& call) {
     const json ns = known ? names_[call.name][0] : json(nullptr);
     const json name = known ? names_[call.name][1] : json(call.name);
     const bool custom = known && is_str(names_[call.name][2], "custom");
-    json it = {{"id", new_id(custom ? "ctc" : "fc")}, {"type", custom ? "custom_tool_call" : "function_call"},
-               {"status", "in_progress"},           {"call_id", call.id},
-               {"name", name},                      {custom ? "input" : "arguments", ""}};
+    json it = {{"id", new_id(custom ? "ctc" : "fc")},
+               {"type", custom ? "custom_tool_call" : "function_call"},
+               {"status", "in_progress"},
+               {"call_id", call.id},
+               {"name", name},
+               {custom ? "input" : "arguments", ""}};
     if (truthy(ns)) it["namespace"] = ns;
     return it;
 }
@@ -998,4 +1008,4 @@ json collect(const std::vector<json>& events) {
     return (*last)["response"];
 }
 
-}  // namespace lamina::responses
+}   // namespace lamina::responses

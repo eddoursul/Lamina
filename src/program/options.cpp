@@ -9,7 +9,7 @@ namespace {
 
 constexpr unsigned C = kListCommon, S = kListServed;
 
-}  // namespace
+}   // namespace
 
 const std::vector<OptionHelp>& engine_options() {
     static const std::vector<OptionHelp> table = {
@@ -480,4 +480,4 @@ std::string options_help(unsigned lists, bool deprecated, size_t width, size_t c
     return out;
 }
 
-}  // namespace lamina::program
+}   // namespace lamina::program

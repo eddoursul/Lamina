@@ -28,7 +28,7 @@ std::mutex& write_mu() {
     return mu;
 }
 
-}  // namespace
+}   // namespace
 
 void set_serve_io(ServeIo io) {
     if (!io.read_line || !io.write) io = stdio_io();
@@ -82,8 +82,8 @@ std::string read_vision_records(const std::string& path, int64_t n_embd, std::ve
         if (got == 0) break;
         if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[2] < 1 || hdr[3] < 1 ||
             (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != (int32_t) n_embd) {
-            ve = "bad embeddings file (expected the image encoder's records of width " + std::to_string((long long) n_embd) +
-                 ")";
+            ve = "bad embeddings file (expected the image encoder's records of width " +
+                 std::to_string((long long) n_embd) + ")";
             break;
         }
         const size_t off = rows.size(), cnt = (size_t) hdr[1] * (size_t) hdr[4];
@@ -124,10 +124,12 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int3
         }
         if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
         const VisionImage& im = imgs[k++];
-        const uint64_t key = vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr, r.rows.data(), n_embd);
+        const uint64_t key =
+            vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr, r.rows.data(), n_embd);
         for (int64_t j = 0; j < im.n; ++j) {
             if (i + j >= n || ids[(size_t) (i + j)] != pad)
-                return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) + " rows but fewer image tokens";
+                return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
+                       " rows but fewer image tokens";
             uint64_t h = key + (uint64_t) j * 0x9E3779B97F4A7C15ull;   // splitmix64 of the key and the row
             h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
             h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
@@ -141,4 +143,4 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, int3
     return "";
 }
 
-}  // namespace lamina::program
+}   // namespace lamina::program

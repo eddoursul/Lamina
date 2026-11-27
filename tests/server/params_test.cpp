@@ -3,9 +3,9 @@
 // again, NAME=VALUE pairs, JSON), the engine's options apart, each command's own options, the errors, a section merged
 // key by key, the config's keys the table lacks, and the commands' help naming every option, serve's the engine's a
 // server takes too.  (CPU only.)
-#include "params.hpp"
 #include "config.hpp"
 #include "lamina/program/options.hpp"
+#include "params.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -17,12 +17,12 @@
 using lamina::json;
 
 static int fails = 0;
-#define CHECK(c)                                                                  \
-    do {                                                                          \
-        if (!(c)) {                                                               \
-            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);   \
-            ++fails;                                                              \
-        }                                                                         \
+#define CHECK(c)                                                                                                       \
+    do {                                                                                                               \
+        if (!(c)) {                                                                                                    \
+            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c);                                          \
+            ++fails;                                                                                                   \
+        }                                                                                                              \
     } while (0)
 
 namespace {
@@ -43,7 +43,7 @@ bool refused(std::vector<std::string> words) {
     return false;
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     // one key a flag, one flag a key; none is a command's own
@@ -71,12 +71,51 @@ int main() {
     CHECK(lamina::find_param("--no-port") == nullptr);
     CHECK(lamina::find_param("--max-context") == nullptr);   // the engine's
 
-    const lamina::CommandLine cl = parse(
-        {"serve", "-m", "x.gguf", "--port", "8090", "--temp", "0.6", "--top-k", "20", "--lazy", "--no-answer-room",
-         "--aliases", "a,b", "--alias", "c", "--env", "A=1", "--env", "B=x=y", "--gpu", "0,2",
-         "--before-load", "[\"a\", \"b\"]", "--script", "x, y", "--script", "z", "--max-context", "65536", "--kv-grow",
-         "--second-gpu", "-1", "--no-mmproj", "--mmproj", "p.gguf", "--open", "--idle-unload", "600",
-         "--queue-timeout", "1.5", "--fit-max-tokens=false", "--reasoning-loop-recovery", "false", "--config", "c.json"});
+    const lamina::CommandLine cl = parse({"serve",
+                                          "-m",
+                                          "x.gguf",
+                                          "--port",
+                                          "8090",
+                                          "--temp",
+                                          "0.6",
+                                          "--top-k",
+                                          "20",
+                                          "--lazy",
+                                          "--no-answer-room",
+                                          "--aliases",
+                                          "a,b",
+                                          "--alias",
+                                          "c",
+                                          "--env",
+                                          "A=1",
+                                          "--env",
+                                          "B=x=y",
+                                          "--gpu",
+                                          "0,2",
+                                          "--before-load",
+                                          "[\"a\", \"b\"]",
+                                          "--script",
+                                          "x, y",
+                                          "--script",
+                                          "z",
+                                          "--max-context",
+                                          "65536",
+                                          "--kv-grow",
+                                          "--second-gpu",
+                                          "-1",
+                                          "--no-mmproj",
+                                          "--mmproj",
+                                          "p.gguf",
+                                          "--open",
+                                          "--idle-unload",
+                                          "600",
+                                          "--queue-timeout",
+                                          "1.5",
+                                          "--fit-max-tokens=false",
+                                          "--reasoning-loop-recovery",
+                                          "false",
+                                          "--config",
+                                          "c.json"});
     const json& s = cl.settings;
     CHECK(s["model"] == lamina::u8_str(std::filesystem::absolute("x.gguf").lexically_normal()));   // a path
     CHECK(s["port"] == 8090 && s["port"].is_number_integer());
@@ -86,12 +125,14 @@ int main() {
     CHECK((s["env"] == json{{"A", "1"}, {"B", "x=y"}}));
     CHECK((s["gpu"] == json{0, 2}));
     {   // --gpu again for each card, a card's settings after its name: one item each, in order
-        const char* argv2[] = {"lamina", "serve", "--gpu", "GPU-75af3083", "--gpu", "RTX 5070 Ti",
-                               "--gpu", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"};
+        const char* argv2[] = {"lamina", "serve",       "--gpu", "GPU-75af3083",
+                               "--gpu",  "RTX 5070 Ti", "--gpu", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"};
         const lamina::CommandLine c2 = lamina::parse_command_line(8, (char**) argv2);
-        CHECK((c2.settings["gpu"] == json{"GPU-75af3083", "RTX 5070 Ti", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"}));
-        CHECK((lamina::gpu_cards(c2.settings) ==
-               std::vector<std::string>{"GPU-75af3083", "RTX 5070 Ti", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"}));
+        CHECK((c2.settings["gpu"] ==
+               json{"GPU-75af3083", "RTX 5070 Ti", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"}));
+        CHECK(
+            (lamina::gpu_cards(c2.settings) ==
+             std::vector<std::string>{"GPU-75af3083", "RTX 5070 Ti", "GPU-f26e9ba6,clocks=1395-2100/9751,sleep=55us"}));
         CHECK(lamina::gpu_list(c2.settings).empty());
     }
     CHECK((s["before_load"] == json{"a", "b"}));
@@ -138,15 +179,19 @@ int main() {
     CHECK(refused({"serve", "-x"}));
 
     // a section merged key by key, anything else replaced
-    json base = {{"sampling", {{"temperature", 0.7}, {"top_p", 0.95}}}, {"port", 8081}, {"args", {"a"}},
-                 {"vision", false}};
+    json base = {
+        {"sampling", {{"temperature", 0.7}, {"top_p", 0.95}}}, {"port", 8081}, {"args", {"a"}}, {"vision", false}};
     lamina::merge_settings(base, {{"sampling", {{"temperature", 0.6}}}, {"args", {"b"}}, {"vision", {{"gpu", true}}}});
     CHECK(base["sampling"]["temperature"] == 0.6 && base["sampling"]["top_p"] == 0.95 && base["port"] == 8081);
     CHECK((base["args"] == json{"b"}) && (base["vision"] == json{{"gpu", true}}));
 
-    CHECK((lamina::unknown_keys({{"port", 1}, {"args", json::array()}, {"mcpServers", json::object()},
-                                 {"sampling", json::object()}, {"images", json::object()}, {"portt", 2}, {"backend", "x"}})
-           == std::vector<std::string>{"portt", "backend"}));
+    CHECK((lamina::unknown_keys({{"port", 1},
+                                 {"args", json::array()},
+                                 {"mcpServers", json::object()},
+                                 {"sampling", json::object()},
+                                 {"images", json::object()},
+                                 {"portt", 2},
+                                 {"backend", "x"}}) == std::vector<std::string>{"portt", "backend"}));
 
     // bench's own options, no keys; the engine keeps its own --bench-* (the qwen35 path's --bench-pp)
     {

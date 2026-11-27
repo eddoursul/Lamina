@@ -58,7 +58,7 @@ bool same(uint32_t a, uint32_t b) {   // NaNs compare by class: a NaN's payload 
     return a == b || (std::isnan(from_bits(a)) && std::isnan(from_bits(b)));
 }
 
-}  // namespace
+}   // namespace
 
 int main() {
     namespace cpu = lamina::kernels::cpu;
@@ -113,7 +113,8 @@ int main() {
                 (unsigned long long) bad_e.load());
     std::printf("SwiGLU (u = 1), GPU against the pool:  %llu differ\n", (unsigned long long) bad_s1.load());
     std::printf("SwiGLU (u varied), GPU against the pool: %llu differ\n", (unsigned long long) bad_su.load());
-    if (first_bad.load() != ~0ull) std::printf("first differing pattern 0x%08llx\n", (unsigned long long) first_bad.load());
+    if (first_bad.load() != ~0ull)
+        std::printf("first differing pattern 0x%08llx\n", (unsigned long long) first_bad.load());
     std::printf("the C runtime's expf differs from expf_contract at %llu patterns (NaNs by class)\n",
                 (unsigned long long) crt_differs.load());
     const bool ok = bad_e == 0 && bad_s1 == 0 && bad_su == 0;

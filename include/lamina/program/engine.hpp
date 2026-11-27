@@ -8,8 +8,8 @@ namespace lamina::program {
 int run(int argc, char** argv);
 
 /// Whether run() would take this command line: its options, read by the parser of the family --native's file is of
-/// (Qwen3.8-Flash-Next's, or the qwen35 path's, which then also refuses an option it would skip under --serve).  0, else
-/// the exit code with the reason on stderr.  Nothing is loaded and no CUDA call is made: lamina checks the
+/// (Qwen3.8-Flash-Next's, or the qwen35 path's, which then also refuses an option it would skip under --serve).  0,
+/// else the exit code with the reason on stderr.  Nothing is loaded and no CUDA call is made: lamina checks the
 /// engine options of its command line with it before it starts.
 int check_args(int argc, char** argv);
 
@@ -18,4 +18,4 @@ int check_args(int argc, char** argv);
 /// lamina write-config writes leaves out the options at their default.
 const char* option_default(const char* flag);
 
-}  // namespace lamina::program
+}   // namespace lamina::program

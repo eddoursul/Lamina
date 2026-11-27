@@ -23,9 +23,6 @@
 
 namespace ik {
 
-using lamina::kernels::q8_1_ds;
-using lamina::kernels::q8_1_finite;
-using lamina::kernels::q8_1_quant;
 using lamina::kernels::cp_async16;
 using lamina::kernels::cp_async8;
 using lamina::kernels::cp_commit;
@@ -34,13 +31,18 @@ using lamina::kernels::h2;
 using lamina::kernels::ldsm4;
 using lamina::kernels::ldsm4t;
 using lamina::kernels::mma16816;
+using lamina::kernels::q8_1_ds;
+using lamina::kernels::q8_1_finite;
+using lamina::kernels::q8_1_quant;
 using lamina::kernels::warp_max;
 using lamina::kernels::warp_sum;
 
 constexpr int kMaxT = lamina::inkling2::sizes::kMaxT;   // rows a forward takes at most (native_mmvq's columns)
-constexpr int kBlk = lamina::inkling2::sizes::kBlk;     // block inputs a mix reads at most (the embedding and three blocks' outputs)
+constexpr int kBlk = lamina::inkling2::sizes::kBlk;     // block inputs a mix reads at most (the
+                                                        // embedding and three blocks' outputs)
 constexpr int kTB = lamina::inkling2::sizes::kTB;       // threads of the row kernels
-constexpr int kWide = lamina::inkling2::sizes::kWide;   // of those whose time is their threads' loop over a row: the mix, the norm, the bias
+constexpr int kWide = lamina::inkling2::sizes::kWide;   // of those whose time is their threads' loop
+                                                        // over a row: the mix, the norm, the bias
 
 /// a q8_1 block as ggml has it: the scale and the values' sum as halves, 32 values
 struct Q81 {
@@ -54,7 +56,9 @@ static_assert(sizeof(Q81) == 36, "q8_1 block");
 // thread: a chunk's K and V convolution took 1.2 ms for 65,536 blocks that way, 0.05 without - so the elements are
 // selected.
 template <class P> __device__ __forceinline__ P at2(P const (&v)[2], int c) { return c == 0 ? v[0] : v[1]; }
-template <class P> __device__ __forceinline__ P at3(P const (&v)[3], int c) { return c == 0 ? v[0] : c == 1 ? v[1] : v[2]; }
+template <class P> __device__ __forceinline__ P at3(P const (&v)[3], int c) {
+    return c == 0 ? v[0] : c == 1 ? v[1] : v[2];
+}
 
 /// A warp's 32 values (lane i: value i) as a q8_1 block, as native_quantize_q8_1 rounds them
 __device__ __forceinline__ void q8_1_store(Q81* b, float x, int lane) {
@@ -135,8 +139,8 @@ struct MixIn {
     const float* blk[kBlk];
     const float* cur;
     const float* q;
-    float* out;      // [nq][T][N]
-    float* cur_n;    // [T][N] or null
+    float* out;     // [nq][T][N]
+    float* cur_n;   // [T][N] or null
     int nb, nq, N, T;
 };
 /// A block a query and a row (a row's queries side by side in the grid: its values come from the cache for all but the
@@ -206,9 +210,7 @@ __device__ __forceinline__ float4 mix_do(const MixIn& a, int c, int t) {
     if (c == 0 && a.cur_n) st4(a.cur_n + (size_t) t * a.N, i4, xn);
     return y;
 }
-__global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) {
-    (void) mix_do(a, blockIdx.x, blockIdx.y);
-}
+__global__ void __launch_bounds__(kWide) mix_kernel(MixIn a) { (void) mix_do(a, blockIdx.x, blockIdx.y); }
 
 // ---------------------------------------------------------------------------------------------- the loop's gates
 /// A looped layer's input u takes the previous pass's message m: (1 - tanh(F h)) u + tanh(G h) m, h = D [u / rms(u);
@@ -225,8 +227,7 @@ struct CtrlIn {
 };
 constexpr int kRankMax = lamina::inkling2::sizes::kRankMax;
 /// h: a block a row, an input and RB of the R outputs (grid (R / RB, T, n)); a thread four values of each half
-template <int RB>
-__global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
+template <int RB> __global__ void __launch_bounds__(kWide) ctrl_h_kernel(CtrlIn a) {
     const int r0 = blockIdx.x * RB, t = blockIdx.y, c = blockIdx.z, i4 = threadIdx.x;
     __shared__ float red[32][2 + 2 * RB];
     __shared__ float tot[2 + 2 * RB];
@@ -354,9 +355,9 @@ __device__ __forceinline__ void norm_do(const NormIn& a, int t, int c, float4 x)
         q->qs[lamina::kernels::q8_1_il16(l + 2)] = q8_1_quant(y.z, d, amax);
         q->qs[lamina::kernels::q8_1_il16(l + 3)] = q8_1_quant(y.w, d, amax);
     } else {
-        const uint32_t codes = (uint32_t) (uint8_t) q8_1_quant(y.x, d, amax) | (uint32_t) (uint8_t) q8_1_quant(y.y, d, amax) << 8 |
-                               (uint32_t) (uint8_t) q8_1_quant(y.z, d, amax) << 16 |
-                               (uint32_t) (uint8_t) q8_1_quant(y.w, d, amax) << 24;
+        const uint32_t codes =
+            (uint32_t) (uint8_t) q8_1_quant(y.x, d, amax) | (uint32_t) (uint8_t) q8_1_quant(y.y, d, amax) << 8 |
+            (uint32_t) (uint8_t) q8_1_quant(y.z, d, amax) << 16 | (uint32_t) (uint8_t) q8_1_quant(y.w, d, amax) << 24;
         *reinterpret_cast<uint32_t*>(q->qs + (i4 & 7) * 4) = codes;
         if (int* const bm = at3(a.bm, c)) {
             const int b = i4 / 8, p = i4 & 7;
@@ -446,7 +447,8 @@ __global__ void conv_state_kernel(float* __restrict__ state, const float* __rest
     if (i >= n) return;
     float keep[7];   // (read_geometry: up to 8 taps; constant bounds: the rows stay in registers)
 #pragma unroll
-    for (int j = 0; j < 7; ++j) keep[j] = j < C - 1 ? conv_in(raw, state, T, C - 1 - j, n, i, C) : 0.f;   // rows T - (C-1) .. T - 1
+    for (int j = 0; j < 7; ++j)
+        keep[j] = j < C - 1 ? conv_in(raw, state, T, C - 1 - j, n, i, C) : 0.f;   // rows T - (C-1) .. T - 1
 #pragma unroll
     for (int j = 0; j < 7; ++j)
         if (j < C - 1) state[(size_t) j * n + i] = keep[j];
@@ -454,9 +456,10 @@ __global__ void conv_state_kernel(float* __restrict__ state, const float* __rest
 
 /// Every visit's states after the first `rows` rows of a decode forward of several: conv_state_kernel's for each of
 /// a visit's four convolutions, from the rows the forward left the visit (`raw`: [visits][K's | V's | the attention's
-/// output | the MoE's], `cap` rows each; `state` as Engine::Visit::conv).  A block 256 of a visit's 2 KV + 2 N channels.
-__global__ void __launch_bounds__(256) conv_commit_kernel(float* __restrict__ state, const float* __restrict__ raw, int KV,
-                                                          int N, int C, int rows, int cap) {
+/// output | the MoE's], `cap` rows each; `state` as
+/// Engine::Visit::conv).  A block 256 of a visit's 2 KV + 2 N channels.
+__global__ void __launch_bounds__(256) conv_commit_kernel(float* __restrict__ state, const float* __restrict__ raw,
+                                                          int KV, int N, int C, int rows, int cap) {
     const int v = blockIdx.y, c = blockIdx.x * 256 + threadIdx.x, per = 2 * KV + 2 * N;
     if (c >= per) return;
     int n, i, before;   // the convolution's width, the channel in it, the channels of the convolutions before it
@@ -479,15 +482,15 @@ __global__ void __launch_bounds__(256) conv_commit_kernel(float* __restrict__ st
 }
 
 /// K and V of T rows from their projections: y = (x + sum over lags of w[C - 1 - lag] x(t - lag) [+ the row's own taps
-/// d[lag] x(t - lag), a full layer's]) / sqrt(C + 1 or 2 C + 1); then K's rows clipped to an L2 norm of `clip` a head, V's
-/// RMS-normed a head.  Taps `w`: [n][C] (a channel's C values); `dyn`: [T][HK][C] or null.  A block a row, a side and a
-/// head; D threads.
+/// d[lag] x(t - lag), a full layer's]) / sqrt(C + 1 or 2 C + 1); then K's rows clipped to an L2 norm of `clip` a head,
+/// V's RMS-normed a head.  Taps `w`: [n][C] (a channel's C values); `dyn`: [T][HK][C] or null.  A block a row, a side
+/// and a head; D threads.
 struct KvIn {
     const float* raw[2];     // K's and V's projections [T][HK * D]
     const float* state[2];   // their states [C - 1][HK * D]
     const float* w[2];
     const float* dyn[2];
-    float* out[2];           // [T][HK * D]
+    float* out[2];   // [T][HK * D]
     int HK, D, C;
     float clip, eps;
 };
@@ -524,10 +527,10 @@ __global__ void kv_conv_kernel(KvIn a) {
     at2(a.out, side)[(size_t) t * n + ch] = y * f;
 }
 
-/// q of T rows: its projection times the layer's per-value scale, clipped to an L2 norm of `clip` a head, times tau in a
-/// full layer.  A block a row and a head; D threads.
-__global__ void q_clip_kernel(const float* __restrict__ raw, const float* __restrict__ scale, const float* __restrict__ tau,
-                              float* __restrict__ q, int H, int D, float clip) {
+/// q of T rows: its projection times the layer's per-value scale, clipped to an L2 norm of `clip` a head, times tau in
+/// a full layer.  A block a row and a head; D threads.
+__global__ void q_clip_kernel(const float* __restrict__ raw, const float* __restrict__ scale,
+                              const float* __restrict__ tau, float* __restrict__ q, int H, int D, float clip) {
     const int t = blockIdx.x, h = blockIdx.y, i = threadIdx.x;
     __shared__ float part[4];
     const float y = raw[((size_t) t * H + h) * D + i] * scale[(size_t) h * D + i];
@@ -547,7 +550,8 @@ constexpr int kRelMax = lamina::inkling2::sizes::kRelMax;   // the distance bias
 /// r of a prompt chunk's rows, for bias_ring_kernel: the projection times the layer's scale, clipped to `clip` a
 /// head, times tau: rc [T][H][R] (raw's place too: each value is read before it is written).  A warp a row and head.
 __global__ void __launch_bounds__(32) r_clip_kernel(const float* raw, const float* __restrict__ scale,
-                                                    const float* __restrict__ tau, float* rc, int H, int R, float clip) {
+                                                    const float* __restrict__ tau, float* rc, int H, int R,
+                                                    float clip) {
     const int t = blockIdx.x, h = blockIdx.y, k = threadIdx.x;
     const float y = k < R ? raw[((size_t) t * H + h) * R + k] * scale[(size_t) h * R + k] : 0.f;
     const float ss = warp_sum(y * y);
@@ -569,10 +573,9 @@ struct RingIn {
     long long first;      // the position of the cells' slot 0
     int H, R, ext;
 };
-constexpr int kRingRs = lamina::inkling2::sizes::kRingRs;         // a row's r values, every head's
+constexpr int kRingRs = lamina::inkling2::sizes::kRingRs;   // a row's r values, every head's
 constexpr int kRingHeads = lamina::inkling2::sizes::kRingHeads;
-template <int R4>
-__global__ void __launch_bounds__(256) bias_ring_kernel(RingIn a) {
+template <int R4> __global__ void __launch_bounds__(256) bias_ring_kernel(RingIn a) {
     const int t = blockIdx.x, i = threadIdx.x;
     __shared__ float r[kRingRs];
     __shared__ float sk[kRingHeads];
@@ -605,7 +608,8 @@ __global__ void __launch_bounds__(256) bias_ring_kernel(RingIn a) {
                 for (int k = 0; k < R4; ++k) {
                     const float r0 = rh[4 * k], r1 = rh[4 * k + 1], r2 = rh[4 * k + 2], r3 = rh[4 * k + 3];
 #pragma unroll
-                    for (int u = 0; u < 4; ++u) o[u] += tv[u][k].x * r0 + tv[u][k].y * r1 + tv[u][k].z * r2 + tv[u][k].w * r3;
+                    for (int u = 0; u < 4; ++u)
+                        o[u] += tv[u][k].x * r0 + tv[u][k].y * r1 + tv[u][k].z * r2 + tv[u][k].w * r3;
                 }
                 const float s = sk[h];
                 st4(a.ring + ((size_t) t * a.H + h) * a.ext, j4, make_float4(o[0] - s, o[1] - s, o[2] - s, o[3] - s));
@@ -644,8 +648,7 @@ struct QbIn {
     int H, D, R, ext, N, full;
     float qclip, rclip, alpha, floor_;
 };
-template <int R4>
-__device__ __forceinline__ void q_bias_do(const QbIn& a, int t, int h) {
+template <int R4> __device__ __forceinline__ void q_bias_do(const QbIn& a, int t, int h) {
     const int i = threadIdx.x;
     __shared__ float red[32][3];
     __shared__ float tot[3];
@@ -689,8 +692,7 @@ __device__ __forceinline__ void q_bias_do(const QbIn& a, int t, int h) {
     }
     if (i == 0) b[a.ext] = -sink;
 }
-template <int R4>
-__global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
+template <int R4> __global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
     q_bias_do<R4>(a, blockIdx.x, blockIdx.y);
 }
 
@@ -699,14 +701,16 @@ __global__ void __launch_bounds__(kWide) q_bias_kernel(QbIn a) {
 /// of `cap` cells (position p in slot p % cap, cap the window and a forward's rows); a full visit a range from position
 /// `first`.
 struct Cells {
-    uint8_t* k;      // [cap][HK][D] halves, or [cap][HK][D / 32] q8_0 blocks
+    uint8_t* k;   // [cap][HK][D] halves, or [cap][HK][D / 32] q8_0 blocks
     uint8_t* v;
     int64_t first;   // a range's first position (0 for a ring)
     int64_t cap;     // cells
     int ring;        // 1: slot = pos % cap
     int q8;          // 1: q8_0 blocks (34 bytes a 32 values), else halves
 };
-__device__ __forceinline__ int64_t cell_slot(const Cells& c, int64_t pos) { return c.ring ? pos % c.cap : pos - c.first; }
+__device__ __forceinline__ int64_t cell_slot(const Cells& c, int64_t pos) {
+    return c.ring ? pos % c.cap : pos - c.first;
+}
 __device__ __forceinline__ size_t cell_bytes(const Cells& c, int HK, int D) {
     return c.q8 ? (size_t) HK * (D / 32) * 34 : (size_t) HK * D * 2;
 }
@@ -725,8 +729,9 @@ __device__ __forceinline__ void cell_put32(const Cells& c, uint8_t* dst, int g, 
     }
 }
 /// T rows' K and V into their cells (positions pos[t]).  A block a row, a side and a head; a warp a group of 32 values.
-__global__ void __launch_bounds__(128) cells_put_kernel(Cells c, const float* __restrict__ k, const float* __restrict__ v,
-                                                        const int32_t* __restrict__ pos, int HK, int D) {
+__global__ void __launch_bounds__(128) cells_put_kernel(Cells c, const float* __restrict__ k,
+                                                        const float* __restrict__ v, const int32_t* __restrict__ pos,
+                                                        int HK, int D) {
     const int t = blockIdx.x, side = blockIdx.y, g = blockIdx.z;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int64_t p = pos[t];
@@ -741,7 +746,7 @@ __global__ void __launch_bounds__(128) cells_put_kernel(Cells c, const float* __
 /// channel's rows in hand).  A block a row, a side and a head; D = 128 threads.
 struct KvCellsIn {
     KvIn kv;
-    float* keep[2];       // the states to write, or null
+    float* keep[2];   // the states to write, or null
     Cells cells;
     const int32_t* pos;   // [T]
 };
@@ -782,8 +787,7 @@ __global__ void __launch_bounds__(128) kv_cells_kernel(KvCellsIn b) {
 /// q_bias_kernel's and kv_cells_kernel's work in one launch (the two read and write apart): block (t, y) with y < H
 /// is q and the bias of row t and head y on kWide threads, the others K and V - side (y - H) / HK, head (y - H) % HK -
 /// on the first 128 (the other warps leave at once).  Grid (T, H + 2 HK).
-template <int R4>
-__global__ void __launch_bounds__(kWide) qkv_cells_kernel(QbIn a, KvCellsIn b) {
+template <int R4> __global__ void __launch_bounds__(kWide) qkv_cells_kernel(QbIn a, KvCellsIn b) {
     const int y = (int) blockIdx.y;
     if (y < a.H) {
         q_bias_do<R4>(a, blockIdx.x, y);
@@ -801,16 +805,17 @@ __global__ void __launch_bounds__(kWide) qkv_cells_kernel(QbIn a, KvCellsIn b) {
 /// outside a window layer's `win` positions, is left out.
 struct AttnIn {
     Cells c;
-    const float* q;         // [T][H][D]
-    const float* bias;      // [T][H][ext + 1]
-    const int32_t* pos;     // [T]
-    const int32_t* live;    // the cells in use: a range's count (its positions first .. first + *live - 1), a ring's last position + 1
-    const int32_t* dyn;     // a ring: null, its every slot, `chunk` cells a stretch; else the stretches from the device
-                            // (a launch captured in a graph serves any number of cells) {cells a stretch, stretches in
-                            // use, the first slot}, going on past its end to its start.  A range: {the first cell in
-                            // use, stretches in use, the first one's number}, stretch_lo's stretches
-    float* part;            // [T][H][n_chunks][D + 2]: m, s, the D sums (D: 128)
-    int H, HK, ext, win;    // win: a window layer's cells (0: every cell)
+    const float* q;        // [T][H][D]
+    const float* bias;     // [T][H][ext + 1]
+    const int32_t* pos;    // [T]
+    const int32_t* live;   // the cells in use: a range's count (its positions first
+                           // .. first + *live - 1), a ring's last position + 1
+    const int32_t* dyn;    // a ring: null, its every slot, `chunk` cells a stretch; else the stretches from the device
+                           // (a launch captured in a graph serves any number of cells) {cells a stretch, stretches in
+                           // use, the first slot}, going on past its end to its start.  A range: {the first cell in
+                           // use, stretches in use, the first one's number}, stretch_lo's stretches
+    float* part;           // [T][H][n_chunks][D + 2]: m, s, the D sums (D: 128)
+    int H, HK, ext, win;   // win: a window layer's cells (0: every cell)
     int chunk, n_chunks;
 };
 /// A range's stretches that do not depend on how many cells it has (so a row's sums are the same whatever was scored
@@ -905,8 +910,8 @@ __global__ void __launch_bounds__(128) attn_join_kernel(JoinIn a) {
 /// `seg`), for the main card's tc_merge_kernel: the largest logit, the sum of exp(logit - it), that-weighted V, into
 /// `part`.  A block a row and a query head; D threads.
 struct SegJoinIn {
-    float* part;         // [T][H][D + 2]: the first segment's sums, and the joined ones
-    const float* seg;    // [n_seg][T][H][D + 2]: the segments after the first
+    float* part;        // [T][H][D + 2]: the first segment's sums, and the joined ones
+    const float* seg;   // [n_seg][T][H][D + 2]: the segments after the first
     int H, D, n_seg, T;
 };
 __global__ void __launch_bounds__(128) tc_join_kernel(SegJoinIn a) {
@@ -949,8 +954,8 @@ __global__ void nsink_kernel(const float* __restrict__ bias, float* __restrict__
 /// A sublayer's output through its causal convolution into the stream: y = (a + conv(a)) / sqrt(C + 1), then x = y (a
 /// block's first attention: the stream starts again) or x += y.  `raw` the sublayer's rows [T][N], `state` its visit's.
 __global__ void __launch_bounds__(kTB) post_conv_kernel(const float* __restrict__ raw, const float* __restrict__ state,
-                                                        const float* __restrict__ w, float* __restrict__ x, int N, int C,
-                                                        int fresh) {
+                                                        const float* __restrict__ w, float* __restrict__ x, int N,
+                                                        int C, int fresh) {
     const int t = blockIdx.y, i = blockIdx.x * kTB + threadIdx.x;
     if (i >= N) return;
     float acc = 0.f;
@@ -965,8 +970,8 @@ __global__ void __launch_bounds__(kTB) post_conv_kernel(const float* __restrict_
 /// (conv_state_kernel's).  A thread a channel.
 __global__ void __launch_bounds__(kTB) post_one_kernel(const float* __restrict__ rows, const float* __restrict__ w,
                                                        float* __restrict__ raw, float* __restrict__ state,
-                                                       const float* __restrict__ cw, float* __restrict__ x, int N, int C,
-                                                       int top_k, int fresh) {
+                                                       const float* __restrict__ cw, float* __restrict__ x, int N,
+                                                       int C, int top_k, int fresh) {
     const int i = blockIdx.x * kTB + threadIdx.x;
     if (i >= N) return;
     float xs[8];   // the channel's rows, the newest first
@@ -1007,19 +1012,19 @@ __global__ void __launch_bounds__(kTB) route_dot_kernel(const float* __restrict_
 /// rows that route to it; entry (t, k) writes row t * top_k + k.  The groups in the order of their first entry.  An
 /// expert with no slot (slot_of < 0) gets no group: its entries are the CPU's (n_miss counts them).
 struct PlanIn {
-    const float* prob;         // [T][E]
-    const float* bias;         // [E] or null
-    const int32_t* slot_of;    // [E]
-    unsigned long long slots;  // the layer's slots, `stride` apart
+    const float* prob;          // [T][E]
+    const float* bias;          // [E] or null
+    const int32_t* slot_of;     // [E]
+    unsigned long long slots;   // the layer's slots, `stride` apart
     size_t stride;
-    int32_t* ids;              // [T][top_k]
-    float* w;                  // [T][top_k]
+    int32_t* ids;   // [T][top_k]
+    float* w;       // [T][top_k]
     unsigned long long* grp_ptr;
-    int32_t* grp_start;        // [n + 1]
+    int32_t* grp_start;   // [n + 1]
     int32_t* n_groups;
     int32_t* ent_dst;
     int32_t* ent_tok;
-    int32_t* n_miss;           // entries without a slot
+    int32_t* n_miss;   // entries without a slot
     int T, E, top_k;
     float scale;
 };
@@ -1176,7 +1181,8 @@ __global__ void __launch_bounds__(kTB) pick_one_kernel(PlanIn a) {
 /// `dscale` ([E], with `ids`): each expert's scale of its down rows, where the rows come without it (a prompt chunk's).
 __global__ void __launch_bounds__(kTB) expert_sum_kernel(const float* __restrict__ rows, const float* __restrict__ w,
                                                          float* __restrict__ y, int N, int top_k,
-                                                         const float* __restrict__ dscale, const int32_t* __restrict__ ids) {
+                                                         const float* __restrict__ dscale,
+                                                         const int32_t* __restrict__ ids) {
     const int t = blockIdx.y, i = blockIdx.x * kTB + threadIdx.x;
     if (i >= N) return;
     float acc = 0.f;
@@ -1191,8 +1197,8 @@ __global__ void __launch_bounds__(kTB) expert_sum_kernel(const float* __restrict
 /// A window visit's cells in position order for a chunk at positions p0 ..: range slot j is position p0 - (win - 1) +
 /// j.  The win - 1 cells before the chunk come from the ring (a position before 0: left as it is, never read).  A
 /// block a cell and a side.
-__global__ void __launch_bounds__(256) ring_to_range_kernel(Cells ring, uint8_t* __restrict__ rk, uint8_t* __restrict__ rv,
-                                                            long long p0, int win, int bytes) {
+__global__ void __launch_bounds__(256)
+ring_to_range_kernel(Cells ring, uint8_t* __restrict__ rk, uint8_t* __restrict__ rv, long long p0, int win, int bytes) {
     const long long pos = p0 - (win - 1) + blockIdx.x;
     if (pos < 0) return;
     const uint32_t* src = (const uint32_t*) ((blockIdx.y ? ring.v : ring.k) + (size_t) (pos % ring.cap) * bytes);
@@ -1202,8 +1208,8 @@ __global__ void __launch_bounds__(256) ring_to_range_kernel(Cells ring, uint8_t*
 /// The chunk's last cells back into the ring (its n rows' cells are range slots win - 1 ..): the positions the ring
 /// holds after the chunk that are the chunk's own.  A block a cell and a side, the last cell first.
 __global__ void __launch_bounds__(256) range_to_ring_kernel(Cells ring, const uint8_t* __restrict__ rk,
-                                                            const uint8_t* __restrict__ rv, long long p0, int n, int win,
-                                                            int bytes) {
+                                                            const uint8_t* __restrict__ rv, long long p0, int n,
+                                                            int win, int bytes) {
     const long long pos = p0 + n - 1 - blockIdx.x;   // (the grid: min(n, the ring's cells))
     const uint32_t* src = (const uint32_t*) ((blockIdx.y ? rv : rk) + (size_t) (pos - p0 + win - 1) * bytes);
     uint32_t* dst = (uint32_t*) ((blockIdx.y ? ring.v : ring.k) + (size_t) (pos % ring.cap) * bytes);
@@ -1455,8 +1461,8 @@ __global__ void gate_h_join_kernel(const float* __restrict__ part, const float* 
 /// 64 rows by 64 of the N outputs (grid (N / 64, ceil(T / 64))), 256 threads, a thread 4 rows by 4 outputs.
 __global__ void __launch_bounds__(256) gate_apply_rows_kernel(const float* __restrict__ u, const float* __restrict__ m,
                                                               const float* __restrict__ h, const float* __restrict__ G,
-                                                              const float* __restrict__ F, float* __restrict__ out, int T,
-                                                              int N) {
+                                                              const float* __restrict__ F, float* __restrict__ out,
+                                                              int T, int N) {
     constexpr int R = 64, KS = 32;
     __shared__ __align__(16) float hs[KS][kGateRows + 4];
     __shared__ __align__(16) float gs[KS][64 + 4];
@@ -1490,7 +1496,8 @@ __global__ void __launch_bounds__(256) gate_apply_rows_kernel(const float* __res
             const float4 x = *reinterpret_cast<const float4*>(&hs[q][ty * 4]);
             const float4 wg = *reinterpret_cast<const float4*>(&gs[q][tx * 4]);
             const float4 wf = *reinterpret_cast<const float4*>(&fs[q][tx * 4]);
-            const float xs[4] = {x.x, x.y, x.z, x.w}, g4[4] = {wg.x, wg.y, wg.z, wg.w}, f4[4] = {wf.x, wf.y, wf.z, wf.w};
+            const float xs[4] = {x.x, x.y, x.z, x.w}, g4[4] = {wg.x, wg.y, wg.z, wg.w},
+                        f4[4] = {wf.x, wf.y, wf.z, wf.w};
 #pragma unroll
             for (int i = 0; i < 4; ++i)
 #pragma unroll
@@ -1545,9 +1552,10 @@ __device__ __forceinline__ uint2 q8_widen4(uint32_t w, __half2 d) {
 }
 
 constexpr int kTcCells = lamina::inkling2::sizes::kTcCells;   // cells a tile
-constexpr int kTcPad = 136;    // a row of 128 halves in shared memory (272 bytes)
-constexpr int kTcRows = 32;    // a decode forward's rows and query heads a block (attn_rows_kernel)
-constexpr int kTcPPad = 40;    // its probability row, halves (80 bytes)
+constexpr int kTcPad = 136;                                   // a row of 128 halves in shared memory (272 bytes)
+constexpr int kTcRows = 32;                                   // a decode forward's rows and query
+                                                              // heads a block (attn_rows_kernel)
+constexpr int kTcPPad = 40;                                   // its probability row, halves (80 bytes)
 
 struct __align__(16) TcSmem {
     __half q[kTcRows * kTcPad];
@@ -1573,22 +1581,22 @@ struct __align__(16) TcSmem {
 /// 32.  Grid (ceil(T / (16 NW)), H, segments), block 32 (NW + NP).
 struct TcIn {
     Cells c;
-    const float* q;        // [T][H][D]
-    const float* ring;     // [T][H][ext]: the bias by cell; not read with ext 0
-    const float* far;      // [T][H]: the bias of a cell past the table (-sink)
-    const float* gate;     // [T][H * D]
-    const int32_t* pos;    // [T]
-    float* out;            // [T][H * D]
+    const float* q;       // [T][H][D]
+    const float* ring;    // [T][H][ext]: the bias by cell; not read with ext 0
+    const float* far;     // [T][H]: the bias of a cell past the table (-sink)
+    const float* gate;    // [T][H * D]
+    const int32_t* pos;   // [T]
+    float* out;           // [T][H * D]
     int T, H, HK, ext, win;
-    long long cells;       // the range's cells in use
-    float* part;           // not null: [T][H][D + 2], a row and head's partial sums (the largest logit m, the sum of
-                           // exp(logit - m), that-weighted V) instead of `out`: another card's share, or this one's
-                           // where others' are joined to it (tc_merge_kernel)
-    int no_sink;           // the sums without the zero sink (a card's cells alone)
-    long long lo;          // a full visit's first cell on this card (the cells before it are other cards')
-    float* seg;            // several segments: [segments - 1][T][H][D + 2], the sums of those after the first (the
-                           // first one's to `part`)
-    const __half* qh;      // not null: q as halves in place of `q` (a cell card's copy, rounded as the kernel rounds)
+    long long cells;    // the range's cells in use
+    float* part;        // not null: [T][H][D + 2], a row and head's partial sums (the largest logit m, the sum of
+                        // exp(logit - m), that-weighted V) instead of `out`: another card's share, or this one's
+                        // where others' are joined to it (tc_merge_kernel)
+    int no_sink;        // the sums without the zero sink (a card's cells alone)
+    long long lo;       // a full visit's first cell on this card (the cells before it are other cards')
+    float* seg;         // several segments: [segments - 1][T][H][D + 2], the sums of those after the first (the
+                        // first one's to `part`)
+    const __half* qh;   // not null: q as halves in place of `q` (a cell card's copy, rounded as the kernel rounds)
 };
 constexpr int kTcSegs = 8;   // segments at most
 /// q as halves, two values a thread as the chunk kernel rounds them (__floats2half2_rn): a cell card's copy of a
@@ -1603,13 +1611,13 @@ __global__ void q_halves_kernel(const float* __restrict__ q, __half2* __restrict
 /// NP (q8_0 cells): warps of their own that fetch a tile's cells and widen them into halves for the next step while
 /// the NW warps score the current one - two tiles of halves, one barrier a step for every warp, and the producers'
 /// own (named barrier 1) around the raw tile they share.  0: every warp widens between two barriers.
-template <int NW, bool Q8, int NP = 0>
-__global__ void __launch_bounds__((NW + NP) * 32) attn_tc_kernel(TcIn a) {
+template <int NW, bool Q8, int NP = 0> __global__ void __launch_bounds__((NW + NP) * 32) attn_tc_kernel(TcIn a) {
     static_assert(NP == 0 || Q8, "producer warps widen q8_0 cells");
     constexpr int D = 128, ROWS = 16 * NW, NT = 32 * NW;
-    constexpr int kRawCell = (D / 32) * 34;                                 // a cell's q8_0 blocks of one K/V head
+    constexpr int kRawCell = (D / 32) * 34;                                              // a cell's q8_0 blocks
+                                                                                         // of one K/V head
     __shared__ __align__(16) __half tile[Q8 && NP == 0 ? 1 : 2][2][kTcCells * kTcPad];   // [buffer][K | V]
-    __shared__ __align__(16) uint8_t raw[2][Q8 ? kTcCells * kRawCell : 16];   // Q8: [K | V] as stored
+    __shared__ __align__(16) uint8_t raw[2][Q8 ? kTcCells * kRawCell : 16];              // Q8: [K | V] as stored
     const int t0 = blockIdx.x * ROWS, h = blockIdx.y, g = h / (a.H / a.HK);
     const int tid = threadIdx.x, w = tid >> 5, lane = tid & 31;
     const int li = lane >> 3, lr = lane & 7, tig = lane & 3;
@@ -1633,11 +1641,11 @@ __global__ void __launch_bounds__((NW + NP) * 32) attn_tc_kernel(TcIn a) {
                 const int c = j / (kRawCell / 8), ch = j % (kRawCell / 8);
                 uint8_t* d = raw[side] + c * kRawCell + ch * 8;
                 if (base + c < cnt)
-                    cp_async8(d, (side ? a.c.v : a.c.k) + (size_t) (s_lo + base + c) * cbytes + (size_t) g * kRawCell + ch * 8);
-                else
-                    *reinterpret_cast<unsigned long long*>(d) = 0ull;
+                    cp_async8(d, (side ? a.c.v : a.c.k) + (size_t) (s_lo + base + c) * cbytes + (size_t) g * kRawCell +
+                                     ch * 8);
+                else *reinterpret_cast<unsigned long long*>(d) = 0ull;
             }
-        } else {              // 16 chunks of 16 bytes a cell and side
+        } else {   // 16 chunks of 16 bytes a cell and side
             for (int i = tid; i < kTcCells * 16; i += NT) {
                 const int c = i / 16, ch = i % 16;
                 __half* kd = tile[buf][0] + c * kTcPad + ch * 8;
@@ -1769,7 +1777,8 @@ __global__ void __launch_bounds__((NW + NP) * 32) attn_tc_kernel(TcIn a) {
             vt = tile[(it - it0) & 1][1];
         }
         // a tile every row of the block sees whole and past the table: no cell's distance to look at
-        const bool far = a.win == 0 && base >= c_min && base + kTcCells <= cnt && s_first - (base + kTcCells - 1) >= a.ext;
+        const bool far =
+            a.win == 0 && base >= c_min && base + kTcCells <= cnt && s_first - (base + kTcCells - 1) >= a.ext;
         float2 gA[4], gB[4];
 #pragma unroll
         for (int nt = 0; nt < 4; ++nt) gA[nt] = gB[nt] = make_float2(0.f, 0.f);
@@ -1919,8 +1928,7 @@ __global__ void __launch_bounds__((NW + NP) * 32) attn_tc_kernel(TcIn a) {
 /// probabilities as halves.  Warps: scores m-tile w & 1 x cells (w >> 1) * 8 .. +8; values m-tile w & 1 x dims
 /// (w >> 1) * 32 .. +32.  The next tile waits in registers through the current one's products.  Grid (stretches, K/V
 /// heads), block 256.
-template <bool Q8>
-__global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
+template <bool Q8> __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     constexpr int D = 128;
     __shared__ TcSmem sm;
     const int cb = blockIdx.x, g = blockIdx.y;
@@ -1948,7 +1956,8 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
     for (int i = tid; i < kTcRows * (D / 4); i += 256) {
         const int r = i / (D / 4), c4 = i % (D / 4);
         float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
-        if (r < NQ) v = *reinterpret_cast<const float4*>(a.q + ((size_t) (r / QH) * a.H + g * QH + r % QH) * D + 4 * c4);
+        if (r < NQ)
+            v = *reinterpret_cast<const float4*>(a.q + ((size_t) (r / QH) * a.H + g * QH + r % QH) * D + 4 * c4);
         *reinterpret_cast<uint2*>(sm.q + r * kTcPad + 4 * c4) = make_uint2(h2(v.x, v.y), h2(v.z, v.w));
     }
     // a tile: 32 cells of K and of V (attn_tc_kernel's)
@@ -2060,11 +2069,15 @@ __global__ void __launch_bounds__(256, 1) attn_rows_kernel(AttnIn a, int T) {
             sm.red[0][nt][rB] = xB;
         }
         __syncthreads();
-        const float nA = fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
-        const float nB = fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
+        const float nA =
+            fmaxf(mA, fmaxf(fmaxf(sm.red[0][0][rA], sm.red[0][1][rA]), fmaxf(sm.red[0][2][rA], sm.red[0][3][rA])));
+        const float nB =
+            fmaxf(mB, fmaxf(fmaxf(sm.red[0][0][rB], sm.red[0][1][rB]), fmaxf(sm.red[0][2][rB], sm.red[0][3][rB])));
         const float aA = __expf(mA - nA), aB = __expf(mB - nB);
-        const float p0A = sc[0] == -INFINITY ? 0.f : __expf(sc[0] - nA), p1A = sc[1] == -INFINITY ? 0.f : __expf(sc[1] - nA);
-        const float p0B = sc[2] == -INFINITY ? 0.f : __expf(sc[2] - nB), p1B = sc[3] == -INFINITY ? 0.f : __expf(sc[3] - nB);
+        const float p0A = sc[0] == -INFINITY ? 0.f : __expf(sc[0] - nA),
+                    p1A = sc[1] == -INFINITY ? 0.f : __expf(sc[1] - nA);
+        const float p0B = sc[2] == -INFINITY ? 0.f : __expf(sc[2] - nB),
+                    p1B = sc[3] == -INFINITY ? 0.f : __expf(sc[3] - nB);
         const int pc = nt * 8 + 2 * tig;
         *reinterpret_cast<unsigned*>(sm.p + rA * kTcPPad + pc) = h2(p0A, p1A);
         *reinterpret_cast<unsigned*>(sm.p + rB * kTcPPad + pc) = h2(p0B, p1B);
@@ -2162,8 +2175,8 @@ __global__ void bf16_floats_kernel(const uint16_t* __restrict__ w, float* __rest
     if (i < n) out[i] = __uint_as_float((unsigned) w[i] << 16);
 }
 /// Rows gathered or scattered by index: dst[r] = src[idx[r]] (`scatter` 0) or dst[idx[r]] = src[r]; n values a row
-__global__ void rows_index_kernel(const float* __restrict__ src, const int32_t* __restrict__ idx, float* __restrict__ dst,
-                                  int rows, int n, int scatter) {
+__global__ void rows_index_kernel(const float* __restrict__ src, const int32_t* __restrict__ idx,
+                                  float* __restrict__ dst, int rows, int n, int scatter) {
     const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= (long long) rows * n) return;
     const int r = (int) (i / n), c = (int) (i % n);
@@ -2174,8 +2187,9 @@ __global__ void rows_index_kernel(const float* __restrict__ src, const int32_t* 
 /// With experts in RAM: the entries whose expert has no slot take the CPU's rows, which come packed in the entries'
 /// order and without the down rows' scale (`scale` [experts], or null).  A block an entry.
 __global__ void __launch_bounds__(kTB) cpu_rows_kernel(const float* __restrict__ src, const int32_t* __restrict__ ids,
-                                                       const int32_t* __restrict__ slot_of, const float* __restrict__ scale,
-                                                       float* __restrict__ rows, int N) {
+                                                       const int32_t* __restrict__ slot_of,
+                                                       const float* __restrict__ scale, float* __restrict__ rows,
+                                                       int N) {
     const int e = blockIdx.x;
     if (slot_of[ids[e]] >= 0) return;
     __shared__ int at;
@@ -2211,4 +2225,4 @@ __global__ void softcap_kernel(float* __restrict__ lg, long long n, float cap, i
     if (!(fabsf(v) <= FLT_MAX)) bad[i / V] = 1;
 }
 
-}  // namespace ik
+}   // namespace ik

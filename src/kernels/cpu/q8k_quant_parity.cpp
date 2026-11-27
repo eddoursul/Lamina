@@ -6,12 +6,12 @@
 //     q8k_quant_parity            (LAMINA_FORCE_ISA=avx: the AVX-2 copy is skipped, native_quant_* must equal ggml's)
 //     q8k_quant_parity --bench    ns per 2560-value row, ggml-cpu's and the AVX-2 copy
 #include "lamina/kernels/cpu/expert_layout.hpp"
-#include "lamina/kernels/cpu/iq_avx2.hpp"
 #include "lamina/kernels/cpu/iq_avx1.hpp"
+#include "lamina/kernels/cpu/iq_avx2.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 
-#include "ggml.h"
 #include "ggml-cpu.h"
+#include "ggml.h"
 
 #include <algorithm>
 #include <chrono>
@@ -48,21 +48,21 @@ std::vector<std::vector<float>> cases(int n) {
     add([&](int) { return nd(rng) * 1e-3f; });
     add([&](int) { return nd(rng) * 1e4f; });
     add([&](int) { return ud(rng); });
-    add([&](int) { return 0.f; });                                         // every block zero
-    add([&](int j) { return (j / kQK) % 2 ? nd(rng) : 0.f; });             // zero blocks between random ones
-    add([&](int j) { return j % kQK == 77 ? nd(rng) : 0.f; });             // one value per block
-    add([&](int j) {                                                       // the largest magnitude twice, the
-        const int k = j % kQK;                                             // FIRST one's sign wins
+    add([&](int) { return 0.f; });                               // every block zero
+    add([&](int j) { return (j / kQK) % 2 ? nd(rng) : 0.f; });   // zero blocks between random ones
+    add([&](int j) { return j % kQK == 77 ? nd(rng) : 0.f; });   // one value per block
+    add([&](int j) {                                             // the largest magnitude twice, the
+        const int k = j % kQK;                                   // FIRST one's sign wins
         return k == 3 ? -5.f : k == 100 ? 5.f : nd(rng);
     });
     add([&](int j) {
         const int k = j % kQK;
         return k == 3 ? 5.f : k == 100 ? -5.f : nd(rng);
     });
-    add([&](int j) { return j % kQK == 9 ? 3e38f : nd(rng); });            // extremes beside ordinary values
+    add([&](int j) { return j % kQK == 9 ? 3e38f : nd(rng); });   // extremes beside ordinary values
     add([&](int j) { return j % kQK == 9 ? -3e38f : nd(rng) * 1e30f; });
-    add([&](int) { return nd(rng) * 1e-40f; });                            // denormals
-    add([&](int j) { return (float) ((j % 255) - 127) / 127.f; });         // the grid itself, and its ties
+    add([&](int) { return nd(rng) * 1e-40f; });                      // denormals
+    add([&](int j) { return (float) ((j % 255) - 127) / 127.f; });   // the grid itself, and its ties
     add([&](int j) { return ((float) ((j * 37) % 509) - 254.f) / 508.f; });
     add([&](int j) { return j % kQK == 5 ? std::numeric_limits<float>::quiet_NaN() : nd(rng); });
     add([&](int j) { return j % kQK == 5 ? std::numeric_limits<float>::infinity() : nd(rng); });
@@ -86,7 +86,7 @@ const cpu::NativeFmt* g_fmt = nullptr;
 void via_act(const float* x, void* y, int64_t) { cpu::native_quant_act(*g_fmt, x, y); }
 void via_h(const float* x, void* y, int64_t) { cpu::native_quant_h(*g_fmt, x, y); }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     const bool bench = argc > 1 && std::string(argv[1]) == "--bench";
@@ -120,7 +120,8 @@ int main(int argc, char** argv) {
         failures += !same("native_quant_h", 512, 0, ref, via_h, x, ggml_row_size(GGML_TYPE_Q8_K, 512));
     std::printf("q8k_quant_parity: %d rows x 4 sizes, AVX-2 copy %s, AVX1 copy %s: %s\n", checked / 4,
                 avx2 ? "checked" : "skipped (no AVX2, or LAMINA_FORCE_ISA)",
-                avx1 ? "checked" : "skipped (AVX2 present, no AVX, or LAMINA_FORCE_ISA)", failures ? "FAILED" : "identical");
+                avx1 ? "checked" : "skipped (AVX2 present, no AVX, or LAMINA_FORCE_ISA)",
+                failures ? "FAILED" : "identical");
     if (bench && (avx2 || avx1)) {
         std::mt19937 rng(3);
         std::normal_distribution<float> nd(0.f, 1.f);
@@ -134,7 +135,8 @@ int main(int argc, char** argv) {
             for (int rep = 0; rep < 5; ++rep) {
                 const auto t0 = std::chrono::steady_clock::now();
                 for (int r = 0; r < rows; ++r) fn(x.data() + (size_t) r * n, y.data() + bytes * r, n);
-                const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
+                const double ns =
+                    std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
                 best = std::min(best, ns / rows);
             }
             std::printf("  %-10s %7.0f ns per %d-value row\n", tag, best, n);

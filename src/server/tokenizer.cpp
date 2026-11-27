@@ -44,10 +44,19 @@ bool alphabet_to_bytes(const std::string& text, std::string& out) {
         const unsigned char c = (unsigned char) text[i];
         uint32_t cp;
         size_t n;
-        if (c < 0x80) { cp = c; n = 1; }
-        else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
-        else { cp = c & 0x07; n = 4; }
+        if (c < 0x80) {
+            cp = c;
+            n = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            cp = c & 0x1F;
+            n = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            cp = c & 0x0F;
+            n = 3;
+        } else {
+            cp = c & 0x07;
+            n = 4;
+        }
         if (i + n > text.size()) return false;
         for (size_t k = 1; k < n; ++k) cp = (cp << 6) | ((unsigned char) text[i + k] & 0x3F);
         const auto it = to_byte.find(cp);
@@ -69,10 +78,10 @@ FILE* open_utf8(const std::string& path) {
 #endif
 }
 
-constexpr size_t kHeapMin = 64;          // longer words merge through a heap (same order as the scan)
+constexpr size_t kHeapMin = 64;   // longer words merge through a heap (same order as the scan)
 constexpr size_t kPieceCacheMax = 200000;
 
-}  // namespace
+}   // namespace
 
 std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
     FILE* f = open_utf8(path);
@@ -108,7 +117,8 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
     t->architecture = str("general.architecture");
     for (int64_t i = 0, n = gguf_get_n_kv(g); i < n; ++i) {
         const std::string k = gguf_get_key(g, i);
-        if (k.rfind("tokenizer.ggml.", 0) != 0 || k.size() < 9 || k.compare(k.size() - 9, 9, "_token_id") != 0) continue;
+        if (k.rfind("tokenizer.ggml.", 0) != 0 || k.size() < 9 || k.compare(k.size() - 9, 9, "_token_id") != 0)
+            continue;
         int64_t v = -1;
         switch (gguf_get_kv_type(g, i)) {
             case GGUF_TYPE_UINT32: v = gguf_get_val_u32(g, i); break;
@@ -132,8 +142,8 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
         throw std::runtime_error("vocabulary has duplicate tokens: " + std::to_string(n_tok) + " entries, " +
                                  std::to_string(ids.size()) + " unique");
     std::vector<int32_t> types(n_tok, 1);
-    if (const int64_t ky = key("tokenizer.ggml.token_type"); ky >= 0 && gguf_get_arr_n(g, ky) == n_tok &&
-                                                             gguf_get_arr_type(g, ky) == GGUF_TYPE_INT32) {
+    if (const int64_t ky = key("tokenizer.ggml.token_type");
+        ky >= 0 && gguf_get_arr_n(g, ky) == n_tok && gguf_get_arr_type(g, ky) == GGUF_TYPE_INT32) {
         const int32_t* d = (const int32_t*) gguf_get_arr_data(g, ky);
         types.assign(d, d + n_tok);
     }
@@ -163,9 +173,8 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
     for (uint32_t k = 0; k < (uint32_t) t->lits_.size(); ++k)
         t->by_first_[(unsigned char) t->lits_[k].text[0]].push_back(k);
     for (auto& v : t->by_first_)
-        std::stable_sort(v.begin(), v.end(), [&](uint32_t a, uint32_t b) {
-            return t->lits_[a].text.size() > t->lits_[b].text.size();
-        });
+        std::stable_sort(v.begin(), v.end(),
+                         [&](uint32_t a, uint32_t b) { return t->lits_[a].text.size() > t->lits_[b].text.size(); });
 
     const std::array<uint32_t, 256> b2u = byte_to_unicode();
     for (int b = 0; b < 256; ++b) {
@@ -250,7 +259,8 @@ void Tokenizer::bpe(const std::string& piece, std::vector<int32_t>& out) const {
     };
     std::priority_queue<Item, std::vector<Item>, std::greater<Item>> heap;
     for (size_t i = 0; i + 1 < n; ++i)
-        if (const auto* m = merge_of(parts[i], parts[i + 1])) heap.push({m->first, (int64_t) i, parts[i], parts[i + 1]});
+        if (const auto* m = merge_of(parts[i], parts[i + 1]))
+            heap.push({m->first, (int64_t) i, parts[i], parts[i + 1]});
     std::vector<uint8_t> gone(n, 0);
     while (!heap.empty()) {
         const Item it = heap.top();
@@ -322,7 +332,8 @@ std::vector<int32_t> Tokenizer::encode(std::string_view text, bool parse_special
             continue;
         }
         const size_t end = i + hit->text.size();
-        while (next_span < spans.size() && spans[next_span].a <= i) plain_end = std::max(plain_end, spans[next_span++].b);
+        while (next_span < spans.size() && spans[next_span].a <= i)
+            plain_end = std::max(plain_end, spans[next_span++].b);
         if (i < plain_end) {
             i = end;
             continue;
@@ -449,9 +460,10 @@ std::vector<int32_t> PromptEncoder::encode(const std::string& text, std::vector<
     for (const auto& e : entries) {
         const size_t same = plain_agree_until(e->plain, plain, common_prefix_len(e->text, text));
         // the last boundary c with c <= same - margin
-        int64_t k = same >= margin ? (int64_t) (std::upper_bound(e->ends.begin(), e->ends.end(), same - margin) -
-                                                e->ends.begin()) - 1
-                                   : -1;
+        int64_t k =
+            same >= margin
+                ? (int64_t) (std::upper_bound(e->ends.begin(), e->ends.end(), same - margin) - e->ends.begin()) - 1
+                : -1;
         if (e->reply_at != SIZE_MAX && same >= e->reply_at) {   // a reply's token boundaries: no margin
             int64_t r = (int64_t) (std::upper_bound(e->ends.begin(), e->ends.end(), same) - e->ends.begin()) - 1;
             while (r > k && e->ends[(size_t) r] >= e->reply_at && straddles(text, e->ends[(size_t) r])) --r;
@@ -546,4 +558,4 @@ void PromptEncoder::forget(const std::vector<int32_t>& ids) {
                    entries_.end());
 }
 
-}  // namespace lamina
+}   // namespace lamina

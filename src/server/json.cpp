@@ -110,7 +110,7 @@ void dump(std::string& out, const json& v, bool ensure_ascii, bool compact, int 
     }
 }
 
-}  // namespace
+}   // namespace
 
 std::string py_dumps(const json& v, bool ensure_ascii, bool compact, int indent) {
     std::string out;
@@ -144,7 +144,7 @@ char too_deep(std::string_view text) {
     return 0;
 }
 
-}  // namespace
+}   // namespace
 
 bool py_loads(std::string_view text, json& out, std::string* err) {
     if (const char c = too_deep(text)) {
@@ -157,7 +157,8 @@ bool py_loads(std::string_view text, json& out, std::string* err) {
         out = json::parse(text.begin(), text.end());
         return true;
     } catch (const std::exception& e) {
-        if (err != nullptr) {   // "[json.exception.parse_error.101] parse error at line 1, column 3: ..." without its tag
+        if (err != nullptr) {   // "[json.exception.parse_error.101] parse error
+                                // at line 1, column 3: ..." without its tag
             *err = e.what();
             const size_t tag = err->find("] ");
             if (starts_with(*err, "[json.exception.") && tag != std::string::npos) err->erase(0, tag + 2);
@@ -221,7 +222,7 @@ void repr_value(const json& v, std::string& out) {
     }
 }
 
-}  // namespace
+}   // namespace
 
 std::string py_repr_value(const json& v) {
     std::string out;
@@ -378,8 +379,8 @@ std::string decode_replace(std::string_view b) {
             ++i;
             continue;
         }
-        size_t need = 0;                     // continuation bytes
-        unsigned char lo = 0x80, hi = 0xBF;  // the second byte's range
+        size_t need = 0;                      // continuation bytes
+        unsigned char lo = 0x80, hi = 0xBF;   // the second byte's range
         if (c >= 0xC2 && c <= 0xDF) {
             need = 1;
         } else if (c >= 0xE0 && c <= 0xEF) {
@@ -462,7 +463,9 @@ std::string_view strip_chars(std::string_view s, std::string_view chars) {
 }
 
 bool starts_with(std::string_view s, std::string_view p) { return s.substr(0, p.size()) == p; }
-bool ends_with(std::string_view s, std::string_view p) { return s.size() >= p.size() && s.substr(s.size() - p.size()) == p; }
+bool ends_with(std::string_view s, std::string_view p) {
+    return s.size() >= p.size() && s.substr(s.size() - p.size()) == p;
+}
 
 bool starts_with_any(std::string_view s, std::initializer_list<std::string_view> ps) {
     for (const std::string_view p : ps)
@@ -519,7 +522,8 @@ std::vector<std::string_view> splitlines(std::string_view s) {
         const uint32_t c = utf8_at(s, i, &n);
         size_t brk = 0;
         if (c == '\r') brk = i + 1 < s.size() && s[i + 1] == '\n' ? 2 : 1;
-        else if (c == '\n' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029)
+        else if (c == '\n' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 ||
+                 c == 0x2028 || c == 0x2029)
             brk = n;
         if (brk == 0) {
             i += n;
@@ -542,7 +546,10 @@ std::string lower(std::string_view s) {
 
 std::string unquote_to_bytes(std::string_view s) {
     auto hex = [](char c) {
-        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        return c >= '0' && c <= '9'   ? c - '0'
+               : c >= 'a' && c <= 'f' ? c - 'a' + 10
+               : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                      : -1;
     };
     std::string out;
     out.reserve(s.size());
@@ -575,4 +582,4 @@ std::string random_hex(size_t n) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

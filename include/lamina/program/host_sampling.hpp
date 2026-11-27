@@ -64,9 +64,15 @@ inline int sample(std::vector<float>& lg, const Sampling& s, const std::vector<i
     size_t keep = idx.size();
     double cum = 0;
     for (size_t i = 0; i < idx.size(); ++i) {
-        if (p[i] / sum < s.min_p * (p[0] / sum)) { keep = i; break; }
+        if (p[i] / sum < s.min_p * (p[0] / sum)) {
+            keep = i;
+            break;
+        }
         cum += p[i] / sum;
-        if (cum >= s.top_p) { keep = i + 1; break; }
+        if (cum >= s.top_p) {
+            keep = i + 1;
+            break;
+        }
     }
     keep = std::max<size_t>(1, keep);
     double tot = 0;
@@ -94,4 +100,4 @@ inline std::vector<int32_t> parse_ids(const char* s) {
     return v;
 }
 
-}  // namespace lamina::program
+}   // namespace lamina::program

@@ -28,11 +28,12 @@ struct PlanLayout {
 
 // the grouped kernels' grids are sized for the bucket a layer's group count falls in
 int bucket(int groups) {
-    for (int b : {1, 2, 3, 4, 6, 8, 12, 16, 24, 32}) if (groups <= b) return b;
+    for (int b : {1, 2, 3, 4, 6, 8, 12, 16, 24, 32})
+        if (groups <= b) return b;
     return groups <= 48 ? 48 : groups;
 }
 
-}  // namespace
+}   // namespace
 
 SecondGpu::~SecondGpu() {
     if (dev_ < 0) return;
@@ -42,16 +43,19 @@ SecondGpu::~SecondGpu() {
     for (auto& gr : graphs_) cudaGraphExecDestroy(gr.exec);
     cache_.close();
     void* dev[] = {d_xq_, d_plan_, d_scratch_, d_rows_, d_count_, d_pre_};
-    for (void* p : dev) if (p) cudaFree(p);
+    for (void* p : dev)
+        if (p) cudaFree(p);
     void* host[] = {h_x_, h_plan_};
-    for (void* p : host) if (p) cudaFreeHost(p);
+    for (void* p : host)
+        if (p) cudaFreeHost(p);
     if (ev_) cudaEventDestroy(ev_);
     if (pre_ev_) cudaEventDestroy(pre_ev_);
     if (s_) cudaStreamDestroy(s_);
     if (pre_s_) cudaStreamDestroy(pre_s_);
 }
 
-bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, int max_t, int64_t k, std::string& err) {
+bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, int max_t, int64_t k,
+                     std::string& err) {
     dev_ = device;
     main_ = main_device;
     max_t_ = max_t;
@@ -60,15 +64,20 @@ bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, 
     cap_ = (int64_t) max_t * k;
     DeviceScope scope(dev_, main_);
     // whole float4s: copy_from_mapped's unit (Q8_K's 730 words a token are not, for an odd max_t)
-    const size_t xb = ((size_t) max_t * (std::max)((size_t) (n_embd / 32) * 36, (size_t) (n_embd / 256) * 292) + 15) &
-                      ~(size_t) 15;
+    const size_t xb =
+        ((size_t) max_t * (std::max) ((size_t) (n_embd / 32) * 36, (size_t) (n_embd / 256) * 292) + 15) & ~(size_t) 15;
     const size_t ob = (size_t) cap_ * (size_t) n_embd * sizeof(float);
     const size_t pb = PlanLayout(cap_).bytes;
     const unsigned pm = cudaHostAllocPortable | cudaHostAllocMapped;
     const char* step = nullptr;
     cudaError_t e = cudaSuccess;
     int unified = 0;
-    auto run = [&](const char* what, cudaError_t r) { if (e == cudaSuccess && r != cudaSuccess) { e = r; step = what; } };
+    auto run = [&](const char* what, cudaError_t r) {
+        if (e == cudaSuccess && r != cudaSuccess) {
+            e = r;
+            step = what;
+        }
+    };
     run("context", cudaFree(nullptr));
     run("unified addressing", cudaDeviceGetAttribute(&unified, cudaDevAttrUnifiedAddressing, dev_));
     run("stream", cudaStreamCreateWithFlags(&s_, cudaStreamNonBlocking));
@@ -79,8 +88,9 @@ bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, 
     run("mapped staging", cudaHostGetDevicePointer((void**) &m_plan_, h_plan_, 0));
     run("device buffers", cudaMalloc((void**) &d_xq_, xb));
     run("device buffers", cudaMalloc((void**) &d_plan_, pb));
-    run("device buffers", cudaMalloc((void**) &d_scratch_, lamina::kernels::native_expert_scratch_bytes(
-                                                               cap_, n_ff, lamina::kernels::cpu::hadamard_spec().any())));
+    run("device buffers",
+        cudaMalloc((void**) &d_scratch_, lamina::kernels::native_expert_scratch_bytes(
+                                             cap_, n_ff, lamina::kernels::cpu::hadamard_spec().any())));
     run("device buffers", cudaMalloc((void**) &d_rows_, ob));
     run("device buffers", cudaMalloc((void**) &d_count_, sizeof(unsigned)));
     run("device buffers", cudaMemset(d_count_, 0, sizeof(unsigned)));
@@ -98,7 +108,7 @@ bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, 
 }
 
 bool SecondGpu::init_prefetch(int slots, uint64_t blob_bytes, std::string& err) {
-    slots = (std::min)(slots, kPrefetchMax);
+    slots = (std::min) (slots, kPrefetchMax);
     if (slots <= 0) return true;
     DeviceScope scope(dev_, main_);
     pre_cap_ = (blob_bytes + 255) / 256 * 256;
@@ -115,7 +125,10 @@ bool SecondGpu::init_prefetch(int slots, uint64_t blob_bytes, std::string& err) 
 bool SecondGpu::prefetch(int64_t layer, const int32_t* ids, const uint8_t* const* src, int n, uint64_t bytes,
                          std::string& err) {
     if (n <= 0) return true;
-    if (n > pre_max_ || bytes > pre_cap_) { err = "second GPU: a prefetch does not fit its slots"; return false; }
+    if (n > pre_max_ || bytes > pre_cap_) {
+        err = "second GPU: a prefetch does not fit its slots";
+        return false;
+    }
     DeviceScope scope(dev_, main_);
     void* dst[kPrefetchMax];
     size_t size[kPrefetchMax];
@@ -138,18 +151,19 @@ bool SecondGpu::prefetch(int64_t layer, const int32_t* ids, const uint8_t* const
 }
 
 bool SecondGpu::graph_for(int gu_type, int d_type, int gu_act, int d_act, int groups, int part, bool prep,
-                          cudaGraphExec_t& exec,
-                          std::string& err) {
+                          cudaGraphExec_t& exec, std::string& err) {
     for (const auto& gr : graphs_)
-        if (gr.gu == gu_type && gr.d == d_type && gr.gu_act == gu_act && gr.d_act == d_act &&
-            gr.groups == groups && gr.part == part && gr.prep == prep) {
+        if (gr.gu == gu_type && gr.d == d_type && gr.gu_act == gu_act && gr.d_act == d_act && gr.groups == groups &&
+            gr.part == part && gr.prep == prep) {
             exec = gr.exec;
             return true;
         }
-    lamina::kernels::NativeExpertLayout L = lamina::kernels::native_expert_layout(gu_type, d_type, n_embd_, n_ff_, gu_act, d_act);
+    lamina::kernels::NativeExpertLayout L =
+        lamina::kernels::native_expert_layout(gu_type, d_type, n_embd_, n_ff_, gu_act, d_act);
     if (lamina::kernels::cpu::tq_supported(d_type)) {   // the trellis formats are Hadamard-folded (core::PackImage)
         L.had_block = lamina::kernels::cpu::hadamard_spec().block;
-        L.d_signs = lamina::kernels::hadamard_device_signs(lamina::kernels::cpu::hadamard_signs((int) n_ff_), (int) n_ff_);
+        L.d_signs =
+            lamina::kernels::hadamard_device_signs(lamina::kernels::cpu::hadamard_signs((int) n_ff_), (int) n_ff_);
     }
     const PlanLayout P(cap_);
     const auto* pi = (const int32_t*) d_plan_;
@@ -198,7 +212,10 @@ bool SecondGpu::submit(int64_t layer, const uint8_t* x, int64_t x_stride, int n_
                        const int32_t* starts, const int32_t* entries, int n_groups, float* out, uint32_t* flag,
                        uint32_t ring, std::string& err) {
     const int n = starts[n_groups];
-    if (n_groups <= 0 || n > cap_ || n_tok > max_t_) { err = "second GPU: a layer's share is out of range"; return false; }
+    if (n_groups <= 0 || n > cap_ || n_tok > max_t_) {
+        err = "second GPU: a layer's share is out of range";
+        return false;
+    }
     cudaError_t q;
     while ((q = cudaEventQuery(ev_)) == cudaErrorNotReady) platform::cpu_relax();
     if (q != cudaSuccess) {
@@ -262,4 +279,4 @@ bool SecondGpu::healthy(std::string& err) const {
     return false;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

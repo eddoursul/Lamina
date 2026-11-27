@@ -38,7 +38,7 @@ bool all_digits(std::string_view s) {
     return true;
 }
 
-}  // namespace
+}   // namespace
 
 bool parse_size(std::string_view text, uint64_t& bytes, std::string& err) {
     const std::string_view s = trim(text);
@@ -63,10 +63,18 @@ bool parse_size(std::string_view text, uint64_t& bytes, std::string& err) {
         double mult;
     };
     static const Unit kUnits[] = {{"b", 1.0},
-                                  {"k", 1024.0},          {"kb", 1024.0},          {"kib", 1024.0},
-                                  {"m", 1048576.0},       {"mb", 1048576.0},       {"mib", 1048576.0},
-                                  {"g", 1073741824.0},    {"gb", 1073741824.0},    {"gib", 1073741824.0},
-                                  {"t", 1099511627776.0}, {"tb", 1099511627776.0}, {"tib", 1099511627776.0}};
+                                  {"k", 1024.0},
+                                  {"kb", 1024.0},
+                                  {"kib", 1024.0},
+                                  {"m", 1048576.0},
+                                  {"mb", 1048576.0},
+                                  {"mib", 1048576.0},
+                                  {"g", 1073741824.0},
+                                  {"gb", 1073741824.0},
+                                  {"gib", 1073741824.0},
+                                  {"t", 1099511627776.0},
+                                  {"tb", 1099511627776.0},
+                                  {"tib", 1099511627776.0}};
     double mult = 0.0;
     for (const Unit& k : kUnits)
         if (u == k.name) mult = k.mult;
@@ -104,8 +112,8 @@ bool parse_seconds(std::string_view text, double& seconds, std::string& err) {
 
 std::string size_text(uint64_t bytes) {
     if (bytes == 0) return "0";
-    static const std::pair<char, uint64_t> kUnits[] = {{'T', 1ull << 40}, {'G', 1ull << 30}, {'M', 1ull << 20},
-                                                      {'K', 1ull << 10}};
+    static const std::pair<char, uint64_t> kUnits[] = {
+        {'T', 1ull << 40}, {'G', 1ull << 30}, {'M', 1ull << 20}, {'K', 1ull << 10}};
     for (const auto& [letter, unit] : kUnits)
         if (bytes % unit == 0) return std::to_string(bytes / unit) + letter;
     return std::to_string(bytes) + "B";
@@ -121,7 +129,8 @@ std::string seconds_text(double seconds) {
 }
 
 const std::vector<std::string_view>& gpu_card_keys() {
-    static const std::vector<std::string_view> keys = {"cache", "reserve", "vram-only", "prefetch", "clocks", "layers", "sleep"};
+    static const std::vector<std::string_view> keys = {"cache",  "reserve", "vram-only", "prefetch",
+                                                       "clocks", "layers",  "sleep"};
     return keys;
 }
 
@@ -136,7 +145,8 @@ bool parse_gpu_card(std::string_view text, GpuCard& card, std::string& err) {
     }
     card.name = std::string(items[0]);
     if (card.name.empty() || card.name.find('=') != std::string::npos) {
-        err = "'" + std::string(text) + "': a card's name comes first (a number, a UUID's start, a PCI bus id or a "
+        err = "'" + std::string(text) +
+              "': a card's name comes first (a number, a UUID's start, a PCI bus id or a "
               "name, or auto), then its settings as key=value";
         return false;
     }
@@ -196,7 +206,8 @@ bool parse_gpu_card(std::string_view text, GpuCard& card, std::string& err) {
         } else if (key == "clocks") {
             for (const char c : value)
                 if (!std::isdigit((unsigned char) c) && c != '-' && c != '/') {
-                    err = "clocks=" + std::string(value) + ": <graphics min>-<graphics max>/<memory> in MHz "
+                    err = "clocks=" + std::string(value) +
+                          ": <graphics min>-<graphics max>/<memory> in MHz "
                           "(1395-2100/9751), or 0";
                     return false;
                 }
@@ -236,4 +247,4 @@ std::string gpu_card_text(const GpuCard& c) {
     return out;
 }
 
-}  // namespace lamina::program
+}   // namespace lamina::program

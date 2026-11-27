@@ -18,8 +18,8 @@
 // It also checks the STATE LAYOUT, which is the one place these kernels intentionally differ from the
 // reference: (S, h_v, S) with j fastest instead of (S, S, h_v).  A layout mix-up is silent, so the state is
 // filled with a value that encodes its own coordinates.
-#include "lamina/kernels/gdn.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/gdn.hpp"
 #include "lamina/kernels/verify_kernels.hpp"
 #include "parity.hpp"
 
@@ -42,8 +42,8 @@ float sigmoid_f(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 /// `state` is passed in the REFERENCE layout (S, S, h_v) - i.e. (i, j, h) - so that this function is a
 /// transcription of `ref/gdn.py` and not of the kernel.
 void ref_step(std::vector<double>& state, const std::vector<float>& q, const std::vector<float>& k,
-              const std::vector<float>& v, const std::vector<float>& gate, const std::vector<float>& beta,
-              int S, int h_k, int h_v, std::vector<float>& o, bool modulo_heads, bool decay_first) {
+              const std::vector<float>& v, const std::vector<float>& gate, const std::vector<float>& beta, int S,
+              int h_k, int h_v, std::vector<float>& o, bool modulo_heads, bool decay_first) {
     auto at = [&](int i, int j, int h) -> double& { return state[(size_t) (i * S + j) * h_v + h]; };
     std::vector<float> oo((size_t) h_v * S, 0.0f);
     for (int h = 0; h < h_v; ++h) {
@@ -51,12 +51,14 @@ void ref_step(std::vector<double>& state, const std::vector<float>& q, const std
         const double dec = std::exp((double) gate[(size_t) h]);
         const double b = (double) beta[(size_t) h];
         for (int j = 0; j < S; ++j) {
-            if (decay_first) for (int i = 0; i < S; ++i) at(i, j, h) *= dec;
+            if (decay_first)
+                for (int i = 0; i < S; ++i) at(i, j, h) *= dec;
             double sk = 0;
             for (int i = 0; i < S; ++i) sk += at(i, j, h) * (double) k[(size_t) (src * S + i)];
             const double d = ((double) v[(size_t) (h * S + j)] - sk) * b;
             for (int i = 0; i < S; ++i) at(i, j, h) += (double) k[(size_t) (src * S + i)] * d;
-            if (!decay_first) for (int i = 0; i < S; ++i) at(i, j, h) *= dec;
+            if (!decay_first)
+                for (int i = 0; i < S; ++i) at(i, j, h) *= dec;
             double dot = 0;
             for (int i = 0; i < S; ++i) dot += at(i, j, h) * (double) q[(size_t) (src * S + i)];
             oo[(size_t) (h * S + j)] = (float) dot;
@@ -66,8 +68,8 @@ void ref_step(std::vector<double>& state, const std::vector<float>& q, const std
 }
 
 /// `ref/gdn.py::conv_step` in its own (d_conv, C) row-major orientation.
-void ref_conv(std::vector<float>& cs, const std::vector<float>& x, const std::vector<float>& kern, int C,
-              int dc, std::vector<float>& out) {
+void ref_conv(std::vector<float>& cs, const std::vector<float>& x, const std::vector<float>& kern, int C, int dc,
+              std::vector<float>& out) {
     out.assign((size_t) C, 0.0f);
     for (int c = 0; c < C; ++c) {
         double acc = 0;
@@ -79,16 +81,19 @@ void ref_conv(std::vector<float>& cs, const std::vector<float>& x, const std::ve
     }
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: gdn_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: gdn_parity [--selftest]\n");
+            return 2;
+        }
     }
 
-    const int S = 128, h_k = 16, h_v = 48;      // the artifact's real geometry
+    const int S = 128, h_k = 16, h_v = 48;   // the artifact's real geometry
     std::mt19937 rng(2024);
     std::normal_distribution<float> gauss(0.0f, 1.0f);
     int bad = 0;
@@ -184,8 +189,14 @@ int main(int argc, char** argv) {
         std::printf("  %-42s rel %.3e\n", "state (read via (S,h_v,S)) vs reference", rel_st);
         // The kernel accumulates in f32 and the reference in f64, and the state is a RECURRENCE over 128
         // terms, so 1e-5 is the arithmetic's floor here and not a structural allowance.
-        if (!(rel_o <= 1e-5)) { std::printf("    *** o over 1e-5 ***\n"); ++bad; }
-        if (!(rel_st <= 1e-5)) { std::printf("    *** state over 1e-5 ***\n"); ++bad; }
+        if (!(rel_o <= 1e-5)) {
+            std::printf("    *** o over 1e-5 ***\n");
+            ++bad;
+        }
+        if (!(rel_st <= 1e-5)) {
+            std::printf("    *** state over 1e-5 ***\n");
+            ++bad;
+        }
 
         // a zero state stays zero, and a zero gate/beta leaves the state untouched (the reference's
         // PROPERTY 4 setup) - a cheap independent invariant that no layout can fake
@@ -205,12 +216,18 @@ int main(int argc, char** argv) {
         }
 
         // ephemeral state: unchanged when the state is untouched but beta=1 — the delta rule writing k*d
-        cudaFree(d_st); cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_g); cudaFree(d_b); cudaFree(d_o);
+        cudaFree(d_st);
+        cudaFree(d_q);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_g);
+        cudaFree(d_b);
+        cudaFree(d_o);
     }
 
     // ================= 2. the conv =================
     {
-        const int C = 24, dc = 4;      // small, so the host reference is a plain loop
+        const int C = 24, dc = 4;   // small, so the host reference is a plain loop
         // TWO DIFFERENT LAYOUTS MEET HERE, and this is where the first version of this test failed at 0.136.
         // `ref/gdn.py` carries the conv state as (d_conv-1, C) ROW-MAJOR - (i, c) at i*C + c - because it is
         // numpy.  The kernel carries it as (C, d_conv-1) with c fastest - c*(dc-1) + i - because that is
@@ -218,7 +235,7 @@ int main(int argc, char** argv) {
         // mapping between them is written out below rather than assumed, in both directions.
         std::vector<float> cs_ref((size_t) (dc - 1) * C), x((size_t) C), kern((size_t) dc * C);
         for (int i = 0; i < dc - 1; ++i)
-            for (int c = 0; c < C; ++c) cs_ref[(size_t) (i * C + c)] = (float) (10 * (i + 1) + c);  // labelled
+            for (int c = 0; c < C; ++c) cs_ref[(size_t) (i * C + c)] = (float) (10 * (i + 1) + c);   // labelled
         for (int c = 0; c < C; ++c) x[(size_t) c] = (float) (100 + c);
         for (size_t i = 0; i < kern.size(); ++i) kern[i] = gauss(rng);
 
@@ -250,7 +267,8 @@ int main(int argc, char** argv) {
             std::vector<float> out_bad((size_t) C, 0.0f);
             for (int c = 0; c < C; ++c) {
                 double a = 0;
-                for (int i = 0; i < dc - 1; ++i) a += (double) cs2[(size_t) (i * C + c)] * (double) kW_wrong[(size_t) (c * dc + i)];
+                for (int i = 0; i < dc - 1; ++i)
+                    a += (double) cs2[(size_t) (i * C + c)] * (double) kW_wrong[(size_t) (c * dc + i)];
                 a += (double) x[(size_t) c] * (double) kW_wrong[(size_t) (c * dc + dc - 1)];
                 out_bad[(size_t) c] = (float) a;
             }
@@ -275,9 +293,18 @@ int main(int argc, char** argv) {
         const double rel_out = rel_l1(want, got), rel_cs = rel_l1(cs_want, got_cs);
         std::printf("  %-42s rel %.3e\n", "conv out vs reference", rel_out);
         std::printf("  %-42s rel %.3e\n", "conv state slide (mapped) vs reference", rel_cs);
-        if (!(rel_out <= 1e-6)) { std::printf("    *** conv out ***\n"); ++bad; }
-        if (!(rel_cs <= 1e-6)) { std::printf("    *** conv state ***\n"); ++bad; }
-        cudaFree(d_cs); cudaFree(d_x); cudaFree(d_w); cudaFree(d_o);
+        if (!(rel_out <= 1e-6)) {
+            std::printf("    *** conv out ***\n");
+            ++bad;
+        }
+        if (!(rel_cs <= 1e-6)) {
+            std::printf("    *** conv state ***\n");
+            ++bad;
+        }
+        cudaFree(d_cs);
+        cudaFree(d_x);
+        cudaFree(d_w);
+        cudaFree(d_o);
     }
 
     // ================= 3. l2_norm =================
@@ -289,7 +316,8 @@ int main(int argc, char** argv) {
         const float eps = 1e-6f;
         for (int r = 0; r < rows; ++r) {
             double acc = 0;
-            for (int i = 0; i < cols; ++i) acc += (double) x_ref[(size_t) (r * cols + i)] * (double) x_ref[(size_t) (r * cols + i)];
+            for (int i = 0; i < cols; ++i)
+                acc += (double) x_ref[(size_t) (r * cols + i)] * (double) x_ref[(size_t) (r * cols + i)];
             const float inv = (float) (1.0 / std::sqrt(acc + (double) eps));
             for (int i = 0; i < cols; ++i) x_ref[(size_t) (r * cols + i)] *= inv;
         }
@@ -300,7 +328,8 @@ int main(int argc, char** argv) {
         std::vector<float> x_mean = x;
         for (int r = 0; r < rows; ++r) {
             double acc = 0;
-            for (int i = 0; i < cols; ++i) acc += (double) x_mean[(size_t) (r * cols + i)] * (double) x_mean[(size_t) (r * cols + i)];
+            for (int i = 0; i < cols; ++i)
+                acc += (double) x_mean[(size_t) (r * cols + i)] * (double) x_mean[(size_t) (r * cols + i)];
             const float inv = (float) (1.0 / std::sqrt(acc / cols + (double) eps));
             for (int i = 0; i < cols; ++i) x_mean[(size_t) (r * cols + i)] *= inv;
         }
@@ -334,8 +363,8 @@ int main(int argc, char** argv) {
             for (int i = 0; i < S2; ++i) acc += (double) o[(size_t) (h * S2 + i)] * (double) o[(size_t) (h * S2 + i)];
             const float inv = (float) (1.0 / std::sqrt(acc / S2 + (double) eps));
             for (int i = 0; i < S2; ++i)
-                y_ref[(size_t) (h * S2 + i)] = o[(size_t) (h * S2 + i)] * inv * sn[(size_t) i] *
-                                              sigmoid_f(z[(size_t) (h * S2 + i)]);
+                y_ref[(size_t) (h * S2 + i)] =
+                    o[(size_t) (h * S2 + i)] * inv * sn[(size_t) i] * sigmoid_f(z[(size_t) (h * S2 + i)]);
         }
         float *d_o = nullptr, *d_z = nullptr, *d_sn = nullptr, *d_y = nullptr;
         check(cudaMalloc(&d_o, o.size() * 4), "no");
@@ -368,10 +397,13 @@ int main(int argc, char** argv) {
         std::printf("  %-42s %-4s (%.2f%% apart)\n", "sigmoid vs SiLU on the gate is observable",
                     rel_silu > 0.05 ? "yes" : "*** NO ***", rel_silu * 100);
         if (!(rel_silu > 0.05)) ++bad;
-        cudaFree(d_o); cudaFree(d_z); cudaFree(d_sn); cudaFree(d_y);
+        cudaFree(d_o);
+        cudaFree(d_z);
+        cudaFree(d_sn);
+        cudaFree(d_y);
     }
 
-    // ================= 5. the verify-window kernels, T = 1..8, bitwise against the single-token kernels =================
+    // =============== 5. the verify-window kernels, T = 1..8, bitwise against the single-token kernels ================
     // gdn_ab_multi and gdn_step_norm_multi are documented as bitwise `fused_gdn_ab` / `fused_gdn_step_norm` per
     // token (verify_kernels.hpp). Every T from 1 to kVerifyMaxT is its own exact-T instantiation, so each is run,
     // and every output and the state are compared with memcmp (not a tolerance).
@@ -421,16 +453,24 @@ int main(int argc, char** argv) {
             auto d_gr = (float*) dev((size_t) T * h_v * 4), d_br = (float*) dev((size_t) T * h_v * 4);
             lamina::kernels::gdn_ab_multi(d_x, d_wa, d_wb, d_dt, d_sa, d_g, d_b, n_embd, h_v, T, nullptr);
             for (int t = 0; t < T; ++t)
-                lamina::kernels::fused_gdn_ab(d_x + (size_t) t * n_embd, d_wa, d_wb, d_dt, d_sa, d_gr + (size_t) t * h_v,
-                                              d_br + (size_t) t * h_v, n_embd, h_v, nullptr);
+                lamina::kernels::fused_gdn_ab(d_x + (size_t) t * n_embd, d_wa, d_wb, d_dt, d_sa,
+                                              d_gr + (size_t) t * h_v, d_br + (size_t) t * h_v, n_embd, h_v, nullptr);
             std::vector<float> g((size_t) T * h_v), b(g.size()), gr(g.size()), br(g.size());
-            down(g, d_g); down(b, d_b); down(gr, d_gr); down(br, d_br);
+            down(g, d_g);
+            down(b, d_b);
+            down(gr, d_gr);
+            down(br, d_br);
             ++ab_n;
-            if (std::memcmp(g.data(), gr.data(), g.size() * 4) != 0 || std::memcmp(b.data(), br.data(), b.size() * 4) != 0) {
+            if (std::memcmp(g.data(), gr.data(), g.size() * 4) != 0 ||
+                std::memcmp(b.data(), br.data(), b.size() * 4) != 0) {
                 std::printf("    *** gdn_ab_multi T=%d differs from fused_gdn_ab (memcmp) ***\n", T);
                 ++ab_bad;
             }
-            cudaFree(d_x); cudaFree(d_g); cudaFree(d_b); cudaFree(d_gr); cudaFree(d_br);
+            cudaFree(d_x);
+            cudaFree(d_g);
+            cudaFree(d_b);
+            cudaFree(d_gr);
+            cudaFree(d_br);
 
             // --- the recurrence + output norm
             std::vector<float> h((size_t) T * C), gate((size_t) T * h_v), beta((size_t) T * h_v), z((size_t) T * vd);
@@ -458,9 +498,16 @@ int main(int argc, char** argv) {
             };
             std::vector<float> y((size_t) T * vd), yr(y.size()), st(st0.size()), sr(st0.size());
             // (name, n_keep tokens or -1 = verify half, t_out_begin)
-            struct Case { const char* name; int n_keep; int tb; };
-            std::vector<Case> cases = {{"verify", -1, 0}, {"verify tb", -1, T > 1 ? T / 2 : 0}, {"commit", T, 0},
-                                       {"commit tb", T, T / 2}, {"commit state only", T, T}};
+            struct Case {
+                const char* name;
+                int n_keep;
+                int tb;
+            };
+            std::vector<Case> cases = {{"verify", -1, 0},
+                                       {"verify tb", -1, T > 1 ? T / 2 : 0},
+                                       {"commit", T, 0},
+                                       {"commit tb", T, T / 2},
+                                       {"commit state only", T, T}};
             if (T > 1) cases.push_back({"commit n-1", T - 1, T - 1});
             for (const Case& c : cases) {
                 check(cudaMemcpy(d_st, st0.data(), st0.size() * 4, cudaMemcpyHostToDevice), "s0");
@@ -471,7 +518,10 @@ int main(int argc, char** argv) {
                 lamina::kernels::gdn_step_norm_multi(d_st, d_h, C, d_gate, d_beta, d_z, d_gm, eps, d_y, h_k, h_v, T,
                                                      c.n_keep >= 0 ? d_nk : nullptr, nullptr, c.tb);
                 run_ref(n);
-                down(y, d_y); down(yr, d_yr); down(st, d_st); down(sr, d_sr);
+                down(y, d_y);
+                down(yr, d_yr);
+                down(st, d_st);
+                down(sr, d_sr);
                 bool ok = true;
                 size_t y_bad = 0, y_all = 0;
                 for (int t = c.tb; t < n; ++t) {
@@ -494,18 +544,33 @@ int main(int argc, char** argv) {
                 }
                 ++sn_n;
                 if (!ok) {
-                    std::printf("    *** gdn_step_norm_multi T=%d '%s' differs from fused_gdn_step_norm (memcmp): %zu of %zu y words%s ***\n",
-                                T, c.name, y_bad, y_all,
-                                std::memcmp(st.data(), (c.n_keep < 0 ? st0 : sr).data(), st.size() * 4) != 0 ? ", state too" : "");
+                    std::printf(
+                        "    *** gdn_step_norm_multi T=%d '%s' differs from fused_gdn_step_norm (memcmp): %zu of %zu y words%s ***\n",
+                        T, c.name, y_bad, y_all,
+                        std::memcmp(st.data(), (c.n_keep < 0 ? st0 : sr).data(), st.size() * 4) != 0 ? ", state too"
+                                                                                                     : "");
                     ++sn_bad;
                 }
             }
-            cudaFree(d_h); cudaFree(d_gate); cudaFree(d_beta); cudaFree(d_z); cudaFree(d_y); cudaFree(d_yr); cudaFree(d_st);
-            cudaFree(d_sr); cudaFree(d_nk);
+            cudaFree(d_h);
+            cudaFree(d_gate);
+            cudaFree(d_beta);
+            cudaFree(d_z);
+            cudaFree(d_y);
+            cudaFree(d_yr);
+            cudaFree(d_st);
+            cudaFree(d_sr);
+            cudaFree(d_nk);
         }
-        cudaFree(d_wa); cudaFree(d_wb); cudaFree(d_dt); cudaFree(d_sa); cudaFree(d_gm);
-        std::printf("\n  %-42s %s (%d cases)\n", "gdn_ab_multi T=1..8 == fused_gdn_ab", ab_bad ? "*** NO ***" : "bitwise", ab_n);
-        std::printf("  %-42s %s (%d cases)\n", "gdn_step_norm_multi T=1..8 == single-token", sn_bad ? "*** NO ***" : "bitwise", sn_n);
+        cudaFree(d_wa);
+        cudaFree(d_wb);
+        cudaFree(d_dt);
+        cudaFree(d_sa);
+        cudaFree(d_gm);
+        std::printf("\n  %-42s %s (%d cases)\n", "gdn_ab_multi T=1..8 == fused_gdn_ab",
+                    ab_bad ? "*** NO ***" : "bitwise", ab_n);
+        std::printf("  %-42s %s (%d cases)\n", "gdn_step_norm_multi T=1..8 == single-token",
+                    sn_bad ? "*** NO ***" : "bitwise", sn_n);
         bad += ab_bad + sn_bad;
     }
 

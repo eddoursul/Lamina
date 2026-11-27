@@ -32,8 +32,24 @@ void set_hc_q8(bool on);
 
 /// The sections `Prefill::profile` times, in the order a layer runs them.
 enum PrefillSection {
-    kPsPle, kPsHcRead, kPsGdn, kPsGdnConv, kPsGdnScan, kPsGdnNorm, kPsGdnOut, kPsQsaProj, kPsQsaIndexer, kPsQsaScores, kPsQsaAttn, kPsQsaOut, kPsHcFfn, kPsRouter,
-    kPsExperts, kPsCombine, kPsDraft, kPsCount
+    kPsPle,
+    kPsHcRead,
+    kPsGdn,
+    kPsGdnConv,
+    kPsGdnScan,
+    kPsGdnNorm,
+    kPsGdnOut,
+    kPsQsaProj,
+    kPsQsaIndexer,
+    kPsQsaScores,
+    kPsQsaAttn,
+    kPsQsaOut,
+    kPsHcFfn,
+    kPsRouter,
+    kPsExperts,
+    kPsCombine,
+    kPsDraft,
+    kPsCount
 };
 const char* prefill_section_name(int section);
 
@@ -41,10 +57,10 @@ struct PrefillStats {
     int64_t tokens = 0;
     int64_t chunks = 0;
     double ms_total = 0;
-    double ms_experts_host = 0;     ///< host time queuing this GPU's experts
-    int64_t experts_streamed = 0;   ///< expert blobs copied host -> this GPU
-    int64_t experts_prefetched = 0; ///< ...of which ahead of the routing
-    int64_t experts_resident = 0;   ///< expert-layer groups served from its VRAM tier
+    double ms_experts_host = 0;       ///< host time queuing this GPU's experts
+    int64_t experts_streamed = 0;     ///< expert blobs copied host -> this GPU
+    int64_t experts_prefetched = 0;   ///< ...of which ahead of the routing
+    int64_t experts_resident = 0;     ///< expert-layer groups served from its VRAM tier
     double ms_ple = 0;
     double ms_section[kPsCount] = {};   ///< GPU ms per section, with `Prefill::profile`
 };
@@ -184,4 +200,4 @@ private:
     bool stopped_ = false;
 };
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

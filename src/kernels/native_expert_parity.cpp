@@ -9,19 +9,19 @@
 // relative).  (c2) where --expert-math exact has kernels (the K-quant formats): the GPU in the CPU's activation formats
 // against the CPU with its exact SwiGLU, bit for bit, the hidden rows' bytes too.  (d) the GPU dequantizers of the
 // prompt path and the embedding, against `to_float`: exact.
+#include "ggml-cpu.h"
 #include "lamina/artifact/gguf_reader.hpp"
-#include "lamina/kernels/cpu/native_expert.hpp"
-#include "lamina/kernels/cpu/hadamard.hpp"
-#include "lamina/kernels/cpu/tq_cpu.hpp"
 #include "lamina/core/pack_image.hpp"
 #include "lamina/kernels/cpu/expert.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/hadamard.hpp"
 #include "lamina/kernels/cpu/iq_avx512.hpp"
 #include "lamina/kernels/cpu/kq_avx2.hpp"
-#include "lamina/platform/cpu_arch.hpp"
-#include "ggml-cpu.h"
+#include "lamina/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/cpu/tq_cpu.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/quantize_act.hpp"
+#include "lamina/platform/cpu_arch.hpp"
 
 #include "ggml.h"
 
@@ -33,9 +33,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 #include <string>
-#include <cstring>
 #include <vector>
 
 namespace cpu = lamina::kernels::cpu;
@@ -47,7 +47,10 @@ constexpr int64_t H = 2560, FF = 640;
 
 double rel(const std::vector<float>& a, const std::vector<float>& b) {
     double n = 0, d = 0;
-    for (size_t i = 0; i < a.size(); ++i) { n += std::fabs((double) a[i] - b[i]); d += std::fabs((double) b[i]); }
+    for (size_t i = 0; i < a.size(); ++i) {
+        n += std::fabs((double) a[i] - b[i]);
+        d += std::fabs((double) b[i]);
+    }
     return n / (d + 1e-30);
 }
 
@@ -68,8 +71,8 @@ int q8_0_tie_fixture(cudaStream_t s) {
     cudaMemcpy(got.data(), dy, got.size(), cudaMemcpyDeviceToHost);
     int failures = (got[2] != 127 || got[3] != 2);
     for (size_t i = 4; i < got.size(); ++i) failures += got[i] != 0;
-    std::printf("q8_0_tie_fixture: q0=%u q1=%u expected=127,2 %s\n",
-                (unsigned) got[2], (unsigned) got[3], failures ? "FAIL" : "PASS");
+    std::printf("q8_0_tie_fixture: q0=%u q1=%u expected=127,2 %s\n", (unsigned) got[2], (unsigned) got[3],
+                failures ? "FAIL" : "PASS");
     cudaFree(dx);
     cudaFree(dy);
     return failures;
@@ -111,7 +114,8 @@ int nvfp4_mt_fixture() {
             }
         }
     }
-    std::printf("nvfp4_mt_fixture: %d of %d dots ggml's bits %s\n", checked - failures, checked, failures ? "FAIL" : "PASS");
+    std::printf("nvfp4_mt_fixture: %d of %d dots ggml's bits %s\n", checked - failures, checked,
+                failures ? "FAIL" : "PASS");
     for (const int nt : {2, 4, 8}) {   // (the time a row of nt tokens: ggml's dot a token against the kernel's)
         const void* act[nt_max];
         for (int t = 0; t < nt; ++t) act[t] = xq.data() + (size_t) t * act_bytes;
@@ -119,11 +123,15 @@ int nvfp4_mt_fixture() {
         constexpr int reps = 2000;
         auto t0 = std::chrono::steady_clock::now();
         for (int it = 0; it < reps; ++it)
-            for (int t = 0; t < nt; ++t) dot(n, &out[t], 0, wq.data() + (size_t) (it % rows) * row_bytes, 0, act[t], 0, 1);
-        const double a = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
+            for (int t = 0; t < nt; ++t)
+                dot(n, &out[t], 0, wq.data() + (size_t) (it % rows) * row_bytes, 0, act[t], 0, 1);
+        const double a =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
         t0 = std::chrono::steady_clock::now();
-        for (int it = 0; it < reps; ++it) lamina::kernels::cpu::nvfp4_dots(wq.data() + (size_t) (it % rows) * row_bytes, n, act, nt, out);
-        const double b = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
+        for (int it = 0; it < reps; ++it)
+            lamina::kernels::cpu::nvfp4_dots(wq.data() + (size_t) (it % rows) * row_bytes, n, act, nt, out);
+        const double b =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
         std::printf("  a row of %d tokens: ggml %.2f us, nvfp4_dots %.2f us\n", nt, a, b);
     }
     return failures != 0;
@@ -146,7 +154,9 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         if (tq) cpu::tq_dequant_row(type, row, (int) n, out);
         else ggml_get_type_traits((ggml_type) type)->to_float(row, out, n);
     };
-    const auto type_name = [&](int type) { return tq ? lamina::ggml_type_name((uint32_t) type) : ggml_type_name((ggml_type) type); };
+    const auto type_name = [&](int type) {
+        return tq ? lamina::ggml_type_name((uint32_t) type) : ggml_type_name((ggml_type) type);
+    };
     std::vector<float> G((size_t) FF * H), U((size_t) FF * H), D((size_t) H * FF);
     for (int64_t r = 0; r < FF; ++r) {
         to_float(f.gu_type, blob.data() + r * f.gu_row, G.data() + r * H, H);
@@ -168,7 +178,10 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         std::vector<float> h(FF);
         for (int64_t r = 0; r < FF; ++r) {
             double g = 0, u = 0;
-            for (int64_t i = 0; i < H; ++i) { g += (double) G[r * H + i] * xr[k * H + i]; u += (double) U[r * H + i] * xr[k * H + i]; }
+            for (int64_t i = 0; i < H; ++i) {
+                g += (double) G[r * H + i] * xr[k * H + i];
+                u += (double) U[r * H + i] * xr[k * H + i];
+            }
             h[r] = (float) (g / (1.0 + std::exp(-g)) * u);
         }
         if (f.had_d) cpu::hadamard_rotate(h.data(), (int) FF, f.had_block, f.d_signs);
@@ -200,8 +213,9 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             const double us1 = us_since(t0, it);
             t0 = std::chrono::steady_clock::now();
             for (int i = 0; i < it; ++i) cpu::native_gu_rows(f, blob.data(), a, NT, ffp, 0, (int) FF);
-            std::printf("          gate+up one thread, weights cache-resident: %.0f us one token (%.2f GB/s), %.0f us %d tokens\n",
-                        us1, 2.0 * f.up_off / us1 / 1e3, us_since(t0, it), NT);
+            std::printf(
+                "          gate+up one thread, weights cache-resident: %.0f us one token (%.2f GB/s), %.0f us %d tokens\n",
+                us1, 2.0 * f.up_off / us1 / 1e3, us_since(t0, it), NT);
 #if LAMINA_X86
             size_t ndiff = 0;
             std::vector<std::vector<float>> refs(NT, std::vector<float>(FF)), gots(NT, std::vector<float>(FF));
@@ -230,7 +244,8 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
                 cpu::tq_detail::tq_rows_avx512(kb, blob.data(), f.gu_row, (int) H, ta.data(), NT, gp, 0, (int) FF);
                 for (int k = 0; k < NT; ++k) ndiff += std::memcmp(refs[k].data(), gots[k].data(), (size_t) FF * 4) != 0;
             }
-            std::printf("          trellis rows, AVX2 and AVX-512 against scalar: %zu differ  %s\n", ndiff, ndiff == 0 ? "ok" : "FAIL");
+            std::printf("          trellis rows, AVX2 and AVX-512 against scalar: %zu differ  %s\n", ndiff,
+                        ndiff == 0 ? "ok" : "FAIL");
             failures += ndiff != 0;
 #endif
         }
@@ -249,12 +264,15 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
                         ggml_type_name((ggml_type) f.gu_type), rel(g512, gref));
             float* f1[1] = {ffp[0]};
             auto t0 = std::chrono::steady_clock::now();
-            for (int i = 0; i < it; ++i) cpu::iq512_gu_rows(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, 1, f1, 0, (int) FF);
+            for (int i = 0; i < it; ++i)
+                cpu::iq512_gu_rows(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, 1, f1, 0, (int) FF);
             const double us1 = us_since(t0, it);
             t0 = std::chrono::steady_clock::now();
-            for (int i = 0; i < it; ++i) cpu::iq512_gu_rows(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, NT, ffp, 0, (int) FF);
+            for (int i = 0; i < it; ++i)
+                cpu::iq512_gu_rows(f.gu_type, blob.data(), f.gu_row, f.up_off, (int) H, a, NT, ffp, 0, (int) FF);
             std::printf("          gate+up one thread, weights cache-resident: avx512 %.0f us one token (%.2f GB/s), "
-                        "%.0f us %d tokens\n", us1, 2.0 * f.up_off / us1 / 1e3, us_since(t0, it), NT);
+                        "%.0f us %d tokens\n",
+                        us1, 2.0 * f.up_off / us1 / 1e3, us_since(t0, it), NT);
         }
 #endif
         if (!tq) {   // ggml-cpu's own rows, one thread (what the pool runs for formats without an AVX-512 kernel)
@@ -266,8 +284,8 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
                     tc->vec_dot((int) H, &uu, 0, blob.data() + f.up_off + r * f.gu_row, 0, a[0], 0, 1);
                 }
             const double usg = us_since(t0, it);
-            std::printf("          gate+up one thread, weights cache-resident: ggml %.0f us one token (%.2f GB/s)\n", usg,
-                        2.0 * f.up_off / usg / 1e3);
+            std::printf("          gate+up one thread, weights cache-resident: ggml %.0f us one token (%.2f GB/s)\n",
+                        usg, 2.0 * f.up_off / usg / 1e3);
         }
         std::vector<std::vector<uint8_t>> hq(NT, std::vector<uint8_t>(cpu::kNativeHBytes));
         for (int k = 0; k < NT; ++k) {
@@ -317,7 +335,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         int32_t *dstart, *dn, *ddst, *dtok;
         cudaMalloc(&dblob, blob.size());
         cudaMalloc(&dx, x.size() * 4);
-        cudaMalloc(&dxq, (size_t) NT * (std::max)(H / 32 * 36, H / 256 * 292));
+        cudaMalloc(&dxq, (size_t) NT * (std::max) (H / 32 * 36, H / 256 * 292));
         cudaMalloc(&dscr, lamina::kernels::native_expert_scratch_bytes(NT, FF, f.had_d));
         cudaMalloc((void**) &dout, (size_t) NT * H * 4);
         cudaMalloc((void**) &dptr, 8);
@@ -344,10 +362,8 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             if (f.had_gu)
                 lamina::kernels::hadamard_rows((const float*) dx, (float*) dx, NT, H,
                                                lamina::kernels::hadamard_device_signs(f.gu_signs, (int) H), s);
-            if (L.gu_act == 15)
-                lamina::kernels::quantize_q8_K((const float*) dx, (uint8_t*) dxq, (int64_t) NT * H, s);
-            else
-                lamina::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
+            if (L.gu_act == 15) lamina::kernels::quantize_q8_K((const float*) dx, (uint8_t*) dxq, (int64_t) NT * H, s);
+            else lamina::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
             const int64_t xstride = L.gu_act == 15 ? (H / 256) * 292 : (H / 32) * 36;
             lamina::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, xstride, dscr, dout, s);
             cudaStreamSynchronize(s);
@@ -359,7 +375,8 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             cudaMemcpy(dr.data(), dx, dr.size() * 4, cudaMemcpyDeviceToHost);
             size_t nrot = 0;
             for (size_t i = 0; i < dr.size(); ++i) nrot += std::memcmp(&dr[i], &xr[i], 4) != 0;
-            std::printf("          GPU rotation vs the CPU's: %zu of %zu floats differ  %s\n", nrot, dr.size(), nrot == 0 ? "ok" : "FAIL");
+            std::printf("          GPU rotation vs the CPU's: %zu of %zu floats differ  %s\n", nrot, dr.size(),
+                        nrot == 0 ? "ok" : "FAIL");
             failures += nrot != 0;
         }
         if (exact) {
@@ -368,7 +385,8 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             size_t hdiff = 0, odiff = 0;
             for (int k = 0; k < NT; ++k) {
                 std::vector<uint8_t> ghq(f.h_bytes);
-                cudaMemcpy(ghq.data(), (const uint8_t*) dscr + (size_t) k * f.h_bytes, f.h_bytes, cudaMemcpyDeviceToHost);
+                cudaMemcpy(ghq.data(), (const uint8_t*) dscr + (size_t) k * f.h_bytes, f.h_bytes,
+                           cudaMemcpyDeviceToHost);
                 for (size_t j = 0; j < f.h_bytes; ++j) hdiff += ghq[j] != cpu_hqx[k][j];
             }
             for (size_t i = 0; i < got_gx.size(); ++i) odiff += std::memcmp(&got_gx[i], &got_cx[i], 4) != 0;
@@ -379,16 +397,22 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             size_t ddiff = 0, drows = 0;
             float* drow = nullptr;
             void* dact = nullptr;
-            cudaMalloc((void**) &drow, (size_t) (std::max)(FF, H) * 4);
+            cudaMalloc((void**) &drow, (size_t) (std::max) (FF, H) * 4);
             cudaMalloc(&dact, cpu::kNativeActBytes);
-            std::vector<float> gd((size_t) (std::max)(FF, H));
+            std::vector<float> gd((size_t) (std::max) (FF, H));
             for (int k = 0; k < NT; ++k) {
                 std::vector<uint8_t> act(cpu::kNativeActBytes);
                 cpu::native_quant_act(f, x.data() + k * H, act.data());
-                const struct { int type; size_t off, row_bytes; int64_t rows; const uint8_t* a; int64_t n; size_t ab; } sets[3] = {
-                    {f.gu_type, 0, f.gu_row, FF, act.data(), H, f.act_bytes},
-                    {f.gu_type, f.up_off, f.gu_row, FF, act.data(), H, f.act_bytes},
-                    {f.d_type, f.down_off, f.d_row, H, cpu_hqx[k].data(), FF, f.h_bytes}};
+                const struct {
+                    int type;
+                    size_t off, row_bytes;
+                    int64_t rows;
+                    const uint8_t* a;
+                    int64_t n;
+                    size_t ab;
+                } sets[3] = {{f.gu_type, 0, f.gu_row, FF, act.data(), H, f.act_bytes},
+                             {f.gu_type, f.up_off, f.gu_row, FF, act.data(), H, f.act_bytes},
+                             {f.d_type, f.down_off, f.d_row, H, cpu_hqx[k].data(), FF, f.h_bytes}};
                 for (const auto& set : sets) {
                     cudaMemcpy(dact, set.a, set.ab, cudaMemcpyHostToDevice);
                     lamina::kernels::native_exact_dot_rows(set.type, (const uint8_t*) dblob + set.off, set.row_bytes,
@@ -398,7 +422,8 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
                     const auto* tc = ggml_get_type_traits_cpu((ggml_type) set.type);
                     for (int64_t r = 0; r < set.rows; ++r) {
                         float v = 0.f;
-                        tc->vec_dot((int) set.n, &v, 0, blob.data() + set.off + (size_t) r * set.row_bytes, 0, set.a, 0, 1);
+                        tc->vec_dot((int) set.n, &v, 0, blob.data() + set.off + (size_t) r * set.row_bytes, 0, set.a, 0,
+                                    1);
                         ddiff += std::memcmp(&v, &gd[(size_t) r], 4) != 0;
                         ++drows;
                     }
@@ -414,26 +439,37 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         cudaMalloc((void**) &dq, (size_t) FF * H * 4);
         std::vector<float> got_dq((size_t) FF * H);
         double dq_err = 0.0;
-        const struct { const uint8_t* src; int type; const std::vector<float>* want; } mats[3] = {
-            {(const uint8_t*) dblob, f.gu_type, &G}, {(const uint8_t*) dblob + f.up_off, f.gu_type, &U},
-            {(const uint8_t*) dblob + f.down_off, f.d_type, &D}};
+        const struct {
+            const uint8_t* src;
+            int type;
+            const std::vector<float>* want;
+        } mats[3] = {{(const uint8_t*) dblob, f.gu_type, &G},
+                     {(const uint8_t*) dblob + f.up_off, f.gu_type, &U},
+                     {(const uint8_t*) dblob + f.down_off, f.d_type, &D}};
         for (const auto& m : mats) {
             lamina::kernels::iq_dequant_f32(m.type, m.src, FF * H, dq, s);
             cudaStreamSynchronize(s);
             cudaMemcpy(got_dq.data(), dq, got_dq.size() * 4, cudaMemcpyDeviceToHost);
-            dq_err = (std::max)(dq_err, rel(got_dq, *m.want));
+            dq_err = (std::max) (dq_err, rel(got_dq, *m.want));
         }
         std::printf("          GPU dequant vs ggml to_float: rel %.2e\n", dq_err);
         if (!(dq_err < 1e-6)) ++failures;
         cudaFree(dq);
-        cudaFree(dblob); cudaFree(dx); cudaFree(dxq); cudaFree(dscr); cudaFree(dout); cudaFree(dptr);
-        cudaFree(dstart); cudaFree(dn); cudaFree(ddst); cudaFree(dtok);
+        cudaFree(dblob);
+        cudaFree(dx);
+        cudaFree(dxq);
+        cudaFree(dscr);
+        cudaFree(dout);
+        cudaFree(dptr);
+        cudaFree(dstart);
+        cudaFree(dn);
+        cudaFree(ddst);
+        cudaFree(dtok);
     }
     const double ec = rel(got_c, ref), eg = rel(got_g, ref), ecg = rel(got_c, got_g);
     const bool ok = ec < 3e-2 && eg < 3e-2 && std::isfinite(ec) && std::isfinite(eg);
     std::printf("%-9s %-8s/%-7s blob %8zu  cpu rel %.2e  gpu rel %.2e  cpu-gpu %.2e  %s\n", label.c_str(),
-                type_name(f.gu_type), type_name(f.d_type), f.bytes, ec, eg, ecg,
-                ok ? "ok" : "FAIL");
+                type_name(f.gu_type), type_name(f.d_type), f.bytes, ec, eg, ecg, ok ? "ok" : "FAIL");
     return failures + (ok ? 0 : 1);
 }
 
@@ -481,12 +517,13 @@ std::vector<uint8_t> synthetic_blob(const cpu::NativeFmt& f, int seed) {
     return blob;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: native_expert_parity <shard1.gguf> [layer ...]\n"
-                             "       native_expert_parity --synthetic GU/DOWN ...   (ggml type names, e.g. q6_K/q8_0)\n");
+        std::fprintf(stderr,
+                     "usage: native_expert_parity <shard1.gguf> [layer ...]\n"
+                     "       native_expert_parity --synthetic GU/DOWN ...   (ggml type names, e.g. q6_K/q8_0)\n");
         return 2;
     }
     int failures = 0;
@@ -542,11 +579,17 @@ int main(int argc, char** argv) {
                 t[r] = model.find("blk." + std::to_string(l) + ".ffn_" + roles[r] + "_exps.weight", &at);
                 if (t[r]) data[r] = model.shard(at).tensor_data(*t[r]);
             }
-            if (!t[0] || !t[1] || !t[2]) { std::printf("layer %d: no expert tensors\n", l); ++failures; continue; }
+            if (!t[0] || !t[1] || !t[2]) {
+                std::printf("layer %d: no expert tensors\n", l);
+                ++failures;
+                continue;
+            }
             cpu::NativeFmt f;
             std::string err;
             if (!cpu::native_fmt((int) t[0]->type, (int) t[2]->type, H, FF, f, err)) {
-                std::printf("layer %d: %s\n", l, err.c_str()); ++failures; continue;
+                std::printf("layer %d: %s\n", l, err.c_str());
+                ++failures;
+                continue;
             }
             if (const cpu::HadamardSpec& hs = cpu::hadamard_spec(); hs.any()) {
                 f.had_block = hs.block;

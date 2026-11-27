@@ -74,4 +74,4 @@ private:
 #endif
 };
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

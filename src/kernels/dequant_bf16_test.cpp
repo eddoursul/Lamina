@@ -23,18 +23,18 @@ namespace {
 bool cpu_block(int type, const uint8_t* b, float* out) {
     using namespace lamina;
     switch (type) {
-    case 2: dequantize_q4_0(b, out); return true;
-    case 6: dequantize_q5_0(b, out); return true;
-    case 7: dequantize_q5_1(b, out); return true;
-    case 8: dequantize_q8_0(b, out); return true;
-    case 11: dequantize_q3_K(b, out); return true;
-    case 12: dequantize_q4_K(b, out); return true;
-    case 13: dequantize_q5_K(b, out); return true;
-    case 14: dequantize_q6_K(b, out); return true;
-    case 20: dequantize_iq4_nl(b, out); return true;
-    case 23: dequantize_iq4_xs(b, out); return true;
-    case 42: dequantize_q2_0(b, out); return true;
-    default: return false;
+        case 2: dequantize_q4_0(b, out); return true;
+        case 6: dequantize_q5_0(b, out); return true;
+        case 7: dequantize_q5_1(b, out); return true;
+        case 8: dequantize_q8_0(b, out); return true;
+        case 11: dequantize_q3_K(b, out); return true;
+        case 12: dequantize_q4_K(b, out); return true;
+        case 13: dequantize_q5_K(b, out); return true;
+        case 14: dequantize_q6_K(b, out); return true;
+        case 20: dequantize_iq4_nl(b, out); return true;
+        case 23: dequantize_iq4_xs(b, out); return true;
+        case 42: dequantize_q2_0(b, out); return true;
+        default: return false;
     }
 }
 
@@ -45,7 +45,7 @@ float bf16_to_f32(uint16_t h) {
     return f;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
             int be = 0, bb = 0;
             if (!lamina::block_geometry(t.type, be, bb)) continue;
             const int64_t cols = (int64_t) t.shape[0];
-            const int64_t rows = (std::min<int64_t>)(4, (int64_t) t.shape[1]);
+            const int64_t rows = (std::min<int64_t>) (4, (int64_t) t.shape[1]);
             const int64_t row_bytes = cols / be * bb;
             const uint8_t* host = (const uint8_t*) gguf.tensor_data(t);
             void* d_blocks = nullptr;
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
                 const double e = std::fabs((double) gf[i] - ref[i]);
                 const double tol = 1e-6 * std::fabs((double) ref[i]) + 1e-30;
                 if (e > tol) ++bad_f;
-                worst = (std::max)(worst, e / (std::fabs((double) ref[i]) + 1e-30));
+                worst = (std::max) (worst, e / (std::fabs((double) ref[i]) + 1e-30));
                 const double eh = std::fabs((double) bf16_to_f32(gh[i]) - ref[i]);
                 if (eh > std::ldexp(std::fabs((double) ref[i]), -8) + 1e-30) ++bad_h;
             }

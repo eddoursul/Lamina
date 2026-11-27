@@ -26,4 +26,4 @@ inline std::string b64encode(std::string_view in) {
     return out;
 }
 
-}  // namespace lamina
+}   // namespace lamina

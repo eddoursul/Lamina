@@ -1,9 +1,9 @@
 // src/prefill/kernels.cu - see include/lamina/prefill/kernels.hpp.
-#include "lamina/prefill/kernels.hpp"
-#include "lamina/kernels/warp.cuh"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/mrope.hpp"
 #include "lamina/kernels/verify_kernels.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/prefill/kernels.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -45,7 +45,10 @@ __device__ float block_sum(float v, float* sh) {
 }
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) { std::fprintf(stderr, "prefill %s: %s\n", what, cudaGetErrorString(e)); std::exit(1); }
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "prefill %s: %s\n", what, cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 unsigned blocks_for(int64_t n, int t = 256) { return (unsigned) ((n + t - 1) / t); }
 
@@ -53,7 +56,7 @@ unsigned blocks_for(int64_t n, int t = 256) { return (unsigned) ((n + t - 1) / t
 __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restrict__ w, float eps,
                                float* __restrict__ xn, uint16_t* __restrict__ xn16) {
     __shared__ float sh[32];
-    const int64_t row = blockIdx.x;                 // t * 4 + c
+    const int64_t row = blockIdx.x;   // t * 4 + c
     const int c = (int) (row % HC);
     const float* r = R + row * N;
     float ss = 0.0f;
@@ -70,7 +73,7 @@ __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr
 __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __restrict__ w, float eps,
                                   float* __restrict__ rs_out, uint16_t* __restrict__ xn16) {
     __shared__ float sh[32];
-    const int64_t row = blockIdx.x;                 // t * 4 + c
+    const int64_t row = blockIdx.x;   // t * 4 + c
     const int c = (int) (row % HC);
     const float* r = R + row * N;
     float ss = 0.0f;
@@ -107,8 +110,8 @@ __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __rest
 // costs 8%).  The last tile's missing rows are zeros (a cp.async of 0 bytes): read from one row, they ran 2-3x slower.
 constexpr int UM_BM = 128, UM_BD = 32, UM_KC = 32, UM_LD = UM_KC + 8;   // tokens, columns a stream, k a slice, a row
 __device__ __forceinline__ void um_cp16(void* s, const void* g, unsigned bytes = 16) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g),
-                 "r"(bytes));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)),
+                 "l"(g), "r"(bytes));
 }
 __device__ __forceinline__ void um_ldm4(unsigned (&r)[4], const void* p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -122,11 +125,10 @@ __device__ __forceinline__ void um_mma(float (&d)[4], const unsigned (&a)[4], un
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 template <bool PF>
-__global__ void __launch_bounds__(256, 2) gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ wu,
-                                                          const float* __restrict__ R, const float* __restrict__ rs,
-                                                          const float* __restrict__ w, float* __restrict__ mixed,
-                                                          uint16_t* __restrict__ mixed16, uint16_t* __restrict__ mixed_h,
-                                                          int64_t T) {
+__global__ void __launch_bounds__(256, 2)
+gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ wu, const float* __restrict__ R,
+                const float* __restrict__ rs, const float* __restrict__ w, float* __restrict__ mixed,
+                uint16_t* __restrict__ mixed16, uint16_t* __restrict__ mixed_h, int64_t T) {
     __shared__ __align__(16) uint16_t sA[2][UM_BM][UM_LD];
     __shared__ __align__(16) uint16_t sB[2][HC * UM_BD][UM_LD];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
@@ -174,11 +176,14 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_kernel(const uint16_t* __rest
         for (int ks = 0; ks < UM_KC / 16; ++ks) {
             unsigned a[2][4];
 #pragma unroll
-            for (int mt = 0; mt < 2; ++mt) um_ldm4(a[mt], &sA[buf][wm * 32 + mt * 16 + (lane & 15)][ks * 16 + (lane >> 4) * 8]);
+            for (int mt = 0; mt < 2; ++mt)
+                um_ldm4(a[mt], &sA[buf][wm * 32 + mt * 16 + (lane & 15)][ks * 16 + (lane >> 4) * 8]);
 #pragma unroll
             for (int c = 0; c < HC; ++c) {
                 unsigned b[4];   // b[0..1]: columns 0-7 of the warp's 16, b[2..3]: 8-15 (k 0-7, 8-15 each)
-                um_ldm4(b, &sB[buf][c * UM_BD + wn * 16 + (lane & 7) + ((lane >> 4) << 3)][ks * 16 + ((lane >> 3) & 1) * 8]);
+                um_ldm4(
+                    b,
+                    &sB[buf][c * UM_BD + wn * 16 + (lane & 7) + ((lane >> 4) << 3)][ks * 16 + ((lane >> 3) & 1) * 8]);
 #pragma unroll
                 for (int mt = 0; mt < 2; ++mt) {
                     um_mma(acc[mt][c][0], a[mt], b[0], b[1]);
@@ -211,9 +216,11 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_kernel(const uint16_t* __rest
                 sm[1] /= (float) HC;
                 if (mixed) *reinterpret_cast<float2*>(mixed + t * N + d) = make_float2(sm[0], sm[1]);
                 if (mixed16)
-                    *reinterpret_cast<uint32_t*>(mixed16 + t * N + d) = (uint32_t) bf(sm[0]) | ((uint32_t) bf(sm[1]) << 16);
+                    *reinterpret_cast<uint32_t*>(mixed16 + t * N + d) =
+                        (uint32_t) bf(sm[0]) | ((uint32_t) bf(sm[1]) << 16);
                 if (mixed_h)
-                    *reinterpret_cast<uint32_t*>(mixed_h + t * N + d) = (uint32_t) hf(sm[0]) | ((uint32_t) hf(sm[1]) << 16);
+                    *reinterpret_cast<uint32_t*>(mixed_h + t * N + d) =
+                        (uint32_t) hf(sm[0]) | ((uint32_t) hf(sm[1]) << 16);
             }
         }
 }
@@ -221,12 +228,13 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_kernel(const uint16_t* __rest
 // the same thread-to-element mapping (256 threads, stride 256) and block_sum, so rs and the BF16 image are the same
 // bits, and R is not read back
 constexpr int GRW_PER = N / 256;
-__global__ void __launch_bounds__(256)
-gr_write_norm_rs_kernel(float* __restrict__ R, const float* __restrict__ bo, const float* __restrict__ inj,
-                        int64_t inj_ld, const float* __restrict__ w, float eps, float* __restrict__ rs_out,
-                        uint16_t* __restrict__ xn16, const uint16_t* __restrict__ partial) {
+__global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict__ R, const float* __restrict__ bo,
+                                                               const float* __restrict__ inj, int64_t inj_ld,
+                                                               const float* __restrict__ w, float eps,
+                                                               float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
+                                                               const uint16_t* __restrict__ partial) {
     __shared__ float sh[32];
-    const int64_t row = blockIdx.x;                 // t * 4 + c
+    const int64_t row = blockIdx.x;   // t * 4 + c
     const int64_t t = row / HC;
     const int c = (int) (row % HC);
     float* r = R + row * N;
@@ -343,30 +351,47 @@ __global__ void route_kernel(const float* __restrict__ logits, int32_t* __restri
     mx = warp_max(mx);
     float sum = 0.0f;
 #pragma unroll
-    for (int i = 0; i < 16; ++i) { v[i] = expf(v[i] - mx); sum += v[i]; }
+    for (int i = 0; i < 16; ++i) {
+        v[i] = expf(v[i] - mx);
+        sum += v[i];
+    }
     const float rcp = 1.0f / warp_sum(sum);
 #pragma unroll
-    for (int i = 0; i < 16; ++i) { v[i] *= rcp; if (isnan(v[i])) v[i] = -FLT_MAX; }
+    for (int i = 0; i < 16; ++i) {
+        v[i] *= rcp;
+        if (isnan(v[i])) v[i] = -FLT_MAX;
+    }
     float selected = 0.0f, selected_sum = 0.0f;
     for (int rank = 0; rank < 10; ++rank) {
         float best = v[0];
         int ex = lane;
 #pragma unroll
-        for (int i = 1; i < 16; ++i) if (v[i] > best) { best = v[i]; ex = lane + i * 32; }
+        for (int i = 1; i < 16; ++i)
+            if (v[i] > best) {
+                best = v[i];
+                ex = lane + i * 32;
+            }
 #pragma unroll
         for (int m = 16; m; m >>= 1) {
             const float ob = __shfl_xor_sync(0xffffffffu, best, m);
             const int oi = __shfl_xor_sync(0xffffffffu, ex, m);
-            if (ob > best || (ob == best && oi < ex)) { best = ob; ex = oi; }
+            if (ob > best || (ob == best && oi < ex)) {
+                best = ob;
+                ex = oi;
+            }
         }
-        if ((ex & 31) == lane) { v[ex / 32] = -INFINITY; selected_sum += best; }
+        if ((ex & 31) == lane) {
+            v[ex / 32] = -INFINITY;
+            selected_sum += best;
+        }
         if (lane == 0) ids[t * 10 + rank] = ex;
         if (rank == lane) selected = best;
     }
     selected_sum = fmaxf(warp_sum(selected_sum), 6.103515625e-5f);
     if (lane < 10) wout[t * 10 + lane] = selected / selected_sum;
 }
-// Lamina blob: gate/up codes [1280][640 B], down codes [2560][160 B], gate/up scales [1280][40] f16, down scales [2560][10] f16
+// Lamina blob: gate/up codes [1280][640 B], down codes [2560][160
+// B], gate/up scales [1280][40] f16, down scales [2560][10] f16
 template <bool HALF>
 __global__ void blob_dequant_kernel(const uint8_t* __restrict__ blob, uint16_t* __restrict__ gu16,
                                     uint16_t* __restrict__ d16) {
@@ -381,7 +406,10 @@ __global__ void blob_dequant_kernel(const uint8_t* __restrict__ blob, uint16_t* 
         const float d = __half2float(__ushort_as_half((uint16_t) (sp[0] | (sp[1] << 8))));
         uint16_t* o = gu16 + row * 2560 + byte * 4;
 #pragma unroll
-        for (int k = 0; k < 4; ++k) { const float v = (float) (((c >> (2 * k)) & 3) - 1) * d; o[k] = HALF ? hf(v) : bf(v); }
+        for (int k = 0; k < 4; ++k) {
+            const float v = (float) (((c >> (2 * k)) & 3) - 1) * d;
+            o[k] = HALF ? hf(v) : bf(v);
+        }
     } else if (i < n_gu + n_d) {
         const int64_t j = i - n_gu, row = j / 160, byte = j % 160;
         const uint8_t c = blob[O_D_CODES + row * 160 + byte];
@@ -389,7 +417,10 @@ __global__ void blob_dequant_kernel(const uint8_t* __restrict__ blob, uint16_t* 
         const float d = __half2float(__ushort_as_half((uint16_t) (sp[0] | (sp[1] << 8))));
         uint16_t* o = d16 + row * 640 + byte * 4;
 #pragma unroll
-        for (int k = 0; k < 4; ++k) { const float v = (float) (((c >> (2 * k)) & 3) - 1) * d; o[k] = HALF ? hf(v) : bf(v); }
+        for (int k = 0; k < 4; ++k) {
+            const float v = (float) (((c >> (2 * k)) & 3) - 1) * d;
+            o[k] = HALF ? hf(v) : bf(v);
+        }
     }
 }
 __global__ void swiglu_il_kernel(const float* __restrict__ gu, uint16_t* __restrict__ h16, int64_t n) {
@@ -442,7 +473,8 @@ __global__ void moe_scatter_add_kernel(float* __restrict__ sum, const float* __r
 }
 
 // ---------------------------------------------------------------- QSA helpers
-__global__ void rms_rows_kernel(float* __restrict__ x, const float* __restrict__ w, int64_t cols, int64_t ld, float eps) {
+__global__ void rms_rows_kernel(float* __restrict__ x, const float* __restrict__ w, int64_t cols, int64_t ld,
+                                float eps) {
     __shared__ float sh[32];
     float* r = x + (int64_t) blockIdx.x * ld;
     float ss = 0.0f;
@@ -455,13 +487,13 @@ template <int MODE>
 __global__ void rope_kernel(float* __restrict__ x, int64_t heads, int64_t dim, int64_t ld, int64_t pos0,
                             float theta_scale, const int32_t* __restrict__ mtab, lamina::kernels::RopeKernelArgs k,
                             lamina::kernels::RopeTab rt) {
-    const int64_t row = blockIdx.x;             // t * heads + h
-    const int pair = threadIdx.x;               // 0..31
+    const int64_t row = blockIdx.x;   // t * heads + h
+    const int pair = threadIdx.x;     // 0..31
     const int64_t t = row / heads, h = row % heads;
     float* p = x + t * ld + h * dim;
     float c, s;
-    lamina::kernels::rope_cs<MODE>(rt, k, theta_scale, lamina::kernels::mrope_pos(mtab, (int) (pos0 + t), pair), pair, c,
-                                   s);
+    lamina::kernels::rope_cs<MODE>(rt, k, theta_scale, lamina::kernels::mrope_pos(mtab, (int) (pos0 + t), pair), pair,
+                                   c, s);
     const float a = p[pair], b = p[pair + 32];
     p[pair] = a * c - b * s;
     p[pair + 32] = a * s + b * c;
@@ -506,7 +538,10 @@ __global__ void kv_append_kernel(const float* __restrict__ K, const float* __res
     const uint16_t sb = hf(amax / 127.0f);
     const float sf = __half2float(__ushort_as_half(sb));
     int q = 0;
-    if (sf > 0.0f) { q = __float2int_rn(x / sf); q = q < -127 ? -127 : (q > 127 ? 127 : q); }
+    if (sf > 0.0f) {
+        q = __float2int_rn(x / sf);
+        q = q < -127 ? -127 : (q > 127 ? 127 : q);
+    }
     (is_v ? v_q : k_q)[row * 256 + d] = (int8_t) q;
     if (threadIdx.x == 0) (is_v ? v_scale : k_scale)[row * 4 + g] = sb;
 }
@@ -536,30 +571,33 @@ __global__ void to_bf16_kernel(const float* __restrict__ x, uint16_t* __restrict
 // mma with FP32 sums (an accumulator tile pair is the next mma's A operand), K and Q through ldmatrix.  Two prep warps
 // a chunk ahead: K K^T, Q K^T (from hi + lo FP16 halves: the FP32 dots' precision), T, P and the scales, K and Q in
 // FP16.  Two loader warps two chunks ahead (cp.async).  One barrier a chunk: the walk warps only compute.
-constexpr int VPK = HV / HK;     // value heads a key head
-constexpr int GCL = 16;          // tokens a chunk
-constexpr int GCW = 32;          // value columns a block
-constexpr int GKP = S + 8;       // padded FP32 K / Q rows: a half-warp's 64-bit loads on distinct banks
-constexpr int GKH = S + 8;       // padded FP16 K / Q rows: ldmatrix's 8 rows on distinct 16-byte bank groups
-constexpr int GTP = GCL + 8;     // padded FP16 T / P rows
-constexpr int GVP = GCW + 4;     // padded V rows
+constexpr int VPK = HV / HK;                                  // value heads a key head
+constexpr int GCL = 16;                                       // tokens a chunk
+constexpr int GCW = 32;                                       // value columns a block
+constexpr int GKP = S + 8;                                    // padded FP32 K / Q rows: a half-warp's
+                                                              // 64-bit loads on distinct banks
+constexpr int GKH = S + 8;                                    // padded FP16 K / Q rows: ldmatrix's 8
+                                                              // rows on distinct 16-byte bank groups
+constexpr int GTP = GCL + 8;                                  // padded FP16 T / P rows
+constexpr int GVP = GCW + 4;                                  // padded V rows
 constexpr int GWALK = 32 * 2 * VPK, GPREP = 64, GLOAD = 64;   // the block's threads: walk, prep, loaders
-struct alignas(16) GdnIn {       // the loaders' K, Q, gates and betas: chunk c in buffer c % 2
+struct alignas(16) GdnIn {                                    // the loaders' K, Q, gates and
+                                                              // betas: chunk c in buffer c % 2
     float k[GCL][GKP], q[GCL][GKP];
     float gate[VPK][GCL], beta[VPK][GCL];
 };
-struct alignas(16) GdnV {        // V: c % 2, a chunk ahead
+struct alignas(16) GdnV {   // V: c % 2, a chunk ahead
     float v[VPK][GCL][GVP];
 };
-struct alignas(16) GdnTps {      // a value head's chunk
+struct alignas(16) GdnTps {   // a value head's chunk
     __half t[GCL][GTP], p[GCL][GTP];
-    float s[64];                 // exp(gamma_t), exp(gamma_L - gamma_t), beta_t, exp(gamma_L)
+    float s[64];   // exp(gamma_t), exp(gamma_L - gamma_t), beta_t, exp(gamma_L)
 };
-struct alignas(16) GdnOut {      // the prep's: c % 3
+struct alignas(16) GdnOut {   // the prep's: c % 3
     __half k[GCL][GKH], q[GCL][GKH];
     GdnTps tp[VPK];
 };
-struct alignas(16) GdnScratch {  // the prep's working set
+struct alignas(16) GdnScratch {   // the prep's working set
     float kk[GCL][GCL + 1], qk[GCL][GCL + 1];
     float a[VPK][GCL][GCL + 1];
     float gm[VPK][GCL];
@@ -583,7 +621,8 @@ __device__ __forceinline__ void gmma(float (&d)[4], const uint32_t (&a)[4], uint
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
-__device__ __forceinline__ void gmmah(uint32_t (&d)[2], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {   // FP16 sums
+__device__ __forceinline__ void gmmah(uint32_t (&d)[2], const uint32_t (&a)[4], uint32_t b0,
+                                      uint32_t b1) {   // FP16 sums
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};"
                  : "+r"(d[0]), "+r"(d[1])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
@@ -605,10 +644,12 @@ __device__ __forceinline__ void gldsm_t(uint32_t (&r)[4], const void* p) {
                  : "r"((unsigned) __cvta_generic_to_shared(p)));
 }
 __device__ __forceinline__ void gcp16(void* dst, const void* src) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(dst)), "l"(src));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(dst)),
+                 "l"(src));
 }
 __device__ __forceinline__ void gcp4(void* dst, const void* src) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"((unsigned) __cvta_generic_to_shared(dst)), "l"(src));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"((unsigned) __cvta_generic_to_shared(dst)),
+                 "l"(src));
 }
 __device__ __forceinline__ float gex2(float x) {   // 2^x, subnormal results flushed
     float y;
@@ -618,10 +659,9 @@ __device__ __forceinline__ float gex2(float x) {   // 2^x, subnormal results flu
 
 // prep warp 0: K K^T from FP16 K, which it keeps for the walk; prep warp 1: Q K^T as hi(Q) hi(K) with FP32 sums plus
 // (hi(Q) lo(K) + lo(Q) hi(K)) / 2^11 with FP16 sums (twice the rate), keeping hi(Q)
-template <bool QK>
-__device__ __forceinline__ void gdn_dots(const GdnIn& in, GdnOut& out, GdnScratch& x, int lane) {
+template <bool QK> __device__ __forceinline__ void gdn_dots(const GdnIn& in, GdnOut& out, GdnScratch& x, int lane) {
     const int g = lane >> 2, q = lane & 3;
-    const float(*m)[GKP] = QK ? in.q : in.k;
+    const float (*m)[GKP] = QK ? in.q : in.k;
     __half(*m16)[GKH] = QK ? out.q : out.k;
     float acc[2][2][4] = {};   // [n tile][k step parity]
     uint32_t cor[2][2][2] = {};
@@ -655,7 +695,7 @@ __device__ __forceinline__ void gdn_dots(const GdnIn& in, GdnOut& out, GdnScratc
             }
         }
     }
-    float(*o)[GCL + 1] = QK ? x.qk : x.kk;
+    float (*o)[GCL + 1] = QK ? x.qk : x.kk;
 #pragma unroll
     for (int nt = 0; nt < 2; ++nt)
 #pragma unroll
@@ -675,7 +715,7 @@ __device__ __forceinline__ void gdn_dots(const GdnIn& in, GdnOut& out, GdnScratc
 // a chunk's T, P, scales and FP16 K, Q from its staged inputs, by the prep threads (pt: 0 .. 63)
 __device__ __forceinline__ void gdn_prep(const GdnIn& in, GdnOut& out, GdnScratch& x, int pt) {
     const int lane = pt & 31, jj = pt >> 4, tt = pt & 15;   // 48 threads: value head jj, its token or column tt
-    {   // gamma: the gates' running sum (0 past the prompt's end)
+    {                                                       // gamma: the gates' running sum (0 past the prompt's end)
         float gv = jj < VPK ? in.gate[jj][tt] : 0.0f;
 #pragma unroll
         for (int d = 1; d < GCL; d <<= 1) {
@@ -692,7 +732,8 @@ __device__ __forceinline__ void gdn_prep(const GdnIn& in, GdnOut& out, GdnScratc
         const float gt = x.gm[jj][tt], bt = in.beta[jj][tt], gl = x.gm[jj][GCL - 1];
         float gi[GCL], e[GCL], kr[GCL], qr[GCL];
 #pragma unroll
-        for (int i = 0; i < GCL; i += 4) *reinterpret_cast<float4*>(&gi[i]) = *reinterpret_cast<const float4*>(&x.gm[jj][i]);
+        for (int i = 0; i < GCL; i += 4)
+            *reinterpret_cast<float4*>(&gi[i]) = *reinterpret_cast<const float4*>(&x.gm[jj][i]);
 #pragma unroll
         for (int i = 0; i < GCL; ++i) {
             kr[i] = x.kk[tt][i];
@@ -718,7 +759,7 @@ __device__ __forceinline__ void gdn_prep(const GdnIn& in, GdnOut& out, GdnScratc
         float xv[GCL];
 #pragma unroll
         for (int t = 0; t < GCL; ++t) xv[t] = t == tt ? 1.0f : 0.0f;
-        const float(*a)[GCL + 1] = x.a[jj];
+        const float (*a)[GCL + 1] = x.a[jj];
 #pragma unroll
         for (int m = 0; m < GCL - 1; ++m)
 #pragma unroll
@@ -728,16 +769,15 @@ __device__ __forceinline__ void gdn_prep(const GdnIn& in, GdnOut& out, GdnScratc
     }
 }
 
-__global__ void __launch_bounds__(GWALK + GPREP + GLOAD, 1) gdn_chunk_kernel(float* __restrict__ state,
-                                                                             const float* __restrict__ h,
-                                                                             const float* __restrict__ gate,
-                                                                             const float* __restrict__ beta,
-                                                                             float* __restrict__ out, int T) {
+__global__ void __launch_bounds__(GWALK + GPREP + GLOAD, 1)
+gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const float* __restrict__ gate,
+                 const float* __restrict__ beta, float* __restrict__ out, int T) {
     extern __shared__ __align__(16) unsigned char gdn_smem[];
     GdnIn* in = reinterpret_cast<GdnIn*>(gdn_smem);
     GdnV* vb = reinterpret_cast<GdnV*>(gdn_smem + 2 * sizeof(GdnIn));
     GdnOut* ob = reinterpret_cast<GdnOut*>(gdn_smem + 2 * sizeof(GdnIn) + 2 * sizeof(GdnV));
-    GdnScratch& px = *reinterpret_cast<GdnScratch*>(gdn_smem + 2 * sizeof(GdnIn) + 2 * sizeof(GdnV) + 3 * sizeof(GdnOut));
+    GdnScratch& px =
+        *reinterpret_cast<GdnScratch*>(gdn_smem + 2 * sizeof(GdnIn) + 2 * sizeof(GdnV) + 3 * sizeof(GdnOut));
     const int kh = blockIdx.x, cs = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int nch = (T + GCL - 1) / GCL;
     // a chunk's barrier: its prepared operands, V and the next chunk's inputs are in, the buffers of the chunks before
@@ -751,7 +791,8 @@ __global__ void __launch_bounds__(GWALK + GPREP + GLOAD, 1) gdn_chunk_kernel(flo
                 const float* hc = h + (size_t) t0 * C;
 #pragma unroll
                 for (int k = 0; k < 2 * GCL * (S / 4) / GLOAD; ++k) {
-                    const int i = lt + k * GLOAD, w = i / (GCL * (S / 4)), t = (i / (S / 4)) % GCL, r4 = (i % (S / 4)) * 4;
+                    const int i = lt + k * GLOAD, w = i / (GCL * (S / 4)), t = (i / (S / 4)) % GCL,
+                              r4 = (i % (S / 4)) * 4;
                     float* d = w ? &b.k[t][r4] : &b.q[t][r4];
                     if (t < n) gcp16(d, hc + t * C + (w ? HK * S : 0) + kh * S + r4);
                     else *reinterpret_cast<float4*>(d) = make_float4(0.f, 0.f, 0.f, 0.f);
@@ -800,7 +841,7 @@ __global__ void __launch_bounds__(GWALK + GPREP + GLOAD, 1) gdn_chunk_kernel(flo
     }
     const int g = lane >> 2, q = lane & 3, j = warp >> 1, head = kh + j * HK;
     const int cl = (warp & 1) * 16, cb = cs * GCW + cl;   // the warp's first column, in the block and in the head
-    float s[S / 8][4];   // S^T: tile nt covers rows 8 nt .. 8 nt + 7
+    float s[S / 8][4];                                    // S^T: tile nt covers rows 8 nt .. 8 nt + 7
 #pragma unroll
     for (int nt = 0; nt < S / 8; ++nt) {
         const int r = 8 * nt + 2 * q;
@@ -894,7 +935,7 @@ __global__ void __launch_bounds__(GWALK + GPREP + GLOAD, 1) gdn_chunk_kernel(flo
     }
 }
 
-}  // namespace
+}   // namespace
 
 void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const int32_t* page_table, int64_t page_size,
                uint16_t* k_pool, uint16_t* v_pool, int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale,
@@ -906,12 +947,14 @@ void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in
 }
 void to_f16(const float* x, uint16_t* y, int64_t n, void* stream) {
     if (n <= 0) return;
-    to_f16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(x, y, n);
+    to_f16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(x, y,
+                                                                                                                   n);
     check("to_f16");
 }
 void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream) {
     if (n <= 0) return;
-    to_bf16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(x, y, n);
+    to_bf16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(
+        x, y, n);
     check("to_bf16");
 }
 
@@ -952,14 +995,15 @@ void gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const 
     }
     const dim3 grid(N / UM_BD, (unsigned) ((T + UM_BM - 1) / UM_BM));
     const cudaStream_t s = (cudaStream_t) stream;
-    if (pf.load() == 1) gr_upmix_kernel<true><<<grid, 256, 0, s>>>(lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, T);
+    if (pf.load() == 1)
+        gr_upmix_kernel<true><<<grid, 256, 0, s>>>(lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, T);
     else gr_upmix_kernel<false><<<grid, 256, 0, s>>>(lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, T);
     check("gr_upmix");
 }
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, const uint16_t* partial) {
-    gr_write_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, bo, inj, inj_ld, w_norm, eps,
-                                                                                     rs, xn16, partial);
+    gr_write_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, bo, inj, inj_ld, w_norm, eps, rs,
+                                                                                    xn16, partial);
     check("gr_write_norm_rs");
 }
 void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream) {
@@ -980,14 +1024,15 @@ void gr_broadcast(const float* e, float* R, int64_t T, void* stream) {
     gr_broadcast_kernel<<<blocks_for(T * D), 256, 0, (cudaStream_t) stream>>>(e, R, T);
     check("gr_broadcast");
 }
-void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate, float* beta, int64_t T, void* stream) {
+void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate, float* beta, int64_t T,
+               void* stream) {
     gdn_gates_kernel<<<blocks_for(T * HV), 256, 0, (cudaStream_t) stream>>>(ab, dt, ssm_a, gate, beta, T);
     check("gdn_gates");
 }
 void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, int64_t T, float eps, void* stream) {
     for (int64_t t0 = 0; t0 < T; t0 += 65535)
-        lamina::kernels::gdn_conv_l2_multi(history, qkv, conv_w, h, C, 2 * HK, eps, (int) std::min<int64_t>(65535, T - t0),
-                                           stream, (int) t0);
+        lamina::kernels::gdn_conv_l2_multi(history, qkv, conv_w, h, C, 2 * HK, eps,
+                                           (int) std::min<int64_t>(65535, T - t0), stream, (int) t0);
     gdn_conv_hist_kernel<<<C / 256, 256, 0, (cudaStream_t) stream>>>(history, qkv, T);
     check("gdn_conv");
 }
@@ -996,15 +1041,15 @@ void gdn_scan(float* state, const float* h, const float* gate, const float* beta
     static std::atomic<bool> smem_set[64] = {};   // 97 KB, opted in on each device (a split prompt path runs on two)
     int dev = 0;
     cudaGetDevice(&dev);
-    if (dev < 0 || dev >= 64 || (!smem_set[dev].load() && cudaFuncSetAttribute(gdn_chunk_kernel,
-                                                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                                                GDN_SMEM) != cudaSuccess)) {
+    if (dev < 0 || dev >= 64 ||
+        (!smem_set[dev].load() && cudaFuncSetAttribute(gdn_chunk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                       GDN_SMEM) != cudaSuccess)) {
         std::fprintf(stderr, "gdn_scan: the kernel's shared memory\n");
         std::exit(1);
     }
     smem_set[dev].store(true);
-    gdn_chunk_kernel<<<dim3(HK, S / GCW), GWALK + GPREP + GLOAD, GDN_SMEM, (cudaStream_t) stream>>>(state, h, gate, beta,
-                                                                                                   y, (int) T);
+    gdn_chunk_kernel<<<dim3(HK, S / GCW), GWALK + GPREP + GLOAD, GDN_SMEM, (cudaStream_t) stream>>>(state, h, gate,
+                                                                                                    beta, y, (int) T);
     check("gdn_scan");
 }
 void gdn_out_norm(float* y, const float* z, const float* gamma, float eps, uint16_t* y16, int64_t T, void* stream,
@@ -1108,8 +1153,7 @@ void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t p
         rope_kernel<ROPE_TABLE><<<grid, 32, 0, st>>>(x, heads, dim, ld, pos0, theta_scale, mrope_table(), k, rt);
     else if (mode == ROPE_SCALED)
         rope_kernel<ROPE_SCALED><<<grid, 32, 0, st>>>(x, heads, dim, ld, pos0, theta_scale, mrope_table(), k, rt);
-    else
-        rope_kernel<ROPE_PLAIN><<<grid, 32, 0, st>>>(x, heads, dim, ld, pos0, theta_scale, mrope_table(), k, rt);
+    else rope_kernel<ROPE_PLAIN><<<grid, 32, 0, st>>>(x, heads, dim, ld, pos0, theta_scale, mrope_table(), k, rt);
     check("rope");
 }
 void split_q(const float* q_full, float* q, int64_t T, void* stream) {
@@ -1121,4 +1165,4 @@ void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t 
     check("gate_attn");
 }
 
-}  // namespace lamina::prefill
+}   // namespace lamina::prefill

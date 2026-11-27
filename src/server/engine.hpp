@@ -131,24 +131,23 @@ public:
     virtual json cache_view() { return nullptr; }
 
     // what the last request left (read by its own thread after generate returns)
-    json last = json::object();            ///< the DONE line's figures (and its LP / TIERS notes)
+    json last = json::object();   ///< the DONE line's figures (and its LP / TIERS notes)
     std::atomic<uint64_t> dones{0};
-    std::optional<Held> held;              ///< after a text request that ended with DONE
-    std::vector<int32_t> drained;          ///< the tokens the engine sent after a STOP (it holds them)
+    std::optional<Held> held;       ///< after a text request that ended with DONE
+    std::vector<int32_t> drained;   ///< the tokens the engine sent after a STOP (it holds them)
     /// the running request's prompt progress, from its PP and RESUME lines: its thread writes it while HTTP threads
     /// read it (/metrics, the keep-alives' prompt_progress), so a copy under a lock
     struct Progress {
         std::optional<std::pair<int64_t, int64_t>> read;   ///< (read, total) prompt tokens
-        double ms = 0;                                    ///< the prompt's time so far
-        double tok_s_mean = -1;                           ///< the engine's mean prompt rate (-1: none)
-        int64_t reused = 0;                               ///< the prompt tokens it continues from
+        double ms = 0;                                     ///< the prompt's time so far
+        double tok_s_mean = -1;                            ///< the engine's mean prompt rate (-1: none)
+        int64_t reused = 0;                                ///< the prompt tokens it continues from
     };
     Progress progress() const {
         std::lock_guard<std::mutex> lk(progress_mu_);
         return progress_;
     }
-    template <class F>
-    void update_progress(F&& f) {
+    template <class F> void update_progress(F&& f) {
         std::lock_guard<std::mutex> lk(progress_mu_);
         f(progress_);
     }
@@ -161,7 +160,7 @@ public:
         std::lock_guard<std::mutex> lk(info_mu_);
         info_ = std::move(v);
     }
-    std::atomic<double> silence_s{300.0};  ///< the config's engine_silence_s (0: wait for ever)
+    std::atomic<double> silence_s{300.0};   ///< the config's engine_silence_s (0: wait for ever)
     /// the Settings view's engine_silence_s, for the requests from now on
     virtual void set_silence_s(double s) { silence_s = s; }
     std::string model_path;
@@ -257,19 +256,19 @@ private:
     std::map<int, double> orphan_seen_;
     std::shared_ptr<std::vector<std::vector<int32_t>>> slot_held_;
     std::vector<double> slot_used_;
-    std::vector<json> slot_live_;          ///< /metrics: the request in each slot (null: none)
+    std::vector<json> slot_live_;   ///< /metrics: the request in each slot (null: none)
     // the admission state is the server's, kept across restarts (#1012: waiters hold it)
     std::mutex slot_mu_;
     std::condition_variable slot_cv_;
     int waiting_ = 0, admitting_ = 0;
     std::list<WaitEntry*> wait_lens_;
     int64_t ctl_epoch_ = 0;
-    std::timed_mutex ctl_;                 ///< one admission or solo request on the control lines at a time
+    std::timed_mutex ctl_;   ///< one admission or solo request on the control lines at a time
     std::shared_ptr<LineChannel> ctl_lines_;
-    std::shared_ptr<LineChannel> loan_lines_;   ///< the engine's answers to LEND / UNLEND (LENT, UNLENT, ERR no loan)
-    std::atomic<bool> loan_unanswered_{false};  ///< a LEND or UNLEND got no answer in time: it may still come
+    std::shared_ptr<LineChannel> loan_lines_;    ///< the engine's answers to LEND / UNLEND (LENT, UNLENT, ERR no loan)
+    std::atomic<bool> loan_unanswered_{false};   ///< a LEND or UNLEND got no answer in time: it may still come
     std::thread pump_;
-    std::atomic<int> bg_{0};               ///< the slots' background waits still running (close() waits for them)
+    std::atomic<int> bg_{0};   ///< the slots' background waits still running (close() waits for them)
     bool ctl_erred_ = false;
     std::optional<std::pair<int, int64_t>> yielded_;
     std::string ctl_mode_, last_done_;
@@ -280,13 +279,13 @@ private:
     std::thread thread_;
     std::shared_ptr<LineChannel> in_, out_;   // to the engine, from it
     std::atomic<bool> ended_{true};
-    std::atomic<bool> finished_{true};        ///< the engine thread has returned
+    std::atomic<bool> finished_{true};   ///< the engine thread has returned
     std::atomic<int> rc_{-1};
     bool unloaded_ = true;
-    json pending_ = json::object();           ///< the request's LP / TIERS notes until its DONE
+    json pending_ = json::object();   ///< the request's LP / TIERS notes until its DONE
     std::string silent_note_;
     std::mutex cache_mu_;
-    json cache_ = json::object();             ///< the last CACHE line (the Monitor's Conversation cache card)
+    json cache_ = json::object();   ///< the last CACHE line (the Monitor's Conversation cache card)
     std::mutex start_mu_;
 };
 
@@ -310,4 +309,4 @@ private:
     std::mutex mu_;
 };
 
-}  // namespace lamina
+}   // namespace lamina

@@ -1,8 +1,8 @@
 // src/kernels/cpu/tq_states.hpp - the 64 trellis states of one TQP block, internal to src/kernels/cpu/tq_*.cpp.
 //
-// Step t's state is the 15 stream bits from bit (63 - t) * K, LSB first, circular over 64 * K bits.  The eight steps 8l .. 8l+7
-// lie in the 64 bits from byte (7 - l) * K, step 8l + j at bit (7 - j) * K of that word (7 * K + 15 <= 64), and only lane 0's
-// word runs past the block's 8 * K bytes, into its first ones.
+// Step t's state is the 15 stream bits from bit (63 - t) * K, LSB first, circular over 64 * K bits.  The eight steps 8l
+// .. 8l+7 lie in the 64 bits from byte (7 - l) * K, step 8l + j at bit (7 - j) * K of that word (7 * K + 15 <= 64), and
+// only lane 0's word runs past the block's 8 * K bytes, into its first ones.
 #pragma once
 
 #include <cstdint>
@@ -22,8 +22,7 @@ inline uint64_t tq_ld64(const uint8_t* p) {
 }
 
 /// The lanes' words: word[l] holds the states of steps 8l .. 8l+7.
-template <int KB>
-inline void tq_lane_words(const uint8_t* qs, uint64_t* word) {
+template <int KB> inline void tq_lane_words(const uint8_t* qs, uint64_t* word) {
     const int tail = 8 * (8 - KB);   // lane 0: the block's last KB bytes, then its first 8 - KB
     word[0] = (tq_ld64(qs + 7 * KB - (8 - KB)) >> tail) | (tq_ld64(qs) << (8 * KB));
     for (int l = 1; l < 8; ++l) word[l] = tq_ld64(qs + (7 - l) * KB);
@@ -55,5 +54,5 @@ inline uint16_t tq_ld16(const uint8_t* p) {
     return v;
 }
 
-}  // namespace
-}  // namespace lamina::kernels::cpu::tq_detail
+}   // namespace
+}   // namespace lamina::kernels::cpu::tq_detail

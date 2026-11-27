@@ -12,11 +12,11 @@
 namespace lamina::kernels {
 namespace {
 
-constexpr int N = 2560;         // n_embd
-constexpr int HC = 4;           // streams
-constexpr int D = N * HC;       // 10240
-constexpr int LR = 320;         // hc_lr
-constexpr int NR = LR + HC;     // the down projection's rows: w_down's 320, then w_inject's 4
+constexpr int N = 2560;       // n_embd
+constexpr int HC = 4;         // streams
+constexpr int D = N * HC;     // 10240
+constexpr int LR = 320;       // hc_lr
+constexpr int NR = LR + HC;   // the down projection's rows: w_down's 320, then w_inject's 4
 
 // down: the NR rows in DG groups of DRB = DW warps x DR rows, the input in DS slices of DCS columns (a slice lies in
 // one stream); a block per (slice, group), up to DT tokens a launch
@@ -103,8 +103,7 @@ __device__ __forceinline__ void reduce_chunks(const float (&v)[VT], int lane, F&
 // counter) adds each row's partials in slice order, per stream times the stream's 1/rms, and writes lo = silu(y / hc)
 // or the injection; group 0's also writes rs.  Every token's arithmetic is the same whatever its place in the window
 // and the window's size.
-template <int TT>
-__global__ void __launch_bounds__(DTH) gr_down_split_kernel(GrMulti m, float* __restrict__ scratch) {
+template <int TT> __global__ void __launch_bounds__(DTH) gr_down_split_kernel(GrMulti m, float* __restrict__ scratch) {
     static_assert(TT >= 1 && TT <= DT, "tokens a launch");
     __shared__ __align__(16) float4 xs[TT][DNF];
     __shared__ float ssw[TT][DW];
@@ -148,10 +147,15 @@ __global__ void __launch_bounds__(DTH) gr_down_split_kernel(GrMulti m, float* __
         if (t < DNF) {
             float4 r = pr[k];
             if (a.apply) {
-                r.x = fmaf(pb[k].x, gw, r.x); r.y = fmaf(pb[k].y, gw, r.y);
-                r.z = fmaf(pb[k].z, gw, r.z); r.w = fmaf(pb[k].w, gw, r.w);
+                r.x = fmaf(pb[k].x, gw, r.x);
+                r.y = fmaf(pb[k].y, gw, r.y);
+                r.z = fmaf(pb[k].z, gw, r.z);
+                r.w = fmaf(pb[k].w, gw, r.w);
             }
-            sq = fmaf(r.x, r.x, sq); sq = fmaf(r.y, r.y, sq); sq = fmaf(r.z, r.z, sq); sq = fmaf(r.w, r.w, sq);
+            sq = fmaf(r.x, r.x, sq);
+            sq = fmaf(r.y, r.y, sq);
+            sq = fmaf(r.z, r.z, sq);
+            sq = fmaf(r.w, r.w, sq);
             xs[k][(t & 1) * (DNF / 2) + (t >> 1)] = make_float4(r.x * pw.x, r.y * pw.y, r.z * pw.z, r.w * pw.w);
         }
         sq = warp_sum(sq);
@@ -171,7 +175,10 @@ __global__ void __launch_bounds__(DTH) gr_down_split_kernel(GrMulti m, float* __
     for (int j = 0; j < DSTEPS; ++j) {
         float4 x0[TT], x1[TT];
 #pragma unroll
-        for (int k = 0; k < TT; ++k) { x0[k] = xs[k][j * 32 + lane]; x1[k] = xs[k][DNF / 2 + j * 32 + lane]; }
+        for (int k = 0; k < TT; ++k) {
+            x0[k] = xs[k][j * 32 + lane];
+            x1[k] = xs[k][DNF / 2 + j * 32 + lane];
+        }
 #pragma unroll
         for (int i = 0; i < DR; ++i)
 #pragma unroll
@@ -277,10 +284,15 @@ __global__ void __launch_bounds__(DTH) gr_down_q8_split_kernel(GrMulti m, float*
         if (t < DNF) {
             float4 r = pr[k];
             if (a.apply) {
-                r.x = fmaf(pb[k].x, gw, r.x); r.y = fmaf(pb[k].y, gw, r.y);
-                r.z = fmaf(pb[k].z, gw, r.z); r.w = fmaf(pb[k].w, gw, r.w);
+                r.x = fmaf(pb[k].x, gw, r.x);
+                r.y = fmaf(pb[k].y, gw, r.y);
+                r.z = fmaf(pb[k].z, gw, r.z);
+                r.w = fmaf(pb[k].w, gw, r.w);
             }
-            sq = fmaf(r.x, r.x, sq); sq = fmaf(r.y, r.y, sq); sq = fmaf(r.z, r.z, sq); sq = fmaf(r.w, r.w, sq);
+            sq = fmaf(r.x, r.x, sq);
+            sq = fmaf(r.y, r.y, sq);
+            sq = fmaf(r.z, r.z, sq);
+            sq = fmaf(r.w, r.w, sq);
             xs[k][(t & 1) * (DNF / 2) + (t >> 1)] = make_float4(r.x * pw.x, r.y * pw.y, r.z * pw.z, r.w * pw.w);
         }
         sq = warp_sum(sq);
@@ -301,7 +313,10 @@ __global__ void __launch_bounds__(DTH) gr_down_q8_split_kernel(GrMulti m, float*
         for (int j = 0; j < DSTEPS; ++j) {
             float4 x0[TT], x1[TT];
 #pragma unroll
-            for (int k = 0; k < TT; ++k) { x0[k] = xs[k][j * 32 + lane]; x1[k] = xs[k][DNF / 2 + j * 32 + lane]; }
+            for (int k = 0; k < TT; ++k) {
+                x0[k] = xs[k][j * 32 + lane];
+                x1[k] = xs[k][DNF / 2 + j * 32 + lane];
+            }
 #pragma unroll
             for (int i = 0; i < DQR; ++i)
 #pragma unroll
@@ -367,15 +382,14 @@ __global__ void __launch_bounds__(DTH) gr_down_q8_split_kernel(GrMulti m, float*
 // while the dots run: R <- R' for this block's columns (when apply), mixed[d] = mean_c xn[c,d] * sigmoid(u[c,d]), the
 // gates' running average (when gate_ema) and the other read's estimate (when est_norm).  The lo vectors are staged
 // split into chunk halves.
-template <int TT>
-__global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
+template <int TT> __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
     constexpr int RW = TT <= 4 ? 4 : 2;
-    constexpr int NV = pow2_at_least(TT * RW);    // sums a lane reduces, zero-padded
-    constexpr int LPV = 32 / NV;                  // lanes that end up holding each sum
+    constexpr int NV = pow2_at_least(TT * RW);   // sums a lane reduces, zero-padded
+    constexpr int LPV = 32 / NV;                 // lanes that end up holding each sum
     __shared__ __align__(16) float4 lo4[TT][2][LR / 8];
     __shared__ float g[TT][HC][UPM_COLS];
-    __shared__ float gs[TT][HC][UPM_COLS];        // the gates
-    __shared__ float ge[TT][HC][UPM_COLS];        // the estimate's terms
+    __shared__ float gs[TT][HC][UPM_COLS];   // the gates
+    __shared__ float ge[TT][HC][UPM_COLS];   // the estimate's terms
     const bool est = m.a[0].est_norm != nullptr;
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     const int d0 = blockIdx.x * UPM_COLS;
@@ -405,8 +419,14 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
             wn = a.w_norm[ei];
             rsc = a.rs[ec];
             apply = a.apply;
-            if (apply) { bo = a.bo_prev[d0 + edd]; ip = a.inj_prev[ec]; }
-            if (est) { en = a.est_norm[ei]; eg = a.est_gates[ei]; }
+            if (apply) {
+                bo = a.bo_prev[d0 + edd];
+                ip = a.inj_prev[ec];
+            }
+            if (est) {
+                en = a.est_norm[ei];
+                eg = a.est_gates[ei];
+            }
         }
         float v[NV];
 #pragma unroll
@@ -461,8 +481,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_multi_kernel(GrMulti m) {
 
 // The up projection in 8 bits: the BF16 kernel with each row's 320 codes read 8 a lane (lanes 0-7 twice), each 8 with
 // their 32-column block's scale.
-template <int TT>
-__global__ void __launch_bounds__(THREADS) gr_up_q8_multi_kernel(GrMulti m) {
+template <int TT> __global__ void __launch_bounds__(THREADS) gr_up_q8_multi_kernel(GrMulti m) {
     constexpr int RW = TT <= 4 ? 4 : 2;
     constexpr int NV = pow2_at_least(TT * RW);
     constexpr int LPV = 32 / NV;
@@ -504,8 +523,14 @@ __global__ void __launch_bounds__(THREADS) gr_up_q8_multi_kernel(GrMulti m) {
             wn = a.w_norm[ei];
             rsc = a.rs[ec];
             apply = a.apply;
-            if (apply) { bo = a.bo_prev[d0 + edd]; ip = a.inj_prev[ec]; }
-            if (est) { en = a.est_norm[ei]; eg = a.est_gates[ei]; }
+            if (apply) {
+                bo = a.bo_prev[d0 + edd];
+                ip = a.inj_prev[ec];
+            }
+            if (est) {
+                en = a.est_norm[ei];
+                eg = a.est_gates[ei];
+            }
         }
         float v[NV];
 #pragma unroll
@@ -559,7 +584,7 @@ __global__ void __launch_bounds__(THREADS) gr_up_q8_multi_kernel(GrMulti m) {
     }
 }
 
-}  // namespace
+}   // namespace
 
 size_t fused_gr_scratch_bytes() { return (size_t) SC_FLOATS * sizeof(float); }
 
@@ -575,10 +600,9 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void* 
         if (!x.R || !x.w_norm || (!x.w_down && !x.q_down) || (!x.w_up && !x.q_up) || !x.lo || !x.rs || !x.mixed ||
             (x.w_inject && !x.inject_out) ||
             (x.apply && (!x.bo_prev || !x.inj_prev || !x.R_out || x.inj_prev == x.inject_out)) ||
-            x.w_down != a[0].w_down || x.w_up != a[0].w_up || x.w_inject != a[0].w_inject ||
-            x.q_down != a[0].q_down || x.s_down != a[0].s_down || x.q_up != a[0].q_up || x.s_up != a[0].s_up ||
-            (x.q_down && !x.s_down) || (x.q_up && !x.s_up) ||
-            x.w_norm != a[0].w_norm || x.gate_ema != a[0].gate_ema || x.eps != a[0].eps ||
+            x.w_down != a[0].w_down || x.w_up != a[0].w_up || x.w_inject != a[0].w_inject || x.q_down != a[0].q_down ||
+            x.s_down != a[0].s_down || x.q_up != a[0].q_up || x.s_up != a[0].s_up || (x.q_down && !x.s_down) ||
+            (x.q_up && !x.s_up) || x.w_norm != a[0].w_norm || x.gate_ema != a[0].gate_ema || x.eps != a[0].eps ||
             x.est_norm != a[0].est_norm || x.est_gates != a[0].est_gates || (x.est_norm && (!x.est_gates || !x.est))) {
             std::fprintf(stderr, "fused_gr_read_multi: invalid arguments for token %d\n", t);
             std::exit(1);
@@ -593,30 +617,36 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void* 
         for (int k = 0; k < md.T; ++k) md.a[k] = a[t0 + k];
         if (a[0].q_down != nullptr) {
             switch (md.T) {
+                // clang-format off
 #define LAMINA_DOWN(T) case T: gr_down_q8_split_kernel<T><<<down_grid, DTH, 0, st>>>(md, scratch); break;
                 LAMINA_DOWN(1) LAMINA_DOWN(2) LAMINA_DOWN(3) LAMINA_DOWN(4)
 #undef LAMINA_DOWN
             }
+            // clang-format on
             continue;
         }
         switch (md.T) {
+            // clang-format off
 #define LAMINA_DOWN(T) case T: gr_down_split_kernel<T><<<down_grid, DTH, 0, st>>>(md, scratch); break;
             LAMINA_DOWN(1) LAMINA_DOWN(2) LAMINA_DOWN(3) LAMINA_DOWN(4)
 #undef LAMINA_DOWN
         }
+        // clang-format on
     }
-    if (a[0].q_up != nullptr)
-        switch (n_tok) {
+    if (a[0].q_up != nullptr) switch (n_tok) {
+        // clang-format off
 #define LAMINA_UP(T) case T: gr_up_q8_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             LAMINA_UP(1) LAMINA_UP(2) LAMINA_UP(3) LAMINA_UP(4) LAMINA_UP(5) LAMINA_UP(6) LAMINA_UP(7) LAMINA_UP(8)
 #undef LAMINA_UP
         }
-    else
-    switch (n_tok) {
+    // clang-format on
+    else switch (n_tok) {
+        // clang-format off
 #define LAMINA_UP(T) case T: gr_up_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         LAMINA_UP(1) LAMINA_UP(2) LAMINA_UP(3) LAMINA_UP(4) LAMINA_UP(5) LAMINA_UP(6) LAMINA_UP(7) LAMINA_UP(8)
 #undef LAMINA_UP
     }
+    // clang-format on
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
         std::fprintf(stderr, "fused_gr_read_multi: %s\n", cudaGetErrorString(e));
@@ -624,8 +654,6 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void* 
     }
 }
 
-bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr) {
-    return n_embd == N && hc == HC && hc_lr == LR;
-}
+bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr) { return n_embd == N && hc == HC && hc_lr == LR; }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

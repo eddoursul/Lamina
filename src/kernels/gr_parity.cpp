@@ -19,15 +19,15 @@
 //      rounding from reduction order, and graph replay must preserve the precision chosen at capture.
 //   6. `gr_write`'s `2*sigmoid`, which centres the gate on 1 so a ZERO injection is a plain residual add.
 //      Asserted as a property, not as a value, because that is what the source comment claims.
-#include "lamina/kernels/gr.hpp"
 #include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/gr.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <random>
@@ -53,24 +53,24 @@ uint16_t bf16_bits(float f) {
 }
 
 struct Opts {
-    bool per_stream_norm = true;   ///< false: one RMS over the whole stack (WRONG)
-    bool scale_inside_silu = true; ///< false: silu(proj)/hc instead of silu(proj/hc) (WRONG)
-    bool sigmoid_on_gate = true;   ///< false: silu on the gate and sigmoid on lo (WRONG)
-    bool mean_over_streams = true; ///< false: sum over streams instead of mean (WRONG)
-    bool round_activation = true;  ///< false: pinned CUDA single-token BF16 MMVF contract
+    bool per_stream_norm = true;     ///< false: one RMS over the whole stack (WRONG)
+    bool scale_inside_silu = true;   ///< false: silu(proj)/hc instead of silu(proj/hc) (WRONG)
+    bool sigmoid_on_gate = true;     ///< false: silu on the gate and sigmoid on lo (WRONG)
+    bool mean_over_streams = true;   ///< false: sum over streams instead of mean (WRONG)
+    bool round_activation = true;    ///< false: pinned CUDA single-token BF16 MMVF contract
 };
 
 /// `ref/gr.py::gr_read`, transcribed with switches for the rival readings.
-void reference(const std::vector<float>& R, const std::vector<float>& w_norm,
-               const std::vector<float>& w_down, const std::vector<float>& w_up,
-               const std::vector<float>& w_inject, float eps, long long n_embd, long long hc, long long hc_lr,
-               const Opts& o, std::vector<float>& mixed, std::vector<float>& inject) {
+void reference(const std::vector<float>& R, const std::vector<float>& w_norm, const std::vector<float>& w_down,
+               const std::vector<float>& w_up, const std::vector<float>& w_inject, float eps, long long n_embd,
+               long long hc, long long hc_lr, const Opts& o, std::vector<float>& mixed, std::vector<float>& inject) {
     const long long hc_dim = hc * n_embd;
     std::vector<float> xn((size_t) hc_dim);
     if (o.per_stream_norm) {
         for (long long c = 0; c < hc; ++c) {
             double ms = 0;
-            for (long long d = 0; d < n_embd; ++d) ms += (double) R[(size_t) (c * n_embd + d)] * R[(size_t) (c * n_embd + d)];
+            for (long long d = 0; d < n_embd; ++d)
+                ms += (double) R[(size_t) (c * n_embd + d)] * R[(size_t) (c * n_embd + d)];
             ms /= (double) n_embd;
             const float rs = (float) (1.0 / std::sqrt(ms + (double) eps));
             for (long long d = 0; d < n_embd; ++d) {
@@ -87,18 +87,22 @@ void reference(const std::vector<float>& R, const std::vector<float>& w_norm,
     }
 
     std::vector<float> act((size_t) hc_dim);
-    for (long long i = 0; i < hc_dim; ++i) act[(size_t) i] = o.round_activation ? to_bf16(xn[(size_t) i]) : xn[(size_t) i];
+    for (long long i = 0; i < hc_dim; ++i)
+        act[(size_t) i] = o.round_activation ? to_bf16(xn[(size_t) i]) : xn[(size_t) i];
 
     // lo
     std::vector<float> lo((size_t) hc_lr);
     for (long long k = 0; k < hc_lr; ++k) {
         double a = 0;
-        for (long long i = 0; i < hc_dim; ++i) a += (double) act[(size_t) i] * (double) w_down[(size_t) (k * hc_dim + i)];
+        for (long long i = 0; i < hc_dim; ++i)
+            a += (double) act[(size_t) i] * (double) w_down[(size_t) (k * hc_dim + i)];
         const float p = (float) a;
-        if (o.sigmoid_on_gate) lo[(size_t) k] = o.scale_inside_silu ? (p / (float) hc) / (1.0f + std::exp(-(p / (float) hc)))
-                                                                  : (p / (1.0f + std::exp(-p))) / (float) hc;
-        else                   lo[(size_t) k] = o.scale_inside_silu ? 1.0f / (1.0f + std::exp(-(p / (float) hc)))
-                                                                    : (1.0f / (1.0f + std::exp(-p))) / (float) hc;
+        if (o.sigmoid_on_gate)
+            lo[(size_t) k] = o.scale_inside_silu ? (p / (float) hc) / (1.0f + std::exp(-(p / (float) hc)))
+                                                 : (p / (1.0f + std::exp(-p))) / (float) hc;
+        else
+            lo[(size_t) k] = o.scale_inside_silu ? 1.0f / (1.0f + std::exp(-(p / (float) hc)))
+                                                 : (1.0f / (1.0f + std::exp(-p))) / (float) hc;
     }
     std::vector<float> lq((size_t) hc_lr);
     for (long long k = 0; k < hc_lr; ++k)
@@ -111,7 +115,8 @@ void reference(const std::vector<float>& R, const std::vector<float>& w_norm,
         for (long long c = 0; c < hc; ++c) {
             const long long i = c * n_embd + d;
             double a = 0;
-            for (long long k = 0; k < hc_lr; ++k) a += (double) lq[(size_t) k] * (double) w_up[(size_t) (i * hc_lr + k)];
+            for (long long k = 0; k < hc_lr; ++k)
+                a += (double) lq[(size_t) k] * (double) w_up[(size_t) (i * hc_lr + k)];
             const float g = (float) a;
             const float s = o.sigmoid_on_gate ? 1.0f / (1.0f + std::exp(-g)) : g / (1.0f + std::exp(-g));
             m += xn[(size_t) i] * s;
@@ -122,7 +127,8 @@ void reference(const std::vector<float>& R, const std::vector<float>& w_norm,
     inject.assign((size_t) hc, 0.0f);
     for (long long c = 0; c < hc; ++c) {
         double a = 0;
-        for (long long i = 0; i < hc_dim; ++i) a += (double) act[(size_t) i] * (double) w_inject[(size_t) (c * hc_dim + i)];
+        for (long long i = 0; i < hc_dim; ++i)
+            a += (double) act[(size_t) i] * (double) w_inject[(size_t) (c * hc_dim + i)];
         inject[(size_t) c] = (float) a;
     }
 }
@@ -149,9 +155,7 @@ double rel_terms(double want, double got, double term_a, double term_b) {
     return std::fabs(want - got) / (den > 1e-30 ? den : 1e-30);
 }
 
-const char* activation_mode_name(int mode) {
-    return mode == 2 ? "native pinned GR" : (mode == 1 ? "FP32" : "BF16");
-}
+const char* activation_mode_name(int mode) { return mode == 2 ? "native pinned GR" : (mode == 1 ? "FP32" : "BF16"); }
 void select_activation_mode(int mode) {
     lamina::kernels::gr_set_native_mmvf(mode == 2);
     // In mode 2 the precision-only switch is deliberately false: native MMVF must imply FP32 by itself.
@@ -177,9 +181,16 @@ int scalar_activation_contract() {
     gr_workspace_init(sh, d_scratch, ws);
     const float ones[] = {1.0f, 1.0f};
     const uint16_t weights[] = {
-        bf16_bits(0.5f), 0, 0, 0,             // down: lo[0]=silu(xn[0]/2), lo[1]=0
-        bf16_bits(1.5f), 0, bf16_bits(1.5f), 0, // both gate rows consume lo[0]
-        bf16_bits(2.0f), 0                     // injection: 2*xn[0]
+        bf16_bits(0.5f),
+        0,
+        0,
+        0,   // down: lo[0]=silu(xn[0]/2), lo[1]=0
+        bf16_bits(1.5f),
+        0,
+        bf16_bits(1.5f),
+        0,   // both gate rows consume lo[0]
+        bf16_bits(2.0f),
+        0   // injection: 2*xn[0]
     };
     check(cudaMemcpy(d_R, ones, sizeof(ones), cudaMemcpyHostToDevice), "scalar upload R");
     check(cudaMemcpy(d_weights, weights, sizeof(weights), cudaMemcpyHostToDevice), "scalar upload weights");
@@ -195,14 +206,12 @@ int scalar_activation_contract() {
         float mixed_by_mode[3][2] = {}, inject_by_mode[3] = {};
         for (int mode = 0; mode < 3; ++mode) {
             select_activation_mode(mode);
-            gr_read(d_R, d_norm, d_weights, d_weights + 4, d_weights + 8, 0.0f,
-                    sh, ws, d_mixed, d_inject, stream);
+            gr_read(d_R, d_norm, d_weights, d_weights + 4, d_weights + 8, 0.0f, sh, ws, d_mixed, d_inject, stream);
             check(cudaStreamSynchronize(stream), "scalar warmup");
             cudaGraph_t graph;
             cudaGraphExec_t executable;
             check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal), "scalar capture begin");
-            gr_read(d_R, d_norm, d_weights, d_weights + 4, d_weights + 8, 0.0f,
-                    sh, ws, d_mixed, d_inject, stream);
+            gr_read(d_R, d_norm, d_weights, d_weights + 4, d_weights + 8, 0.0f, sh, ws, d_mixed, d_inject, stream);
             check(cudaStreamEndCapture(stream, &graph), "scalar capture end");
             check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0), "scalar instantiate");
             // Changing both host options after capture cannot change the graph's selected kernels.
@@ -214,8 +223,10 @@ int scalar_activation_contract() {
             check(cudaMemsetAsync(d_scratch, 0xa5, ws.bytes, stream), "scalar poison workspace");
             check(cudaGraphLaunch(executable, stream), "scalar replay");
             check(cudaStreamSynchronize(stream), "scalar replay sync");
-            check(cudaMemcpy(mixed_by_mode[mode], d_mixed, 2 * sizeof(float), cudaMemcpyDeviceToHost), "scalar mixed copy");
-            check(cudaMemcpy(&inject_by_mode[mode], d_inject, sizeof(float), cudaMemcpyDeviceToHost), "scalar inject copy");
+            check(cudaMemcpy(mixed_by_mode[mode], d_mixed, 2 * sizeof(float), cudaMemcpyDeviceToHost),
+                  "scalar mixed copy");
+            check(cudaMemcpy(&inject_by_mode[mode], d_inject, sizeof(float), cudaMemcpyDeviceToHost),
+                  "scalar inject copy");
             const float activation = mode ? gamma : to_bf16(gamma);
             const float projection = activation * 0.5f;
             const float lo = projection / (1.0f + std::exp(-projection));
@@ -228,11 +239,9 @@ int scalar_activation_contract() {
             // actual pinned CUDA graphs. The nonzero projection/injection here
             // has only one exactly representable product and remains exact.
             const bool ok = std::fabs(mixed_by_mode[mode][0] - expected_mixed) <= 2e-7f &&
-                            mixed_by_mode[mode][0] == mixed_by_mode[mode][1] &&
-                            inject_by_mode[mode] == expected_inject;
-            std::printf("  scalar gamma %.8f %s activation/capture %s (mixed %.9f, ref %.9f)\n",
-                        gamma, activation_mode_name(mode), ok ? "pass" : "FAIL",
-                        mixed_by_mode[mode][0], expected_mixed);
+                            mixed_by_mode[mode][0] == mixed_by_mode[mode][1] && inject_by_mode[mode] == expected_inject;
+            std::printf("  scalar gamma %.8f %s activation/capture %s (mixed %.9f, ref %.9f)\n", gamma,
+                        activation_mode_name(mode), ok ? "pass" : "FAIL", mixed_by_mode[mode][0], expected_mixed);
             if (!ok) ++bad;
             check(cudaGraphExecDestroy(executable), "scalar graph exec destroy");
             check(cudaGraphDestroy(graph), "scalar graph destroy");
@@ -241,13 +250,13 @@ int scalar_activation_contract() {
             check(cudaMemcpy(d_inject, &sentinel, sizeof(float), cudaMemcpyHostToDevice), "scalar sentinel");
             check(cudaDeviceSynchronize(), "scalar sentinel sync");   // a late sentinel would hide a write to d_inject
             select_activation_mode(mode);
-            gr_read(d_R, d_norm, d_weights, d_weights + 4, nullptr, 0.0f,
-                    sh, ws, d_mixed, d_inject, stream);
+            gr_read(d_R, d_norm, d_weights, d_weights + 4, nullptr, 0.0f, sh, ws, d_mixed, d_inject, stream);
             check(cudaStreamSynchronize(stream), "scalar final mixer sync");
             float final_mixed[2] = {}, untouched = 0.0f;
             check(cudaMemcpy(final_mixed, d_mixed, sizeof(final_mixed), cudaMemcpyDeviceToHost), "scalar final mixed");
             check(cudaMemcpy(&untouched, d_inject, sizeof(float), cudaMemcpyDeviceToHost), "scalar sentinel copy");
-            const bool final_ok = std::memcmp(final_mixed, mixed_by_mode[mode], sizeof(final_mixed)) == 0 && untouched == sentinel;
+            const bool final_ok =
+                std::memcmp(final_mixed, mixed_by_mode[mode], sizeof(final_mixed)) == 0 && untouched == sentinel;
             std::printf("  scalar final mixer %s %s\n", activation_mode_name(mode), final_ok ? "pass" : "FAIL");
             if (!final_ok) ++bad;
         }
@@ -263,13 +272,17 @@ int scalar_activation_contract() {
     }
     select_activation_mode(0);
     check(cudaStreamDestroy(stream), "scalar stream destroy");
-    cudaFree(d_R); cudaFree(d_norm); cudaFree(d_mixed); cudaFree(d_inject);
-    cudaFree(d_weights); cudaFree(d_scratch);
+    cudaFree(d_R);
+    cudaFree(d_norm);
+    cudaFree(d_mixed);
+    cudaFree(d_inject);
+    cudaFree(d_weights);
+    cudaFree(d_scratch);
     return bad;
 }
 
-int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const uint16_t* d_up,
-                           const uint16_t* d_inject, float eps) {
+int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const uint16_t* d_up, const uint16_t* d_inject,
+                           float eps) {
     using namespace lamina::kernels;
     constexpr int N = 2560, HC = 4, LR = 320, D = N * HC, T = kFusedGrMaxT;
     std::mt19937 rng(0x6f8a);
@@ -323,16 +336,22 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
         s.rs.resize((size_t) T * HC);
         s.inject.resize((size_t) T * HC);
         s.mixed.resize((size_t) T * N);
-        check(cudaMemcpy(s.r_out.data(), d_r_out, s.r_out.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read R_out");
+        check(cudaMemcpy(s.r_out.data(), d_r_out, s.r_out.size() * sizeof(float), cudaMemcpyDeviceToHost),
+              "multi read R_out");
         check(cudaMemcpy(s.lo.data(), d_lo, s.lo.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read lo");
         check(cudaMemcpy(s.rs.data(), d_rs, s.rs.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read rs");
-        check(cudaMemcpy(s.inject.data(), d_inj_out, s.inject.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read inject");
-        check(cudaMemcpy(s.mixed.data(), d_mixed, s.mixed.size() * sizeof(float), cudaMemcpyDeviceToHost), "multi read mixed");
+        check(cudaMemcpy(s.inject.data(), d_inj_out, s.inject.size() * sizeof(float), cudaMemcpyDeviceToHost),
+              "multi read inject");
+        check(cudaMemcpy(s.mixed.data(), d_mixed, s.mixed.size() * sizeof(float), cudaMemcpyDeviceToHost),
+              "multi read mixed");
         return s;
     };
     // the split read (LAMINA_GR_V3=1) sums in another order than the single-token kernel: equal within float
     // rounding, not to the bit, so it is compared with a relative tolerance; the default kernels bit for bit
-    static const bool v3 = [] { const char* v = std::getenv("LAMINA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
+    static const bool v3 = [] {
+        const char* v = std::getenv("LAMINA_GR_V3");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
     auto close = [](const std::vector<float>& x, const std::vector<float>& y) {
         double worst = 0.0, mag = 1e-30;
         for (size_t i = 0; i < x.size(); ++i) {
@@ -340,11 +359,13 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
             mag = std::max(mag, (double) std::fabs(y[i]));
         }
         if (worst > 2e-6 * mag)
-            std::printf("    tolerance: worst %.3e of max |ref| %.3e (rel %.3e), n %zu\n", worst, mag, worst / mag, x.size());
+            std::printf("    tolerance: worst %.3e of max |ref| %.3e (rel %.3e), n %zu\n", worst, mag, worst / mag,
+                        x.size());
         return worst <= 2e-6 * mag;
     };
     auto same = [&](const Snapshot& a, const Snapshot& b) {
-        if (v3)   // `lo` is the default kernels' workspace between down and up; the split read keeps it in shared memory
+        if (v3)   // `lo` is the default kernels' workspace between down
+                  // and up; the split read keeps it in shared memory
             return close(a.r_out, b.r_out) && close(a.rs, b.rs) && close(a.inject, b.inject) && close(a.mixed, b.mixed);
         return std::memcmp(a.r_out.data(), b.r_out.data(), a.r_out.size() * sizeof(float)) == 0 &&
                std::memcmp(a.lo.data(), b.lo.data(), a.lo.size() * sizeof(float)) == 0 &&
@@ -355,7 +376,8 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
 
     cudaStream_t stream = nullptr;
     check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "multi stream");
-    // the uploads above (and the caller's weights) run on the legacy stream, which the non-blocking `stream` does not wait for
+    // the uploads above (and the caller's weights) run on the legacy
+    // stream, which the non-blocking `stream` does not wait for
     check(cudaDeviceSynchronize(), "multi setup");
     // Max T: the kernel's largest dynamic shared-memory request, 8 * 1280 * sizeof(float) = 40 KiB.
     fused_gr_read_multi(args.data(), T, d_xn, stream);
@@ -389,8 +411,10 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
     for (size_t i = 0; i < bo.size(); ++i) bo[i] = -0.4f * bo[i] + 0.02f;
     for (size_t i = 0; i < inj.size(); ++i) inj[i] += 0.3f;
     check(cudaMemcpyAsync(d_r, r.data(), r.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "multi replay R");
-    check(cudaMemcpyAsync(d_bo, bo.data(), bo.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "multi replay bo");
-    check(cudaMemcpyAsync(d_inj, inj.data(), inj.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "multi replay inj");
+    check(cudaMemcpyAsync(d_bo, bo.data(), bo.size() * sizeof(float), cudaMemcpyHostToDevice, stream),
+          "multi replay bo");
+    check(cudaMemcpyAsync(d_inj, inj.data(), inj.size() * sizeof(float), cudaMemcpyHostToDevice, stream),
+          "multi replay inj");
     check(cudaGraphLaunch(graph_exec, stream), "multi graph changed replay");
     check(cudaStreamSynchronize(stream), "multi graph changed sync");
     const Snapshot replay = snapshot();
@@ -405,8 +429,7 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
         ++bad;
     }
 
-    std::printf("  fused GR multi max-T=8 LDS launch and changing graph replay %s\n",
-                bad == 0 ? "pass" : "FAIL");
+    std::printf("  fused GR multi max-T=8 LDS launch and changing graph replay %s\n", bad == 0 ? "pass" : "FAIL");
     check(cudaGraphExecDestroy(graph_exec), "multi graph exec destroy");
     check(cudaGraphDestroy(graph), "multi graph destroy");
     check(cudaStreamDestroy(stream), "multi stream destroy");
@@ -422,13 +445,16 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
     return bad;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: gr_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: gr_parity [--selftest]\n");
+            return 2;
+        }
     }
 
     const long long n_embd = 256, hc = 4, hc_lr = 32;
@@ -496,7 +522,8 @@ int main(int argc, char** argv) {
     lamina::kernels::gr_read(d_R, d_norm, d_down, d_up, d_inj, eps, sh, ws, d_mixed, d_inject, nullptr);
     std::vector<float> got_mixed((size_t) n_embd), got_inject((size_t) hc);
     check(cudaMemcpy(got_mixed.data(), d_mixed, got_mixed.size() * sizeof(float), cudaMemcpyDeviceToHost), "c mixed");
-    check(cudaMemcpy(got_inject.data(), d_inject, got_inject.size() * sizeof(float), cudaMemcpyDeviceToHost), "c inject");
+    check(cudaMemcpy(got_inject.data(), d_inject, got_inject.size() * sizeof(float), cudaMemcpyDeviceToHost),
+          "c inject");
 
     int bad = 0;
 
@@ -505,7 +532,11 @@ int main(int argc, char** argv) {
     std::vector<float> want_mixed, want_inject;
     reference(R, w_norm, w_down, w_up, w_inject, eps, n_embd, hc, hc_lr, right, want_mixed, want_inject);
 
-    struct Trap { const char* name; Opts o; double floor; };
+    struct Trap {
+        const char* name;
+        Opts o;
+        double floor;
+    };
     const Trap traps[] = {
         {"per-stream RMSNorm vs whole-stack", {false, true, true, true, true}, 0.05},
         {"/hc inside the silu vs outside", {true, false, true, true, true}, 0.05},
@@ -518,8 +549,8 @@ int main(int argc, char** argv) {
         reference(R, w_norm, w_down, w_up, w_inject, eps, n_embd, hc, hc_lr, t.o, m, i);
         const double rel = rel_diff(want_mixed, m);
         const bool observable = rel > t.floor;
-        std::printf("  %-40s %-4s (%.4f%% apart, floor %.3f%%)\n", t.name, observable ? "yes" : "*** NO ***",
-                    rel * 100, t.floor * 100);
+        std::printf("  %-40s %-4s (%.4f%% apart, floor %.3f%%)\n", t.name, observable ? "yes" : "*** NO ***", rel * 100,
+                    t.floor * 100);
         if (!observable) {
             std::printf("      *** the fixture cannot see this trap, so passing proves nothing about it ***\n");
             ++bad;
@@ -566,8 +597,7 @@ int main(int argc, char** argv) {
         lamina::kernels::gr_set_fp32_activations(false);
         const double rm = rel_diff(wm, gm), ri = rel_diff(wi, gi);
         const bool ok = rm <= 1e-4 && ri <= 1e-4;
-        std::printf("  FP32 activations vs reference: %s (mixed %.3e, inject %.3e)\n",
-                    ok ? "pass" : "FAIL", rm, ri);
+        std::printf("  FP32 activations vs reference: %s (mixed %.3e, inject %.3e)\n", ok ? "pass" : "FAIL", rm, ri);
         if (!ok) ++bad;
         lamina::kernels::gr_read(d_R, d_norm, d_down, d_up, d_inj, eps, sh, ws, d_mixed, d_inject, nullptr);
         check(cudaMemcpy(gm.data(), d_mixed, gm.size() * sizeof(float), cudaMemcpyDeviceToHost), "restored mixed");
@@ -591,22 +621,22 @@ int main(int argc, char** argv) {
             for (long long i = 0; i < hc_dim; ++i)
                 tr_down[(size_t) (i * hc_lr + k)] = q_down[(size_t) (k * hc_dim + i)];
         for (long long i = 0; i < hc_dim; ++i)
-            for (long long k = 0; k < hc_lr; ++k)
-                tr_up[(size_t) (k * hc_dim + i)] = q_up[(size_t) (i * hc_lr + k)];
+            for (long long k = 0; k < hc_lr; ++k) tr_up[(size_t) (k * hc_dim + i)] = q_up[(size_t) (i * hc_lr + k)];
         check(cudaMemcpy(d_down_bad, tr_down.data(), tr_down.size() * 2, cudaMemcpyHostToDevice), "cb d");
         check(cudaMemcpy(d_up_bad, tr_up.data(), tr_up.size() * 2, cudaMemcpyHostToDevice), "cb u");
         std::vector<float> bad_mixed((size_t) n_embd);
         float* d_bad = nullptr;
         check(cudaMalloc(&d_bad, bad_mixed.size() * sizeof(float)), "m bad");
-        lamina::kernels::gr_read(d_R, d_norm, d_down_bad, d_up_bad, d_inj, eps, sh, ws, d_bad, d_inject,
-                                 nullptr);
+        lamina::kernels::gr_read(d_R, d_norm, d_down_bad, d_up_bad, d_inj, eps, sh, ws, d_bad, d_inject, nullptr);
         check(cudaMemcpy(bad_mixed.data(), d_bad, bad_mixed.size() * sizeof(float), cudaMemcpyDeviceToHost), "cb b");
         const double rel = rel_diff(want_mixed, bad_mixed);
         const bool visible = rel > 0.05;
-        std::printf("  %-40s %s (%.1f%% apart)\n", "weight orientation is observable",
-                    visible ? "yes" : "*** NO ***", rel * 100);
+        std::printf("  %-40s %s (%.1f%% apart)\n", "weight orientation is observable", visible ? "yes" : "*** NO ***",
+                    rel * 100);
         if (!visible) ++bad;
-        cudaFree(d_down_bad); cudaFree(d_up_bad); cudaFree(d_bad);
+        cudaFree(d_down_bad);
+        cudaFree(d_up_bad);
+        cudaFree(d_bad);
     }
 
     // ---- the FINAL mixer passes w_inject = nullptr, and then nothing may be written
@@ -641,12 +671,12 @@ int main(int argc, char** argv) {
         for (long long d = 0; d < n_embd; ++d) {
             const size_t i = (size_t) (c * n_embd + d);
             const double want = (double) R[i] + (double) block_out[(size_t) d];
-            worst_plain = std::fmax(worst_plain, rel_terms(want, (double) got_write[i], (double) R[i],
-                                                           (double) block_out[(size_t) d]));
+            worst_plain = std::fmax(
+                worst_plain, rel_terms(want, (double) got_write[i], (double) R[i], (double) block_out[(size_t) d]));
         }
     const bool plain = worst_plain < 1e-6;
-    std::printf("  %-40s %s (worst rel %.3e)\n", "zero injection -> plain residual add",
-                plain ? "yes" : "*** NO ***", worst_plain);
+    std::printf("  %-40s %s (worst rel %.3e)\n", "zero injection -> plain residual add", plain ? "yes" : "*** NO ***",
+                worst_plain);
     if (!plain) ++bad;
 
     // the rival reading: sigmoid without the 2 halves the update, and must be visible.
@@ -661,14 +691,14 @@ int main(int argc, char** argv) {
             for (long long d = 0; d < n_embd; ++d) {
                 const size_t i = (size_t) (c * n_embd + d);
                 got_delta[i] = (float) ((double) got_write[i] - (double) R[i]);
-                want_delta[i] = block_out[(size_t) d];        // 2*sigmoid(0) = 1.0
-                wrong_delta[i] = block_out[(size_t) d] * 0.5f; // 1*sigmoid(0) = 0.5
+                want_delta[i] = block_out[(size_t) d];           // 2*sigmoid(0) = 1.0
+                wrong_delta[i] = block_out[(size_t) d] * 0.5f;   // 1*sigmoid(0) = 0.5
             }
         const double rel = rel_diff(want_delta, wrong_delta);
         const double rel_got = rel_diff(want_delta, got_delta);
         const bool visible = rel > 0.05 && rel_got < 0.05;
-        std::printf("  %-40s %s (readings %.0f%% apart, kernel within %.2e)\n",
-                    "1*sigmoid vs 2*sigmoid is observable", visible ? "yes" : "*** NO ***", rel * 100, rel_got);
+        std::printf("  %-40s %s (readings %.0f%% apart, kernel within %.2e)\n", "1*sigmoid vs 2*sigmoid is observable",
+                    visible ? "yes" : "*** NO ***", rel * 100, rel_got);
         if (!visible) ++bad;
     }
 
@@ -752,14 +782,20 @@ int main(int argc, char** argv) {
             reference(rR, rnorm, rdown, rup, rinj, eps, rn, rhc, rlr, precision, wm, wi);
             const double rm = rel_diff(wm, gm), ri = rel_diff(wi, gi);
             const bool ok = rm <= 1e-4 && ri <= 1e-4;
-            std::printf("\n  real dims 2560/4/320 %s %s (mixed %.3e, inject %.3e)\n",
-                        activation_mode_name(mode), ok ? "pass" : "*** FAIL ***", rm, ri);
+            std::printf("\n  real dims 2560/4/320 %s %s (mixed %.3e, inject %.3e)\n", activation_mode_name(mode),
+                        ok ? "pass" : "*** FAIL ***", rm, ri);
             if (!ok) ++bad;
         }
         bad += fused_multi_lds_parity(dN, dD, dU, dJ, eps);
         select_activation_mode(0);
         cudaFree(rws_raw);
-        cudaFree(dR); cudaFree(dN); cudaFree(dD); cudaFree(dU); cudaFree(dJ); cudaFree(dM); cudaFree(dI);
+        cudaFree(dR);
+        cudaFree(dN);
+        cudaFree(dD);
+        cudaFree(dU);
+        cudaFree(dJ);
+        cudaFree(dM);
+        cudaFree(dI);
     }
 
     bad += scalar_activation_contract();

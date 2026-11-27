@@ -26,22 +26,21 @@
 
 namespace {
 
-using lamina::kernels::SForm;
 using lamina::kernels::Codebook;
+using lamina::kernels::SForm;
 
 /// The host decode, transcribed from `docs/pack-format.md`'s rule: `value = cb[code] * scale + offset`, with
 /// the integer bias applied INSIDE the integer domain before the one multiply.
 const signed char kIq4Nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
-double weight_at(const std::vector<uint8_t>& codes, const std::vector<float>& scales,
-                 const std::vector<float>& offset, const SForm& f, long long n_in, long long o, long long i) {
+double weight_at(const std::vector<uint8_t>& codes, const std::vector<float>& scales, const std::vector<float>& offset,
+                 const SForm& f, long long n_in, long long o, long long i) {
     const int per_byte = 8 / f.code_bits;
     const long long codes_per_row = n_in / per_byte;
     const long long n_groups = n_in / f.group_elems;
     const uint8_t* c = codes.data() + o * codes_per_row;
     const int code = (c[i / per_byte] >> ((int) (i % per_byte) * f.code_bits)) & ((1 << f.code_bits) - 1);
-    const double v = (f.codebook == Codebook::Iq4Nl) ? (double) kIq4Nl[code & 0x0F]
-                                                     : (double) (code + f.code_bias);
+    const double v = (f.codebook == Codebook::Iq4Nl) ? (double) kIq4Nl[code & 0x0F] : (double) (code + f.code_bias);
     const long long g = i / f.group_elems;
     double w = v * (double) scales[(size_t) (o * n_groups + g)];
     if (f.has_offset) w += (double) offset[(size_t) (o * n_groups + g)];
@@ -114,7 +113,7 @@ int ragged_rows(const Case& cs, long long n_out) {
     check(cudaMemcpy(x0.data(), d_x0, x0.size(), cudaMemcpyDeviceToHost), "rcx0");
 
     int bad = 0;
-    for (int kind = 0; kind < 2; ++kind) {           // 0: Q8_K activation, 1: Q8_0 activation
+    for (int kind = 0; kind < 2; ++kind) {   // 0: Q8_K activation, 1: Q8_0 activation
         std::vector<float> want((size_t) n_out);
         std::vector<double> mag((size_t) n_out);   // sum |w_i a_i| per row: a row whose sum cancels near 0
         for (long long o = 0; o < n_out; ++o) {    // must not turn f32 rounding into a relative failure
@@ -163,18 +162,26 @@ int ragged_rows(const Case& cs, long long n_out) {
                     kind == 0 ? "Q8_K" : "Q8_0", n_out, rel, touched, ok ? "ok" : "*** WRONG ***");
         if (!ok) ++bad;
     }
-    cudaFree(d_xf); cudaFree(d_xk); cudaFree(d_x0); cudaFree(d_codes); cudaFree(d_scales); cudaFree(d_offs);
+    cudaFree(d_xf);
+    cudaFree(d_xk);
+    cudaFree(d_x0);
+    cudaFree(d_codes);
+    cudaFree(d_scales);
+    cudaFree(d_offs);
     cudaFree(d_y);
     return bad;
 }
 
-}  // namespace
+}   // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--selftest") selftest = true;
-        else { std::fprintf(stderr, "usage: s_gemv_q8k_parity [--selftest]\n"); return 2; }
+        else {
+            std::fprintf(stderr, "usage: s_gemv_q8k_parity [--selftest]\n");
+            return 2;
+        }
     }
     int bad = 0;
 
@@ -224,8 +231,7 @@ int main(int argc, char** argv) {
         std::vector<float> want((size_t) n_out, 0.0f);
         for (long long o = 0; o < n_out; ++o) {
             double acc = 0;
-            for (long long i = 0; i < n_in; ++i)
-                acc += weight_at(codes, scales, offs, f, n_in, o, i) * q8k_at(xq8k, i);
+            for (long long i = 0; i < n_in; ++i) acc += weight_at(codes, scales, offs, f, n_in, o, i) * q8k_at(xq8k, i);
             want[(size_t) o] = (float) acc;
         }
 
@@ -241,11 +247,11 @@ int main(int argc, char** argv) {
         check(cudaMemcpy(d_offs, offs.data(), offs.size() * 4, cudaMemcpyHostToDevice), "co");
 
         std::vector<float> naive((size_t) n_out), warp((size_t) n_out);
-        lamina::kernels::s_gemv_q8k(d_xq, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in, n_out,
-                                    f, nullptr);
+        lamina::kernels::s_gemv_q8k(d_xq, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in, n_out, f,
+                                    nullptr);
         check(cudaMemcpy(naive.data(), d_y, (size_t) n_out * 4, cudaMemcpyDeviceToHost), "cy1");
-        lamina::kernels::s_gemv_q8k_split(d_xq, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in,
-                                          n_out, f, nullptr);
+        lamina::kernels::s_gemv_q8k_split(d_xq, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in, n_out,
+                                          f, nullptr);
         check(cudaMemcpy(warp.data(), d_y, (size_t) n_out * 4, cudaMemcpyDeviceToHost), "cy2");
 
         double mag = 0, d1 = 0, d2 = 0;
@@ -257,7 +263,10 @@ int main(int argc, char** argv) {
         std::printf("  %-28s naive %.3e   warp %.3e\n", cs.what, d1 / mag, d2 / mag);
         // The kernel accumulates in f32, the reference in f64, over 512 terms with values of similar size.
         // 1e-5 is the arithmetic's floor, not a structural allowance.
-        if (!(d1 / mag <= 1e-5 && d2 / mag <= 1e-5)) { std::printf("    *** over 1e-5 ***\n"); ++bad; }
+        if (!(d1 / mag <= 1e-5 && d2 / mag <= 1e-5)) {
+            std::printf("    *** over 1e-5 ***\n");
+            ++bad;
+        }
 
         // ---- 2b. THE Q8_0 ACTIVATION, on the SAME weight planes.  `s_gemv_q8_0_split` exists because the
         // legacy block formats want Q8_0 and `ffn_down_shexp` cannot use Q8_K at all (n_in = 640 is not a
@@ -284,8 +293,8 @@ int main(int argc, char** argv) {
                 }
                 want0[(size_t) o] = (float) acc;
             }
-            lamina::kernels::s_gemv_q8_0_split(d_x0, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y,
-                                               n_in, n_out, f, nullptr);
+            lamina::kernels::s_gemv_q8_0_split(d_x0, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in,
+                                               n_out, f, nullptr);
             std::vector<float> got0((size_t) n_out);
             check(cudaMemcpy(got0.data(), d_y, (size_t) n_out * 4, cudaMemcpyDeviceToHost), "cy0");
             double m0 = 0, dd0 = 0;
@@ -309,8 +318,7 @@ int main(int argc, char** argv) {
             check(cudaMalloc(&d_x16, (size_t) n_in * 2), "x16");
             check(cudaMemcpy(d_x16, x16.data(), (size_t) n_in * 2, cudaMemcpyHostToDevice), "cx16");
             std::vector<float> fp16out((size_t) n_out);
-            lamina::kernels::s_gemv(d_x16, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in, n_out,
-                                    f);
+            lamina::kernels::s_gemv(d_x16, d_codes, d_scales, cs.has_offset ? d_offs : nullptr, d_y, n_in, n_out, f);
             check(cudaMemcpy(fp16out.data(), d_y, (size_t) n_out * 4, cudaMemcpyDeviceToHost), "cy3");
             double dd = 0;
             for (long long o = 0; o < n_out; ++o)
@@ -322,7 +330,12 @@ int main(int argc, char** argv) {
             if (!visible) ++bad;
             cudaFree(d_x16);
         }
-        cudaFree(d_xf); cudaFree(d_xq); cudaFree(d_codes); cudaFree(d_scales); cudaFree(d_offs); cudaFree(d_y);
+        cudaFree(d_xf);
+        cudaFree(d_xq);
+        cudaFree(d_codes);
+        cudaFree(d_scales);
+        cudaFree(d_offs);
+        cudaFree(d_y);
     }
 
     // ---- 4. output widths that are NOT a multiple of the eight rows per block

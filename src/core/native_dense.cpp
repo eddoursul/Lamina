@@ -1,15 +1,15 @@
 #include "lamina/core/native_dense.hpp"
-#include "lamina/core/weights.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/weights.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstring>
-#include <climits>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -22,13 +22,19 @@ namespace {
 bool eligible(const std::string& name, bool include_ple_key) {
     if (name.rfind("blk.", 0) != 0) return false;
     if (include_ple_key && name == "blk.1.ple_key.weight") return true;
-    static const char* suffixes[] = {".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight",
-        ".attn_q.weight", ".attn_k.weight", ".attn_v.weight", ".attn_output.weight",
-        ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight", ".ffn_down_shexp.weight"};
-    for (const char* suffix : suffixes) if (name.ends_with(suffix)) return true;
+    static const char* suffixes[] = {".attn_qkv.weight",      ".attn_gate.weight",      ".ssm_out.weight",
+                                     ".attn_q.weight",        ".attn_k.weight",         ".attn_v.weight",
+                                     ".attn_output.weight",   ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight",
+                                     ".ffn_down_shexp.weight"};
+    for (const char* suffix : suffixes)
+        if (name.ends_with(suffix)) return true;
     return false;
 }
-struct DeviceFree { void operator()(void* p) const { if (p) cudaFree(p); } };
+struct DeviceFree {
+    void operator()(void* p) const {
+        if (p) cudaFree(p);
+    }
+};
 using DevicePtr = std::unique_ptr<void, DeviceFree>;
 struct Pending {
     WeightRef* ref;
@@ -36,11 +42,15 @@ struct Pending {
     uint64_t bytes;
     DevicePtr data;
 };
-struct Upload { void* dev; const uint8_t* src; uint64_t bytes; };
-// The matrices' bytes into VRAM from up to 8 threads in 8 MiB pieces through pinned staging (upstream PR #2673): a thread
-// copies a piece from the shard's mapping (taking its page faults) into one half of its staging buffer and sends it on
-// its own stream while it fills the other half.  One synchronous cudaMemcpy a matrix took the faults one at a time
-// (UD-Q4_K_XL's 2,975 MiB in ~1.5-2 s with the file cached).
+struct Upload {
+    void* dev;
+    const uint8_t* src;
+    uint64_t bytes;
+};
+// The matrices' bytes into VRAM from up to 8 threads in 8 MiB pieces through pinned staging (upstream PR #2673): a
+// thread copies a piece from the shard's mapping (taking its page faults) into one half of its staging buffer and sends
+// it on its own stream while it fills the other half.  One synchronous cudaMemcpy a matrix took the faults one at a
+// time (UD-Q4_K_XL's 2,975 MiB in ~1.5-2 s with the file cached).
 bool upload_parallel(const std::vector<Upload>& jobs, std::string& err) {
     constexpr uint64_t PIECE = 8ull << 20;
     std::vector<std::pair<size_t, uint64_t>> pieces;   // (job, offset)
@@ -48,7 +58,10 @@ bool upload_parallel(const std::vector<Upload>& jobs, std::string& err) {
         for (uint64_t o = 0; o < jobs[j].bytes; o += PIECE) pieces.emplace_back(j, o);
     if (pieces.empty()) return true;
     int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess) { err = "native dense upload: no device"; return false; }
+    if (cudaGetDevice(&device) != cudaSuccess) {
+        err = "native dense upload: no device";
+        return false;
+    }
     std::atomic<size_t> next{0};
     std::atomic<bool> bad{false};
     std::atomic<int> first_err{(int) cudaSuccess};   // a worker's error (the runtime's last error is per thread)
@@ -73,15 +86,22 @@ bool upload_parallel(const std::vector<Upload>& jobs, std::string& err) {
             if (i >= pieces.size()) break;
             const auto [j, o] = pieces[i];
             const uint64_t n = std::min(PIECE, jobs[j].bytes - o);
-            if (live[h] && (e = cudaEventSynchronize(done[h])) != cudaSuccess) { fail(e); break; }
+            if (live[h] && (e = cudaEventSynchronize(done[h])) != cudaSuccess) {
+                fail(e);
+                break;
+            }
             std::memcpy(stage + h * PIECE, jobs[j].src + o, (size_t) n);
             e = cudaMemcpyAsync((uint8_t*) jobs[j].dev + o, stage + h * PIECE, (size_t) n, cudaMemcpyHostToDevice, s);
             if (e == cudaSuccess) e = cudaEventRecord(done[h], s);
-            if (e != cudaSuccess) { fail(e); break; }
+            if (e != cudaSuccess) {
+                fail(e);
+                break;
+            }
             live[h] = true;
         }
         if (s != nullptr && (e = cudaStreamSynchronize(s)) != cudaSuccess) fail(e);
-        for (cudaEvent_t ev : done) if (ev) cudaEventDestroy(ev);
+        for (cudaEvent_t ev : done)
+            if (ev) cudaEventDestroy(ev);
         if (stage) cudaFreeHost(stage);
         if (s) cudaStreamDestroy(s);
     };
@@ -98,10 +118,10 @@ bool upload_parallel(const std::vector<Upload>& jobs, std::string& err) {
     }
     return true;
 }
-}
+}   // namespace
 
-bool NativeDense::served_names(const std::vector<std::string>& shards, bool include_ple_key,
-                               std::set<std::string>& out, std::string& err) {
+bool NativeDense::served_names(const std::vector<std::string>& shards, bool include_ple_key, std::set<std::string>& out,
+                               std::string& err) {
     try {
         for (const auto& path : shards) {
             lamina::GgufFile gguf(path);
@@ -124,8 +144,14 @@ NativeDense::~NativeDense() {
 
 bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err,
                        bool include_ple_key) {
-    if (scratch_ || !weights_.empty()) { err = "native dense: already loaded"; return false; }
-    if (shards.empty()) { err = "native dense: at least one GGUF shard is required"; return false; }
+    if (scratch_ || !weights_.empty()) {
+        err = "native dense: already loaded";
+        return false;
+    }
+    if (shards.empty()) {
+        err = "native dense: at least one GGUF shard is required";
+        return false;
+    }
     try {
         std::vector<Pending> pending;
         std::set<std::string> seen;
@@ -142,7 +168,8 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
             const auto* tensors = gguf.get("split.tensors.count");
             const auto* architecture = gguf.get("general.architecture");
             if (number && !split_numbers.insert(number->u).second) {
-                err = "native dense: duplicate split shard number"; return false;
+                err = "native dense: duplicate split shard number";
+                return false;
             }
             // A re-split GGUF (Huihui's Q8_0) repeats general.architecture on every shard but keeps the
             // architecture's numeric keys (block_count ...) on the first one only: the full guard is the first
@@ -156,17 +183,19 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     split_count = count->u;
                     split_tensors = tensors->u;
                 }
-            } else if (!have_architecture || !split_count || !count || !number || !tensors ||
-                       count->u != split_count || number->u == 0 || number->u >= split_count ||
-                       tensors->u != split_tensors || (architecture && architecture->s != first_arch)) {
-                err = "native dense: additional shard must match the architecture-validated first shard's split metadata";
+            } else if (!have_architecture || !split_count || !count || !number || !tensors || count->u != split_count ||
+                       number->u == 0 || number->u >= split_count || tensors->u != split_tensors ||
+                       (architecture && architecture->s != first_arch)) {
+                err =
+                    "native dense: additional shard must match the architecture-validated first shard's split metadata";
                 return false;
             }
             std::vector<uint64_t> offsets;
             for (const auto& tensor : gguf.tensors()) offsets.push_back(tensor.offset);
             std::sort(offsets.begin(), offsets.end());
             if (std::adjacent_find(offsets.begin(), offsets.end()) != offsets.end()) {
-                err = "native dense: tensor payload offsets overlap"; return false;
+                err = "native dense: tensor payload offsets overlap";
+                return false;
             }
             // Validate every directory span, including tensors we do not upload:
             // an ignored tensor must not overlap the native matrix that follows it.
@@ -176,47 +205,57 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 uint64_t elements = 1;
                 if (tensor.shape.empty() || !lamina::block_geometry(tensor.type, block_elements, block_bytes) ||
                     tensor.shape[0] % (uint64_t) block_elements != 0) {
-                    err = "native dense: invalid block geometry " + tensor.name; return false;
+                    err = "native dense: invalid block geometry " + tensor.name;
+                    return false;
                 }
                 for (uint64_t dimension : tensor.shape) {
                     if (!dimension || elements > (std::numeric_limits<uint64_t>::max)() / dimension) {
-                        err = "native dense: invalid tensor extent " + tensor.name; return false;
+                        err = "native dense: invalid tensor extent " + tensor.name;
+                        return false;
                     }
                     elements *= dimension;
                 }
                 const uint64_t blocks = elements / (uint64_t) block_elements;
                 if (blocks > (std::numeric_limits<uint64_t>::max)() / (uint64_t) block_bytes) {
-                    err = "native dense: tensor byte count overflow " + tensor.name; return false;
+                    err = "native dense: tensor byte count overflow " + tensor.name;
+                    return false;
                 }
                 const uint64_t bytes = blocks * (uint64_t) block_bytes;
                 if (tensor.offset > payload || bytes > payload - tensor.offset) {
-                    err = "native dense: truncated payload " + tensor.name; return false;
+                    err = "native dense: truncated payload " + tensor.name;
+                    return false;
                 }
                 const auto next = std::upper_bound(offsets.begin(), offsets.end(), tensor.offset);
                 if (next != offsets.end() && bytes > *next - tensor.offset) {
-                    err = "native dense: overlapping payload " + tensor.name; return false;
+                    err = "native dense: overlapping payload " + tensor.name;
+                    return false;
                 }
             }
             std::vector<Upload> jobs;
             for (const auto& tensor : gguf.tensors()) {
                 if (!eligible(tensor.name, include_ple_key)) continue;
                 if (!seen.insert(tensor.name).second) {
-                    err = "native dense: duplicate tensor " + tensor.name; return false;
+                    err = "native dense: duplicate tensor " + tensor.name;
+                    return false;
                 }
                 auto found = table.table_.find(tensor.name);
                 if (found == table.table_.end()) {
-                    err = "native dense: tensor absent from canonical table: " + tensor.name; return false;
+                    err = "native dense: tensor absent from canonical table: " + tensor.name;
+                    return false;
                 }
                 auto& ref = found->second;
-                if (ref.native_data) { err = "native dense: override already attached"; return false; }
-                if (!lamina::kernels::native_mmvq_supported(tensor.type)) continue;
-                if (!ref.quantized() || tensor.shape.size() != 2 ||
-                    ref.ne0 <= 0 || ref.ne0 > INT_MAX || ref.ne1 <= 0 || ref.ne1 > INT_MAX ||
-                    tensor.shape[0] != (uint64_t) ref.ne0 || tensor.shape[1] != (uint64_t) ref.ne1) {
-                    err = "native dense: incompatible matrix " + tensor.name; return false;
+                if (ref.native_data) {
+                    err = "native dense: override already attached";
+                    return false;
                 }
-                const auto bytes = lamina::kernels::native_mmvq_weight_bytes(
-                    tensor.type, (int) ref.ne0, (int) ref.ne1);
+                if (!lamina::kernels::native_mmvq_supported(tensor.type)) continue;
+                if (!ref.quantized() || tensor.shape.size() != 2 || ref.ne0 <= 0 || ref.ne0 > INT_MAX || ref.ne1 <= 0 ||
+                    ref.ne1 > INT_MAX || tensor.shape[0] != (uint64_t) ref.ne0 ||
+                    tensor.shape[1] != (uint64_t) ref.ne1) {
+                    err = "native dense: incompatible matrix " + tensor.name;
+                    return false;
+                }
+                const auto bytes = lamina::kernels::native_mmvq_weight_bytes(tensor.type, (int) ref.ne0, (int) ref.ne1);
                 // a zeroed tail: the prompt path's MMQ reads past the last row of a matrix whose rows are not whole
                 // 256-value steps (the shared expert's down projection, 640), and NaN times a zero input is NaN
                 constexpr uint64_t kTail = 4096;
@@ -225,20 +264,27 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 DevicePtr data(allocation);
                 if (status == cudaSuccess) status = cudaMemset((uint8_t*) data.get() + bytes, 0, kTail);
                 if (status != cudaSuccess) {
-                    err = "native dense upload " + tensor.name + ": " + cudaGetErrorString(status); return false;
+                    err = "native dense upload " + tensor.name + ": " + cudaGetErrorString(status);
+                    return false;
                 }
                 jobs.push_back(Upload{data.get(), (const uint8_t*) gguf.tensor_data(tensor), bytes});
-                max_in = (std::max)(max_in, (int) ref.ne0);
+                max_in = (std::max) (max_in, (int) ref.ne0);
                 total += bytes;
                 pending.push_back(Pending{&ref, (int) tensor.type, bytes, std::move(data)});
             }
             if (!upload_parallel(jobs, err)) return false;
         }
-        if (pending.empty()) { err = "native dense: no supported GDN/QSA matrices in supplied shards"; return false; }
+        if (pending.empty()) {
+            err = "native dense: no supported GDN/QSA matrices in supplied shards";
+            return false;
+        }
         void* allocation = nullptr;
         const auto status = cudaMalloc(&allocation, lamina::kernels::native_q8_1_bytes(max_in));
         DevicePtr scratch(allocation);
-        if (status != cudaSuccess) { err = std::string("native dense scratch: ") + cudaGetErrorString(status); return false; }
+        if (status != cudaSuccess) {
+            err = std::string("native dense scratch: ") + cudaGetErrorString(status);
+            return false;
+        }
         // All checks and allocations finish before publishing any reference.
         weights_.reserve(pending.size());
         for (auto& item : pending) {
@@ -297,7 +343,7 @@ void q8_0_row(const float* x, int64_t n, int8_t* q, uint16_t* s) {
         for (int j = 0; j < 32; ++j) q[b * 32 + j] = (int8_t) std::roundf(x[b * 32 + j] * id);
     }
 }
-}  // namespace
+}   // namespace
 
 bool HcQ8::names(const std::vector<std::string>& shards, std::set<std::string>& out, std::string& err) {
     try {
@@ -320,12 +366,15 @@ HcQ8::~HcQ8() {
 bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err) {
     try {
         int device = 0;
-        if (cudaGetDevice(&device) != cudaSuccess) { err = "hc q8: no device"; return false; }
+        if (cudaGetDevice(&device) != cudaSuccess) {
+            err = "hc q8: no device";
+            return false;
+        }
         struct Job {
             const lamina::TensorInfo* t;
             WeightRef* ref;
-            bool q8_0;    // the GGUF's own Q8_0 blocks, split into codes and scales
-            int kind;     // else the rows' type: 0 F32, 1 F16, 2 BF16
+            bool q8_0;   // the GGUF's own Q8_0 blocks, split into codes and scales
+            int kind;    // else the rows' type: 0 F32, 1 F16, 2 BF16
             void* dq = nullptr;
             void* ds = nullptr;
         };
@@ -431,4 +480,4 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
         return false;
     }
 }
-} // namespace lamina::core
+}   // namespace lamina::core

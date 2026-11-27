@@ -15,8 +15,8 @@
 namespace lamina::platform {
 
 struct Completion {
-    uint64_t tag = 0;      ///< the caller's tag from `submit`
-    uint32_t bytes = 0;    ///< bytes transferred (short only at end of file)
+    uint64_t tag = 0;     ///< the caller's tag from `submit`
+    uint32_t bytes = 0;   ///< bytes transferred (short only at end of file)
     bool ok = false;
 };
 
@@ -58,4 +58,4 @@ private:
 /// Monotonic time in microseconds, for latency accounting.
 double now_us();
 
-}  // namespace lamina::platform
+}   // namespace lamina::platform

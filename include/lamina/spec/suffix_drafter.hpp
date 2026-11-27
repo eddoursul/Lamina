@@ -45,21 +45,21 @@ public:
 
 private:
     struct Slot {
-        uint64_t key = 0;             // trigram hash (0 = empty)
-        int32_t last = -1;            // the trigram's most recent end position (-1: none left after `assign`)
+        uint64_t key = 0;    // trigram hash (0 = empty)
+        int32_t last = -1;   // the trigram's most recent end position (-1: none left after `assign`)
     };
     Slot* find_slot(uint64_t key, bool insert);
     uint64_t key_at(size_t end) const;
-    void link(size_t end);            // index hist_[end], the newest token
+    void link(size_t end);   // index hist_[end], the newest token
     void rebuild();
 
     int min_match_, max_match_;
     std::vector<int32_t> hist_;
-    std::vector<int32_t> prev_;       // per end position: its trigram's previous end position (-1: none)
+    std::vector<int32_t> prev_;   // per end position: its trigram's previous end position (-1: none)
     std::vector<Slot> table_;
     size_t mask_ = 0;
-    size_t used_ = 0;                 // occupied slots, those of undone positions included
+    size_t used_ = 0;   // occupied slots, those of undone positions included
     int last_match_ = 0;
 };
 
-}  // namespace lamina::spec
+}   // namespace lamina::spec

@@ -62,12 +62,11 @@ uint64_t shared_expert_scratch_bytes(int64_t n_ff);
 /// Measured cost of the wrong choice: 0.66-1.41% per GEMV.  `s_gemv_q8_0_split` was written for the Q8_0 half
 /// (LEDGER L55) and `s2_gemv_q8` already served the Q2_0 half.
 void shared_expert(const uint8_t* x_q8_0, const uint8_t* x_q8k, const uint16_t* x_bf16, const SForm& gate_form,
-                   const uint8_t* gate_codes, const float* gate_scales, const float* gate_off,
-                   const SForm& up_form, const uint8_t* up_codes, const float* up_scales, const float* up_off,
-                   const SForm& down_form, const uint8_t* down_codes, const float* down_scales,
-                   const float* down_off, const uint16_t* gate_inp_bf16, float* scratch, float* out,
-                   int64_t n_embd, int64_t n_ff, int tpr, void* stream, const float* x_f32 = nullptr,
-                   const NativeSharedWeights* native = nullptr);
+                   const uint8_t* gate_codes, const float* gate_scales, const float* gate_off, const SForm& up_form,
+                   const uint8_t* up_codes, const float* up_scales, const float* up_off, const SForm& down_form,
+                   const uint8_t* down_codes, const float* down_scales, const float* down_off,
+                   const uint16_t* gate_inp_bf16, float* scratch, float* out, int64_t n_embd, int64_t n_ff, int tpr,
+                   void* stream, const float* x_f32 = nullptr, const NativeSharedWeights* native = nullptr);
 
 /// The native scalar gate applied: `g` (n_tok logits) becomes sigmoid(g), and each token's row of `out` (n_tok,
 /// n_embd) is multiplied by it.
@@ -103,7 +102,7 @@ void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& n
 /// One thread per output element, k accumulations each; k is 10 at the real geometry.  This is where the CPU
 /// expert pool's outputs are summed: `ExpertPool` carries a `weight` per job and deliberately does NOT apply
 /// it, because the sum has to happen once over all k and not once per worker.
-void moe_combine(const float* parts, const float* weights, const float* shared, float* y, int64_t n_embd,
-                 int64_t k, void* stream);
+void moe_combine(const float* parts, const float* weights, const float* shared, float* y, int64_t n_embd, int64_t k,
+                 void* stream);
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

@@ -50,4 +50,4 @@ LAMINA_BF16_HD inline float f32_from_bf16(uint16_t h) {
     return f;
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

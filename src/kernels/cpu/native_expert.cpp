@@ -3,18 +3,18 @@
 // ggml-cpu's, so an IQ expert computes what llama.cpp's CPU backend computes for it.
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/expert.hpp"
-#include "lamina/kernels/cpu/iq_avx512.hpp"
-#include "lamina/kernels/cpu/iq_avx2.hpp"
-#include "lamina/kernels/cpu/iq_avx1.hpp"
-#include "lamina/kernels/cpu/kq_avx2.hpp"
 #include "lamina/kernels/cpu/expert_layout.hpp"
 #include "lamina/kernels/cpu/hadamard.hpp"
+#include "lamina/kernels/cpu/iq_avx1.hpp"
+#include "lamina/kernels/cpu/iq_avx2.hpp"
+#include "lamina/kernels/cpu/iq_avx512.hpp"
+#include "lamina/kernels/cpu/kq_avx2.hpp"
 #include "lamina/kernels/cpu/tq_cpu.hpp"
 #include "lamina/kernels/expf_contract.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 
-#include "ggml.h"
 #include "ggml-cpu.h"
+#include "ggml.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,7 +32,7 @@ void init_once() {
     std::call_once(once, [] { ggml_cpu_init(); });
 }
 
-}  // namespace
+}   // namespace
 
 bool native_experts_available() noexcept { return true; }
 
@@ -40,9 +40,7 @@ bool native_experts_available() noexcept { return true; }
 // compiled for AVX-512 and iq_avx2.cpp / kq_avx2.cpp for AVX2, and native_gu_rows asks these on every CPU before it
 // has checked what the CPU can run.  A function in a wide-ISA file may use that ISA anywhere in its body, so an
 // answer that is only a comparison must not come from one (#795).
-bool iq512_supported(int type) noexcept {
-    return type == 16 || type == 17 || type == 18 || type == 21 || type == 22;
-}
+bool iq512_supported(int type) noexcept { return type == 16 || type == 17 || type == 18 || type == 21 || type == 22; }
 
 bool iq256_supported(int type) noexcept {
     return type == 16 || type == 17 || type == 18 || type == 21 || type == 22 || type == 23;
@@ -50,7 +48,8 @@ bool iq256_supported(int type) noexcept {
 
 bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt& f, std::string& err) {
     init_once();
-    if (tq_supported(gu_type) || tq_supported(d_type)) {   // not ggml types here: tq_cpu.hpp's kernels, q8_1 activations
+    if (tq_supported(gu_type) || tq_supported(d_type)) {   // not ggml types here: tq_cpu.hpp's
+                                                           // kernels, q8_1 activations
         if (!tq_supported(gu_type) || !tq_supported(d_type)) {
             err = "native experts: a layer of trellis experts with a down or gate/up of another format";
             return false;
@@ -80,7 +79,8 @@ bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt
     const ggml_type_traits_cpu* tg = traits(gu_type);
     const ggml_type_traits_cpu* td = traits(d_type);
     if (tg == nullptr || tg->vec_dot == nullptr || td == nullptr || td->vec_dot == nullptr) {
-        err = "native experts: ggml-cpu has no dot product for type " + std::to_string(tg && tg->vec_dot ? d_type : gu_type);
+        err = "native experts: ggml-cpu has no dot product for type " +
+              std::to_string(tg && tg->vec_dot ? d_type : gu_type);
         return false;
     }
     const ggml_type_traits_cpu* ag = traits(tg->vec_dot_type);
@@ -138,7 +138,7 @@ bool q8k_avx1(int type) {
 #endif
 
 bool g_exact_swiglu = false;
-}  // namespace
+}   // namespace
 
 void set_native_exact_swiglu(bool on) noexcept { g_exact_swiglu = on; }
 bool native_exact_swiglu() noexcept { return g_exact_swiglu; }
@@ -188,8 +188,14 @@ void native_quant_act(const NativeFmt& f, const float* x, void* dst) {
         return;
     }
 #if LAMINA_X86
-    if (q8k_avx2(f.gu_act)) { q8k_quant_avx2(x, dst, f.n_embd); return; }
-    if (q8k_avx1(f.gu_act)) { q8k_quant_avx1(x, dst, f.n_embd); return; }
+    if (q8k_avx2(f.gu_act)) {
+        q8k_quant_avx2(x, dst, f.n_embd);
+        return;
+    }
+    if (q8k_avx1(f.gu_act)) {
+        q8k_quant_avx1(x, dst, f.n_embd);
+        return;
+    }
 #endif
     traits(f.gu_act)->from_float(x, dst, f.n_embd);
 }
@@ -203,8 +209,14 @@ void native_quant_h(const NativeFmt& f, const float* h, void* dst) {
         return;
     }
 #if LAMINA_X86
-    if (q8k_avx2(f.d_act)) { q8k_quant_avx2(h, dst, f.n_ff); return; }
-    if (q8k_avx1(f.d_act)) { q8k_quant_avx1(h, dst, f.n_ff); return; }
+    if (q8k_avx2(f.d_act)) {
+        q8k_quant_avx2(h, dst, f.n_ff);
+        return;
+    }
+    if (q8k_avx1(f.d_act)) {
+        q8k_quant_avx1(h, dst, f.n_ff);
+        return;
+    }
 #endif
     traits(f.d_act)->from_float(h, dst, f.n_ff);
 }
@@ -222,9 +234,11 @@ int native_gu_mt_min(int gu_type) {
     // of the window.  So IQ3_S takes it for every group, and those rows no longer depend on the drafting.  A machine-
     // wide rule, not a per-core one: every core rounds an expert the same.  Every probe here is in expert_layout.cpp
     // and cpu_avx2_ok() comes first, so no AVX2 code runs before the check.  LAMINA_IQ_MT_MIN set keeps its rule.
-    // Opt-in (LAMINA_IQ3S_MT1=1): it changes a lone token's IQ3_S rounding on those CPUs, so the default stays 0.1.39's.
-    static const bool iq3s_one = env == nullptr && std::getenv("LAMINA_IQ3S_MT1") != nullptr && cpu_avx2_ok() && std::getenv("LAMINA_NO_IQ256") == nullptr &&
-                                 !cpu_avx512_ok() && iq256_gather_setting() != 0 && cpu_gather_fast();
+    // Opt-in (LAMINA_IQ3S_MT1=1): it changes a lone token's IQ3_S
+    // rounding on those CPUs, so the default stays 0.1.39's.
+    static const bool iq3s_one = env == nullptr && std::getenv("LAMINA_IQ3S_MT1") != nullptr && cpu_avx2_ok() &&
+                                 std::getenv("LAMINA_NO_IQ256") == nullptr && !cpu_avx512_ok() &&
+                                 iq256_gather_setting() != 0 && cpu_gather_fast();
     return iq3s_one && gu_type == 21 ? 1 : mt_min;
 }
 
@@ -239,10 +253,10 @@ bool nvfp4_mt() {
     }();
     return on;
 }
-}  // namespace
+}   // namespace
 #endif
-void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt, float* const* ff,
-                    int r0, int r1) {
+void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* act, int nt, float* const* ff, int r0,
+                    int r1) {
     if (f.act == 1) {   // Inkling 2: ggml-cpu's dots times the blob's gate/up scale, then its activation
         const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
         const int n = (int) f.n_embd;
@@ -278,7 +292,8 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         }
         return;
     }
-    if (f.swiglu_limit > 0.f) {   // the clamped SwiGLU (Hy4-flash): ggml-cpu's dots, then ggml_swiglu_clamp's arithmetic
+    if (f.swiglu_limit > 0.f) {   // the clamped SwiGLU (Hy4-flash): ggml-cpu's
+                                  // dots, then ggml_swiglu_clamp's arithmetic
         const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
         const int n = (int) f.n_embd;
         const float lim = f.swiglu_limit;
@@ -326,7 +341,10 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     // Unsloth UD-Q4_K_XL's Q4_K gate/up: the multi-token kernel is bit-exact against ggml's per-token dot (any group
     // size, no #152 rule).  Opt-in, LAMINA_KQ256=1: measured no faster in the engine (a window's expert groups hold
     // ~1.4 tokens and the weights stay in L1 across ggml's per-token calls; 1.01-1.13x in native_expert_parity).
-    static const bool kq = [] { const char* v = std::getenv("LAMINA_KQ256"); return cpu_avx2_ok() && v != nullptr && std::atoi(v) != 0; }();
+    static const bool kq = [] {
+        const char* v = std::getenv("LAMINA_KQ256");
+        return cpu_avx2_ok() && v != nullptr && std::atoi(v) != 0;
+    }();
     if (kq && f.gu_type == 12 && nt >= 2) {   // one token: ggml's own dot below (the same bits, less overhead)
         kq256_gu_rows(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
         return;
@@ -365,8 +383,8 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     }
 }
 
-void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
-                      int r0, int r1) {
+void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out, int r0,
+                      int r1) {
     if (tq_supported(f.d_type)) {
         tq_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
@@ -375,16 +393,24 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     // IQ4_NL down rows: the AVX-2 multi-token kernel decodes the nibbles and absolutises the weights once per
     // block instead of once per token; ggml-cpu's dot is single-token.  LAMINA_NO_IQ4NL falls back to it.
     static const bool iq4nl_mt = std::getenv("LAMINA_NO_IQ4NL") == nullptr;
-    static const int mt_min = [] { const char* e = std::getenv("LAMINA_IQ_MT_MIN"); return e ? std::atoi(e) : 2; }();
-    static const bool kq = [] { const char* v = std::getenv("LAMINA_KQ256"); return v != nullptr && std::atoi(v) != 0; }();
+    static const int mt_min = [] {
+        const char* e = std::getenv("LAMINA_IQ_MT_MIN");
+        return e ? std::atoi(e) : 2;
+    }();
+    static const bool kq = [] {
+        const char* v = std::getenv("LAMINA_KQ256");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
     // Both multi-token kernels below are /arch:AVX2 translation units (kq_avx2.cpp and iq_avx2.cpp),
     // so a CPU without AVX2 has to reach ggml-cpu's vec_dot instead - same reasoning as the gate/up
     // rows above, where `avx512` tested cpu_avx512_ok() and `avx2` did not.
-    if (cpu_avx2_ok() && kq && nt >= 2 && (f.d_type == 7 || f.d_type == 8)) {   // Q5_1 / Q8_0 down: bit-exact, any group size
+    if (cpu_avx2_ok() && kq && nt >= 2 && (f.d_type == 7 || f.d_type == 8)) {   // Q5_1 / Q8_0 down:
+                                                                                // bit-exact, any group size
         kq256_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
-    if (cpu_avx2_ok() && nt >= 2 && f.d_type == 40 && nvfp4_mt() && f.n_ff % 64 == 0) {   // NVFP4 down: its bits, any group
+    if (cpu_avx2_ok() && nt >= 2 && f.d_type == 40 && nvfp4_mt() && f.n_ff % 64 == 0) {   // NVFP4 down: its
+                                                                                          // bits, any group
         std::vector<float> s((size_t) nt);
         for (int r = r0; r < r1; ++r) {
             nvfp4_dots(blob + f.down_off + (size_t) r * f.d_row, (int) f.n_ff, hq, nt, s.data());
@@ -415,4 +441,4 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     }
 }
 
-}  // namespace lamina::kernels::cpu
+}   // namespace lamina::kernels::cpu

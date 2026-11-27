@@ -2,9 +2,9 @@
 //
 // Built with --use_fast_math like native_mmvq.cu, whose Q6_K and Q8_0 x q8_1 dots the exact rescoring repeats (the
 // same thread-to-block mapping, sums in the same order: bitwise its logits).
+#include "lamina/kernels/dp4a.hpp"
 #include "lamina/kernels/draft_proxy.hpp"
 #include "lamina/kernels/warp.cuh"
-#include "lamina/kernels/dp4a.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -18,14 +18,14 @@ namespace lamina::kernels {
 namespace {
 
 constexpr int WARP = 32;
-constexpr int K = 2560;                    // a row's weights
-constexpr int G = K / 32;                  // its 32-weight groups (one q8_1 block each)
-constexpr int W4 = G / 2;                  // its uint4 of codes, two groups each
-constexpr int SCORE_WARPS = 4;             // a tile's warps, a quarter of the row each
+constexpr int K = 2560;          // a row's weights
+constexpr int G = K / 32;        // its 32-weight groups (one q8_1 block each)
+constexpr int W4 = G / 2;        // its uint4 of codes, two groups each
+constexpr int SCORE_WARPS = 4;   // a tile's warps, a quarter of the row each
 constexpr int W4_WARP = W4 / SCORE_WARPS;
-constexpr int PER = 4;                     // candidates a tile of 32 rows keeps
-constexpr float WINDOW = 8.0f;             // rescored: a copy score within this of the best one
-constexpr int RS_BLOCKS = 64, RS_T = 256, RS_W = RS_T / WARP;   // the rescoring: a warp a row, a fixed 64-block grid
+constexpr int PER = 4;                                           // candidates a tile of 32 rows keeps
+constexpr float WINDOW = 8.0f;                                   // rescored: a copy score within this of the best one
+constexpr int RS_BLOCKS = 64, RS_T = 256, RS_W = RS_T / WARP;    // the rescoring: a warp a row, a fixed 64-block grid
 static_assert(W4 % SCORE_WARPS == 0 && RS_BLOCKS == 2 * WARP);   // the last block folds 2 * WARP = RS_BLOCKS shares
 
 struct Q81Block {
@@ -106,7 +106,10 @@ __global__ void pack_kernel(const uint8_t* __restrict__ rows, int64_t n, uint4* 
             const float r = ((float) q - 1.5f) * sh - w[l];
             e += r * r;
         }
-        if (e < best_e) { best_e = e; best_s = s; }
+        if (e < best_e) {
+            best_e = e;
+            best_s = s;
+        }
     }
     const __half hs = __float2half(best_s);
     const float sh = __half2float(hs);
@@ -131,12 +134,10 @@ __global__ void pack_kernel(const uint8_t* __restrict__ rows, int64_t n, uint4* 
 // One tile of 32 rows a block, four warps splitting the row, lane = row: the approximate scores; the tile's best PER
 // (score, row), its softmax partial (max, sum of exp(score - max)) and its max into `gmax`; with `scores`, every row's
 // score.
-__global__ void __launch_bounds__(SCORE_WARPS * WARP) score_kernel(const uint4* __restrict__ wq,
-                                                                   const uint32_t* __restrict__ sc,
-                                                                   const Q81Block* __restrict__ x, int n_rows,
-                                                                   float2* __restrict__ cand, float2* __restrict__ part,
-                                                                   unsigned* __restrict__ gmax,
-                                                                   float* __restrict__ scores) {
+__global__ void __launch_bounds__(SCORE_WARPS* WARP)
+score_kernel(const uint4* __restrict__ wq, const uint32_t* __restrict__ sc, const Q81Block* __restrict__ x, int n_rows,
+             float2* __restrict__ cand, float2* __restrict__ part, unsigned* __restrict__ gmax,
+             float* __restrict__ scores) {
     __shared__ __align__(16) int xi[G * 8];
     __shared__ float xs[G], xdd[G];
     __shared__ float red[SCORE_WARPS][WARP];
@@ -208,7 +209,10 @@ __global__ void __launch_bounds__(SCORE_WARPS * WARP) score_kernel(const uint4* 
         for (int o = 16; o; o >>= 1) {
             const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
             const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
-            if (ov > bv || (ov == bv && oi < bi)) { bv = ov; bi = oi; }
+            if (ov > bv || (ov == bv && oi < bi)) {
+                bv = ov;
+                bi = oi;
+            }
         }
         if (lane == 0) cand[tile * PER + k] = make_float2(bv, __int_as_float(tile * 32 + bi));
         if (lane == bi) v = ninf;
@@ -292,12 +296,11 @@ __device__ float q80_row(const Q80Block* __restrict__ w, const Q81Block* __restr
 // order: the pick, and its probability 1 / (sum * exp(m - best)).  Fixed shares and orders, so the result does not
 // depend on timing.  It leaves `gmax` and `ticket` zero for the next launch.
 template <int TYPE>
-__global__ void __launch_bounds__(RS_T) rescore_kernel(const uint8_t* __restrict__ rows, const Q81Block* __restrict__ x,
-                                                       int n_tiles, const int32_t* __restrict__ map,
-                                                       const float2* __restrict__ cand,
-                                                       const float2* __restrict__ part, float4* __restrict__ blk,
-                                                       unsigned* __restrict__ gmax, unsigned* __restrict__ ticket,
-                                                       int32_t* __restrict__ out_id, float* __restrict__ out_prob) {
+__global__ void __launch_bounds__(RS_T)
+rescore_kernel(const uint8_t* __restrict__ rows, const Q81Block* __restrict__ x, int n_tiles,
+               const int32_t* __restrict__ map, const float2* __restrict__ cand, const float2* __restrict__ part,
+               float4* __restrict__ blk, unsigned* __restrict__ gmax, unsigned* __restrict__ ticket,
+               int32_t* __restrict__ out_id, float* __restrict__ out_prob) {
     __shared__ __align__(16) int2 xe[G * 8];
     __shared__ float wsum[RS_W], wbv[RS_W];
     __shared__ int wbi[RS_W];
@@ -331,19 +334,29 @@ __global__ void __launch_bounds__(RS_T) rescore_kernel(const uint8_t* __restrict
         else y = q80_row(reinterpret_cast<const Q80Block*>(rows) + (size_t) row * G, x, lane);
         if (lane == 0) {
             sum += __expf(y - m) - __expf(c.x - m);
-            if (y > bv || (y == bv && row < bi)) { bv = y; bi = row; }
+            if (y > bv || (y == bv && row < bi)) {
+                bv = y;
+                bi = row;
+            }
         }
     }
 #pragma unroll
     for (int o = 16; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
-    if (lane == 0) { wsum[warp] = sum; wbv[warp] = bv; wbi[warp] = bi; }
+    if (lane == 0) {
+        wsum[warp] = sum;
+        wbv[warp] = bv;
+        wbi[warp] = bi;
+    }
     __syncthreads();
     if (tid == 0) {
         float s = wsum[0], v = wbv[0];
         int i0 = wbi[0];
         for (int i = 1; i < RS_W; ++i) {
             s += wsum[i];
-            if (wbv[i] > v || (wbv[i] == v && wbi[i] < i0)) { v = wbv[i]; i0 = wbi[i]; }
+            if (wbv[i] > v || (wbv[i] == v && wbi[i] < i0)) {
+                v = wbv[i];
+                i0 = wbi[i];
+            }
         }
         blk[blockIdx.x] = make_float4(s, v, __int_as_float(i0), 0.0f);
         __threadfence();
@@ -355,13 +368,19 @@ __global__ void __launch_bounds__(RS_T) rescore_kernel(const uint8_t* __restrict
     const float4 qa = __ldcg(blk + lane), qb = __ldcg(blk + lane + WARP);
     float s = qa.x + qb.x, v = qa.y;
     int i0 = __float_as_int(qa.z);
-    if (qb.y > v || (qb.y == v && __float_as_int(qb.z) < i0)) { v = qb.y; i0 = __float_as_int(qb.z); }
+    if (qb.y > v || (qb.y == v && __float_as_int(qb.z) < i0)) {
+        v = qb.y;
+        i0 = __float_as_int(qb.z);
+    }
 #pragma unroll
     for (int o = 16; o; o >>= 1) {
         s += __shfl_xor_sync(0xffffffffu, s, o);
         const float ov = __shfl_xor_sync(0xffffffffu, v, o);
         const int oi = __shfl_xor_sync(0xffffffffu, i0, o);
-        if (ov > v || (ov == v && oi < i0)) { v = ov; i0 = oi; }
+        if (ov > v || (ov == v && oi < i0)) {
+            v = ov;
+            i0 = oi;
+        }
     }
     if (lane == 0) {
         *out_id = map[i0 < 0x7fffffff ? i0 : 0];
@@ -376,7 +395,7 @@ void check(const char* what) {
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
 }
 
-}  // namespace
+}   // namespace
 
 bool draft_proxy_supported(int ggml_type, int n_in) noexcept {
     return n_in == K && (ggml_type == 14 || ggml_type == 8);
@@ -399,8 +418,7 @@ void draft_proxy_pack(int ggml_type, const void* rows, int64_t n_rows, void* pro
     const unsigned blocks = (unsigned) ((n_rows * G + 127) / 128);
     if (ggml_type == 14)
         pack_kernel<14><<<blocks, 128, 0, (cudaStream_t) stream>>>((const uint8_t*) rows, n_rows, wq, sc);
-    else
-        pack_kernel<8><<<blocks, 128, 0, (cudaStream_t) stream>>>((const uint8_t*) rows, n_rows, wq, sc);
+    else pack_kernel<8><<<blocks, 128, 0, (cudaStream_t) stream>>>((const uint8_t*) rows, n_rows, wq, sc);
     check("draft_proxy_pack");
 }
 
@@ -427,4 +445,4 @@ void draft_proxy_top1(int ggml_type, const void* proxy, const void* rows, const 
     check("draft_proxy_top1");
 }
 
-}  // namespace lamina::kernels
+}   // namespace lamina::kernels

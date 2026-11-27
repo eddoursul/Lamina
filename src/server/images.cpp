@@ -23,9 +23,9 @@
 #endif
 #include <windows.h>
 #else
+#include <sys/stat.h>
 #include <cerrno>
 #include <cstring>
-#include <sys/stat.h>
 #endif
 
 namespace lamina::images {
@@ -41,12 +41,12 @@ json or_else(const json& v, json dflt) { return truthy(v) ? v : std::move(dflt);
 
 /// the code points of Unicode's decimal digits (Nd, Unicode 15.0 as Python 3.12 has it): runs of ten from these zeros
 constexpr uint32_t kDigitZeros[] = {
-    0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66, 0xDE6, 0xE50, 0xED0,
-    0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620,
-    0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0, 0xFF10, 0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0,
-    0x112F0, 0x11450, 0x114D0, 0x11650, 0x116C0, 0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50, 0x11DA0, 0x11F50,
-    0x16A60, 0x16AC0, 0x16B50, 0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E4F0, 0x1E950,
-    0x1FBF0};
+    0x30,    0x660,   0x6F0,   0x7C0,   0x966,   0x9E6,   0xA66,   0xAE6,   0xB66,   0xBE6,   0xC66,   0xCE6,
+    0xD66,   0xDE6,   0xE50,   0xED0,   0xF20,   0x1040,  0x1090,  0x17E0,  0x1810,  0x1946,  0x19D0,  0x1A80,
+    0x1A90,  0x1B50,  0x1BB0,  0x1C40,  0x1C50,  0xA620,  0xA8D0,  0xA900,  0xA9D0,  0xA9F0,  0xAA50,  0xABF0,
+    0xFF10,  0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0, 0x11650, 0x116C0,
+    0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50, 0x11DA0, 0x11F50, 0x16A60, 0x16AC0, 0x16B50, 0x1D7CE, 0x1D7D8,
+    0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E4F0, 0x1E950, 0x1FBF0};
 
 /// a decimal digit's value (str.isdecimal, re's \d, what int() reads), else -1
 int digit_value(uint32_t cp) {
@@ -97,7 +97,8 @@ int64_t int_of_str(const std::string& s) {
     const bool neg = !v.empty() && v[0] == '-';
     if (!v.empty() && (v[0] == '-' || v[0] == '+')) v.remove_prefix(1);
     const std::string digits = without_underscores(v);
-    const bool ok = ascii && !digits.empty() && std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '9'; });
+    const bool ok = ascii && !digits.empty() &&
+                    std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '9'; });
     if (!ok) throw std::invalid_argument("invalid literal for int() with base 10: " + py_repr_value(json(s)));
     uint64_t u = 0;
     for (const char c : digits) {
@@ -117,7 +118,8 @@ int64_t py_int(const json& v) {
     switch (v.type()) {
         case json::value_t::boolean: return v.get<bool>() ? 1 : 0;
         case json::value_t::number_integer: return v.get<int64_t>();
-        case json::value_t::number_unsigned: return (int64_t) std::min<uint64_t>(v.get<uint64_t>(), (uint64_t) std::numeric_limits<int64_t>::max());
+        case json::value_t::number_unsigned:
+            return (int64_t) std::min<uint64_t>(v.get<uint64_t>(), (uint64_t) std::numeric_limits<int64_t>::max());
         case json::value_t::number_float: {
             const double d = v.get<double>();
             if (std::isnan(d)) throw std::invalid_argument("cannot convert float NaN to integer");
@@ -128,8 +130,9 @@ int64_t py_int(const json& v) {
         }
         case json::value_t::string: return int_of_str(v.get_ref<const std::string&>());
         default:
-            throw ConfigTypeError("TypeError", "int() argument must be a string, a bytes-like object or a real number, not '" +
-                                                   py_type_name(v) + "'");
+            throw ConfigTypeError("TypeError",
+                                  "int() argument must be a string, a bytes-like object or a real number, not '" +
+                                      py_type_name(v) + "'");
     }
 }
 
@@ -171,7 +174,8 @@ double py_float(const json& v) {
         case json::value_t::number_float: return v.get<double>();
         case json::value_t::string: return float_of_str(v.get_ref<const std::string&>());
         default:
-            throw ConfigTypeError("TypeError", "float() argument must be a string or a real number, not '" + py_type_name(v) + "'");
+            throw ConfigTypeError("TypeError",
+                                  "float() argument must be a string or a real number, not '" + py_type_name(v) + "'");
     }
 }
 
@@ -196,7 +200,8 @@ std::vector<json> py_iter(const json& v) {
 }
 
 std::string path_type_error(const json& v) {
-    return "argument should be a str or an os.PathLike object where __fspath__ returns a str, not '" + py_type_name(v) + "'";
+    return "argument should be a str or an os.PathLike object where __fspath__ returns a str, not '" + py_type_name(v) +
+           "'";
 }
 
 // ---------------------------------------------------------------------------------------------- paths
@@ -209,7 +214,8 @@ std::string path_str(std::string p) {
     if (!p.empty() && p[0] == sep) {
         if (p.size() > 1 && p[1] == sep) {   // \\server\share, \\?\UNC\server\share, \\.\device
             std::string head = p.substr(0, 8);
-            std::transform(head.begin(), head.end(), head.begin(), [](char c) { return (char) std::toupper((unsigned char) c); });
+            std::transform(head.begin(), head.end(), head.begin(),
+                           [](char c) { return (char) std::toupper((unsigned char) c); });
             const size_t i1 = p.find(sep, head == "\\\\?\\UNC\\" ? 8 : 2);
             const size_t i2 = i1 == std::string::npos ? i1 : p.find(sep, i1 + 1);
             if (i2 == std::string::npos) {
@@ -273,8 +279,9 @@ bool path_is_dir(const std::string& p) {
 std::optional<int64_t> stat_size(const std::string& p) {
     const std::string s = path_str(p);
 #ifdef _WIN32
-    const HANDLE h = CreateFileW(u8_path(s).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                 nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    const HANDLE h =
+        CreateFileW(u8_path(s).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (h == INVALID_HANDLE_VALUE) return std::nullopt;
     BY_HANDLE_FILE_INFORMATION info{};
     const BOOL ok = GetFileInformationByHandle(h, &info);
@@ -282,7 +289,7 @@ std::optional<int64_t> stat_size(const std::string& p) {
     if (!ok) return std::nullopt;
     return (int64_t) (((uint64_t) info.nFileSizeHigh << 32) | info.nFileSizeLow);
 #else
-    struct stat st {};
+    struct stat st{};
     if (::stat(s.c_str(), &st) != 0) return std::nullopt;
     return (int64_t) st.st_size;
 #endif
@@ -315,7 +322,8 @@ fs::path make_temp_dir(const fs::path& parent, const std::string& prefix) {
         if (ec) throw std::runtime_error("cannot create the folder " + u8_str(p) + ": " + ec.message());
 #else
         if (::mkdir(p.c_str(), 0700) == 0) return p;
-        if (errno != EEXIST) throw std::runtime_error("cannot create the folder " + u8_str(p) + ": " + std::strerror(errno));
+        if (errno != EEXIST)
+            throw std::runtime_error("cannot create the folder " + u8_str(p) + ": " + std::strerror(errno));
 #endif
     }
     throw std::runtime_error("No usable temporary directory name found");
@@ -336,8 +344,9 @@ void write_file(const fs::path& p, const std::string& data) {
 /// the stored images' names: ^[0-9a-f]{32}\.png$ (re's $ also takes a last "\n")
 bool stored_name(std::string_view name) {
     if (name.size() == 37 && name.back() == '\n') name.remove_suffix(1);
-    return name.size() == 36 && name.substr(32) == ".png" &&
-           std::all_of(name.begin(), name.begin() + 32, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    return name.size() == 36 && name.substr(32) == ".png" && std::all_of(name.begin(), name.begin() + 32, [](char c) {
+               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+           });
 }
 
 /// secrets.token_hex(nbytes): from the system's secure source
@@ -464,15 +473,13 @@ private:
     std::string part_;
 };
 
-template <class F>
-struct OnExit {
+template <class F> struct OnExit {
     F f;
     ~OnExit() { f(); }
 };
-template <class F>
-OnExit(F) -> OnExit<F>;
+template <class F> OnExit(F) -> OnExit<F>;
 
-}  // namespace
+}   // namespace
 
 // ================================================================================================= the request
 std::pair<int64_t, int64_t> parse_size(const json& value, int64_t max_side) {
@@ -513,27 +520,30 @@ std::pair<int64_t, int64_t> parse_size(const json& value, int64_t max_side) {
     if (!ok) throw ImageRequestError("size: WIDTHxHEIGHT, e.g. \"1024x1024\", not " + py_repr_value(value));
     for (const int64_t v : {w, h})
         if (v < kMinSide || v > max_side || v % kSizeStep != 0)
-            throw ImageRequestError("size " + std::to_string(w) + "x" + std::to_string(h) + ": each side a multiple of " +
-                                    std::to_string(kSizeStep) + " from " + std::to_string(kMinSide) + " to " +
-                                    std::to_string(max_side));
+            throw ImageRequestError("size " + std::to_string(w) + "x" + std::to_string(h) +
+                                    ": each side a multiple of " + std::to_string(kSizeStep) + " from " +
+                                    std::to_string(kMinSide) + " to " + std::to_string(max_side));
     return {w, h};
 }
 
 namespace {
 
 /// a request's whole number from lo to hi, or `dflt` when it has none
-std::optional<int64_t> int_field(const json& req, const char* key, int64_t lo, int64_t hi, std::optional<int64_t> dflt) {
+std::optional<int64_t> int_field(const json& req, const char* key, int64_t lo, int64_t hi,
+                                 std::optional<int64_t> dflt) {
     const json& v = jget(req, key);
     if (v.is_null()) return dflt;
     bool ok = v.is_number_integer();
-    if (ok && v.is_number_unsigned()) ok = hi >= 0 && v.get<uint64_t>() <= (uint64_t) hi && (lo <= 0 || v.get<uint64_t>() >= (uint64_t) lo);
+    if (ok && v.is_number_unsigned())
+        ok = hi >= 0 && v.get<uint64_t>() <= (uint64_t) hi && (lo <= 0 || v.get<uint64_t>() >= (uint64_t) lo);
     else if (ok) ok = lo <= v.get<int64_t>() && v.get<int64_t>() <= hi;
     if (!ok)
-        throw ImageRequestError(std::string(key) + ": a whole number from " + std::to_string(lo) + " to " + std::to_string(hi));
+        throw ImageRequestError(std::string(key) + ": a whole number from " + std::to_string(lo) + " to " +
+                                std::to_string(hi));
     return v.is_number_unsigned() ? (int64_t) v.get<uint64_t>() : v.get<int64_t>();
 }
 
-}  // namespace
+}   // namespace
 
 Job parse_request(const json& req, const json& cfg) {
     const json& prompt = jget(req, "prompt");
@@ -564,9 +574,25 @@ std::vector<std::string> sd_cli_args(const json& cfg, const Job& job, const std:
         if (!cfg.is_object() || !cfg.contains(k)) throw ConfigTypeError("KeyError", std::string("'") + k + "'");
         return py_str(cfg[k]);
     };
-    std::vector<std::string> cmd = {at("exe"), "--diffusion-model", at("diffusion_model"), "--vae", at("vae"), "--llm", at("llm"),
-                                    "-p", job.prompt, "--steps", std::to_string(job.steps), "--cfg-scale", "1.0",
-                                    "--sampling-method", "euler", "-W", std::to_string(job.width), "-H", std::to_string(job.height)};
+    std::vector<std::string> cmd = {at("exe"),
+                                    "--diffusion-model",
+                                    at("diffusion_model"),
+                                    "--vae",
+                                    at("vae"),
+                                    "--llm",
+                                    at("llm"),
+                                    "-p",
+                                    job.prompt,
+                                    "--steps",
+                                    std::to_string(job.steps),
+                                    "--cfg-scale",
+                                    "1.0",
+                                    "--sampling-method",
+                                    "euler",
+                                    "-W",
+                                    std::to_string(job.width),
+                                    "-H",
+                                    std::to_string(job.height)};
     if (job.steps == kTurboSteps) {
         cmd.push_back("--sigmas");
         cmd.push_back(py_str(or_else(jget(cfg, "sigmas"), std::string(kTurboSigmas))));
@@ -577,7 +603,8 @@ std::vector<std::string> sd_cli_args(const json& cfg, const Job& job, const std:
     const json& args = jget(cfg, "args");
     if (truthy(args))
         for (const json& a : py_iter(args)) cmd.push_back(py_str(a));
-    if (jget(cfg, "native").is_boolean() && jget(cfg, "native").get<bool>())   // Lamina's DiT runner inside sd-cli (CUDA builds)
+    if (jget(cfg, "native").is_boolean() && jget(cfg, "native").get<bool>())   // Lamina's DiT runner inside
+                                                                               // sd-cli (CUDA builds)
         cmd.insert(cmd.end(), {"--model-args", "qwen_image_2_1_native=1"});
     return cmd;
 }
@@ -608,7 +635,9 @@ Environment image_env(const json& cfg, const Environment* base) {
         const json& backend = jget(cfg, "backend");
         if (backend.is_array() || backend.is_object())
             throw ConfigTypeError("TypeError", "unhashable type: '" + py_type_name(backend) + "'");
-        const char* var = is_str(backend, "cuda") ? "CUDA_VISIBLE_DEVICES" : is_str(backend, "vulkan") ? "GGML_VK_VISIBLE_DEVICES" : nullptr;
+        const char* var = is_str(backend, "cuda")     ? "CUDA_VISIBLE_DEVICES"
+                          : is_str(backend, "vulkan") ? "GGML_VK_VISIBLE_DEVICES"
+                                                      : nullptr;
         if (var != nullptr) {
             env[var] = py_str(gpu);
             if (is_str(backend, "cuda")) env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID";
@@ -616,7 +645,8 @@ Environment image_env(const json& cfg, const Environment* base) {
     }
     const json& extra = jget(cfg, "env");
     if (truthy(extra)) {
-        if (!extra.is_object()) throw ConfigTypeError("AttributeError", "'" + py_type_name(extra) + "' object has no attribute 'items'");
+        if (!extra.is_object())
+            throw ConfigTypeError("AttributeError", "'" + py_type_name(extra) + "' object has no attribute 'items'");
         for (auto it = extra.begin(); it != extra.end(); ++it) env[it.key()] = py_str(it.value());
     }
     return env;
@@ -628,7 +658,8 @@ int64_t need_mib(const json& cfg, int64_t width, int64_t height) {
     for (const char* k : {"diffusion_model", "vae", "llm"}) {
         const json& p = jget(cfg, k);
         if (!p.is_string()) continue;   // missing (KeyError) or not a path (TypeError): not counted
-        if (has_nul(p.get_ref<const std::string&>())) throw std::invalid_argument("stat: embedded null character in path");
+        if (has_nul(p.get_ref<const std::string&>()))
+            throw std::invalid_argument("stat: embedded null character in path");
         files += stat_size(p.get<std::string>()).value_or(0);
     }
     const double area = std::clamp((double) width * (double) height * 4096.0, -0x1p61, 0x1p61);   // 4 GiB a megapixel
@@ -640,7 +671,8 @@ int64_t need_mib(const json& cfg, int64_t width, int64_t height) {
 ImageGen::ImageGen(const json& cfg_, std::string log_) : cfg(cfg_), log(std::move(log_)) {
     const json pol = or_else(jget(cfg, "gpu_policy"), "auto");
     if (std::none_of(kPolicies.begin(), kPolicies.end(), [&](std::string_view p) { return is_str(pol, p); }))
-        throw std::invalid_argument("images \"gpu_policy\" must be one of auto, keep, unload, not " + py_repr_value(pol));
+        throw std::invalid_argument("images \"gpu_policy\" must be one of auto, keep, unload, not " +
+                                    py_repr_value(pol));
     const json rel = or_else(jget(cfg, "reload"), "lazy");
     if (!is_str(rel, "lazy") && !is_str(rel, "eager"))
         throw std::invalid_argument("images \"reload\" must be lazy or eager, not " + py_repr_value(rel));
@@ -655,7 +687,8 @@ ImageGen::ImageGen(const json& cfg_, std::string log_) : cfg(cfg_), log(std::mov
     model = or_else(jget(cfg, "model_name"), std::string(kModelName));
     const json& out = jget(cfg, "out_dir");
     if (truthy(out) && !out.is_string()) throw ConfigTypeError("TypeError", path_type_error(out));
-    dir = truthy(out) ? u8_path(path_str(out.get<std::string>())) : make_temp_dir(u8_path(temp_dir()), "lamina-images-");
+    dir =
+        truthy(out) ? u8_path(path_str(out.get<std::string>())) : make_temp_dir(u8_path(temp_dir()), "lamina-images-");
     fs::create_directories(dir);
     keep_files = py_int(or_else(jget(cfg, "keep_files"), 64));
 }
@@ -704,7 +737,8 @@ std::optional<fs::path> ImageGen::file(const std::string& name) const {
     return p;
 }
 
-std::pair<std::vector<std::string>, json> ImageGen::run(const Job& job, Cancel* cancel, const std::string& policy_used) {
+std::pair<std::vector<std::string>, json> ImageGen::run(const Job& job, Cancel* cancel,
+                                                        const std::string& policy_used) {
     std::error_code ec;
     fs::create_directories(dir, ec);   // a temporary folder the system's cleanup took since
     const fs::path work = make_temp_dir(dir, "job-");
@@ -780,7 +814,7 @@ std::pair<std::vector<std::string>, json> ImageGen::run(const Job& job, Cancel* 
                 continue;
             }
             took(err.take(false));   // stdout is quiet: stderr's lines since then go here
-            if (got < 0) {   // its stdout closed while it runs on
+            if (got < 0) {           // its stdout closed while it runs on
                 if (cancel != nullptr) cancel->wait(0.2);
                 else std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
@@ -818,7 +852,9 @@ std::pair<std::vector<std::string>, json> ImageGen::run(const Job& job, Cancel* 
         const size_t first = lines.size() > 12 ? lines.size() - 12 : 0;
         std::string tail;
         for (size_t i = first; i < lines.size(); ++i) tail += (i > first ? "\n" : "") + std::string(lines[i]);
-        const std::string what = !why.empty() ? why : rc && *rc != 0 ? "sd-cli exited with code " + exit_code_text(*rc) : "sd-cli wrote no image";
+        const std::string what = !why.empty()     ? why
+                                 : rc && *rc != 0 ? "sd-cli exited with code " + exit_code_text(*rc)
+                                                  : "sd-cli wrote no image";
         say("image job failed: " + what + "\n" + tail);
         throw ImageJobFailed(what + "; the end of its log:\n" + tail);
     }
@@ -854,7 +890,8 @@ std::string ImageGen::store(const std::string& data) {
     return name;
 }
 
-json ImageGen::response(const std::vector<std::string>& images, const Job& job, const json& figures, const std::string& base_url) {
+json ImageGen::response(const std::vector<std::string>& images, const Job& job, const json& figures,
+                        const std::string& base_url) {
     json data = json::array();
     for (size_t i = 0; i < images.size(); ++i) {
         json item = {{"revised_prompt", job.prompt}, {"seed", job.seed + (int64_t) i}};
@@ -886,4 +923,4 @@ json ImageGen::status() const {
     return out;
 }
 
-}  // namespace lamina::images
+}   // namespace lamina::images

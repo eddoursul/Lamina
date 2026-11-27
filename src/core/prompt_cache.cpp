@@ -22,14 +22,12 @@ using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 double mib(uint64_t b) { return (double) b / 1048576.0; }
-}  // namespace
+}   // namespace
 
 // ---- the disk tier (lamina/core/disk_tier.hpp): the files' folder, budget and stage are the tier's; the cache says
 // which conversations go there and when, and the engine copies a range of cells at a time (kv_range).
 
-void SequenceCache::kv_settle() {
-    (void) cudaDeviceSynchronize();
-}
+void SequenceCache::kv_settle() { (void) cudaDeviceSynchronize(); }
 
 bool SequenceCache::open_disk(const std::string& root, uint64_t budget, std::string& msg) {
     if (!enabled()) {
@@ -50,15 +48,15 @@ void SequenceCache::open_disk(const std::string& dir, int64_t mib) {
     if (!enabled() || dir.empty() || mib == 0) return;
     std::string m;
     if (open_disk(dir, mib > 0 ? (uint64_t) mib << 20 : 0, m))
-        std::fprintf(stderr, "lamina serve: prompt cache: the conversations the RAM does not hold go to %s\n", m.c_str());
-    else
-        std::fprintf(stderr, "lamina serve: prompt cache: no disk tier: %s\n", m.c_str());
+        std::fprintf(stderr, "lamina serve: prompt cache: the conversations the RAM does not hold go to %s\n",
+                     m.c_str());
+    else std::fprintf(stderr, "lamina serve: prompt cache: no disk tier: %s\n", m.c_str());
 }
 
 std::unique_ptr<DiskFile, FileFree> SequenceCache::new_file() {
-    return std::unique_ptr<DiskFile, FileFree>(disk_->make().release(), FileFree{[](void* who, DiskFile* f) {
-        static_cast<SequenceCache*>(who)->drop_file(f);
-    }, this});
+    return std::unique_ptr<DiskFile, FileFree>(
+        disk_->make().release(),
+        FileFree{[](void* who, DiskFile* f) { static_cast<SequenceCache*>(who)->drop_file(f); }, this});
 }
 
 void SequenceCache::drop_file(DiskFile* f) {
@@ -179,11 +177,11 @@ void SequenceCache::evict(Seq&& s, const char* why) {
     if (disk_ != nullptr && s.kv) {   // its copy in RAM to the disk tier, then the RAM back
         const auto t0 = Clock::now();
         kv_settle();
-        const uint64_t need = disk_->size_of(0, s.kv_cells, kv_unit(), range_bytes()) +
-                              s.ckpts.size() * disk_->slot_bytes();
+        const uint64_t need =
+            disk_->size_of(0, s.kv_cells, kv_unit(), range_bytes()) + s.ckpts.size() * disk_->slot_bytes();
         std::unique_ptr<DiskFile, FileFree> f;
-        bool ok = kv_complete(s.kv.get()) && disk_room(need) && (f = new_file()) &&
-                  disk_put_copy(*f, s.kv.get(), s.kv_cells);
+        bool ok =
+            kv_complete(s.kv.get()) && disk_room(need) && (f = new_file()) && disk_put_copy(*f, s.kv.get(), s.kv_cells);
         for (size_t i = 0; ok && i < s.ckpts.size(); ++i) ok = disk_put_ckpt(*f, s.ckpts[i].pos, s.ckpts[i].host);
         if (ok) {
             s.kv.reset();
@@ -193,8 +191,10 @@ void SequenceCache::evict(Seq&& s, const char* why) {
             }
             s.disk_bytes = disk_->bytes(*f);
             s.file = std::move(f);
-            std::fprintf(stderr, "lamina serve: prompt cache: a parked conversation of %zu cells moved to the disk "
-                                 "(%.0f MiB in %.0f ms)%s\n", s.tokens.size(), mib(s.disk_bytes), ms_since(t0), why);
+            std::fprintf(stderr,
+                         "lamina serve: prompt cache: a parked conversation of %zu cells moved to the disk "
+                         "(%.0f MiB in %.0f ms)%s\n",
+                         s.tokens.size(), mib(s.disk_bytes), ms_since(t0), why);
             parked_.readmit(std::move(s));
             return;
         }
@@ -269,9 +269,10 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     }
     if (!ok) {
         if (!s.ckpts.empty())
-            std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells (%.0f MiB more) not parked: "
-                                 "%s\n", (long long) L, mib(need),
-                         room ? "its file could not be written" : "no room on the disk tier");
+            std::fprintf(stderr,
+                         "lamina serve: prompt cache: a conversation of %lld cells (%.0f MiB more) not parked: "
+                         "%s\n",
+                         (long long) L, mib(need), room ? "its file could not be written" : "no room on the disk tier");
         return;
     }
     s.tokens = live_.tokens;
@@ -283,9 +284,11 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     s.disk_bytes = disk_->bytes(*s.file);
     const uint64_t wrote = block + wrote_ckpts * disk_->slot_bytes();
     const double ms = ms_since(t0);
-    std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells parked on the disk (%.0f MiB written "
-                         "in %.0f ms, %.2f GiB/s; its file %.0f MiB, from cell %lld)\n", (long long) L, mib(wrote), ms,
-                 ms > 0 ? (double) wrote / 1073741824.0 / (ms / 1000.0) : 0.0, mib(s.disk_bytes), (long long) from);
+    std::fprintf(stderr,
+                 "lamina serve: prompt cache: a conversation of %lld cells parked on the disk (%.0f MiB written "
+                 "in %.0f ms, %.2f GiB/s; its file %.0f MiB, from cell %lld)\n",
+                 (long long) L, mib(wrote), ms, ms > 0 ? (double) wrote / 1073741824.0 / (ms / 1000.0) : 0.0,
+                 mib(s.disk_bytes), (long long) from);
     parked_.park(std::move(s));
 }
 
@@ -509,7 +512,8 @@ std::vector<PromptCache::Part> PromptCache::kv_parts(int64_t lo, int64_t hi) con
                              (uint64_t) std::max<int64_t>(0, p1 - p0) * page * a.row_bytes});
         const int64_t rows = st->max_cells / sh.idx_block + 2;
         const int64_t r0 = std::min(rows, lo / sh.idx_block), r1 = std::min(rows, hi / sh.idx_block + 2);
-        parts.push_back({(uint8_t*) st->idx_pooled + (uint64_t) r0 * row, (uint64_t) std::max<int64_t>(0, r1 - r0) * row});
+        parts.push_back(
+            {(uint8_t*) st->idx_pooled + (uint64_t) r0 * row, (uint64_t) std::max<int64_t>(0, r1 - r0) * row});
     }
     return parts;
 }
@@ -557,20 +561,22 @@ void SequenceCache::stash_live(int64_t keep_upto) {
         // logged when the RAM's limit is the lower one: the budget, or a conversation that lends its start, also
         // turn one away (as before the reserve, silently)
         if (incoming <= parked_.budget() && parked_.ram_bound(spare))
-            std::fprintf(stderr, "lamina serve: prompt cache: a conversation of %lld cells (%.0f MiB) not parked: the "
-                                 "system's available RAM is %.0f MiB %s the reserve\n", (long long) L,
-                         (double) incoming / 1048576.0, (double) (spare < 0 ? -spare : spare) / 1048576.0,
-                         spare < 0 ? "below" : "above");
+            std::fprintf(stderr,
+                         "lamina serve: prompt cache: a conversation of %lld cells (%.0f MiB) not parked: the "
+                         "system's available RAM is %.0f MiB %s the reserve\n",
+                         (long long) L, (double) incoming / 1048576.0,
+                         (double) (spare < 0 ? -spare : spare) / 1048576.0, spare < 0 ? "below" : "above");
         return;
     }
     for (Seq& s : evicted) evict(std::move(s), "");   // to the disk tier where there is one, else gone
-    evicted.clear();   // their K/V copies go before this one's is allocated
+    evicted.clear();                                  // their K/V copies go before this one's is allocated
     Seq s;
     s.kv = std::unique_ptr<uint8_t[], KvFree>((uint8_t*) lamina::platform::spill_alloc(spill_align_up(bytes)),
                                               KvFree{[](void* who, uint8_t* host) {
-                                                  static_cast<SequenceCache*>(who)->kv_drop(host);
-                                                  lamina::platform::spill_free(host);
-                                              }, this});
+                                                         static_cast<SequenceCache*>(who)->kv_drop(host);
+                                                         lamina::platform::spill_free(host);
+                                                     },
+                                                     this});
     if (!s.kv || !kv_copy(L, L, s.kv.get(), true)) return;
     for (size_t i = 0; i < live_.ckpts.size();) {
         if (live_.ckpts[i].pos > keep_upto) {
@@ -649,61 +655,63 @@ int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<
         return best;
     };
     switch (st.kind) {
-    case Start::kFresh: {
-        use(st.session);
-        stash_live(0);
-        const int64_t result = zero();
-        live().imgs = imgs;
-        return result;
-    }
-    case Start::kContinue: {
-        // The session's conversation continues: from its end, or from a checkpoint with what came after given up.
-        // Another conversation that shares its start and has no other session to take continues in place too, the
-        // session's own parked first when the prompt drops more of it than it keeps.
-        use(st.session);
-        Seq& c = live();
-        const int64_t L = (int64_t) c.tokens.size();
-        if (st.park_rest) stash_live(best);
-        // (the whole prompt: its end's checkpoint brings the engine's output back, also where the state stands there)
-        if ((best < L || best == (int64_t) ids.size()) && !restore(c, best, false, false, true)) return zero();
-        release(c, best);
-        cut(c, best);
-        c.tokens.resize((size_t) best);
-        c.imgs = imgs;
-        return best;
-    }
-    case Start::kBorrowSession: {
-        // Another conversation that shares the start of one a session holds: it takes a session of its own, the
-        // cells before `best` copied from the lender's, which stays as it is (it may be decoding).
-        Seq& lender = lives_[(size_t) st.from];
-        touch(st.from);
-        use(st.session);
-        vacate();
-        const Ckpt* const ck = load_ckpt(lender, best) ? lender.find(best) : nullptr;
-        if (ck == nullptr || !kv_from(st.from, best) || !state_load(best, ck->host)) return zero();
-        return started(lender);
-    }
-    case Start::kBorrowParked: {
-        // Another conversation that shares the parked one's start: it borrows the cells before `best`, and the
-        // parked conversation stays whole (pinned while the session's own is parked beside it).
-        parked_.entries()[(size_t) st.from].pin = best;
-        use(st.session);
-        vacate();
-        auto donor = std::find_if(parked_.entries().begin(), parked_.entries().end(),
-                                  [](const Seq& s) { return s.pin >= 0; });
-        if (donor == parked_.entries().end()) return zero();
-        const auto t0 = Clock::now();
-        const bool ok = restore(*donor, best, true, true, false);
-        donor->pin = -1;
-        if (!ok) return zero();
-        if (donor->on_disk())
-            std::fprintf(stderr, "lamina serve: prompt cache: the first %lld cells of a conversation on the disk "
-                                 "lent (%.0f ms)\n", (long long) best, ms_since(t0));
-        donor->stamp = parked_.tick();
-        return started(*donor);
-    }
-    case Start::kTake:
-        break;
+        case Start::kFresh: {
+            use(st.session);
+            stash_live(0);
+            const int64_t result = zero();
+            live().imgs = imgs;
+            return result;
+        }
+        case Start::kContinue: {
+            // The session's conversation continues: from its end, or from a checkpoint with what came after given up.
+            // Another conversation that shares its start and has no other session to take continues in place too, the
+            // session's own parked first when the prompt drops more of it than it keeps.
+            use(st.session);
+            Seq& c = live();
+            const int64_t L = (int64_t) c.tokens.size();
+            if (st.park_rest) stash_live(best);
+            // (the whole prompt: its end's checkpoint brings the
+            // engine's output back, also where the state stands there)
+            if ((best < L || best == (int64_t) ids.size()) && !restore(c, best, false, false, true)) return zero();
+            release(c, best);
+            cut(c, best);
+            c.tokens.resize((size_t) best);
+            c.imgs = imgs;
+            return best;
+        }
+        case Start::kBorrowSession: {
+            // Another conversation that shares the start of one a session holds: it takes a session of its own, the
+            // cells before `best` copied from the lender's, which stays as it is (it may be decoding).
+            Seq& lender = lives_[(size_t) st.from];
+            touch(st.from);
+            use(st.session);
+            vacate();
+            const Ckpt* const ck = load_ckpt(lender, best) ? lender.find(best) : nullptr;
+            if (ck == nullptr || !kv_from(st.from, best) || !state_load(best, ck->host)) return zero();
+            return started(lender);
+        }
+        case Start::kBorrowParked: {
+            // Another conversation that shares the parked one's start: it borrows the cells before `best`, and the
+            // parked conversation stays whole (pinned while the session's own is parked beside it).
+            parked_.entries()[(size_t) st.from].pin = best;
+            use(st.session);
+            vacate();
+            auto donor = std::find_if(parked_.entries().begin(), parked_.entries().end(),
+                                      [](const Seq& s) { return s.pin >= 0; });
+            if (donor == parked_.entries().end()) return zero();
+            const auto t0 = Clock::now();
+            const bool ok = restore(*donor, best, true, true, false);
+            donor->pin = -1;
+            if (!ok) return zero();
+            if (donor->on_disk())
+                std::fprintf(stderr,
+                             "lamina serve: prompt cache: the first %lld cells of a conversation on the disk "
+                             "lent (%.0f ms)\n",
+                             (long long) best, ms_since(t0));
+            donor->stamp = parked_.tick();
+            return started(*donor);
+        }
+        case Start::kTake: break;
     }
     // The parked conversation continues: the session's own is parked and the chosen one becomes live - from its end,
     // or cut at `best` where its own next request parts from it there (the cells after, and their checkpoints, go).
@@ -796,7 +804,8 @@ size_t SequenceCache::shed() {
     std::vector<Seq> evicted;
     const size_t n = parked_.shed(spare, evicted);
     char why[96];
-    std::snprintf(why, sizeof why, ": the system's available RAM is %.0f MiB below the reserve", (double) -spare / 1048576.0);
+    std::snprintf(why, sizeof why, ": the system's available RAM is %.0f MiB below the reserve",
+                  (double) -spare / 1048576.0);
     for (Seq& s : evicted) evict(std::move(s), why);
     // The evicted chains' buffers went to the free list, which keeps the pinned ones for the next chains: below the
     // reserve no idle buffer is kept, so the RAM the evictions counted goes back to the system.
@@ -837,8 +846,9 @@ std::string SequenceCache::summary() const {
     const State s = state();
     char in[64] = "", disk[128] = "";
     if (lives_.size() > 1) std::snprintf(in, sizeof in, " in %zu of %zu sessions", s.held, lives_.size());
-    if (disk_) std::snprintf(disk, sizeof disk, ", %zu of them on the disk; files %.0f of %.0f MiB", s.disk,
-                             mib(s.disk_bytes), mib(s.disk_budget));
+    if (disk_)
+        std::snprintf(disk, sizeof disk, ", %zu of them on the disk; files %.0f of %.0f MiB", s.disk, mib(s.disk_bytes),
+                      mib(s.disk_budget));
     size_t in_ram = 0;   // (a conversation back from the disk tier keeps the others in its file)
     for (const Seq& c : lives_)
         for (const Ckpt& k : c.ckpts) in_ram += k.host != nullptr;
@@ -851,4 +861,4 @@ std::string SequenceCache::summary() const {
     return buf;
 }
 
-}  // namespace lamina::core
+}   // namespace lamina::core

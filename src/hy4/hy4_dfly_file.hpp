@@ -20,4 +20,4 @@ struct DFlyConfig {
 /// The config.json in `dir`; false (and `err`) without its DFly keys or with settings this path does not run
 bool read_dfly_config(const std::string& dir, DFlyConfig& c, std::string& err);
 
-}  // namespace lamina::hy4
+}   // namespace lamina::hy4
