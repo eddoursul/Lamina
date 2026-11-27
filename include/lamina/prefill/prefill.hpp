@@ -23,6 +23,8 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace lamina::prefill {
 
@@ -189,7 +191,20 @@ public:
     /// the checkpoint waits for no copy at the end: a part's 113 MB took 20 ms there, and a split prompt's first
     /// stage waited ~90 ms more behind its residual's hand-off.  The layers this path runs only (set_layers).
     void set_checkpoint(int64_t pos, void* host);
-    /// After that run: its copies have landed; false: one failed (the checkpoint is not taken).
+    /// Checkpoints inside the next run(): the state at each position (ascending, strictly inside that run) into its
+    /// pinned buffer, the layers this path runs only, as set_checkpoint's.  The sub-chunk that holds one runs its
+    /// state's steps - each GDN layer's convolution and scan, each QSA layer's indexer appends, the PLE block - in two
+    /// launches around its row, and each layer's part is copied between them into one of two device buffers, which
+    /// goes out to the host behind the run: no run ends there, so no expert streams twice.  The convolution, the
+    /// appends and the PLE block take their rows one after the other (bitwise one launch's); the scan's chunks of 16
+    /// rows then start at the mark, as a run that starts there has them.  The token window (session_ckpt_put_window)
+    /// is the cache's to write.  false: none taken (reserve_marks failed).
+    bool set_marks(std::vector<std::pair<int64_t, void*>> marks);
+    /// The two device buffers of set_marks (7.3 MB on Flash-Next), allocated once, on the current GPU, from the VRAM
+    /// the engine leaves free: the prompt's loans, and with them the expert cache, are what they are without marks.
+    /// false: no VRAM for them (logged once; no marks are taken then).
+    bool reserve_marks();
+    /// After that run: its copies have landed, the marks' too; false: one failed (no checkpoint of it is taken).
     bool checkpoint_wait();
 
 private:

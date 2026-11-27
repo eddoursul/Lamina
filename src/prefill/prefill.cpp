@@ -34,6 +34,8 @@ constexpr float EPS = 1e-6f;
 constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
 constexpr int64_t C = 10240, ZV = 6144, HV = 48;
 constexpr int64_t SUB = 2048;        // tokens of a sub-chunk: everything but the routed experts
+constexpr int64_t kIdxRow = 128;     // an indexer key's floats (idx_raw's rows)
+constexpr int kMarkSlots = 2;        // set_marks: device buffers a layer's part leaves through, in turn
 constexpr int64_t SEL_BATCH = 256;   // queries per block-score launch
 // a hyper-connection read's up projection and mix in one kernel (gr_upmix) from this many tokens: bitwise the
 // product + gr_mix_r pair wherever the product keeps K whole (gr_upmix_parity: every count up to a sub-chunk's on an
@@ -149,7 +151,7 @@ Bufs layout(Alloc& a, int64_t T, int64_t cap, int64_t max_blocks, bool offload, 
     b.Vc = a.take<float>(p * 512);
     b.Qf = a.take<float>(p * 12288);
     b.q = a.take<float>(p * ZV);
-    b.idx_raw = a.take<float>(p * 128);
+    b.idx_raw = a.take<float>(p * kIdxRow);
     b.q_idx = a.take<float>(p * 512);
     b.attn = a.take<float>(p * ZV);
     b.attn_h = a.take<uint16_t>(p * ZV);
@@ -257,6 +259,17 @@ struct Prefill::Impl {
     cudaStream_t ck_s = nullptr;
     cudaEvent_t ck_ev = nullptr;
     bool ck_failed = false;
+    // set_marks: the checkpoints inside the next run (positions ascending)
+    std::vector<std::pair<int64_t, void*>> marks;
+    cudaEvent_t mk_ev = nullptr;            // a part is in its device buffer (the copy out waits for it)
+    cudaEvent_t mk_free[kMarkSlots] = {};   // each device buffer's last copy out has landed
+    bool mk_used[kMarkSlots] = {};
+    int mk_next = 0;
+    // reserve_marks: the device buffers, kMarkSlots of mk_slot bytes, from the VRAM the engine leaves free (the
+    // prompt's loans and the expert cache stay as they are)
+    uint8_t* mk_ring = nullptr;
+    uint64_t mk_slot = 0;
+    bool mk_failed = false;
 };
 
 Prefill::Prefill() : impl_(new Impl) {}
@@ -270,6 +283,10 @@ Prefill::~Prefill() {
     if (m.ev_mixed) cudaEventDestroy(m.ev_mixed);
     if (m.ev_routed) cudaEventDestroy(m.ev_routed);
     if (m.ck_ev) cudaEventDestroy(m.ck_ev);
+    if (m.mk_ev) cudaEventDestroy(m.mk_ev);
+    if (m.mk_ring) cudaFree(m.mk_ring);
+    for (cudaEvent_t e : m.mk_free)
+        if (e) cudaEventDestroy(e);
     if (m.ck_s) cudaStreamDestroy(m.ck_s);
     for (auto* v : {&m.ev_in, &m.ev_piece, &m.ev_written, &m.ev_out, &m.pace_ev})
         for (cudaEvent_t e : *v)
@@ -316,6 +333,9 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         cudaStreamCreateWithFlags(&m.xsum, cudaStreamNonBlocking) != cudaSuccess ||
         cudaStreamCreateWithFlags(&m.ck_s, cudaStreamNonBlocking) != cudaSuccess ||
         cudaEventCreateWithFlags(&m.ck_ev, cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&m.mk_ev, cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&m.mk_free[0], cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&m.mk_free[1], cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&m.ev_mixed, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&m.ev_routed, cudaEventDisableTiming) != cudaSuccess ||
         cudaHostAlloc((void**) &m.ids_host, (size_t) max_chunk * K * 4, cudaHostAllocDefault) != cudaSuccess ||
@@ -374,11 +394,40 @@ void Prefill::set_checkpoint(int64_t pos, void* host) {
     m.ck_host = host;
     m.ck_failed = false;
 }
+bool Prefill::reserve_marks() {
+    Impl& m = *impl_;
+    if (m.mk_ring != nullptr) return true;
+    if (m.mk_failed) return false;
+    m.mk_slot = core::session_ckpt_layer_bytes(*m.g);
+    if (cudaMalloc(&m.mk_ring, (size_t) (kMarkSlots * m.mk_slot)) != cudaSuccess) {
+        (void) cudaGetLastError();
+        m.mk_ring = nullptr;
+        m.mk_failed = true;
+        std::fprintf(stderr, "lamina: no VRAM for checkpoints inside a prompt's run (%llu MiB): none are taken\n",
+                     (unsigned long long) (kMarkSlots * m.mk_slot) >> 20);
+        return false;
+    }
+    return true;
+}
+bool Prefill::set_marks(std::vector<std::pair<int64_t, void*>> marks) {
+    Impl& m = *impl_;
+    m.marks = std::move(marks);
+    m.marks.erase(std::remove_if(m.marks.begin(), m.marks.end(), [](const auto& k) { return k.second == nullptr; }),
+                  m.marks.end());
+    m.ck_failed = false;
+    if (!m.marks.empty() && !reserve_marks()) {
+        m.marks.clear();
+        return false;
+    }
+    return true;
+}
 bool Prefill::checkpoint_wait() {
     Impl& m = *impl_;
     const bool ok = !m.ck_failed && cudaStreamSynchronize(m.ck_s) == cudaSuccess;
     m.ck_host = nullptr;
     m.ck_pos = -1;
+    m.marks.clear();
+    for (bool& u : m.mk_used) u = false;
     return ok;
 }
 void Prefill::set_fast_link(bool on) {
@@ -574,6 +623,49 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     // set_layers: [L0, L1) here; the draft layer's K/V with the last layer
     const int64_t L0 = m.first, L1 = m.last < 0 ? g.n_layers : m.last;
     core::MtpDrafter* const drafter = L1 == g.n_layers ? draft : nullptr;
+    // set_marks: those inside this run.  A mark's part of layer l (`what`: its state, or the PLE's history) is copied
+    // on this path's stream into the next of the device buffers, which goes out to the host on the copy stream: the
+    // state changes on right after, and nothing waits for the host's copy but that buffer's next use.  (This stream
+    // waiting for each copy to the host held a video's first read back 0.15 s.)
+    std::vector<std::pair<int64_t, void*>> marks;
+    for (const auto& k : m.marks)
+        if (k.first > pos0 && k.first < pos0 + n) marks.push_back(k);
+    if (m.mk_ring == nullptr) marks.clear();   // (set_marks took none)
+    auto mark_copy = [&](int64_t pos, void* host, int64_t l, int what) {
+        const int slot = m.mk_next++ % kMarkSlots;
+        if (m.mk_used[slot]) cudaStreamWaitEvent(m.cs, m.mk_free[slot], 0);
+        uint8_t* const stage = m.mk_ring + (size_t) slot * m.mk_slot;
+        const std::vector<core::CkptPart> parts = core::session_ckpt_parts(ss, g, pos, l, l + 1, L0, what);
+        uint64_t at = 0;
+        for (const core::CkptPart& p : parts) {
+            cudaMemcpyAsync(stage + at, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToDevice, m.cs);
+            at += (p.bytes + 255) & ~255ull;
+        }
+        cudaEventRecord(m.mk_ev, m.cs);
+        cudaStreamWaitEvent(m.ck_s, m.mk_ev, 0);
+        at = 0;
+        for (const core::CkptPart& p : parts) {
+            if (cudaMemcpyAsync((uint8_t*) host + p.host, stage + at, (size_t) p.bytes, cudaMemcpyDeviceToHost,
+                                m.ck_s) != cudaSuccess)
+                m.ck_failed = !core::session_copy_failed(m.ck_s);
+            at += (p.bytes + 255) & ~255ull;
+        }
+        cudaEventRecord(m.mk_free[slot], m.ck_s);
+        m.mk_used[slot] = true;
+    };
+    // the rows [0, P) of the sub-chunk at position `at` through `step(from, to)`, in pieces around the marks among
+    // them: each one's part of layer l copied between two
+    auto by_marks = [&](int64_t at, int64_t P, int64_t l, int what, const std::function<void(int64_t, int64_t)>& step) {
+        int64_t from = 0;
+        for (const auto& [pos, host] : marks) {
+            const int64_t r = pos - at;
+            if (r < 0 || r >= P) continue;
+            if (r > from) step(from, r);
+            mark_copy(pos, host, l, what);
+            from = r;
+        }
+        if (P > from) step(from, P);
+    };
     const core::MtpPromptKv dk = drafter == nullptr ? core::MtpPromptKv{} : draft_kv ? *draft_kv : drafter->prompt_kv();
     if (drafter != nullptr && (!dk.norm_emb || !dk.norm_hidden || !dk.fc_emb || !dk.fc_hidden || !dk.hc_norm ||
                                !dk.hc_down || !dk.hc_up || !dk.k_proj || !dk.v_proj || !dk.k_norm || !dk.kv)) {
@@ -814,10 +906,15 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         return false;
                     }
                     m.gemm.bf16(b.mixed_bf, pw.value_bf16, b.bo, P, N, N);
-                    try {
-                        lamina::kernels::native_ple_postops_tokens(
-                            b.ple_kp, b.R + t0 * D, b.bo, ss.ple.hist, pw,
-                            {b.ple_key, b.ple_q, b.inj_a, b.ple_gated, b.ple_q, b.R + t0 * D}, (int) P, m.cs);
+                    try {   // (set_marks: in pieces, the history copied out at each mark)
+                        by_marks(p0 + t0, P, 1, core::kCkptPle, [&](int64_t a, int64_t z) {
+                            float* const R = b.R + (t0 + a) * D;
+                            lamina::kernels::native_ple_postops_tokens(
+                                b.ple_kp + a * D, R, b.bo + a * N, ss.ple.hist, pw,
+                                {b.ple_key + a * D, b.ple_q + a * D, b.inj_a + a * HC, b.ple_gated + a * D,
+                                 b.ple_q + a * D, R},
+                                (int) (z - a), m.cs);
+                        });
                     } catch (const std::exception& e) {
                         err = std::string("prefill PLE: ") + e.what();
                         return false;
@@ -849,6 +946,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     }
                 }
             // ================ per sub-chunk: the mixer half, then the FFN half up to the routing ================
+            // a mark's part of this layer at its mixer (layer 1's PLE history with it where no PLE block ran)
+            const int mark_what = l == 1 && !ple_on ? core::kCkptAll : core::kCkptState;
             for (int64_t t0 = 0; t0 < T; t0 += SUB) {
                 const int64_t P = std::min(SUB, T - t0), pp = p0 + t0;
                 uint16_t* mixed_h = b.mixed_h + t0 * N;
@@ -905,10 +1004,14 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         if (!bf16_proj(m.gemm, wb, b.mixed_bf, b.ab + HV, P, v.name("ssm_beta.weight"), err, 2 * HV))
                             return false;
                         gdn_gates(b.ab, (const float*) wdt->data, (const float*) wsa->data, b.gate, b.beta, P, m.cs);
-                        mark(kPsGdnConv);
-                        gdn_conv(conv, b.qkv, (const float*) wc->data, b.hbuf, P, EPS, m.cs);
-                        mark(kPsGdnScan);
-                        gdn_scan(state, b.hbuf, b.gate, b.beta, b.y, P, m.cs);
+                        // (set_marks: in pieces, the layer's state copied out at each mark)
+                        by_marks(pp, P, l, mark_what, [&](int64_t a, int64_t z) {
+                            mark(kPsGdnConv);
+                            gdn_conv(conv, b.qkv + a * C, (const float*) wc->data, b.hbuf + a * C, z - a, EPS, m.cs);
+                            mark(kPsGdnScan);
+                            gdn_scan(state, b.hbuf + a * C, b.gate + a * HV, b.beta + a * HV, b.y + a * ZV, z - a,
+                                     m.cs);
+                        });
                         mark(kPsGdnNorm);
                         gdn_out_norm(b.y, b.z, (const float*) wnm->data, EPS, b.y_h, P, m.cs);
                         mark(kPsGdnOut);
@@ -948,11 +1051,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         const lamina::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled,
                                                                     st.idx_block_pos};
                         mark(kPsQsaIndexer);
-                        try {
-                            lamina::kernels::native_qsa_indexer_append_multi(
-                                b.idx_raw, steps + lamina::kernels::kStepPos, (int) SC, (int) P, 0,
-                                (const float*) wikn->data, EPS, ib, s, st.max_cells, lamina::kernels::rope_scaling(),
-                                m.cs);
+                        try {   // (set_marks: in pieces, the layer's state copied out at each mark)
+                            by_marks(pp, P, l, mark_what, [&](int64_t a, int64_t z) {
+                                lamina::kernels::native_qsa_indexer_append_multi(
+                                    b.idx_raw + a * kIdxRow, steps + a * SC + lamina::kernels::kStepPos, (int) SC,
+                                    (int) (z - a), 0, (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                                    lamina::kernels::rope_scaling(), m.cs);
+                            });
                         } catch (const std::exception& e) {
                             err = std::string("prefill indexer: ") + e.what();
                             return false;

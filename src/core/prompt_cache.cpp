@@ -394,8 +394,10 @@ void* SequenceCache::save(int64_t pos, void* filled) {
 
 bool PromptCache::state_save(int64_t pos, void* host, bool filled) {
     const bool split = split_from > 0 && split_save;
-    if (filled) {   // the run copied the device state in: the token window is the host's
-        session_ckpt_put_window(ss_, g_, host);
+    if (filled) {   // the run copied the device state in; the token window: the tokens before `pos`
+        const std::vector<int64_t>& t = live_tokens();
+        const auto tok = [&](int64_t i) { return i >= 0 && i < (int64_t) t.size() ? (int32_t) t[(size_t) i] : -1; };
+        session_ckpt_put_window(g_, host, tok(pos - 2), tok(pos - 1), ss_.ple_token);
     } else {
         cudaDeviceSynchronize();
         if (!(split ? session_ckpt_save_layers(ss_, g_, pos, host, stream_, 0, split_from, 0)
@@ -436,36 +438,50 @@ int64_t PromptCache::kv_unit() const {
     return std::lcm(sh.page_size, sh.idx_block);
 }
 
+bool SequenceCache::pinned_buffer(const void* b) const {
+    const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& x) { return x.first == b; });
+    return o != owned_.end() && o->second;
+}
+
+void SequenceCache::pinned_first() {   // (take_buffer takes the list's last)
+    const auto f = std::find_if(free_.begin(), free_.end(), [&](const void* b) { return pinned_buffer(b); });
+    if (f != free_.end()) std::iter_swap(f, free_.end() - 1);
+}
+
 void* SequenceCache::prepare(bool* pageable, bool end) {
     drop_prepared();
     if (!enabled()) return nullptr;
     if (end) drop_end();
-    auto pinned = [&](void* b) {
-        const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& x) { return x.first == b; });
-        return o != owned_.end() && o->second;
-    };
-    if (pageable != nullptr) {   // an idle pinned buffer goes first (take_buffer takes the list's last)
-        const auto f = std::find_if(free_.begin(), free_.end(), pinned);
-        if (f != free_.end()) std::iter_swap(f, free_.end() - 1);
-    }
+    if (pageable != nullptr) pinned_first();   // an idle pinned buffer goes first
     void* h = take_buffer();
     if (h == nullptr) return nullptr;
-    const bool pin = pinned(h);
+    const bool pin = pinned_buffer(h);
     if (!pin && pageable == nullptr) {   // pageable: a copy into it waits for the run (checkpoint copies then)
         give_back(h);
         return nullptr;
     }
     if (pageable != nullptr) *pageable = !pin;
-    prepared_ = h;
+    prepared_.push_back(h);
+    return h;
+}
+
+void* SequenceCache::prepare_more() {
+    if (!enabled()) return nullptr;
+    pinned_first();
+    void* h = take_buffer();
+    if (h == nullptr) return nullptr;
+    if (!pinned_buffer(h)) {   // a pageable one: no copy into it runs beside the run
+        give_back(h);
+        return nullptr;
+    }
+    prepared_.push_back(h);
     return h;
 }
 
 void SequenceCache::spare() {
     if (!enabled() || pinned_ > chain_cap_) return;
-    for (void* b : free_) {
-        const auto o = std::find_if(owned_.begin(), owned_.end(), [&](const auto& x) { return x.first == b; });
-        if (o != owned_.end() && o->second) return;
-    }
+    for (void* b : free_)
+        if (pinned_buffer(b)) return;
     void* h = nullptr;
     if (cudaMallocHost(&h, (size_t) ckpt_alloc_) != cudaSuccess) {
         (void) cudaGetLastError();
@@ -492,9 +508,8 @@ void SequenceCache::drop_end() {
 }
 
 void SequenceCache::drop_prepared() {
-    if (prepared_ == nullptr) return;
-    give_back(prepared_);
-    prepared_ = nullptr;
+    for (void* h : prepared_) give_back(h);
+    prepared_.clear();
 }
 
 std::vector<PromptCache::Part> PromptCache::kv_parts(int64_t lo, int64_t hi) const {
@@ -777,7 +792,8 @@ void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
 }
 
 void SequenceCache::checkpoint(int64_t pos, void* filled, bool end) {
-    if (filled != nullptr && filled == prepared_) prepared_ = nullptr;   // this call takes it, or gives it back
+    const auto it = std::find(prepared_.begin(), prepared_.end(), filled);
+    if (filled != nullptr && it != prepared_.end()) prepared_.erase(it);   // this call takes it, or gives it back
     else filled = nullptr;
     Seq& live_ = live();
     if (!enabled() || pos <= 0 || pos != (int64_t) live_.tokens.size() || live_.find(pos) != nullptr) {

@@ -123,41 +123,33 @@ void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, 
 
 namespace {
 
-/// One region of a checkpoint: `bytes` of device memory at `dev`, at `host` in the host buffer; `layer`: the model
-/// layer whose state it is (the PLE's: layer 1).
-struct CkptPart {
-    void* dev;
-    uint64_t bytes;
-    uint64_t host;
-    int64_t layer;
-};
-
 /// The parts of a checkpoint at `pos` of the layers [lo, hi), from a state whose GDN and QSA states are indexed from
 /// `first` <= lo (a split prompt path's later stage, prefill/split.hpp, which holds its own layers alone: no state of
 /// a layer outside [lo, hi) is touched; 0: a whole session).  Storage order: every GDN layer's state, the PLE history,
 /// each QSA layer's indexer tail, spare key, open block's pooled row and block position; the PLE token window follows
 /// them on the host.
 std::vector<CkptPart> ckpt_parts(const SessionState& s, const ModelGeometry& g, int64_t pos, int64_t first = 0,
-                                 int64_t lo = 0, int64_t hi = INT64_MAX) {
+                                 int64_t lo = 0, int64_t hi = INT64_MAX, int what = kCkptAll) {
     lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     sh.idx_dim = g.idx_key_dim;
     const uint64_t row = (uint64_t) sh.idx_dim * sizeof(float);
     const uint64_t gdn = (uint64_t) gdn_state_floats(g) * sizeof(float);
+    const bool state = (what & kCkptState) != 0, ple = (what & kCkptPle) != 0;
     std::vector<CkptPart> parts;
     uint64_t at = 0;
     for (int64_t l = 0, i = 0; l < g.n_layers; ++l) {
         if (is_qsa_layer(g, l)) continue;
         if (l >= first) {
-            if (l >= lo && l < hi) parts.push_back({(uint8_t*) s.gdn_state + (uint64_t) i * gdn, gdn, at, l});
+            if (state && l >= lo && l < hi) parts.push_back({(uint8_t*) s.gdn_state + (uint64_t) i * gdn, gdn, at, l});
             ++i;
         }
         at += gdn;
     }
-    if (first <= 1 && lo <= 1 && 1 < hi) parts.push_back({s.ple_hist, ple_hist_bytes(), at, 1});
+    if (ple && first <= 1 && lo <= 1 && 1 < hi) parts.push_back({s.ple_hist, ple_hist_bytes(), at, 1});
     at += ple_hist_bytes();
     for (int64_t l = 0, i = 0; l < g.n_layers; ++l) {
         if (!is_qsa_layer(g, l)) continue;
-        const QsaState* st = l >= first && l >= lo && l < hi ? &s.qsa_states[i] : nullptr;
+        const QsaState* st = state && l >= first && l >= lo && l < hi ? &s.qsa_states[i] : nullptr;
         if (l >= first) ++i;
         const CkptPart q[4] = {
             {st ? st->idx_tail : nullptr, (uint64_t) (sh.idx_block - 1) * row, 0, l},
@@ -199,17 +191,37 @@ bool session_ckpt_save_layers(const SessionState& s, const ModelGeometry& g, int
 }
 
 bool session_ckpt_queue_layers(const SessionState& s, const ModelGeometry& g, int64_t pos, void* host, void* stream,
-                               int64_t lo, int64_t hi, int64_t first) {
+                               int64_t lo, int64_t hi, int64_t first, int what) {
     cudaStream_t cs = (cudaStream_t) stream;
     uint8_t* h = (uint8_t*) host;
-    for (const CkptPart& p : ckpt_parts(s, g, pos, first, lo, hi))
+    for (const CkptPart& p : ckpt_parts(s, g, pos, first, lo, hi, what))
         if (cudaMemcpyAsync(h + p.host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs) != cudaSuccess)
             return session_copy_failed(stream);
     return true;
 }
 
+namespace {
+uint64_t up256(uint64_t n) { return (n + 255) & ~255ull; }
+}   // namespace
+
+uint64_t session_ckpt_layer_bytes(const ModelGeometry& g) {
+    const uint64_t row = (uint64_t) g.idx_key_dim * sizeof(float);
+    const uint64_t idx_block = (uint64_t) lamina::kernels::qsa_real_shapes().idx_block;
+    return up256((uint64_t) gdn_state_floats(g) * sizeof(float)) + up256(ple_hist_bytes()) +
+           up256((idx_block - 1) * row) + 2 * up256(row) + up256(sizeof(int32_t));
+}
+
+std::vector<CkptPart> session_ckpt_parts(const SessionState& s, const ModelGeometry& g, int64_t pos, int64_t lo,
+                                         int64_t hi, int64_t first, int what) {
+    return ckpt_parts(s, g, pos, first, lo, hi, what);
+}
+
 void session_ckpt_put_window(const SessionState& s, const ModelGeometry& g, void* host) {
-    const int32_t ints[kCkptHostInts] = {s.ple_prev[0], s.ple_prev[1], s.ple_token};
+    session_ckpt_put_window(g, host, s.ple_prev[0], s.ple_prev[1], s.ple_token);
+}
+
+void session_ckpt_put_window(const ModelGeometry& g, void* host, int32_t prev0, int32_t prev1, int32_t token) {
+    const int32_t ints[kCkptHostInts] = {prev0, prev1, token};
     std::memcpy((uint8_t*) host + ckpt_ints_at(g), ints, sizeof ints);
 }
 

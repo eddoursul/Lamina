@@ -5037,9 +5037,17 @@ int lamina::program::run(int argc, char** argv) {
             // the previous one (the next request sharing that prefix resumes there), and, when the last message grows
             // (the previous prompt held its start already), a few cells before its <|im_end|> (the next request parts
             // there; the margin covers a seam that tokenizes differently once text follows it).  An agent's turn
-            // adds a message instead, and takes neither.
+            // adds a message instead, and takes neither.  And one behind the last picture or video the request reads
+            // (`media_end`, one past its <|vision_end|>): another question about it, in a new conversation too, starts
+            // there.
+            int64_t media_end = 0;
+            if (!req_imgs.empty()) {
+                media_end = req_imgs.back().start;
+                while (media_end < n && media_pad(ids[(size_t) media_end])) ++media_end;
+                media_end = std::min(media_end + 1, n - 1);
+            }
             constexpr int64_t kImEnd = 248046;
-            int64_t fork = 0, msg_end = 0;
+            int64_t fork = 0, msg_end = 0, pic = 0;
             if (track) {
                 const int64_t lim = std::min<int64_t>((int64_t) prev_prompt.size(), n - 1);
                 int64_t d = 0;
@@ -5052,32 +5060,27 @@ int lamina::program::run(int argc, char** argv) {
                         if (d > start + 3 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                         break;
                     }
+                if (media_end > reuse && media_end < n - 1) pic = media_end;
             }
             if (!geni) prev_prompt.assign(ids.begin(), ids.end());
             const int64_t cut1 = std::min(fork > 0 ? fork : INT64_MAX, msg_end > 0 ? msg_end : INT64_MAX);
             const int64_t cut2 = std::max(fork, msg_end) > cut1 ? std::max(fork, msg_end) : 0;
             const int64_t cuts[2] = {cut1 == INT64_MAX ? 0 : cut1, cut2};   // ascending, 0 = none
-            int64_t batched_end = reuse;                                    // [reuse, batched_end) through
-                                                                            // the batched prompt path
-            if (geni) {                                                     // image rows reach the batched path only; a
-                                                                            // short text tail after the last
-                                                                            // <|im_start|> need not, and ends there as
-                                                                            // a text prompt does, with the turn's
-                                                                            // checkpoint
-                batched_end = n - 1;
-                if (q > reuse && n - 1 - q <= o.feed_max &&
-                    std::find_if(ids.begin() + q, ids.begin() + (n - 1), media_pad) == ids.begin() + (n - 1))
-                    batched_end = q;
-            } else if (n - 1 - reuse > o.feed_max) {
-                batched_end = (q > reuse && n - 1 - q <= o.feed_max) ? q : n - 1;
-            }
+            // [reuse, batched_end) through the batched prompt path, which the pictures' and videos' rows reach alone.
+            // A read of them takes the text after them in the same run, to the last <|im_start|> where a short
+            // opening follows it (its run takes the checkpoint behind them inside it: no run ends there, so no
+            // expert streams twice); without them, short parts go through verify windows.
+            int64_t batched_end = reuse;
+            if (media_end > reuse) batched_end = (q >= media_end && n - 1 - q <= o.feed_max) ? q : n - 1;
+            else if (n - 1 - reuse > o.feed_max) batched_end = (q > reuse && n - 1 - q <= o.feed_max) ? q : n - 1;
             // Every batched chunk streams each expert its tokens use, however few tokens it holds, so a short last
-            // chunk goes through verify windows too.  Chunks and checkpoint segments start at `reuse`.
-            if (!geni && batched_end > reuse) {
+            // chunk goes through verify windows too (no picture's rows).  Chunks and checkpoint segments start at
+            // `reuse`.
+            if (batched_end > reuse) {
                 const int64_t last = reuse + (batched_end - 1 - reuse) / o.prefill_chunk * o.prefill_chunk;
-                if (last > reuse && batched_end - last <= o.feed_max) batched_end = last;
+                if (last > reuse && last >= media_end && batched_end - last <= o.feed_max) batched_end = last;
                 for (int64_t c : cuts)   // a short piece after a cut goes through verify windows, as a short last chunk
-                    if (c > reuse && c < batched_end && batched_end - c <= o.feed_max) {
+                    if (c > reuse && c >= media_end && c < batched_end && batched_end - c <= o.feed_max) {
                         batched_end = c;
                         break;
                     }
@@ -5177,11 +5180,20 @@ int lamina::program::run(int argc, char** argv) {
                     pp_at = a0;
                     pp_chunks = 0;
                     lead_seg = b0 - a0;
-                    // the run fills the checkpoint at its end as it goes (Prefill::set_checkpoint)
+                    // the run fills the checkpoint at its end as it goes (Prefill::set_checkpoint), and the one behind
+                    // the last picture or video inside it (Prefill::set_marks; a split prompt's stages theirs)
                     void* const ck = track ? pcache.prepare() : nullptr;
+                    std::vector<std::pair<int64_t, void*>> marks;
+                    if (void* h = track && pic > a0 && pic < b0 ? pcache.prepare_more() : nullptr; h != nullptr)
+                        marks.emplace_back(pic, h);
                     prefill.set_checkpoint(b0, ck);
+                    if ((split_on && !psplit.set_marks(marks)) || !prefill.set_marks(marks)) {
+                        marks.clear();   // (their buffers go back at the next prepare())
+                        prefill.set_marks({});
+                        if (split_on) psplit.set_marks({});
+                    }
                     if (!prefill.run(ids.data() + a0, b0 - a0, a0, err)) {
-                        prefill.checkpoint_wait();   // (its copies land before the buffer goes back)
+                        prefill.checkpoint_wait();   // (its copies land before the buffers go back)
                         // an error while a STOP is set is still an error: the states may have gone past the chunks
                         if (!prefill.stopped()) {
                             report(err);
@@ -5194,7 +5206,14 @@ int lamina::program::run(int argc, char** argv) {
                     tr("prompt run", a0, b0);
                     const bool filled = prefill.checkpoint_wait();
                     if (track) {
-                        pcache.set(a0, ids.data() + a0, b0 - a0);
+                        int64_t at = a0;
+                        for (const auto& [pos, host] : marks) {
+                            pcache.set(at, ids.data() + at, pos - at);
+                            if (filled) pcache.checkpoint(pos, host);
+                            tr("prompt checkpoint inside the run", pos);
+                            at = pos;
+                        }
+                        pcache.set(at, ids.data() + at, b0 - at);
                         pcache.checkpoint(b0, filled ? ck : nullptr);
                         tr("prompt checkpoint", b0);
                     }

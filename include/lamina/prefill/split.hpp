@@ -36,6 +36,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lamina::prefill {
@@ -89,8 +90,12 @@ public:
     bool begin(const std::vector<Region>& regions, int64_t chunk, int64_t pos0, int64_t cells, bool checkpoints,
                std::string& err);
     bool active() const;
+    /// Before the first stage's run() with marks (Prefill::set_marks): the same positions and buffers.  Each stage
+    /// saves its layers' state at one as it passes it: a mark inside its chunk as its prompt path's, one at its
+    /// chunk's end after that chunk.  false: a stage's GPU has no VRAM for them (Prefill::reserve_marks): none taken.
+    bool set_marks(std::vector<std::pair<int64_t, void*>> marks);
     /// The prompt cache's checkpoint at `pos` (core::PromptCache::split_save): each stage saves its layers' state
-    /// into `host` once its chunk ending at `pos` is done.
+    /// into `host` once its chunk ending at `pos` is done (a mark's: the stages have it already).
     void checkpoint(int64_t pos, void* host);
     /// After `first.run(...)` returned with its last chunk ending at `pos` and the prompt cache has checkpointed there
     /// or not: the stages may go on past that chunk.

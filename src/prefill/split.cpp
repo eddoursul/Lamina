@@ -75,6 +75,7 @@ struct Job {
     int64_t T = 0, p0 = 0;
     bool run_end = false;
     std::vector<cudaEvent_t> landed;
+    std::vector<std::pair<int64_t, void*>> marks;   // set_marks' in (p0, p0 + T]
 };
 
 }   // namespace
@@ -93,9 +94,10 @@ struct PromptSplit::Impl {
     lamina::kernels::QsaShapes shapes;
     int64_t pos0 = 0, first_cell = 0;
     bool on = false, ckpts_on = false;
-    std::vector<std::unique_ptr<St>> st;   // the stages after the main GPU's, in the layers' order
-    std::vector<int32_t> order;            // set_order, for the stages init makes
-    std::mutex stats_mu;                   // ms_copy_in, added to from the stages' threads
+    std::vector<std::pair<int64_t, void*>> marks;   // set_marks: the checkpoints inside the first stage's run
+    std::vector<std::unique_ptr<St>> st;            // the stages after the main GPU's, in the layers' order
+    std::vector<int32_t> order;                     // set_order, for the stages init makes
+    std::mutex stats_mu;                            // ms_copy_in, added to from the stages' threads
 };
 
 /// A stage after the main GPU's: its prompt path, its copies and its thread.  The stage before it (the main GPU's
@@ -369,7 +371,24 @@ struct PromptSplit::Impl::St final : public SplitOut {
         p.set_run_end(j.run_end);
         run_p0 = j.p0;
         run_T = j.T;
-        if (!p.run(j.tokens, j.T, j.p0, e)) return false;
+        // the first stage's checkpoints inside its run: those inside this chunk as this prompt path's marks, one at
+        // the chunk's end (where the first stage's next chunk starts) after it
+        std::vector<std::pair<int64_t, void*>> inside, at_end;
+        for (const auto& k : j.marks) (k.first < j.p0 + j.T ? inside : at_end).push_back(k);
+        p.set_marks(inside);   // (set_marks reserved its buffers)
+        if (!p.run(j.tokens, j.T, j.p0, e)) {
+            p.checkpoint_wait();
+            return false;
+        }
+        if (!p.checkpoint_wait()) {
+            e = "prompt split: a stage's part of a checkpoint";
+            return false;
+        }
+        for (const auto& [pos, host] : at_end)
+            if (!core::session_ckpt_save_layers(ss2, g, pos, host, s2, at, end, at)) {
+                e = "prompt split: a stage's part of a checkpoint";
+                return false;
+            }
         // the chunk's cells to the main GPU's session
         std::vector<Run> runs;
         qsa_runs(j.p0, j.p0 + j.T, true, runs);
@@ -474,6 +493,8 @@ struct PromptSplit::Impl::St final : public SplitOut {
         j.p0 = pos0;
         j.run_end = run_end;
         j.landed.assign(landed, landed + (T + SUB - 1) / SUB);
+        for (const auto& k : im->marks)
+            if (k.first > pos0 && k.first <= pos0 + T) j.marks.push_back(k);
         {
             std::lock_guard<std::mutex> lk(mu);
             if (failed) {
@@ -775,6 +796,7 @@ bool PromptSplit::begin(const std::vector<Region>& regions, int64_t chunk, int64
     cudaSetDevice(cur);
     m.pos0 = pos0;
     m.ckpts_on = checkpoints;
+    m.marks.clear();
     m.on = true;
     for (auto& sp : m.st) {
         Impl::St& t = *sp;
@@ -793,7 +815,25 @@ bool PromptSplit::begin(const std::vector<Region>& regions, int64_t chunk, int64
     return true;
 }
 
+bool PromptSplit::set_marks(std::vector<std::pair<int64_t, void*>> marks) {
+    Impl& m = *impl_;
+    m.marks.clear();
+    if (marks.empty()) return true;
+    int cur = 0;
+    cudaGetDevice(&cur);
+    bool ok = true;
+    for (auto& sp : m.st) {   // (each stage's buffers on its GPU, before it runs a chunk with them)
+        cudaSetDevice(sp->dev);
+        ok = ok && sp->p.reserve_marks();
+    }
+    cudaSetDevice(cur);
+    if (ok) m.marks = std::move(marks);
+    return ok;
+}
+
 void PromptSplit::checkpoint(int64_t pos, void* host) {
+    for (const auto& k : impl_->marks)   // (the stages save theirs as they pass it)
+        if (k.first == pos) return;
     for (auto& sp : impl_->st) {
         Impl::St& t = *sp;
         {

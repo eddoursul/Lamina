@@ -123,6 +123,9 @@ public:
     /// `end`: for a prompt's end (checkpoint()'s `end`) - the conversation's last one goes first, and its buffer is
     /// the one to take.
     void* prepare(bool* pageable = nullptr, bool end = false);
+    /// Another pinned buffer beside prepare()'s, for a checkpoint the same run fills inside it (prefill::Prefill::
+    /// set_marks; null: none to give).  checkpoint() takes it; one it does not goes back with prepare()'s.
+    void* prepare_more();
     /// Between requests: a pinned buffer made ready for the next checkpoint, where none is idle and the cache may
     /// still pin one (pinning takes about 0.1 ms a MiB, which is then no request's time).
     void spare();
@@ -159,6 +162,8 @@ protected:
     /// The fixed-size state at `pos` (== the live length) into `host`, a buffer of ckpt_bytes(); `filled`: the run
     /// has copied the device state in already (prepare()'s buffer).  false: it could not be saved.
     virtual bool state_save(int64_t pos, void* host, bool filled) = 0;
+    /// The live conversation's tokens (state_save's `pos` of them).
+    const std::vector<int64_t>& live_tokens() const { return live().tokens; }
     /// The state `host` holds: the engine is at `pos` then.
     virtual bool state_load(int64_t pos, const void* host) = 0;
     /// An empty sequence.
@@ -289,10 +294,12 @@ private:
     std::vector<void*> free_;
     std::vector<std::pair<void*, bool>> owned_;   // every buffer, and whether it is pinned
     int pinned_ = 0;
-    void* prepared_ = nullptr;   // prepare()'s, until checkpoint() takes it
+    std::vector<void*> prepared_;   // prepare()'s and prepare_more()'s, until checkpoint() takes them
     void drop_prepared();
-    void drop_end();   // the live conversation's checkpoint of a prompt's end, if it has one (keep_ends:
-                       // it stays, a checkpoint as the others)
+    bool pinned_buffer(const void* b) const;
+    void pinned_first();   // an idle pinned buffer where take_buffer takes the next
+    void drop_end();       // the live conversation's checkpoint of a prompt's end, if it has one (keep_ends:
+                           // it stays, a checkpoint as the others)
 };
 
 /// Qwen3.8-Flash-Next's: the session state and the cells of `kv`.
