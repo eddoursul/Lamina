@@ -18,8 +18,10 @@
 //   FRAMES <output path>\t<frame>[\t<frame>]   ->  the same for a video's group of frames (picture files already
 //                                             at its plan's size: include/lamina/vision/video.hpp) through
 //                                             encode_frames
-//   PLAN <frames> <fps> <width> <height>   ->  "OK {json}": the video plan of a stream of that many frames, rate and
-//                                             displayed size (frames, width, height, per_group, group_tokens, times)
+//   PLAN <frames> <fps> <width> <height> [<start> <end>]   ->  "OK {json}": the video plan of a stream of that many
+//                                             frames, rate and displayed size (first, frames, width, height,
+//                                             per_group, group_tokens, times); its part from start to end seconds
+//                                             (either one -1: the video's own)
 //   QUIT
 // The output file is  int32 {0x31455653 'SVE1', n_tokens, nx, ny, n_embd}  then float32 [n_tokens][n_embd],
 // row i at grid position (x = i % nx, y = i / nx): the record the engine reads a picture from.
@@ -144,9 +146,11 @@ int main(int argc, char** argv) {
         if (line == "QUIT") break;
         if (line.rfind("PLAN ", 0) == 0) {
             lamina::vision::VideoStream vs;
-            if (std::sscanf(line.c_str() + 5, "%lld %lf %d %d", (long long*) &vs.frames, &vs.fps, &vs.width,
-                            &vs.height) != 4) {
-                std::printf("ERR expected: PLAN <frames> <fps> <width> <height>\n");
+            lamina::vision::VideoRange range;
+            const int got = std::sscanf(line.c_str() + 5, "%lld %lf %d %d %lf %lf", (long long*) &vs.frames, &vs.fps,
+                                        &vs.width, &vs.height, &range.start, &range.end);
+            if (got != 4 && got != 6) {
+                std::printf("ERR expected: PLAN <frames> <fps> <width> <height> [<start> <end>]\n");
                 std::fflush(stdout);
                 continue;
             }
@@ -158,8 +162,8 @@ int main(int argc, char** argv) {
             } catch (const std::exception& e) {
                 why = e.what();
             }
-            if (why.empty() && lamina::vision::plan_video(header, vs, params.max_tokens, plan, why)) {
-                std::string out = "{\"frames\": [";
+            if (why.empty() && lamina::vision::plan_video(header, vs, params.max_tokens, plan, why, range)) {
+                std::string out = "{\"first\": " + std::to_string((long long) plan.first) + ", \"frames\": [";
                 for (size_t i = 0; i < plan.frames.size(); ++i)
                     out += (i ? "," : "") + std::to_string((long long) plan.frames[i]);
                 out += "], \"width\": " + std::to_string(plan.width) + ", \"height\": " + std::to_string(plan.height) +

@@ -96,15 +96,28 @@ std::vector<std::shared_ptr<VideoJob>> Service::plan_videos(json& messages, Canc
             const std::string src = jstr(item, "source");
             std::string why;
             if (cancel != nullptr && cancel->is_set()) throw ClientGone();
-            if (vision == nullptr)
+            // a part of it: qwen-vl-utils' video_start and video_end, seconds
+            double range[2] = {-1, -1};
+            for (int i = 0; i < 2; ++i) {
+                const char* key = i ? "video_end" : "video_start";
+                const json& v = jget(item, key);
+                if (v.is_null()) continue;
+                if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() < 0)
+                    why = std::string(key) + " must be a number of seconds, 0 or more";
+                else range[i] = v.get<double>();
+            }
+            if (why.empty() && range[0] >= 0 && range[1] >= 0 && range[1] <= range[0])
+                why = "video_end must be after video_start";
+            if (why.empty() && vision == nullptr)
                 why = "this server was started without the vision encoder (an image projector beside the model, or "
                       "the config's vision section), so it cannot read videos";
-            else if (tok.blocks) why = "this model's chat template has no place for a video";
-            else if (offline && is_url(src))
+            if (why.empty() && tok.blocks) why = "this model's chat template has no place for a video";
+            if (why.empty() && offline && is_url(src))
                 why = "offline mode cannot download a video URL; send a data: video or a local file instead";
             if (why.empty()) {
                 try {
-                    out.push_back(vision->plan_video(src, false));   // (a URL downloaded outside the turn)
+                    // (a URL downloaded outside the turn)
+                    out.push_back(vision->plan_video(src, false, range[0], range[1]));
                     continue;
                 } catch (const std::invalid_argument& e) {
                     why = e.what();

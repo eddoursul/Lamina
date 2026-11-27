@@ -33,9 +33,10 @@ inline constexpr uint64_t kImagePixelsMax = 178956970;
 
 /// a request's video, before the turn: its plan, then its frames
 struct VideoJob {
-    std::string key;   ///< the video's (VideoFile::key): an encoded one is found by it
+    std::string key;   ///< the video's (VideoFile::key, with its range): an encoded one is found by it
     std::shared_ptr<VideoFile> file;
     VideoInfo info;
+    int64_t first = 0;             ///< the range's first frame (0: the whole video), where the reading seeks
     std::vector<int64_t> frames;   ///< the plan's frames in order (an index can repeat)
     int width = 0, height = 0, per_group = 1, group_tokens = 0;
     std::vector<double> times;                  ///< each group's time in seconds
@@ -96,9 +97,10 @@ public:
     /// "" where the encoder takes videos (Qwen's and Hy4-flash's projectors, with ffmpeg), else why not
     std::string video_refusal();
     /// A video planned, outside the turn: its file opened (a URL's bytes downloaded), its stream probed, its frames,
-    /// their size and its groups settled as its model's processor settles them, or its rows found in the cache.
+    /// their size and its groups settled as its model's processor settles them, or its rows found in the cache. Its
+    /// part from `start` to `end` seconds alone where either is 0 or more (vision::VideoRange).
     /// std::invalid_argument when it cannot be read.
-    std::shared_ptr<VideoJob> plan_video(const std::string& source, bool is_bytes);
+    std::shared_ptr<VideoJob> plan_video(const std::string& source, bool is_bytes, double start = -1, double end = -1);
     /// its frames decoded and resized (bicubic, a thread each of half the CPU's), outside the turn; nothing for a
     /// video the cache holds
     void read_video(VideoJob& job, Cancel* cancel);

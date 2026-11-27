@@ -13,6 +13,12 @@
 //                   (61,440,000 pixels, 2 to 2,048 frames, 6 timestamp tokens a frame and 1,000 held back, a frame at
 //                   most 1,024 x 1,024 pixels): 2 frames a second, each the middle of its segment; one frame a group.
 // Inkling 2 Mini's projector takes no video.
+//
+// A part of a video (VideoRange: qwen-vl-utils' video_start and video_end) is bounded as qwen-vl-utils'
+// calculate_video_frame_range bounds it: its first frame ceil(start * fps), its last floor(end * fps), each within the
+// video, at least two frames. Its frames are planned as a whole video of that many frames is, at their own indices
+// (Qwen's np.linspace from its first to its last frame, as qwen-vl-utils' readers index a part; Hy4's segments over
+// it, from its first), so its times are the video's.
 #pragma once
 
 #include "lamina/vision/projector.hpp"
@@ -30,8 +36,15 @@ struct VideoStream {
     int width = 0, height = 0;   ///< a frame's displayed size (its pixel aspect ratio and rotation applied)
 };
 
+/// A part of a video, in seconds from its start: `start` to `end` (either one < 0: the video's own).
+struct VideoRange {
+    double start = -1, end = -1;
+    bool any() const { return start >= 0 || end >= 0; }
+};
+
 /// How a video reaches the model.
 struct VideoPlan {
+    int64_t first = 0;             ///< the first frame of the range (0 for the whole video), where a reader seeks
     std::vector<int64_t> frames;   ///< the frames to decode, by index, in order (an index can repeat)
     int width = 0, height = 0;     ///< the size each frame is resized to (whole merged patches)
     int per_group = 1;             ///< frames a group: Qwen's 2 (a temporal pair), Hy4's 1
@@ -41,9 +54,11 @@ struct VideoPlan {
     int groups() const { return per_group > 0 ? (int) (frames.size() / (size_t) per_group) : 0; }
 };
 
-/// The plan for stream `s` under projector `p`; `max_tokens` (a picture's limit, 0: none) caps Qwen's tokens a group
-/// too.  False with `err` for a projector that takes no video or a stream it cannot size.
-bool plan_video(const ProjectorParams& p, const VideoStream& s, int max_tokens, VideoPlan& plan, std::string& err);
+/// The plan for stream `s` (its part `range`) under projector `p`; `max_tokens` (a picture's limit, 0: none) caps
+/// Qwen's tokens a group too.  False with `err` for a projector that takes no video, a stream it cannot size, or a
+/// range of fewer than two frames.
+bool plan_video(const ProjectorParams& p, const VideoStream& s, int max_tokens, VideoPlan& plan, std::string& err,
+                const VideoRange& range = {});
 
 /// A group's time as the processors write it before the group: "<1.5 seconds>" (Python's f"<{t:.1f} seconds>")
 std::string video_time_text(double seconds);

@@ -214,6 +214,11 @@ time in the prompt (`<12.5 seconds>`), so the model can tell when something happ
   12,300 tokens, plus ~10 a group for its time and tags.
 - **Hy4-flash:** up to 2,048 frames, one a group, held to about 60,000 tokens.
 
+A part of a video: `"video_start"` and `"video_end"` beside the part's `"type"`, in seconds (Qwen's own
+`qwen-vl-utils` keys; either one alone runs from the start or to the end). The part is planned as a whole video of its
+frames is, so a short part of a long video gets the budget to itself (each frame larger), and its times stay the
+video's (`<3005.0 seconds>`). ffmpeg seeks to it rather than decoding from the start.
+
 A 3:42 film at 720p comes to ~13,300 prompt tokens with the Qwen models and ~57,000 with Hy4-flash. Its frames are read in
 1.6 s and encoded in 2-8 s on the development PC, and the prompt is read at the model's usual rate. A video is encoded
 once and kept (up to 32 videos or 4 GiB of encoded rows), also when a chat app sends it again every turn, and the next

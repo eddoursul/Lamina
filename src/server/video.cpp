@@ -176,8 +176,8 @@ VideoInfo probe_video(const FfmpegTools& t, const std::string& path) {
         return j;
     };
     const json j = probe({"-show_entries",
-                          "stream=width,height,sample_aspect_ratio,avg_frame_rate,r_frame_rate,nb_frames,duration:"
-                          "stream_side_data=rotation:format=duration"});
+                          "stream=width,height,sample_aspect_ratio,avg_frame_rate,r_frame_rate,nb_frames,duration,"
+                          "start_time:stream_side_data=rotation:format=duration"});
     const json& streams = jget(j, "streams");
     if (!streams.is_array() || streams.empty() || !streams[0].is_object())
         throw std::invalid_argument("the file has no video stream ffprobe reads");
@@ -187,6 +187,7 @@ VideoInfo probe_video(const FfmpegTools& t, const std::string& path) {
     v.stored_h = (int) integer(jget(s, "height"));
     double duration = number(jget(s, "duration"));
     if (!(duration > 0)) duration = number(jget(jget(j, "format"), "duration"));
+    v.start = number(jget(s, "start_time"));   // ("N/A": 0)
     v.fps = rational(jget(s, "avg_frame_rate"));
     if (!(v.fps > 0)) v.fps = rational(jget(s, "r_frame_rate"));
     v.frames = integer(jget(s, "nb_frames"));
@@ -221,25 +222,27 @@ VideoInfo probe_video(const FfmpegTools& t, const std::string& path) {
     return v;
 }
 
-size_t read_video_frames(const FfmpegTools& t, const std::string& path, const VideoInfo& info,
+size_t read_video_frames(const FfmpegTools& t, const std::string& path, const VideoInfo& info, int64_t first,
                          const std::vector<int64_t>& frames,
                          const std::function<void(size_t, std::vector<uint8_t>&&)>& on_frame, Cancel* cancel) {
     if (frames.empty()) return 0;
-    // the planned frames alone leave the filter graph (its select filter, n counting the decoded frames), at the
-    // probed size, one each, as they come (no frame rate's duplicates)
+    // the planned frames alone leave the filter graph (its select filter, n counting the decoded frames from `first`),
+    // at the probed size, one each, as they come (no frame rate's duplicates); ffmpeg stops after the last
     std::string select = "select=";
-    for (size_t k = 0; k < frames.size(); ++k) select += (k ? "+not(n-" : "not(n-") + std::to_string(frames[k]) + ")";
+    for (size_t k = 0; k < frames.size(); ++k)
+        select += (k ? "+not(n-" : "not(n-") + std::to_string(frames[k] - first) + ")";
     const std::string scale = "scale=" + std::to_string(info.stored_w) + ":" + std::to_string(info.stored_h);
     const unsigned threads = std::max(1u, std::thread::hardware_concurrency() / 2);   // half the CPU for the rest
     SpawnOptions o;
-    o.args = {t.ffmpeg,    "-nostdin",    "-v",
-              "error",     "-threads",    std::to_string(threads),
-              "-i",        path,          "-map",
-              "0:v:0",     "-an",         "-sn",
-              "-dn",       "-vf",         select + "," + scale,
-              "-fps_mode", "passthrough", "-f",
-              "rawvideo",  "-pix_fmt",    "rgb24",
-              "pipe:1"};
+    o.args = {t.ffmpeg, "-nostdin", "-v", "error", "-threads", std::to_string(threads)};
+    if (first > 0) {   // (the seek's time is the stream's own: its first frame at start_time)
+        char at[32];
+        std::snprintf(at, sizeof at, "%.6f", info.start + ((double) first - 0.5) / info.fps);
+        o.args.insert(o.args.end(), {"-ss", at});
+    }
+    o.args.insert(o.args.end(), {"-i", path, "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", select + "," + scale,
+                                 "-fps_mode", "passthrough", "-frames:v", std::to_string(frames.size()), "-f",
+                                 "rawvideo", "-pix_fmt", "rgb24", "pipe:1"});
     o.in = SpawnOptions::null;
     o.out = SpawnOptions::pipe;
     o.raw_out = true;

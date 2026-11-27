@@ -199,6 +199,7 @@ json content_of(const json& content, const std::string& param) {
                                      "this server keeps no files",
                                      at, "unsupported_parameter");
             parts.push_back({{"type", "input_video"}, {"video_url", url}});
+            copy_video_range(part, parts.back());
             image = true;
         } else {
             throw ResponsesError("content parts of type " + py_repr_value(kind) +
@@ -222,6 +223,7 @@ json content_of(const json& content, const std::string& param) {
             items.push_back({{"type", "image"}, {"source", truthy(url) ? url : json("")}});
         } else if (is_str(p["type"], "input_video")) {
             items.push_back({{"type", "video"}, {"source", p["video_url"]}});
+            copy_video_range(p, items.back());
         } else {
             items.push_back({{"type", "text"}, {"text", p["text"]}});
         }

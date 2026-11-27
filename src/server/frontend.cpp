@@ -291,6 +291,11 @@ std::string video_source(const json& part) {
     return v.is_string() ? v.get<std::string>() : std::string();
 }
 
+void copy_video_range(const json& from, json& to) {
+    for (const char* key : {"video_start", "video_end"})
+        if (from.is_object() && from.contains(key)) to[key] = from[key];
+}
+
 json parts_of(const json& content) {
     if (!has_media(content)) return text_of(content);
     json items = json::array();
@@ -300,6 +305,7 @@ json parts_of(const json& content) {
             items.push_back({{"type", "image"}, {"source", image_source(part)}});
         } else if (is_video_part(part)) {
             items.push_back({{"type", "video"}, {"source", video_source(part)}});
+            copy_video_range(part, items.back());
         } else if (is_text_part(part) && part.contains("text")) {
             items.push_back({{"type", "text"}, {"text", jstr(part, "text")}});
         }

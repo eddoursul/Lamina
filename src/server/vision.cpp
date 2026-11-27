@@ -803,7 +803,7 @@ std::string Vision::video_refusal() {
 #endif
 }
 
-std::shared_ptr<VideoJob> Vision::plan_video(const std::string& source, bool is_bytes) {
+std::shared_ptr<VideoJob> Vision::plan_video(const std::string& source, bool is_bytes, double start, double end) {
 #if LAMINA_VISION
     if (const std::string no = video_refusal(); !no.empty())
         throw std::invalid_argument("the video could not be read: " + no);
@@ -814,9 +814,12 @@ std::shared_ptr<VideoJob> Vision::plan_video(const std::string& source, bool is_
         proj = plan_->proj;
         max_tokens = plan_->params.max_tokens;
     }
+    const vision::VideoRange range{start, end};
     auto job = std::make_shared<VideoJob>();
     job->file = open_video(source, is_bytes, dir);
-    job->key = job->file->key;
+    job->key = job->file->key;   // a part's rows are its own
+    if (range.any())
+        job->key = sha256_hex(job->key + "@" + std::to_string(start) + "-" + std::to_string(end)).substr(0, 32);
     {
         const std::lock_guard<std::mutex> lk(mu_);
         for (const auto& [k, e] : video_cache_)
@@ -832,8 +835,9 @@ std::shared_ptr<VideoJob> Vision::plan_video(const std::string& source, bool is_
     const vision::VideoStream s{job->info.frames, job->info.fps, job->info.shown_w, job->info.shown_h};
     vision::VideoPlan plan;
     std::string err;
-    if (!vision::plan_video(proj, s, max_tokens, plan, err))
+    if (!vision::plan_video(proj, s, max_tokens, plan, err, range))
         throw std::invalid_argument("the video could not be read (" + err + ")");
+    job->first = plan.first;
     job->frames = plan.frames;
     job->width = plan.width;
     job->height = plan.height;
@@ -844,6 +848,8 @@ std::shared_ptr<VideoJob> Vision::plan_video(const std::string& source, bool is_
 #else
     (void) source;
     (void) is_bytes;
+    (void) start;
+    (void) end;
     throw std::invalid_argument(std::string("the video could not be read: ") + vision_not_built());
 #endif
 }
@@ -905,7 +911,7 @@ void Vision::read_video(VideoJob& job, Cancel* cancel) {
         }
     } join{workers, qm, qcv, done};
     const size_t got = read_video_frames(
-        ff_, job.file->path, info, distinct,
+        ff_, job.file->path, info, job.first, distinct,
         [&](size_t k, std::vector<uint8_t>&& px) {
             std::unique_lock<std::mutex> lk(qm);
             qcv.wait(lk, [&] { return queue.size() < 2 * (size_t) n_workers; });

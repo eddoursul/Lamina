@@ -46,16 +46,20 @@ std::shared_ptr<VideoFile> open_video(const std::string& source, bool is_bytes, 
 struct VideoInfo {
     int64_t frames = 0;               ///< the frames it decodes to (the container's count, else its packets')
     double fps = 0;                   ///< its average frame rate
+    double start = 0;                 ///< its first frame's time (start_time: an edit list's or a stream's offset)
     int stored_w = 0, stored_h = 0;   ///< a decoded frame's size, rotated
     int shown_w = 0, shown_h = 0;     ///< its displayed size (the pixel aspect ratio applied)
 };
 /// std::invalid_argument when ffprobe cannot read it as a video
 VideoInfo probe_video(const FfmpegTools& t, const std::string& path);
 
-/// The frames `frames` (ascending, distinct indices) decoded, each to `on_frame(k, rgb)` in order (k: its place in
-/// `frames`; rgb: stored_w x stored_h x 3 bytes) -> how many there were: fewer where the stream ends before the count
-/// its container gave (at least one).  std::invalid_argument when ffmpeg fails; ClientGone when `cancel` is set.
-size_t read_video_frames(const FfmpegTools& t, const std::string& path, const VideoInfo& info,
+/// The frames `frames` (ascending, distinct indices, none before `first`) decoded, each to `on_frame(k, rgb)` in
+/// order (k: its place in `frames`; rgb: stored_w x stored_h x 3 bytes) -> how many there were: fewer where the stream
+/// ends before the count its container gave (at least one). A `first` over 0 is sought to, by its time at the average
+/// rate after the stream's start_time (half a frame early: the frame at or after it, as ffmpeg's accurate seek
+/// decodes from the keyframe before; ffmpeg's -ss is the stream's time, not offset by its start).
+/// std::invalid_argument when ffmpeg fails; ClientGone when `cancel` is set.
+size_t read_video_frames(const FfmpegTools& t, const std::string& path, const VideoInfo& info, int64_t first,
                          const std::vector<int64_t>& frames,
                          const std::function<void(size_t, std::vector<uint8_t>&&)>& on_frame, Cancel* cancel);
 

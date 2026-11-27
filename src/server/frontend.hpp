@@ -65,8 +65,10 @@ std::string text_of(const json& content);
 bool has_media(const json& content);
 std::string image_source(const json& part);
 std::string video_source(const json& part);
+/// a video part's range (qwen-vl-utils' "video_start" and "video_end", seconds) onto `to`, where it has one
+void copy_video_range(const json& from, json& to);
 /// a request's content as the template reads it: text alone as a string, else its text, {"type": "image", "source"}
-/// and {"type": "video", "source"} items in order
+/// and {"type": "video", "source"} items in order (a video's with its range)
 json parts_of(const json& content);
 /// a picture or a video of the rendered conversation
 struct MediaRef {
