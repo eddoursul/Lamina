@@ -5066,6 +5066,11 @@ int lamina::program::run(int argc, char** argv) {
                         if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
                         break;
                     }
+                // on the scan's grid from the read's start (Prefill::kMarkGrid): a checkpoint inside the run there
+                // leaves its arithmetic, and the answer, as they are without it; the next prompt reads up to 15 cells
+                // more.  (The one behind a picture stays where it is: another question about it starts there.)
+                for (int64_t* c : {&fork, &msg_end})
+                    if (*c > 0) *c -= (*c - reuse) % lamina::prefill::Prefill::kMarkGrid;
                 for (int64_t* c : {&fork, &msg_end})
                     if (*c > 0 && media_pad(ids[(size_t) *c]) && media_pad(ids[(size_t) *c - 1])) *c = 0;
                 if (media_end > reuse && media_end < n - 1) pic = media_end;

@@ -197,9 +197,13 @@ public:
     /// launches around its row, and each layer's part is copied between them into one of two device buffers, which
     /// goes out to the host behind the run: no run ends there, so no expert streams twice.  The convolution, the
     /// appends and the PLE block take their rows one after the other (bitwise one launch's); the scan's chunks of 16
-    /// rows then start at the mark, as a run that starts there has them.  The token window (session_ckpt_put_window)
+    /// rows then start at the mark, as a run that starts there has them.  A mark a multiple of kMarkGrid rows past the
+    /// run's first position (its chunks start at multiples of 256 past it, its sub-chunks at multiples of 2,048 in a
+    /// chunk) falls where the scan's chunks end anyway, and the scan carries its state from one chunk to the next in
+    /// FP32: the run's arithmetic is the one without the mark, bitwise.  The token window (session_ckpt_put_window)
     /// is the cache's to write.  false: none taken (reserve_marks failed).
     bool set_marks(std::vector<std::pair<int64_t, void*>> marks);
+    static constexpr int64_t kMarkGrid = 16;   // the GDN scan's chunk (gdn_chunk_kernel's GCL)
     /// The two device buffers of set_marks (7.3 MB on Flash-Next), allocated once, on the current GPU, from the VRAM
     /// the engine leaves free: the prompt's loans, and with them the expert cache, are what they are without marks.
     /// false: no VRAM for them (logged once; no marks are taken then).
