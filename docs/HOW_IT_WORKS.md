@@ -144,7 +144,7 @@ A request continues from the longest start of its prompt that the engine still h
 
 - **The live conversation**: a follow-up turn reads only its new tokens.
 - **Checkpoints** of the sequence's fixed-size state (the DeltaNet states, the indexer's and the embeddings' recent
-  history: 113 MiB each, in pinned RAM), taken before the last turn of a prompt, at its end, along long prompts, where
+  history: 113 MiB each, in RAM), taken before the last turn of a prompt, at its end, along long prompts, where
   it leaves the request before and before the end of a last message that grows (subagents after one long start, a
   transcript appended to), and behind its last picture or video, where another question about it starts. Those inside
   the batched prompt path's part are taken inside its run (the steps that change that state split at the

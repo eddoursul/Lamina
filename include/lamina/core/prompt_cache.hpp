@@ -124,7 +124,9 @@ public:
     /// the one to take.
     void* prepare(bool* pageable = nullptr, bool end = false);
     /// Another pinned buffer beside prepare()'s, for a checkpoint the same run fills inside it (prefill::Prefill::
-    /// set_marks; null: none to give).  checkpoint() takes it; one it does not goes back with prepare()'s.
+    /// set_marks; null: none to give).  Where none is idle and no more may be pinned, a held checkpoint gives its
+    /// own up and moves to a pageable buffer (the conversations' chains hold them all in a session of many).
+    /// checkpoint() takes it; one it does not goes back with prepare()'s.
     void* prepare_more();
     /// Between requests: a pinned buffer made ready for the next checkpoint, where none is idle and the cache may
     /// still pin one (pinning takes about 0.1 ms a MiB, which is then no request's time).
@@ -227,6 +229,10 @@ private:
     /// that fills its buffers behind the run (prepare()'s `pageable`) may still owe one its contents until then.
     void* take_buffer();
     void give_back(void* h);
+    /// prepare_more()'s pinned buffer where none is idle: a held checkpoint's, whose bytes move to `pageable` (a
+    /// parked conversation's, the least recently used first, else one the live conversation held before this
+    /// request: its own later ones may still be being written, a split prompt's stages'); null: none is pinned.
+    void* pinned_from_held(void* pageable);
     void trim();
     void release(Seq& seq, int64_t keep_upto);   // frees the checkpoints after `keep_upto`
     /// Thins `seq`'s chain to the cap (chain_victim).
@@ -242,6 +248,10 @@ private:
     /// which it keeps (`keep`) or which goes back after the load (a start a parked conversation lends).
     bool restore(Seq& seq, int64_t pos, bool prefix, bool parked, bool keep);
 
+    /// begin()'s choice of the start; begin() keeps it in `begun_`.
+    int64_t begin_from(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag, uint64_t busy,
+                       int* session);
+    int64_t begun_ = -1;   // where the request continues the live conversation (-1: before any begin())
     /// Session `s` is the one the request runs in: selected in the engine, and used now.
     void use(int s);
     Seq& live() { return lives_[(size_t) cur_]; }

@@ -471,11 +471,34 @@ void* SequenceCache::prepare_more() {
     void* h = take_buffer();
     if (h == nullptr) return nullptr;
     if (!pinned_buffer(h)) {   // a pageable one: no copy into it runs beside the run
-        give_back(h);
-        return nullptr;
+        void* const p = pinned_from_held(h);
+        if (p == nullptr) {
+            give_back(h);
+            return nullptr;
+        }
+        h = p;
     }
     prepared_.push_back(h);
     return h;
+}
+
+void* SequenceCache::pinned_from_held(void* pageable) {
+    Ckpt* from = nullptr;
+    uint64_t oldest = UINT64_MAX;
+    for (Seq& s : parked_.entries())
+        for (Ckpt& c : s.ckpts)
+            if (s.stamp < oldest && c.host != nullptr && pinned_buffer(c.host)) {
+                from = &c;
+                oldest = s.stamp;
+                break;
+            }
+    for (Ckpt& c : live().ckpts)
+        if (from == nullptr && c.pos <= begun_ && c.host != nullptr && pinned_buffer(c.host)) from = &c;
+    if (from == nullptr) return nullptr;
+    std::memcpy(pageable, from->host, (size_t) ckpt_bytes_);
+    void* const pinned = from->host;
+    from->host = pageable;
+    return pinned;
 }
 
 void SequenceCache::spare() {
@@ -635,6 +658,12 @@ bool SequenceCache::restore(Seq& seq, int64_t pos, bool prefix, bool parked, boo
 
 int64_t SequenceCache::begin(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag,
                              uint64_t busy, int* session) {
+    begun_ = begin_from(ids, imgs, tag, busy, session);
+    return begun_;
+}
+
+int64_t SequenceCache::begin_from(const std::vector<int64_t>& ids, const std::vector<ImgKey>& imgs, uint64_t tag,
+                                  uint64_t busy, int* session) {
     drop_prepared();
     trim();
     auto zero = [&]() -> int64_t {
