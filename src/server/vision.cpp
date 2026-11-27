@@ -333,9 +333,18 @@ std::optional<double> timeout_env(const char* name, double dflt) {
     return v;
 }
 
-bool network_path(const std::string& path) {
+bool device_path(const std::string& path) {
     const std::string p = replace_all(path, "/", "\\");
-    return starts_with(p, "\\\\") || starts_with(p, "\\??\\");
+    if (starts_with(p, "\\??\\")) return true;
+    const size_t n = p.find_first_not_of('\\');   // \\.\ and \\?\, after any number of separators
+    if (n == std::string::npos || n < 2) return false;
+    const std::string_view rest = std::string_view(p).substr(n);
+    return rest == "." || rest == "?" || starts_with(rest, ".\\") || starts_with(rest, "?\\");
+}
+
+bool share_path(const std::string& path) {
+    const size_t n = replace_all(path, "/", "\\").find_first_not_of('\\');
+    return n != std::string::npos && n >= 2 && !device_path(path);
 }
 
 std::string projector_type(const std::string& mmproj) {
@@ -695,31 +704,43 @@ std::string Vision::load(const std::string& source) {
             throw std::invalid_argument("the image could not be read from " + path + " (" + e.what() + ")");
         }
     }
-    throw std::invalid_argument("an image must be a data: URL, an http(s) URL or a local file path");
+    throw std::invalid_argument(path.empty() ? "an image must be a data: URL, an http(s) URL or a file's path"
+                                             : "the image file " + path + " is not there or cannot be read");
 }
 
 std::string media_file_path(const std::string& source, const char* what) {
     const bool file_url = starts_with(source, "file://");
     std::string path = file_url ? source.substr(7) : source;
-    // refused before anything looks at the path: file://host/share/x.png is \\host\share\x.png ("file://C:/x.png", a
-    // drive, is a client's spelling of file:///C:/x.png)
+    // file://host/share/x.png is \\host\share\x.png ("file://C:/x.png", a drive, is a client's spelling of
+    // file:///C:/x.png)
     std::string host;
     if (file_url) host = path.substr(0, path.find_first_of("/\\"));
     const bool drive = host.size() == 2 && std::isalpha((unsigned char) host[0]) && host[1] == ':';
     if (file_url) {   // the path as urllib.request.url2pathname reads it: no localhost, %XX decoded, /C:/ a drive's
         if (lower(host) == "localhost") path.erase(0, host.size());
         path = unquote_to_bytes(path);
+        if (!host.empty() && !drive && lower(host) != "localhost") path = "//" + path;
 #ifdef _WIN32
         if (path.size() >= 3 && (path[0] == '/' || path[0] == '\\') && std::isalpha((unsigned char) path[1]) &&
             path[2] == ':')
             path.erase(0, 1);
 #endif
     }
-    // checked on the decoded path: file:///%2F%2Fhost/share/x.png is //host/share/x.png too
-    if (network_path(path) || (!host.empty() && !drive && lower(host) != "localhost"))
+    // checked on the decoded path: file:///%2F%2F.%2Fpipe%2Fx is ///./pipe/x
+    if (device_path(path))
         throw std::invalid_argument(std::string(what) +
-                                    " file must be on this computer: network paths (\\\\host\\share, //host/share, "
-                                    "file://host/...) are not read");
+                                    "'s path names a device (\\\\.\\, \\\\?\\, \\??\\), not a file");
+    if (share_path(path)) {
+#ifdef _WIN32
+        // \\host\share\x.png (///host/share/x.png too), read through Windows' sign-in to that host
+        const std::string p = replace_all(path, "/", "\\");
+        path = "\\\\" + p.substr(p.find_first_not_of('\\'));
+#else
+        throw std::invalid_argument(std::string(what) +
+                                    " on a network share (\\\\host\\share, //host/share, file://host/...) is read on "
+                                    "Windows only: mount the share here and name the file by its path in it");
+#endif
+    }
     return path;
 }
 

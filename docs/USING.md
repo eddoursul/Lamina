@@ -184,10 +184,12 @@ but the embedding, the router and the routed experts; activated LoRA (aLoRA) ada
 ## Pictures
 
 With an image projector beside the model (or a config's `vision` section), OpenAI `image_url` parts and Anthropic
-`image` blocks (base64 data, http(s) URLs or local file paths) go through the server's image encoder and reach the
-model as up to 1,024 tokens each in the presets (a 640x480 photo is ~300; Inkling 2 Mini's are not resized: a token a
-40 x 40 px patch, up to 4,096). JPEG, PNG, BMP and GIF are read as they are, WebP, TIFF, AVIF and others converted to
-PNG first. A picture is encoded once, also when a chat app sends it again every turn.
+`image` blocks (base64 data, http(s) URLs or file paths) go through the server's image encoder and reach the model as
+up to 1,024 tokens each in the presets (a 640x480 photo is ~300; Inkling 2 Mini's are not resized: a token a 40 x 40
+px patch, up to 4,096). JPEG, PNG, BMP and GIF are read as they are, WebP, TIFF, AVIF and others converted to PNG
+first. A picture is encoded once, also when a chat app sends it again every turn. On Windows a file path can be a
+network share's (`\\host\share\x.png` or `file://host/share/x.png`), read with the account the server runs under;
+elsewhere, mount the share and name the file by its path there.
 
 By default the encoder runs on the engine's main GPU in VRAM it borrows from the engine for each new picture, so the
 GPUs keep their VRAM for the model: 0.3-0.6 s a picture of ~1,000 tokens, where the CPU takes 8-10 s. On the development
@@ -201,8 +203,9 @@ refuses URLs.
 Qwen3.8-Flash-Next, Qwen3.6-35B-A3B, Qwen3.8-27B and Hy4-flash read videos through the same projector and encoder
 (Inkling 2 Mini's takes none): an OpenAI-style `video_url` part (vLLM's form), llama.cpp's `input_video` part
 (`{"data": ...}` or `{"url": ...}`), a Responses API `input_video` part (its `video_url`) or a `video` block shaped as
-an Anthropic `image` block, each a data: URL, an http(s) URL (up to 1 GiB) or a local file path. ffmpeg and ffprobe, 5.1
-or newer, read the file (any format they read): on the PATH, or `--vision-ffmpeg` names ffmpeg (ffprobe beside it).
+an Anthropic `image` block, each a data: URL, an http(s) URL (up to 1 GiB) or a file path (a network share's too, as
+a picture's). ffmpeg and ffprobe, 5.1 or newer, read the file (any format they read): on the PATH, or
+`--vision-ffmpeg` names ffmpeg (ffprobe beside it).
 
 A video is sampled and sized as its model's own processor does it: 2 frames a second, each group of frames after its
 time in the prompt (`<12.5 seconds>`), so the model can tell when something happens.

@@ -996,6 +996,10 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_executable(remote_model_test tests/server/remote_model_test.cpp)
     target_link_libraries(remote_model_test PRIVATE lamina_server_core)
     add_test(NAME remote_model_test COMMAND remote_model_test)
+    # a picture's or video's file as a request names it: paths, file:// URLs, network shares, device paths (CPU only)
+    add_executable(media_path_test tests/server/media_path_test.cpp)
+    target_link_libraries(media_path_test PRIVATE lamina_server_core)
+    add_test(NAME media_path_test COMMAND media_path_test)
     # the releases' programs: the server, with the engine in its process (the engine alone, `lamina-engine`, is for
     # tests and measurements and stays in the build folder)
     install(TARGETS lamina RUNTIME DESTINATION . COMPONENT lamina)
@@ -1028,7 +1032,8 @@ if(LAMINA_BUILD_TESTS)
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
              conversation_cache_test disk_tier_test control_vector_test model_family_test deterministic_adapt_help platform_memory_test
              platform_spill_test pretokenize_parity tokenizer_test sha256_base64_test
-             ple_reader_selftest model_config_test params_test bench_test remote_model_test cpu_floor_test)
+             ple_reader_selftest model_config_test params_test bench_test remote_model_test media_path_test
+             cpu_floor_test)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)
     endif()

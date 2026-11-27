@@ -339,14 +339,14 @@ public:
         return true;
     }
 
-    /// a web page of another origin must not have a file on this computer read as an image or a video
+    /// a web page of another origin must not have a file (this computer's or a network share's) read as an image or a
+    /// video
     void no_local_images(const json& messages) {
         if (!foreign_origin()) return;
         for (const MediaRef& m : media_of(messages))
             if (!starts_with(m.source, "data:") && !starts_with(m.source, "http://") &&
                 !starts_with(m.source, "https://"))
-                throw RequestError(std::string("a web page of another origin cannot have a file on this computer read "
-                                               "as ") +
+                throw RequestError(std::string("a web page of another origin cannot have a file read as ") +
                                    (m.video ? "a video" : "an image") +
                                    ": send it as a data: URL (or add the page's origin to the config's "
                                    "trusted_origins)");

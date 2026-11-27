@@ -157,10 +157,13 @@ bool projector_type_read(const std::string& type);
 /// open: its type, its tower's shape, tensors the encoder does not read); "" where it reads it, or in a build without
 /// the encoder
 std::string projector_refusal(const std::string& mmproj);
-/// a path to another computer (\\host\share, //host/share, \\?\UNC\..., \??\UNC\...): Windows would sign in to it
-bool network_path(const std::string& path);
-/// a local file's path from a path or a file:// URL (as urllib's url2pathname reads one); std::invalid_argument for a
-/// network path or another host's URL (`what`: "an image", "a video", for the message)
+/// a path in Windows' device or object namespace (\\.\pipe\x, \\?\C:\x, \??\UNC\x), which names no file to read
+bool device_path(const std::string& path);
+/// a network share's path (\\host\share\x, //host/share/x), not a device's
+bool share_path(const std::string& path);
+/// a file's path from a path or a file:// URL (as urllib's url2pathname reads one: file://host/share/x is
+/// \\host\share\x); a network share's is read on Windows, as \\host\share\x. std::invalid_argument for a device's path,
+/// or a share's off Windows (`what`: "an image", "a video", for the message)
 std::string media_file_path(const std::string& source, const char* what);
 /// #874: where one request's combined image-embeddings file goes: on Linux /dev/shm when it has room (the engine
 /// reads it back at once), else the encoder's own directory

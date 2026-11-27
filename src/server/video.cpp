@@ -153,8 +153,9 @@ std::shared_ptr<VideoFile> open_video(const std::string& source, bool is_bytes, 
         const std::string path = media_file_path(source, "a video");
         std::error_code ec;
         const fs::path p = u8_path(path);
-        if (path.empty() || !fs::is_regular_file(p, ec))
-            throw std::invalid_argument("a video must be a data: URL, an http(s) URL or a local file path");
+        if (path.empty()) throw std::invalid_argument("a video must be a data: URL, an http(s) URL or a file's path");
+        if (!fs::is_regular_file(p, ec))
+            throw std::invalid_argument("the video file " + path + " is not there or cannot be read");
         const uintmax_t size = fs::file_size(p, ec);
         const long long time = (long long) fs::last_write_time(p, ec).time_since_epoch().count();
         f->path = path;
