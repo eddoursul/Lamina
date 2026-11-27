@@ -2179,6 +2179,11 @@ struct Engine {
     bool lot_quick[kLots] = {};           // the conversation in a lot came back quickly the last time
     const uint8_t* taking = nullptr;      // the buffer of the conversation that leaves
                                           // the park with the next kv_copy (kv_take)
+    // The conversation the live sequence left in its lot at the last park, until the sequence has cells again (a
+    // copy in, a reset).  The cache may go on with the live one from a checkpoint all the same (another conversation
+    // that keeps its start drops a sixteenth of it): the sequence, in a free lot now, then takes the cells before
+    // it from that lot (live_cells).
+    const uint8_t* left_in_lot = nullptr;
     // A parked conversation's last checkpoint image (the rings and the convolutions' states; what `snap` holds when
     // it is parked) kept on the cards beside its lot - each card its own visits' part - for its return: a state the
     // cache brings back from that checkpoint then comes from there instead of through the links
@@ -7247,8 +7252,18 @@ struct Engine {
         }
         n_pos = 0;
         logits_held = false;
+        left_in_lot = nullptr;
         sp_vlo = sp_vhi = sp_whi = 0;
         frnn_n = 0;
+    }
+    /// A state restored at `pos` (the cache's state_load): where the live sequence left its conversation in its lot
+    /// just before and nothing has been copied into the free lot it went on in, the cells before `pos` come from that
+    /// lot, as a start a parked conversation lends (else the full visits would read that lot's memory as it was).
+    bool live_cells(int64_t pos) {
+        const uint8_t* const from = left_in_lot;
+        left_in_lot = nullptr;
+        const Parked* const r = from != nullptr ? parked_of(from) : nullptr;
+        return r == nullptr || kv_copy(std::min(pos, r->held), r->held, const_cast<uint8_t*>(from), false);
     }
     /// A split's rings and convolution states between the two cards and `host`, now: each card's own visits' bytes,
     /// the two cards' copies under way at once (the first card's arrays whole took the other's visits' three quarters
@@ -7409,11 +7424,14 @@ struct Engine {
                 if (lot_mapped(nl) > 0) lot_release(nl, 0);   // (what a sequence no one kept left there)
                 lot_use(nl);                                  // (its units stay on the cell
                                                               // cards, in its lot's ranges there)
+                left_in_lot = host;
                 lots_say("a conversation stays in its lot", held);
                 return true;
             }
+            left_in_lot = nullptr;   // (the sequence keeps its cells: a copy of them leaves)
             return kv_plain(cells, held, host, true);
         }
+        left_in_lot = nullptr;   // (the sequence's cells come from a copy now)
         const bool take = taking == host;
         taking = nullptr;
         Parked* r = parked_of(host);
@@ -7858,6 +7876,7 @@ protected:
     }
     bool state_load(int64_t pos, const void* host) override {
         E.snap_wait();
+        if (!E.live_cells(pos)) return false;   // (the live one, parked in its lot just now, goes on all the same)
         const auto t0 = Clock::now();
         const bool from_image = E.image_load(pos, static_cast<const uint8_t*>(host));
         if (!from_image && !E.state_copy(const_cast<uint8_t*>(static_cast<const uint8_t*>(host)), false)) return false;
