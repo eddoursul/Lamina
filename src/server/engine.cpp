@@ -110,9 +110,9 @@ void LaminaEngine::start() {
         std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", std::localtime(&t));
         std::string cmd;
         for (const auto& a : args_) cmd += " " + a;
-        f << "[lamina] " << when << " engine started: lamina --serve" << cmd << "\n";
+        f << "[lamina] " << when << " engine started: lamina-engine --serve" << cmd << "\n";
     }
-    std::vector<std::string> argv{"lamina", "--serve"};
+    std::vector<std::string> argv{"lamina-engine", "--serve"};
     argv.insert(argv.end(), args_.begin(), args_.end());
     rc_ = -1;
     ended_ = true;   // not alive until READY
@@ -344,7 +344,7 @@ std::string LaminaEngine::death_note() {
         if (it->find("issue #29") != std::string::npos)
             return "The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
                    "line: " + std::string(strip(*it)) + " - please report it at github.com/eddoursul/Lamina/issues.";
-    static const std::regex message(R"(^lamina( [a-z0-9_-]+)?:)");   // not the usage's "lamina --native ..."
+    static const std::regex message(R"(^lamina( [a-z0-9_-]+)?:)");   // not the usage's "lamina-engine --native ..."
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
         const std::string_view s = strip(*it);
         if (std::regex_search(s.begin(), s.end(), message) || starts_with(s, "ERR"))

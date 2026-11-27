@@ -1,5 +1,5 @@
-// include/lamina/program/options.hpp - the engine's options as the help lists them: `lamina --help` the common ones,
-// `--help-all` every one, lamina-server's --help those its engine takes.  The paths' parsers read them.
+// include/lamina/program/options.hpp - the engine's options as the help lists them: `lamina-engine --help` the
+// common ones, `--help-all` every one, lamina-server's --help those its engine takes.  The paths' parsers read them.
 #pragma once
 
 #include <cstddef>
@@ -9,9 +9,9 @@
 
 namespace lamina::program {
 
-/// Where an option is listed besides `lamina --help-all`, which lists every one.
+/// Where an option is listed besides `lamina-engine --help-all`, which lists every one.
 enum OptionList : unsigned {
-    kListCommon = 1,   ///< `lamina --help`: the options most runs set
+    kListCommon = 1,   ///< `lamina-engine --help`: the options most runs set
     kListServed = 2,   ///< lamina-server's --help: an option for the engine a server runs
 };
 

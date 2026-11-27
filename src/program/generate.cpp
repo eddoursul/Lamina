@@ -1,4 +1,4 @@
-// src/program/generate.cpp - the engine (`lamina`): a model's prompt through the batched prompt path and its
+// src/program/generate.cpp - the engine (`lamina-engine`): a model's prompt through the batched prompt path and its
 // decoding in verify windows of the last token and the draft layer's drafts, the experts in the GPUs' VRAM tiers and
 // the CPU pool.  Generate mode reads pretokenized ids (--tokens) and prints the tokens it decodes; --serve keeps
 // the model loaded and takes requests on stdin, or on lamina-server's in-process channels (serve_io.hpp).
@@ -432,7 +432,7 @@ bool number_list(const char* s, std::vector<double>& out) {
 
 /// --help: the options most runs set; --help-all: every one, then the deprecated spellings the engine still takes.
 void usage(bool all = false) {
-    std::fputs("lamina --native MODEL.gguf [options]   (lamina-server runs it; generate mode also takes --tokens)\n"
+    std::fputs("lamina-engine --native MODEL.gguf [options]   (lamina-server runs it; generate mode also takes --tokens)\n"
                "\n"
                "A switch also takes --no-<name>.\n",
                stderr);

@@ -173,7 +173,7 @@ std::string items(const json& d) {
 /// the command line's engine options as the engine's own parser reads them, for the family of the config's model:
 /// false when it refuses one (said, the engine's line above it)
 bool engine_options_ok(const json& cfg, const std::vector<EngineOption>& opts) {
-    std::vector<std::string> line{"lamina", "--serve", "--native", model_file(cfg)};
+    std::vector<std::string> line{"lamina-engine", "--serve", "--native", model_file(cfg)};
     for (const EngineOption& o : opts) line.insert(line.end(), o.begin(), o.end());
     std::vector<char*> argv;
     for (std::string& w : line) argv.push_back(w.data());

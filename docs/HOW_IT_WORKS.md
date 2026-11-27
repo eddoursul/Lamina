@@ -192,9 +192,9 @@ at consecutive positions, as text, which is how llama.cpp's support for it reads
 `lamina-server` serves the OpenAI, Anthropic and Responses APIs and the web app, which is built into it. It renders
 the model's chat template (from its GGUF, or the config's `chat_template_file`, with llama.cpp's Jinja engine) and tokenizes with the model's tokenizer (from
 the GGUF too), and runs the engine on a thread of its own process: the engine takes prompts as token ids and writes
-tokens as each pass accepts them, through in-process channels that carry the line protocol `lamina --serve` speaks on
-stdin and stdout. The server turns the tokens back into text, reasoning and tool calls, streamed. Flash-Next runs one
-request at a time, the others wait; when the engine stops, the server starts it again.
+tokens as each pass accepts them, through in-process channels that carry the line protocol `lamina-engine --serve`
+speaks on stdin and stdout. The server turns the tokens back into text, reasoning and tool calls, streamed.
+Flash-Next runs one request at a time, the others wait; when the engine stops, the server starts it again.
 
 ## Exactness
 

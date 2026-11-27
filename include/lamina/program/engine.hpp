@@ -1,4 +1,4 @@
-// include/lamina/program/engine.hpp - the engine as a function: the `lamina` binary's main, and the engine that
+// include/lamina/program/engine.hpp - the engine as a function: the `lamina-engine` binary's main, and the engine that
 // lamina-server runs on a thread of its own (with in-process channels: serve_io.hpp).
 #pragma once
 

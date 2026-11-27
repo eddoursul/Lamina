@@ -1,7 +1,7 @@
 // tests/core/model_family_test.cpp - the model families on synthetic GGUFs: no model, no GPU.
 //
 //   * the architecture guard accepts qwen4exp and qwen35moe and refuses anything else; the Flash-Next engine's guard
-//     refuses qwen35moe, naming its own engine path (src/qwen35, which `lamina` switches to before that guard);
+//     refuses qwen35moe, naming its own engine path (src/qwen35, which `lamina-engine` switches to before that guard);
 //   * geometry_from_gguf reads Qwen3.6-35B-A3B's real metadata values (hidden 2048, 40 + 1 MTP layers, 32 GDN V
 //     heads, conv 8192, no hyper-connections, no indexer) and Flash-Next's as exactly the compiled defaults;
 //   * the layout tables, on tiny files of either family: a complete file passes, a wrong shape, a missing tensor

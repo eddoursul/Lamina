@@ -270,6 +270,6 @@ json request_stats(const std::vector<json>& segments);
 double now_s();   ///< time.time()
 double mono_s();  ///< time.perf_counter(): the request records' clock
 
-inline constexpr int64_t kCtxSlack = 8;   // `lamina --serve` rejects prompt + max_new + 8 > context
+inline constexpr int64_t kCtxSlack = 8;   // `lamina-engine --serve` rejects prompt + max_new + 8 > context
 
 }  // namespace lamina

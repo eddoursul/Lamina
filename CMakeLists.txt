@@ -1,6 +1,6 @@
 ﻿# Lamina Engine - top-level build.
 #
-# The engine (`lamina`), the server (`lamina-server`, the image encoder in it) and
+# The engine (`lamina-engine`), the server (`lamina-server`, the image encoder in it) and
 # the GPU tools need LAMINA_ENABLE_CUDA and NVIDIA GPUs of compute capability 8.0 or newer; without CUDA only the
 # CPU-side libraries, their tools and tests build. CMakePresets.json has the two builds: `native` (this PC's GPUs and
 # CPU, in build/) and `portable` (the releases': RTX 30, 40 and 50, any AVX2 CPU, in build-portable/); build.bat and
@@ -313,7 +313,7 @@ if(LAMINA_ENABLE_CUDA)
   target_link_libraries(lamina_engine PUBLIC lamina_core lamina_kernels lamina_kernels_cpu CUDA::cudart_static
                         ${CMAKE_DL_LIBS})
 
-  # `lamina generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
+  # `lamina-engine generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
   # what composes them into a token.  No tokenizer - the prompt arrives as ids - because Gate C1 compares logits
   # against llama.cpp on the SAME ids and a tokenizer on one side of that comparison is a second variable.
   # plan v0.3 P5: batched prompt processing (tensor-core GEMMs: lamina_kernels' gemm.cu).
@@ -322,8 +322,8 @@ if(LAMINA_ENABLE_CUDA)
   target_include_directories(lamina_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(lamina_prefill PUBLIC lamina_engine CUDA::cudart_static)
 
-  # the engine as a library: the lamina binary's main (src/program/main.cpp) and lamina-server's engine thread, which
-  # speaks the --serve protocol through in-process channels (serve_io.hpp)
+  # the engine as a library: the lamina-engine binary's main (src/program/main.cpp) and lamina-server's engine thread,
+  # which speaks the --serve protocol through in-process channels (serve_io.hpp)
   add_library(lamina_serve_io STATIC src/program/serve_io.cpp)
   target_include_directories(lamina_serve_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_library(lamina_program STATIC src/program/generate.cpp)
@@ -331,8 +331,8 @@ if(LAMINA_ENABLE_CUDA)
   target_link_libraries(lamina_program PUBLIC lamina_engine lamina_prefill lamina_spec lamina_serve_io lamina_cards
                         CUDA::cudart_static)
   # src/platform/cpu_floor.cpp: the CPU check before anything else of the program runs
-  add_executable(lamina src/program/main.cpp src/platform/cpu_floor.cpp)
-  target_link_libraries(lamina PRIVATE lamina_program)
+  add_executable(lamina-engine src/program/main.cpp src/platform/cpu_floor.cpp)
+  target_link_libraries(lamina-engine PRIVATE lamina_program)
   # the hyper-connection read's fused up projection + mix against the product + gr_mix_r at every sub-chunk size (--bench)
   add_executable(gr_upmix_parity src/prefill/gr_upmix_parity.cu)
   target_link_libraries(gr_upmix_parity PRIVATE lamina_prefill CUDA::cudart_static)
@@ -373,7 +373,7 @@ if(LAMINA_ENABLE_CUDA)
     add_test(NAME model_family_test COMMAND model_family_test)
     add_test(NAME control_vector_test COMMAND control_vector_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
-    add_test(NAME deterministic_adapt_help COMMAND lamina --deterministic-adapt --help-all)
+    add_test(NAME deterministic_adapt_help COMMAND lamina-engine --deterministic-adapt --help-all)
     set_tests_properties(deterministic_adapt_help PROPERTIES
                          PASS_REGULAR_EXPRESSION "--deterministic-adapt")
   endif()
@@ -812,9 +812,9 @@ if(LAMINA_NATIVE_EXPERTS)
     target_link_libraries(nvfp4_gemm_parity PRIVATE lamina_kernels CUDA::cudart_static)
     add_test(NAME nvfp4_gemm_parity COMMAND nvfp4_gemm_parity)
 
-    # Qwen3.6-35B-A3B (GGUF architecture qwen35moe): its own engine path, a library `lamina` switches to for such a
-    # model (the family switch at the top of its main) and lamina-q36 wraps on its own; the experts that do not fit
-    # in VRAM run on the CPU pool.  lamina-q36ref: the reference path tools/qwen35/ checks against llama.cpp.
+    # Qwen3.6-35B-A3B (GGUF architecture qwen35moe): its own engine path, a library `lamina-engine` switches to for
+    # such a model (the family switch at the top of its main) and lamina-q36 wraps on its own; the experts that do not
+    # fit in VRAM run on the CPU pool.  lamina-q36ref: the reference path tools/qwen35/ checks against llama.cpp.
     add_library(lamina_qwen35 STATIC src/qwen35/q36_engine.cu)
     target_include_directories(lamina_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -834,8 +834,9 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_safetensors PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(lamina_safetensors PRIVATE nlohmann lamina_warnings)
 
-    # Hy4-flash (GGUF architecture hy_v4_flash): its own engine path, a library `lamina` switches to for such a model as
-    # it does for Qwen3.6, and lamina-hy4 wraps on its own.  Fast math as ggml-cuda (llama.cpp's PR, the reference).
+    # Hy4-flash (GGUF architecture hy_v4_flash): its own engine path, a library `lamina-engine` switches to for such a
+    # model as it does for Qwen3.6, and lamina-hy4 wraps on its own.  Fast math as ggml-cuda (llama.cpp's PR, the
+    # reference).
     add_library(lamina_hy4 STATIC src/hy4/hy4_engine.cu src/hy4/hy4_dfly_file.cpp src/hy4/hy4_place.cpp)
     target_include_directories(lamina_hy4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -847,8 +848,8 @@ if(LAMINA_NATIVE_EXPERTS)
     target_link_libraries(lamina_program PUBLIC lamina_hy4)
     target_compile_definitions(lamina_program PRIVATE LAMINA_HAVE_HY4=1)
 
-    # Inkling 2 (GGUF architectures inkling2 and inkling2_loop): its own engine path, a library `lamina` switches to for
-    # such a model, and lamina-inkling2 wraps on its own.  Fast math as ggml-cuda (llama.cpp, the reference).
+    # Inkling 2 (GGUF architectures inkling2 and inkling2_loop): its own engine path, a library `lamina-engine` switches
+    # to for such a model, and lamina-inkling2 wraps on its own.  Fast math as ggml-cuda (llama.cpp, the reference).
     add_library(lamina_inkling2 STATIC src/inkling2/inkling2_engine.cu)
     target_include_directories(lamina_inkling2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -991,8 +992,8 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     add_executable(remote_model_test tests/server/remote_model_test.cpp)
     target_link_libraries(remote_model_test PRIVATE lamina_server_core)
     add_test(NAME remote_model_test COMMAND remote_model_test)
-    # the releases' programs: the server, with the engine in its process (the engine alone, `lamina`, is for tests
-    # and measurements and stays in the build folder)
+    # the releases' programs: the server, with the engine in its process (the engine alone, `lamina-engine`, is for
+    # tests and measurements and stays in the build folder)
     install(TARGETS lamina-server RUNTIME DESTINATION . COMPONENT lamina)
     if(WIN32)
       install(PROGRAMS download-draft-layer.bat DESTINATION . COMPONENT lamina)
@@ -1030,12 +1031,12 @@ if(LAMINA_BUILD_TESTS)
   endforeach()
 endif()
 
-# Without LAMINA_BUILD_TESTS the default target builds the programs a release holds (lamina, lamina-server): the
-# tests, parity checks, benches and tools build by name (cmake --build <build> --target <name>)
+# Without LAMINA_BUILD_TESTS the default target builds the two programs (lamina-engine, lamina-server): the tests,
+# parity checks, benches and tools build by name (cmake --build <build> --target <name>)
 get_property(_lamina_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(_t IN LISTS _lamina_targets)
   get_target_property(_type ${_t} TYPE)
-  if(NOT _type STREQUAL "EXECUTABLE" OR _t MATCHES "^lamina(-server)?$")
+  if(NOT _type STREQUAL "EXECUTABLE" OR _t MATCHES "^lamina-(engine|server)$")
     continue()
   elseif(NOT LAMINA_BUILD_TESTS)
     set_target_properties(${_t} PROPERTIES EXCLUDE_FROM_ALL ON)

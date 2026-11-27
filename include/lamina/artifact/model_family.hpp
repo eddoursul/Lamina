@@ -70,9 +70,8 @@ inline const char* model_family_title(ModelFamily f) {
 }
 
 /// Whether Flash-Next's engine path runs the family.  Qwen3.6, Hy4-flash and Inkling 2 have engine paths of their own
-/// (src/qwen35, src/hy4, src/inkling2), which `lamina` switches to at the top of main (a build with CUDA and native
-/// experts); without them the
-/// family is refused with `model_family_not_supported`.
+/// (src/qwen35, src/hy4, src/inkling2), which `lamina-engine` switches to at the top of main (a build with CUDA and
+/// native experts); without them the family is refused with `model_family_not_supported`.
 inline bool model_family_runs(ModelFamily f) { return f == ModelFamily::Qwen4Exp; }
 
 /// The refusal for a recognised family the engine does not run (empty when it runs it).

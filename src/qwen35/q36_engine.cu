@@ -5743,12 +5743,12 @@ static int run_engine(int argc, char** argv, bool check_only) {
             if (i + 1 >= argc) { std::fprintf(stderr, "lamina: %s needs a value\n", a.c_str()); throw Fatal{2}; }
             return argv[++i];
         };
-        // lamina's names where they mean the same thing (the family switch passes lamina's command line on)
+        // lamina-engine's names where they mean the same thing (the family switch passes its command line on)
         if (a == "--model" || a == "--native") model = next();
         else if (a == "--max-new") n_gen = std::atoi(next().c_str());
         else if (a == "--no-token-graph") graph = false;
         else if (a == "--pool-workers") cpu_threads = std::atoi(next().c_str());
-        else if (a == "--gpu") (void) next();   // applied by lamina before the switch (CUDA/HIP_VISIBLE_DEVICES)
+        else if (a == "--gpu") (void) next();   // applied by lamina-engine before the switch (CUDA/HIP_VISIBLE_DEVICES)
         else if (a == "--greedy") {}            // --tokens decodes greedily here anyway
         else if (a == "--serve") serve_mode = true;
         else if (a == "--max-context" || a == "--ctx") ctx = std::atoi(next().c_str());

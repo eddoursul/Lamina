@@ -363,13 +363,13 @@ void the_redaction() {
     const json deep = B::redact({{"a", {{{"p", "D:\\Users\\zed\\x"}}}}, {"n", 3}}, red);
     CHECK(deep.dump().find("zed") == std::string::npos && deep["n"] == 3);
 
-    const json cfg = {{"exe", "C:\\Users\\me\\Lamina\\engine\\lamina.exe"},
+    const json cfg = {{"exe", "C:\\Users\\me\\Lamina\\engine\\lamina-engine.exe"},
                       {"args", {"--native", "/home/me/models/m-IQ3_XXS.gguf", "--ctx", "65536"}},
                       {"api_key", "hunter2"}, {"model_name", "Fake Model"}, {"log", "/tmp/x.log"}, {"port", 8080},
                       {"vision", {{"mmproj", "D:/Models/x/mmproj-F16.gguf"}, {"token", "t"}, {"gpu", false}}},
                       {"env", {{"LAMINA_FOO", "/home/me/z"}, {"PATH", "/usr/bin"}, {"LAMINA_TOKEN", "t"}}}};
     const json v = B::config_view(cfg);
-    CHECK(v["exe"] == "lamina.exe");
+    CHECK(v["exe"] == "lamina-engine.exe");
     CHECK(v["args"] == json::array({"--native", "m-IQ3_XXS.gguf", "--ctx", "65536"}));
     CHECK(!v.contains("api_key") && !v.contains("log") && v["port"] == 8080);
     CHECK((v["vision"] == json{{"mmproj", "mmproj-F16.gguf"}, {"gpu", false}}));   // nested: paths cut, secrets out

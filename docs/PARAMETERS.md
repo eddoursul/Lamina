@@ -429,10 +429,10 @@ after the cards: no tiers).
 
 ### The engine alone
 
-`lamina --native MODEL.gguf` runs the engine without the server, for tests and measurements: a build makes it beside
-lamina-server, the releases have the server alone. `--serve` and `--vision` are the line protocol and the pictures
-lamina-server speaks to the engine in its process; with `--tokens` it generates from token ids. `lamina --help` lists
-the common options, `lamina --help-all` every one.
+`lamina-engine --native MODEL.gguf` runs the engine without the server, for tests and measurements: a build makes
+it beside lamina-server, the releases have the server alone. `--serve` and `--vision` are the line protocol and the
+pictures lamina-server speaks to the engine in its process; with `--tokens` it generates from token ids.
+`lamina-engine --help` lists the common options, `lamina-engine --help-all` every one.
 
 | Option | Models | What it does |
 | --- | --- | --- |

@@ -1,4 +1,4 @@
-// src/program/main.cpp - the `lamina` binary: the engine on the command line, --serve on stdin and stdout.
+// src/program/main.cpp - the `lamina-engine` binary: the engine on the command line, --serve on stdin and stdout.
 #include "lamina/program/engine.hpp"
 
 #include <cstdio>
@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
         if (a == "-v" || a == "--version") {
-            std::fputs("lamina " LAMINA_VERSION "\n", stdout);
+            std::fputs("lamina-engine " LAMINA_VERSION "\n", stdout);
             return 0;
         }
     }

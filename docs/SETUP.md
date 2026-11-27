@@ -17,7 +17,7 @@ build.bat                        (Windows)
 ```
 
 They build the preset `native` of `CMakePresets.json` into `build/`: `lamina-server` (the image encoder is a part of
-it) and `lamina` (the engine alone, for tests and measurements), the CUDA runtime linked in (they load the NVIDIA
+it) and `lamina-engine` (the engine alone, for tests and measurements), the CUDA runtime linked in (they load the NVIDIA
 driver alone), for this PC's CPU and its GPUs of the RTX 30 series and newer, as `nvidia-smi` names them at each build
 (after a card is added, build again). The programs run from there: `build\lamina-server -m MODEL.gguf`
 ([below](#a-model-file)). `build.bat portable` (`./build.sh portable`) builds them for other PCs into

@@ -803,7 +803,7 @@ std::string launch_line(const json& view) {
         const std::string s = py_str(a);
         words.push_back(s.find(' ') != std::string::npos ? "\"" + s + "\"" : s);
     }
-    const std::string exe = jget(view, "exe").is_string() ? view["exe"].get<std::string>() : "lamina";
+    const std::string exe = jget(view, "exe").is_string() ? view["exe"].get<std::string>() : "lamina-engine";
     return std::string(strip(exe + " " + join(words, " ")));
 }
 

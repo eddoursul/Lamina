@@ -1,6 +1,6 @@
 // include/lamina/program/serve_io.hpp - the --serve loop's line protocol, wherever it travels.
 //
-// The engine binary (`lamina --serve`) reads requests on stdin and writes its replies on stdout. lamina-server
+// The engine binary (`lamina-engine --serve`) reads requests on stdin and writes its replies on stdout. lamina-server
 // runs the same loop on a thread of its own process, with in-process channels set here before lamina::program::run.
 #pragma once
 
