@@ -1215,6 +1215,43 @@ __global__ void __launch_bounds__(256) range_to_ring_kernel(Cells ring, const ui
     uint32_t* dst = (uint32_t*) ((blockIdx.y ? ring.v : ring.k) + (size_t) (pos % ring.cap) * bytes);
     for (int i = threadIdx.x; i < bytes / 4; i += blockDim.x) dst[i] = src[i];
 }
+/// A window visit's ring as it stands once the chunk at positions p0 .. has passed position `at` - 1 (a checkpoint
+/// inside the chunk), into `ok` and `ov` laid out as the ring: the slot of position q in [at - cap, at) holds q's cell,
+/// from the chunk's range where it has q (range slot j is position p0 - (win - 1) + j), else from the ring, which
+/// holds the positions before the chunk until range_to_ring_kernel writes the chunk's.  A block a slot and a side.
+__global__ void __launch_bounds__(256) ring_at_kernel(Cells ring, const uint8_t* __restrict__ rk,
+                                                      const uint8_t* __restrict__ rv, uint8_t* __restrict__ ok,
+                                                      uint8_t* __restrict__ ov, long long p0, long long at, int win,
+                                                      int bytes) {
+    const long long cap = ring.cap, lo = at - cap, first = p0 - (win - 1);
+    const long long q = lo + ((((long long) blockIdx.x - lo) % cap) + cap) % cap;   // the position slot x holds
+    const uint8_t* const from = q >= first ? (blockIdx.y ? rv : rk) + (size_t) (q - first) * bytes
+                                           : (blockIdx.y ? ring.v : ring.k) + (size_t) blockIdx.x * bytes;
+    const uint32_t* src = (const uint32_t*) from;
+    uint32_t* dst = (uint32_t*) ((blockIdx.y ? ov : ok) + (size_t) blockIdx.x * bytes);
+    for (int i = threadIdx.x; i < bytes / 4; i += blockDim.x) dst[i] = src[i];
+}
+/// A visit's convolution states as they stand after a chunk's first `r` rows (a checkpoint inside it): for each of its
+/// four convolutions the last C - 1 rows of [state | raw], as conv_state_kernel takes them after the whole chunk. `out`
+/// is laid out as Engine::Visit::conv and holds the states from before the chunk where r < C - 1 (read, then written
+/// over in place); the raws are the chunk's [T][KV] and [T][N].  A thread a channel of the visit's 2 KV + 2 N.
+__global__ void __launch_bounds__(256) conv_at_kernel(float* __restrict__ out, const float* __restrict__ kraw,
+                                                      const float* __restrict__ vraw, const float* __restrict__ oraw,
+                                                      const float* __restrict__ fraw, int KV, int N, int C, int r) {
+    const int c = blockIdx.x * 256 + threadIdx.x;
+    if (c >= 2 * KV + 2 * N) return;
+    const int which = c < KV ? 0 : c < 2 * KV ? 1 : c < 2 * KV + N ? 2 : 3;
+    const int before = which == 0 ? 0 : which == 1 ? KV : which == 2 ? 2 * KV : 2 * KV + N, n = which < 2 ? KV : N;
+    const float* const raw = which == 0 ? kraw : which == 1 ? vraw : which == 2 ? oraw : fraw;
+    const int i = c - before;
+    float* const st = out + (size_t) (C - 1) * before;
+    float keep[7];
+#pragma unroll
+    for (int j = 0; j < 7; ++j) keep[j] = j < C - 1 ? conv_in(raw, st, r, C - 1 - j, n, i, C) : 0.f;
+#pragma unroll
+    for (int j = 0; j < 7; ++j)
+        if (j < C - 1) st[(size_t) j * n + i] = keep[j];
+}
 
 /// T rows' experts picked, a warp a row, as pick_plan_kernel picks them: ids, w [T][top_k].
 struct PickIn {

@@ -256,6 +256,14 @@ constexpr float kSparkWhole = 0.35f;       // the drafter's head in one product 
                                            // 0.5 + 0.7 p ms against one's 0.76: even at 0.37)
 /// A window visit's ring: its window and a forward's rows, in whole tiles
 int64_t ring_cells(const Geometry& g) { return (g.n_swa + kMaxT + kRingSub - 1) / kRingSub * kRingSub; }
+// The checkpoints a prompt chunk takes inside it at most, and the device buffers of a window visit's ring their parts
+// go out through (Engine::MarkBufs)
+constexpr int kMaxMarks = 4, kMarkRings = 2;
+/// Those buffers' bytes on a card: the rings', then each mark's of a visit's convolution states
+uint64_t mark_bytes(const Geometry& g, bool q8) {
+    return (uint64_t) kMarkRings * 2 * (uint64_t) ring_cells(g) * (uint64_t) g.cell_bytes(q8) +
+           (uint64_t) kMaxMarks * (uint64_t) (g.n_conv - 1) * (uint64_t) g.conv_channels() * 4;
+}
 
 // ------------------------------------------------------------------------------------------------ the model
 constexpr size_t kWeightPad = 4096;   // zero bytes after each weight: a kernel may read past a short last row
@@ -642,7 +650,8 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         const uint64_t per_pos = (uint64_t) g.n_full_visits() * 2 * cell;
         const int64_t trained = m.trained_ctx;
         const uint64_t ring = (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell * (uint64_t) ring_cells(g);
-        const uint64_t beside = ring * (o.cache ? 2 : 1) + (o.prefill > 0 ? 230ull << 20 : 0) + (96ull << 20);
+        const uint64_t beside =
+            (o.cache ? 2 * ring + mark_bytes(g, o.q8) : ring) + (o.prefill > 0 ? 230ull << 20 : 0) + (96ull << 20);
         auto least_with = [&](bool cards) {   // (the fewest cells a card holds: with cards after it a few units)
             return cards ? 4 * kGrow : o.max_ctx > 0 ? std::min(o.max_ctx, kContextFloor) : kContextFloor;
         };
@@ -1483,6 +1492,13 @@ struct Rows {
     int32_t *tiles = nullptr, *tiles_h = nullptr;
     int* grp = nullptr;   // a chunk's grouping on the card (group_kernel's counts and masks)
     int n_part = 0;       // stretches `part` holds a row and head
+    // the checkpoints inside the chunk (rows ascending, kMaxMarks at most): the state after its first `row` rows into
+    // the pinned buffer `host` (Engine::state_bytes(): each visit writes its part as the chunk passes the row)
+    struct Mark {
+        int row = 0;
+        uint8_t* host = nullptr;
+    };
+    std::vector<Mark> marks;
     int head_rows() const { return batch ? 1 : cap; }
 };
 
@@ -1547,6 +1563,7 @@ struct Engine {
     static constexpr uint64_t kLotSpare = 6ull << 30;   // addresses a card keeps to spare beside its lots
     struct Visit {
         int layer = 0, pass = 0;
+        int ring_at = -1;        // a window visit's ring among all of them (its place in `rings` and a checkpoint)
         float* conv = nullptr;   // [C - 1] rows of: K's projection | V's | the attention's output | the MoE's
         ik::Cells cells{};
         CellRange *k_vm = nullptr, *v_vm = nullptr;   // a full visit's K and V: the live lot's
@@ -1664,6 +1681,16 @@ struct Engine {
     // here.  Between two visits on different cards the forward crosses: the queued work ends (a graph's segment),
     // the rows that carry the state are packed, copied to the other card and unpacked (the stream, and the block
     // inputs made so far: carry_list).
+    // A card's buffers of the checkpoints inside a chunk (Rows::marks): a window visit's ring as it stands at a mark's
+    // row goes through the next of kMarkRings, and each mark's convolution states through its own, to the
+    // checkpoint's pinned buffer on the card's snapshot stream; nothing waits for that copy but the buffer's next use.
+    struct MarkBufs {
+        uint8_t* ring = nullptr;   // [kMarkRings][K | V of ring_cap cells]
+        float* conv = nullptr;     // [kMaxMarks][a visit's conv_floats]
+        int next = 0;              // the ring buffer the next part takes
+        bool ring_used[kMarkRings] = {}, conv_used[kMaxMarks] = {};
+        cudaEvent_t ev_in = nullptr, ev_ring[kMarkRings] = {}, ev_conv[kMaxMarks] = {};
+    };
     struct Sat {
         int dev = -1;
         int v0 = 0, v1 = 0;
@@ -1684,10 +1711,12 @@ struct Engine {
         int sms = 0, arch = 0, il_proj_min = 0;
         long long* nan_at = nullptr;
         uint8_t* rings = nullptr;
-        // (a checkpoint's image of its visits' rings and states, its stream and events: as the engine's own)
+        // (a checkpoint's image of its visits' rings and states, its stream and events, the buffers of the checkpoints
+        // inside a chunk: as the engine's own)
         uint8_t* snap = nullptr;
         cudaStream_t st_snap = nullptr;
         cudaEvent_t ev_snap = nullptr, ev_landed = nullptr;
+        MarkBufs mk;
         float *pack = nullptr, *pack_main = nullptr;   // the rows on their way: there, and on this card,
         float* pin = nullptr;                          // and in pinned memory between the two
     };
@@ -1991,6 +2020,35 @@ struct Engine {
     bool imaged = false;           // a staged run's image of the state its caller is told of (image_part)
     cudaStream_t st_snap = nullptr;
     cudaEvent_t ev_snap = nullptr, ev_landed = nullptr;
+    // A checkpoint inside a chunk (Rows::marks) is no image: visit() writes each visit's part of it as the chunk
+    // passes its row - a window visit's ring as it stands there, the convolutions' states after that row - and sends
+    // it to the checkpoint's buffer through `mk` (the split's card through its own), so no chunk ends there.
+    MarkBufs mk;
+    MarkBufs& mark_bufs() { return at_sat ? sat->mk : mk; }
+    cudaStream_t snap_stream() const { return at_sat ? sat->st_snap : st_snap; }
+    std::vector<const uint8_t*> marks_lost;   // the buffers of those whose copy could not be queued
+    /// The checkpoint inside a chunk into `host` lacks a part (its copy could not be queued): the caller keeps none
+    bool mark_lost(const void* host) {
+        const auto it = std::find(marks_lost.begin(), marks_lost.end(), host);
+        if (it == marks_lost.end()) return false;
+        marks_lost.erase(std::remove(marks_lost.begin(), marks_lost.end(), host), marks_lost.end());
+        return true;
+    }
+    /// How the read takes the caller's checkpoint after a part's first d tokens (feed's `marks`): `take(d, host)` is 1
+    /// inside its chunk, into `host` (a pinned buffer of state_bytes()), 0 at a chunk's end there (the read's chunk, or
+    /// decode forward, ends at it: `settles` says so), -1 not at all.
+    using MarkTake = std::function<int(int64_t d, uint8_t*& host)>;
+    struct PartMark {   // a checkpoint taken inside a chunk: after the part's first d tokens, into `host`
+        int64_t d = 0;
+        uint8_t* host = nullptr;
+    };
+    /// Those of `in` after the part's first a tokens and up to its b-th, as the rows of a chunk that starts there
+    static std::vector<Rows::Mark> marks_in(const std::vector<PartMark>& in, int64_t a, int64_t b) {
+        std::vector<Rows::Mark> out;
+        for (const PartMark& k : in)
+            if (k.d > a && k.d <= b) out.push_back({(int) (k.d - a), k.host});
+        return out;
+    }
     bool logits_held = false;   // the state came from a prompt's end: its logits are the decode rows' row 0
     size_t conv_bytes() const { return visits.size() * conv_floats * 4; }
     /// A visit's convolution inputs of a decode forward's rows (win_raw: conv_commit takes the states from them)
@@ -3456,11 +3514,12 @@ struct Engine {
                     // (with experts in RAM they give way to a longer context: the floor's cells are what must fit)
                     const int64_t want_ctx = max_ctx > 0 ? std::min<int64_t>(max_ctx, m->trained_ctx) : kContextFloor;
                     const uint64_t want = (uint64_t) (m->in_ram ? std::min(want_ctx, kContextFloor) : want_ctx);
-                    // (still to come beside the cells: the window rings and the cache's image of them; a chunk's rows
-                    // with the products' scratch and MMQ's buffers beside them, as measured: 896 MiB at 1,024 rows)
+                    // (still to come beside the cells: the window rings, the cache's image of them and the buffers of
+                    // the checkpoints inside a chunk; a chunk's rows with the products' scratch and MMQ's buffers
+                    // beside them, as measured: 896 MiB at 1,024 rows)
                     const uint64_t ring =
                         (uint64_t) (g.n_visits() - g.n_full_visits()) * 2 * cell_bytes * (uint64_t) ring_cells(g);
-                    const uint64_t rest = ring * (cache_on ? 2 : 1) + (32ull << 20);
+                    const uint64_t rest = (cache_on ? 2 * ring + mark_bytes(g, kv_q8) : ring) + (32ull << 20);
                     size_t fr = 0, fs = 0, tot = 0;
                     CK(cudaMemGetInfo(&fr, &tot));
                     if (sat) {
@@ -3555,6 +3614,7 @@ struct Engine {
             V.cells.q8 = kv_q8 ? 1 : 0;
             if (!g.full(V.layer)) {
                 uint8_t* const of = on_sat((int) v) ? sat->rings : rings;
+                V.ring_at = wi;
                 V.cells.ring = 1;
                 V.cells.cap = ring_cap;
                 V.cells.k = of + (size_t) (2 * wi) * (size_t) ring_cap * cell_bytes;
@@ -3562,7 +3622,15 @@ struct Engine {
                 ++wi;
             }
         }
-        if (cache_on) {   // (before the context is sized: the image is VRAM the cells do not get)
+        if (cache_on) {   // (before the context is sized: the image and the marks' buffers are VRAM the cells do not
+                          // get)
+            auto mark_bufs_new = [&](MarkBufs& b) {   // (the card current)
+                b.ring = dalloc<uint8_t>((size_t) kMarkRings * 2 * (size_t) ring_cap * cell_bytes);
+                b.conv = dalloc<float>((size_t) kMaxMarks * conv_floats);
+                b.ev_in = event_new();
+                for (cudaEvent_t& e : b.ev_ring) e = event_new();
+                for (cudaEvent_t& e : b.ev_conv) e = event_new();
+            };
             snap = dalloc<uint8_t>(state_bytes());
             snap_via = halloc<uint8_t>(state_bytes());
             CK(cudaStreamCreateWithFlags(&st_snap, cudaStreamNonBlocking));
@@ -3570,7 +3638,8 @@ struct Engine {
             ev_snap = event_new();
             ev_landed = event_new();
             CK(cudaEventRecord(ev_landed, st_snap));
-            if (sat) {   // (the split's card: its visits' part of the image)
+            mark_bufs_new(mk);
+            if (sat) {   // (the split's card: its visits' part of the image, its marks' buffers)
                 const OnDev dv(sat->dev);
                 const size_t per = 2 * (size_t) ring_cap * cell_bytes;
                 sat->snap = dalloc<uint8_t>((size_t) (sat->w1 - sat->w0) * per +
@@ -3580,6 +3649,7 @@ struct Engine {
                 sat->ev_snap = event_new();
                 sat->ev_landed = event_new();
                 CK(cudaEventRecord(sat->ev_landed, sat->st_snap));
+                mark_bufs_new(sat->mk);
             }
         }
 
@@ -5166,6 +5236,29 @@ struct Engine {
     void conv_keep(float* state, const float* raw, int n, int T) {
         ik::conv_state_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, st>>>(state, raw, n, T, (int) m->g.n_conv);
     }
+    // ---- the checkpoints inside a chunk: a visit's parts through the current card's MarkBufs
+    /// The next device buffer of a window visit's ring, once its last copy to the host has landed (waited for on the
+    /// stream)
+    int mark_ring(MarkBufs& b) {
+        const int s = b.next;
+        b.next = (b.next + 1) % kMarkRings;
+        if (b.ring_used[s]) CK(cudaStreamWaitEvent(st, b.ev_ring[s], 0));
+        return s;
+    }
+    /// Mark k's device buffer of a visit's convolution states, the same way
+    float* mark_conv(MarkBufs& b, size_t k) {
+        if (b.conv_used[k]) CK(cudaStreamWaitEvent(st, b.ev_conv[k], 0));
+        return b.conv + k * conv_floats;
+    }
+    /// `bytes` of a device buffer to the checkpoint buffer `host` at `at`, on the card's snapshot stream behind the
+    /// stream's work; `freed` behind that copy
+    void mark_out(MarkBufs& b, uint8_t* host, size_t at, const void* from, size_t bytes, cudaEvent_t freed) {
+        CK(cudaEventRecord(b.ev_in, st));
+        const cudaStream_t ss = snap_stream();
+        CK(cudaStreamWaitEvent(ss, b.ev_in, 0));
+        if (!soft(cudaMemcpyAsync(host + at, from, bytes, cudaMemcpyDeviceToHost, ss))) marks_lost.push_back(host);
+        CK(cudaEventRecord(freed, ss));
+    }
 
     /// No upload ahead is in flight or waits for its application (before the scratch moves, and between chunks)
     void ahead_drop() {
@@ -5596,6 +5689,14 @@ struct Engine {
         float* const vraw = wr ? wr + (size_t) kMaxT * KV : R.vraw;
         float* const oraw = wr ? wr + (size_t) kMaxT * 2 * KV : R.oraw;
         float* const fraw = wr ? oraw + (size_t) kMaxT * N : R.fraw;
+        // The checkpoints inside the chunk (Rows::marks): this visit's part of each as the chunk passes its row - a
+        // window visit's ring before the chunk's cells go into it (below), the convolutions' states at the visit's end;
+        // one within C - 1 rows of the chunk's start takes those from before the chunk, which conv_keep writes over.
+        MarkBufs& mb = mark_bufs();
+        const bool marked = batch && !R.marks.empty();
+        for (size_t k = 0; marked && k < R.marks.size(); ++k)
+            if (R.marks[k].row < C - 1)
+                CK(cudaMemcpyAsync(mark_conv(mb, k), V.conv, conv_floats * 4, cudaMemcpyDeviceToDevice, st));
 
         // a pass of the loop starts from the state before the loop; the pass before it speaks through messages
         if (L.looped && l == g.loop_start) {
@@ -5953,6 +6054,16 @@ struct Engine {
             run("a: attention's output",
                 [&] { ik::attn_out_kernel<<<dim3((unsigned) T, (unsigned) H), (unsigned) D_, 0, st>>>(a); });
         }
+        for (size_t k = 0; slide && marked && k < R.marks.size(); ++k) {   // (the ring as it stands at each mark's row)
+            const int s = mark_ring(mb);
+            const size_t side = (size_t) ring_cap * cell_bytes;
+            uint8_t* const kp = mb.ring + (size_t) s * 2 * side;
+            ik::ring_at_kernel<<<dim3((unsigned) ring_cap, 2), 256, 0, st>>>(
+                V.cells, R.wk, R.wv, kp, kp + side, (long long) p0, (long long) (p0 + R.marks[k].row), win,
+                (int) cell_bytes);
+            mark_out(mb, R.marks[k].host, (size_t) V.ring_at * 2 * side, kp, 2 * side, mb.ev_ring[s]);
+            mb.ring_used[s] = true;
+        }
         if (slide)
             ik::range_to_ring_kernel<<<dim3((unsigned) std::min<int64_t>(T, ring_cap), 2), 256, 0, st>>>(
                 V.cells, R.wk, R.wv, (long long) p0, T, win, (int) cell_bytes);
@@ -6086,6 +6197,15 @@ struct Engine {
             run("f: convolved into the stream",
                 [&] { ik::post_conv_kernel<<<gN, ik::kTB, 0, st>>>(fraw, cf, L.f_conv, R.x, N, C, 0); });
             if (batch) run("f: output's state kept", [&] { conv_keep(cf, fraw, N, T); });
+        }
+        for (size_t k = 0; marked && k < R.marks.size(); ++k) {   // (the convolutions' states at each mark's row)
+            float* const cp = mark_conv(mb, k);
+            const int per = (int) g.conv_channels();
+            ik::conv_at_kernel<<<(unsigned) ((per + 255) / 256), 256, 0, st>>>(cp, kraw, vraw, oraw, fraw, KV, N, C,
+                                                                               R.marks[k].row);
+            mark_out(mb, R.marks[k].host, ring_bytes + (size_t) v * conv_floats * 4, cp, conv_floats * 4,
+                     mb.ev_conv[k]);
+            mb.conv_used[k] = true;
         }
         tick("MoE output");
         probe("the MoE's output", fraw, (size_t) T, (size_t) N);
@@ -6762,6 +6882,7 @@ struct Engine {
     /// (its step record's pinned copy).
     void stage_b(const Rows& Rm, int T, int64_t p0, int par) {
         Rows& R = sat->P;
+        R.marks = Rm.marks;
         const size_t row = (size_t) T * (size_t) m->g.n_embd;
         float* buf[ik::kCarry];
         int nb = carry_list(R, sat->v0, buf);
@@ -6832,19 +6953,23 @@ struct Engine {
     /// (the chunk under way then is read to its end first), -2 without cells; `done`: the tokens read.  `settles(d)`:
     /// the caller takes the state after the part's first d tokens (a checkpoint) when `progress` tells it of them: its
     /// image is taken stage by stage (image_part) with the next chunk under way, and where there is no image to take it
-    /// into no chunk starts before the one that ends there is through.
+    /// into no chunk starts before the one that ends there is through.  `inside`: the checkpoints taken inside the
+    /// chunks (feed's), each chunk's in its rows.
     int stage_run(const int32_t* tok, int64_t n, int64_t at0, int64_t total,
                   const std::function<bool(int64_t)>& progress, const std::function<bool(int64_t)>* settles,
-                  int64_t& done) {
+                  const std::vector<PartMark>& inside, int64_t& done) {
         const int64_t first_pos = pos();
         const int rows = chunk_rows, n_chunks = (int) ((n + rows - 1) / rows);
         auto size = [&](int k) { return (int) std::min<int64_t>(rows, n - (int64_t) k * rows); };
         auto p0_of = [&](int k) { return first_pos + (int64_t) k * rows; };
         auto end_of = [&](int k) { return at0 + (int64_t) k * rows + size(k); };
+        auto marks_of = [&](int k) { return marks_in(inside, end_of(k) - size(k), end_of(k)); };
         CK(cudaStreamSynchronize(st));
         if (stages_apart) {
             done = 0;
             for (int k = 0; k < n_chunks; ++k) {
+                P.marks = marks_of(k);
+                sat->P.marks = P.marks;
                 if (!chunk(tok + (int64_t) k * rows, size(k), end_of(k) == total)) return -2;
                 done = end_of(k) - at0;
                 CK(cudaStreamSynchronize(st));
@@ -6858,6 +6983,7 @@ struct Engine {
         if (!stage_thread.joinable()) stage_thread = std::thread([this] { stage_worker(); });
         auto begin = [&](int k) {   // chunk k's rows, and its visits before the split
             Rows& R = stage_rows(k);
+            R.marks = marks_of(k);   // (stage_b's rows there take them from these)
             embed(R, tok + (int64_t) k * rows, size(k), p0_of(k));
             steps(R, p0_of(k), size(k));
             if (sp != nullptr) rope_rows(R.f_cs_h, p0_of(k), size(k));
@@ -7113,21 +7239,43 @@ struct Engine {
         return true;
     }
 
-    /// `n` prompt tokens; the last one's logits are row 0.  A chunk (or a decode forward) ends at each of `cuts`
-    /// (ascending, counted in this part's tokens).  0, -1 when `progress` said stop, -2 without cells.
-    /// `settles(d)`: the caller takes the state after the part's first d tokens (a checkpoint): a split's staged chunks
-    /// start none past it before it is whole.
+    /// `n` prompt tokens; the last one's logits are row 0.  `marks` (ascending, in this part's tokens): the caller's
+    /// checkpoints, each decided by `take` as the read comes to it - inside a chunk while chunks read the part there,
+    /// else a chunk or a decode forward ends at it.  0, -1 when `progress` said stop, -2 without cells.
+    /// `settles(d)`: the caller takes the state after the part's first d tokens at a chunk's end (a checkpoint): a
+    /// split's staged chunks start none past it before it is whole.
     int feed(const int32_t* tok, int64_t n, const std::function<bool(int64_t)>& progress,
-             const std::vector<int64_t>* cuts = nullptr, const std::function<bool(int64_t)>* settles = nullptr) {
-        size_t ci = 0;
-        auto end = [&](int rc) {   // (read, stopped or without cells: with experts
-                                   // in RAM a grown chunk's VRAM is theirs)
+             const std::vector<int64_t>* marks = nullptr, const MarkTake* take = nullptr,
+             const std::function<bool(int64_t)>* settles = nullptr) {
+        std::vector<int64_t> cuts;      // the marks a chunk (or a decode forward) ends at
+        std::vector<PartMark> inside;   // the ones inside chunks
+        size_t mi = 0;                  // the marks decided so far
+        auto end = [&](int rc) {        // (read, stopped or without cells: with experts
+                                        // in RAM a grown chunk's VRAM is theirs)
             chunk_back();
+            for (Rows* R : {&P, &P2, sat ? &sat->P : nullptr})
+                if (R != nullptr) R->marks.clear();
             return rc;
         };
         for (int64_t at = 0; at < n;) {
-            while (cuts != nullptr && ci < cuts->size() && (*cuts)[ci] <= at) ++ci;
-            const int64_t left = (cuts != nullptr && ci < cuts->size() ? std::min(n, (*cuts)[ci]) : n) - at;
+            // the marks before the next cut, in order: inside the chunks that read them where `take` gives a buffer
+            int64_t left = 0;
+            for (;;) {
+                const auto c = std::upper_bound(cuts.begin(), cuts.end(), at);
+                left = (c != cuts.end() ? *c : n) - at;
+                if (marks == nullptr || mi >= marks->size() || (*marks)[mi] >= at + left) break;
+                const int64_t d = (*marks)[mi++];
+                if (d <= at) continue;
+                uint8_t* host = nullptr;
+                const bool chunks = prefill > 0 && left >= chunk_min && mk.ring != nullptr;
+                const int how = chunks && take != nullptr && inside.size() < (size_t) kMaxMarks ? (*take)(d, host) : 0;
+                if (how > 0) {
+                    std::memset(host + state_bytes() - 8, 0, 8);   // (no logits in it)
+                    inside.push_back({d, host});
+                } else if (how == 0) {
+                    cuts.insert(std::upper_bound(cuts.begin(), cuts.end(), d), d);
+                }
+            }
             int T;
             bool ok;
             struct Hold {   // (the buffers stay as chunk_fit left them while the part's chunks run)
@@ -7153,7 +7301,7 @@ struct Engine {
                                  (long long) lo);
                 if (go) {   // two chunks or more: the cards at once
                     int64_t read = 0;
-                    const int rc = stage_run(tok + at, run, at, n, progress, settles, read);
+                    const int rc = stage_run(tok + at, run, at, n, progress, settles, inside, read);
                     at += read;
                     if (rc != 0) return end(rc);
                     continue;
@@ -7163,12 +7311,22 @@ struct Engine {
                 chunk_fit(left);
                 const Hold hold(chunk_held);
                 T = (int) std::min<int64_t>(chunk_rows, left);
+                P.marks = marks_in(inside, at, at + T);
+                if (sat) sat->P.marks = P.marks;
                 ahead_next = ahead_across && at + T < n;   // (more of the part follows: a chunk mostly)
                 ok = chunk(tok + at, T, at + T == n);
                 ahead_next = false;
+                P.marks.clear();
+                if (sat) sat->P.marks.clear();
             } else {
+                // (the decode forwards of a short piece end at a checkpoint taken inside the chunks before, which
+                // gets the state there as a chunk's end does)
                 T = (int) std::min<int64_t>(feed_rows, left);
+                for (const PartMark& k : inside)
+                    if (k.d > at && k.d < at + T) T = (int) std::min<int64_t>(T, k.d - at);
                 ok = forward(tok + at, T, at + T == n ? 1 : 0);
+                for (const PartMark& k : inside)
+                    if (ok && k.d == at + T && !snap_state(k.host, true, false, pos())) marks_lost.push_back(k.host);
             }
             if (!ok) return end(-2);
             at += T;
@@ -8039,10 +8197,14 @@ struct Serve {
     /// ascending, each in (reuse, n) with two cells or more to its neighbours and the ends: where this prompt leaves
     /// the one before (agents send one long start again with another tail: the next such request continues from
     /// there), a few cells before the end of a last message that grows between requests (the request before held 256
-    /// tokens or more of it), and the end of the block of the prompt's last picture.
-    std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse) {
+    /// tokens or more of it), before the last message 256 cells or more past the reuse (`optional`: a client that
+    /// sends that message again after each new turn leaves the prompt there, a sibling with another first message
+    /// after one system prompt too), and the end of the block of the prompt's last picture.  A place where this prompt
+    /// leaves the one before up to kNearStart cells into its last message (a sibling's: the role, the words the two
+    /// share) is taken at that message's start, which serves both.
+    std::vector<int64_t> checkpoint_marks(const std::vector<int32_t>& ids, int64_t reuse, int64_t& optional) {
         const int64_t n = (int64_t) ids.size();
-        int64_t fork = 0, msg_end = 0;
+        int64_t fork = 0, msg_end = 0, last_msg = 0;
         const int64_t lim = std::min<int64_t>((int64_t) prev_prompt.size(), n - 1);
         int64_t d = 0;
         while (d < lim && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
@@ -8059,9 +8221,14 @@ struct Serve {
                 int64_t start = i;                                                // the message's first token
                 while (start > 0 && !opens(start)) --start;
                 if (d - (start + 3) >= 256 && i - 4 > reuse + 256 && i - 4 != fork) msg_end = i - 4;
+                if (start > reuse + 256) last_msg = start;
                 break;
             }
         prev_prompt = ids;
+        if (last_msg > 0 && fork > last_msg && fork - last_msg <= kNearStart) {
+            fork = last_msg;
+            last_msg = 0;
+        }
         int64_t pic = 0;   // behind the prompt's last picture (its block's end): another question about it starts there
         for (int64_t i = n - 1; i > reuse; --i)
             if (ids[(size_t) i] < 0) {
@@ -8070,11 +8237,19 @@ struct Serve {
             }
         std::vector<int64_t> want{fork, msg_end, pic};
         std::sort(want.begin(), want.end());
+        auto fits = [&](int64_t p) { return p >= reuse + 2 && p <= n - 2; };
         std::vector<int64_t> marks;
         for (const int64_t p : want)
-            if (p >= reuse + 2 && p <= n - 2 && (marks.empty() || p >= marks.back() + 2)) marks.push_back(p);
+            if (fits(p) && (marks.empty() || p >= marks.back() + 2)) marks.push_back(p);
+        optional = 0;
+        if (last_msg > 0 && fits(last_msg) &&
+            std::none_of(marks.begin(), marks.end(), [&](int64_t p) { return std::abs(p - last_msg) < 2; })) {
+            marks.insert(std::upper_bound(marks.begin(), marks.end(), last_msg), last_msg);
+            optional = last_msg;
+        }
         return marks;
     }
+    static constexpr int64_t kNearStart = 16;
 
     void request(const std::string& line, bool geni) {
         const Geometry& g = E.m->g;
@@ -8199,18 +8374,23 @@ struct Serve {
         if (reuse > 0) serve_print("RESUME %zu\n", reuse);
         const auto t0 = Clock::now();
         const int64_t fresh = (int64_t) (ids.size() - reuse);
-        // The cache's checkpoints are taken as the read passes them: at its marks (a chunk ends there), and in a long
-        // prompt at a chunk's end once --prompt-cache-every cells came since the last; the prompt's end is one with the
-        // logits its read left.  Each is an image on the device, sent to the cache's buffer behind the run.
-        std::vector<int64_t> marks, cuts;
-        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse);
+        // The cache's checkpoints are taken as the read passes them: at its marks, and in a long prompt at a chunk's
+        // end once --prompt-cache-every cells came since the last; the prompt's end is one with the logits its read
+        // left. A mark is taken inside its chunk into a pinned buffer of its own (Engine::MarkTake: the visits write
+        // their parts as the chunk passes it), else a chunk ends there and it is an image on the device as a chunk's
+        // end is (sent to the cache's buffer behind the run) - but the one before the last message, which is left out
+        // then: a chunk that ends there costs an appending client's ~2K-token turn ~80 ms.  The ones inside chunks go
+        // into the cache in order as the read passes them.
+        int64_t optional = 0;
+        std::vector<int64_t> marks, part_marks;
+        if (cache) marks = checkpoint_marks(ids, (int64_t) reuse, optional);
         if (E.stage_log) {
             std::string at;
-            for (const int64_t mk : marks) at += " " + std::to_string(mk);
+            for (const int64_t mk : marks) at += " " + std::to_string(mk) + (mk == optional ? "?" : "");
             std::fprintf(stderr, "lamina: marks: %zu of a prompt of %zu tokens, %zu held:%s\n", marks.size(),
                          ids.size(), reuse, at.empty() ? " none" : at.c_str());
         }
-        for (const int64_t at : marks) cuts.push_back(at - (int64_t) reuse);
+        for (const int64_t at : marks) part_marks.push_back(at - (int64_t) reuse);
         const int64_t rows = E.prefill > 0 ? E.prefill : kMaxT;
         const int64_t every = std::max<int64_t>(1, copt.every / rows) * rows;
         int64_t noted = (int64_t) reuse, saved = (int64_t) reuse;   // the cache has the tokens up to `noted`
@@ -8219,11 +8399,38 @@ struct Serve {
             cache->set(noted, ids.data() + noted, upto - noted);
             noted = upto;
         };
+        struct Inside {   // a checkpoint inside a chunk: its place, its buffer
+            int64_t pos;
+            void* host;
+        };
+        std::vector<Inside> inside;   // those the cache does not hold yet
+        std::vector<int64_t> off;     // the marks no chunk ends at: inside one, or left out
+        const Engine::MarkTake take = [&](int64_t d, uint8_t*& host) {
+            const int64_t here = (int64_t) reuse + d;
+            void* const h = cache->prepare_more();
+            if (h == nullptr && here != optional) return 0;
+            off.push_back(here);
+            if (h == nullptr) return -1;
+            inside.push_back({here, h});
+            host = static_cast<uint8_t*>(h);
+            return 1;
+        };
+        auto take_inside = [&](int64_t upto) {   // the ones the read has passed, into the cache
+            while (!inside.empty() && inside.front().pos <= upto) {
+                const Inside k = inside.front();
+                inside.erase(inside.begin());
+                if (E.mark_lost(k.host)) continue;   // (its buffer goes back with prepare()'s)
+                note(k.pos);
+                saved = k.pos;
+                cache->checkpoint(k.pos, k.host);
+            }
+        };
         auto checkpoint = [&](int64_t here, bool end) {   // of the state the queued work leaves
             note(here);
             saved = here;
             bool pageable = false;
-            void* const h = cache->prepare(&pageable, end);
+            // (a pinned one beside those of the checkpoints inside chunks still to come: prepare() would take theirs)
+            void* const h = inside.empty() ? cache->prepare(&pageable, end) : cache->prepare_more();
             if (h == nullptr) {
                 if (!end) cache->checkpoint(here);   // (copied now; an end without a buffer keeps no logits: none)
             } else if (E.snap_state(static_cast<uint8_t*>(h), !pageable, end, here)) {
@@ -8232,12 +8439,14 @@ struct Serve {
         };
         int64_t done = 0;
         auto last_pp = Clock::now();
-        // (a checkpoint follows the part's first d tokens: at a mark, or `every` tokens past the last one)
+        // (a checkpoint follows the part's first d tokens at a chunk's end: at a mark no chunk takes, or `every` tokens
+        // past the last one where no mark comes within a chunk)
         const std::function<bool(int64_t)> settles = [&](int64_t d) {
             if (!cache || d >= (int64_t) fresh) return false;
             const int64_t here = (int64_t) reuse + d;
             const auto next = std::lower_bound(marks.begin(), marks.end(), here);
-            const bool mark = next != marks.end() && *next == here;
+            const bool mark =
+                next != marks.end() && *next == here && std::find(off.begin(), off.end(), here) == off.end();
             return mark ||
                    (here - saved >= every && (next != marks.end() ? *next : (int64_t) ids.size()) - here >= rows);
         };
@@ -8245,6 +8454,7 @@ struct Serve {
             ids.data() + reuse, fresh,
             [&](int64_t d) {
                 done = d;
+                if (cache) take_inside((int64_t) reuse + done);
                 if (settles(done)) checkpoint((int64_t) reuse + done, false);
                 if (done == fresh || ms_since(last_pp) > 250) {
                     serve_print("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) fresh, ms_since(t0),
@@ -8253,7 +8463,7 @@ struct Serve {
                 }
                 return !stop.load();
             },
-            &cuts, &settles);
+            &part_marks, cache ? &take : nullptr, &settles);
         E.prof_print("the prompt");
         note((int64_t) reuse + done);
         live.insert(live.end(), ids.begin() + (long) reuse, ids.begin() + (long) reuse + (long) done);
