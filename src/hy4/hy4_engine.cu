@@ -251,6 +251,8 @@ struct Model {
     int32_t video_pad = -1;   // <｜hy_video▁pad｜>: a video frame's cells, as a picture's
     int32_t image_pad = -1;   // <｜hy_image▁pad｜>: a picture's cells in a
                               // prompt (the template writes one, the server n)
+    // a message: <｜hy_start｜>, its role, <｜hy_middle｜>, its text, <｜hy_end｜> (-1: not in the vocabulary)
+    int32_t turn_start = -1, turn_middle = -1, turn_end = -1;
 };
 
 /// Rows of floats as a Q8_0 matrix on the device (ggml's quantizer; kWeightPad zero bytes after it)
@@ -433,6 +435,9 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         m.eos = (int32_t) v->u;
     m.image_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_image\xE2\x96\x81pad");
     m.video_pad = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_video\xE2\x96\x81pad");
+    m.turn_start = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_start");
+    m.turn_middle = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_middle");
+    m.turn_end = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_end");
     const auto& g = m.g;
     Loader L{gm, {}, {}, {}};
     {   // the dense tensors: all but the routed experts, the Engram table and the MTP block when it is not loaded
@@ -1777,10 +1782,20 @@ struct Engine {
     std::function<bool(bool)> pass_fn;
     /// n tokens into the state; `on(done)` after each piece (false: stop there).  Returns the logits row of the last
     /// token (host_logits), -1 when stopped first.
-    std::vector<int64_t> chunk_snaps;   // the snapshots inside the next chunk: the multiples of kSnapEvery, media_snap
-    // the next read's snapshot behind its prompt's last picture or video (-1: none), where the prompt path's pieces
-    // pass it: inside a piece or at a piece's end
-    int64_t media_snap = -1;
+    /// Why a snapshot is kept (keep_snap): a prompt's end (the last kSnaps), a multiple of kSnapEvery a read passed
+    /// (all), behind a prompt's last picture or video (the last kMediaSnaps), where a later prompt may part from this
+    /// one (the last kPartSnaps)
+    enum class Kept : uint8_t { end, every, media, part };
+    std::vector<int64_t> chunk_snaps;   // the snapshots inside the next chunk: the multiples of kSnapEvery, `wanted`'s
+    // the next read's snapshots besides the multiples of kSnapEvery (request()), ascending, where the prompt path's
+    // pieces pass them: inside a piece or at a piece's end
+    std::vector<std::pair<int64_t, Kept>> wanted;
+    /// a snapshot's kind at p: a wanted one's, else a multiple's
+    Kept kept_at(int64_t p) const {
+        for (const auto& [at, k] : wanted)
+            if (at == p) return k;
+        return Kept::every;
+    }
     int feed(const int32_t* toks, int64_t n, const std::function<bool(int64_t)>& on) {
         int64_t done = 0;
         int last = 0;
@@ -1815,16 +1830,17 @@ struct Engine {
                     chunk_snaps.clear();
                     for (int64_t mk = (p0 / kSnapEvery + 1) * kSnapEvery; mk < p0 + T; mk += kSnapEvery)
                         chunk_snaps.push_back(mk);
-                    if (media_snap > p0 && media_snap < p0 + T && media_snap % kSnapEvery != 0)
-                        chunk_snaps.insert(std::upper_bound(chunk_snaps.begin(), chunk_snaps.end(), media_snap),
-                                           media_snap);
+                    for (const auto& w : wanted)
+                        if (w.first > p0 && w.first < p0 + T && w.first % kSnapEvery != 0)
+                            chunk_snaps.push_back(w.first);
+                    std::sort(chunk_snaps.begin(), chunk_snaps.end());
                     chunk_fn(toks + done + sd, T);
                     chunk_snaps.clear();
-                    // the piece ends at a multiple, or behind the picture
-                    if ((pos() % kSnapEvery == 0 || pos() == media_snap) && done + sd + T < n) {
+                    // the piece ends at a multiple, or where a wanted one is
+                    if ((pos() % kSnapEvery == 0 || kept_at(pos()) != Kept::every) && done + sd + T < n) {
                         std::vector<float> lg;
                         host_logits(0, lg);
-                        snapshot(lg, true, pos() % kSnapEvery != 0);
+                        snapshot(lg, kept_at(pos()));
                     }
                 } else {
                     const int64_t p0 = pos();
@@ -1839,18 +1855,17 @@ struct Engine {
             if (!chunks && pos() % kSnapEvery == 0 && done < n) {
                 std::vector<float> lg;
                 host_logits(last, lg);
-                snapshot(lg, true);
+                snapshot(lg, Kept::every);
             }
         }
         return last;
     }
     /// A snapshot taken inside a chunk at `p` (Prompt::run): its bytes as snapshot() lays them out, no logits
-    void add_snapshot(int64_t p, std::vector<uint8_t>&& bytes, bool media) {
+    void add_snapshot(int64_t p, std::vector<uint8_t>&& bytes, Kept kept) {
         if (snap_at(p) != nullptr) return;
         Snap sn;
         sn.pos = p;
-        sn.mark = true;
-        sn.media = media;
+        sn.kept = kept;
         sn.bytes = std::move(bytes);
         keep_snap(std::move(sn));
     }
@@ -1859,25 +1874,28 @@ struct Engine {
     // already right.  The window layers' rings and the indexer's tail hold the last cells only: going back up to
     // kMaxT tokens leaves them whole (the ring has kMaxT cells to spare, the tail 16); further back takes a snapshot of
     // both taken at or before the point (snapshot(): at each prompt's end), else the state starts over.  A read keeps
-    // one at each multiple of kSnapEvery it passes and one behind its prompt's last picture or video (another question
-    // about it in a new conversation continues there): at the last multiple of the indexer's pool before the end of
-    // its cells, where a snapshot inside a chunk needs no tail (it keeps the tails as the chunk leaves them).
+    // one at each multiple of kSnapEvery it passes, and at the places a later prompt may part from this one: behind
+    // its last picture or video (another question about it in a new conversation continues there), where it leaves
+    // the request before (agents send one long start again with another tail) and a few cells before the end of a
+    // last message that grows between requests.  Each at the last multiple of the indexer's pool at or before its
+    // place, where a snapshot inside a chunk needs no tail (it keeps the tails as the chunk leaves them).
     struct Snap {
         int64_t pos = 0;
         std::vector<uint8_t> bytes;   // every window layer's ring, then every indexer layer's tail
         std::vector<float> logits;    // the last row's (the next token's distribution there)
-        bool mark = false;            // taken during a read (kept), else at a prompt's end
-        bool media = false;           // (a mark) behind a picture or video: the last kMediaSnaps kept
+        Kept kept = Kept::end;
     };
     std::vector<Snap> snaps;
     static constexpr size_t kSnaps = 8;           // prompt ends kept
     static constexpr size_t kMediaSnaps = 4;      // snapshots behind pictures kept
+    static constexpr size_t kPartSnaps = 4;       // snapshots where prompts part kept
     static constexpr int64_t kSnapEvery = 8192;   // a read keeps a snapshot at each multiple of this it passes
-    /// s into snaps, the oldest of its kind out where it has its count already (prompt ends, pictures')
+    /// s into snaps, the oldest of its kind out where it has its count already (all but the multiples')
     void keep_snap(Snap&& s) {
-        if (!s.mark || s.media) {
-            const auto kind = [&](const Snap& x) { return x.mark == s.mark && x.media == s.media; };
-            if ((size_t) std::count_if(snaps.begin(), snaps.end(), kind) >= (s.media ? kMediaSnaps : kSnaps))
+        if (s.kept != Kept::every) {
+            const size_t cap = s.kept == Kept::end ? kSnaps : s.kept == Kept::media ? kMediaSnaps : kPartSnaps;
+            const auto kind = [&](const Snap& x) { return x.kept == s.kept; };
+            if ((size_t) std::count_if(snaps.begin(), snaps.end(), kind) >= cap)
                 snaps.erase(std::find_if(snaps.begin(), snaps.end(), kind));
         }
         snaps.push_back(std::move(s));
@@ -1891,12 +1909,11 @@ struct Engine {
         if (hring) n += (size_t) kHRing * (size_t) m->g.n_embd * 4;   // the MTP block's states
         return n;
     }
-    void snapshot(const std::vector<float>& logits_now, bool mark = false, bool media = false) {
+    void snapshot(const std::vector<float>& logits_now, Kept kept = Kept::end) {
         if (snap_at(pos()) != nullptr) return;
         Snap s;
         s.pos = pos();
-        s.mark = mark;
-        s.media = media;
+        s.kept = kept;
         s.logits = logits_now;
         s.bytes.resize(snap_bytes());
         size_t at = 0;
@@ -1985,7 +2002,7 @@ struct Engine {
     using File = std::unique_ptr<lamina::core::DiskFile, FileGone>;
     struct SnapRec {   // a snapshot in a file: its record is its bytes, then its logits
         int64_t pos;
-        bool mark, media;
+        Kept kept;
         size_t n_logits;
     };
     struct Parked {
@@ -2157,7 +2174,7 @@ struct Engine {
         for (const Snap& x : c.snaps) {
             ok = ok && disk->put_record(*f, x.pos,
                                         {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
-            recs.push_back({x.pos, x.mark, x.media, x.logits.size()});
+            recs.push_back({x.pos, x.kept, x.logits.size()});
         }
         if (!ok) return false;
         c.cells = std::vector<uint8_t>();   // (its RAM freed: `= {}` keeps a vector's capacity)
@@ -2192,7 +2209,7 @@ struct Engine {
             if (ok && c.file->slot(x.pos) == nullptr)
                 ok = disk->put_record(*c.file, x.pos,
                                       {{x.bytes.data(), x.bytes.size()}, {x.logits.data(), x.logits.size() * 4}});
-            c.recs.push_back({x.pos, x.mark, x.media, x.logits.size()});
+            c.recs.push_back({x.pos, x.kept, x.logits.size()});
         }
         if (!ok) {
             std::fprintf(stderr,
@@ -2223,7 +2240,7 @@ struct Engine {
             live_file.reset();
             return;
         }
-        snapshot({}, false);
+        snapshot({}, Kept::end);
         if (disk && live_file) {   // back from the disk tier: its file holds most of it, the rest goes there
             park_to_disk(keep);
             return;
@@ -2309,8 +2326,7 @@ struct Engine {
             for (const SnapRec& r : c.recs) {
                 Snap s;
                 s.pos = r.pos;
-                s.mark = r.mark;
-                s.media = r.media;
+                s.kept = r.kept;
                 s.bytes.resize(snap_bytes());
                 s.logits.resize(r.n_logits);
                 ok = ok && disk->get_record(*c.file, r.pos,
@@ -2367,8 +2383,7 @@ struct Engine {
                 if (!ok || x.pos > r) continue;
                 Snap s;
                 s.pos = x.pos;
-                s.mark = x.mark;
-                s.media = x.media;
+                s.kept = x.kept;
                 s.bytes.resize(snap_bytes());
                 s.logits.resize(x.n_logits);
                 ok = disk->get_record(*c.file, x.pos,
@@ -4641,22 +4656,26 @@ struct Prompt {
         MMQ::quantize(x, map, out, type, cols, ld ? ld : cols, rows, st);
     }
 
-    /// A chunk that holds the snapshot behind a picture beside its multiples of kSnapEvery: one buffer more, of the
-    /// VRAM the slots leave (the GPU's plan stays as it is); without it that snapshot is not taken
-    void more_snap_dev() {
-        void* b = nullptr;
-        if (cudaMalloc(&b, snap_size) == cudaSuccess) {
-            own(&Owned::dev, b);
-            snap_devs.push_back(static_cast<uint8_t*>(b));
-            return;
-        }
-        (void) cudaGetLastError();
+    /// A chunk that holds wanted snapshots beside its multiples of kSnapEvery: their buffers more, of the VRAM the
+    /// slots leave (the GPU's plan stays as it is; a buffer kept for the chunks after); one with no buffer is not taken
+    void more_snap_devs() {
         auto& v = E.chunk_snaps;
-        v.erase(std::remove(v.begin(), v.end(), E.media_snap), v.end());
-        if (!snap_dev_failed)
-            std::fprintf(stderr, "lamina: no VRAM for a snapshot behind a picture (%.1f MiB): not taken there\n",
-                         (double) snap_size / (double) (1 << 20));
-        snap_dev_failed = true;
+        while (v.size() > snap_devs.size()) {
+            void* b = nullptr;
+            if (cudaMalloc(&b, snap_size) == cudaSuccess) {
+                own(&Owned::dev, b);
+                snap_devs.push_back(static_cast<uint8_t*>(b));
+                continue;
+            }
+            (void) cudaGetLastError();
+            const auto w = std::find_if(v.rbegin(), v.rend(), [](int64_t p) { return p % Engine::kSnapEvery != 0; });
+            if (w == v.rend()) break;   // (init() made the multiples' buffers)
+            v.erase(std::next(w).base());
+            if (!snap_dev_failed)
+                std::fprintf(stderr, "lamina: no VRAM for a snapshot inside a chunk (%.1f MiB): not taken there\n",
+                             (double) snap_size / (double) (1 << 20));
+            snap_dev_failed = true;
+        }
     }
 
     /// T rows (tokens toks at positions pos() ..) through the
@@ -4668,7 +4687,7 @@ struct Prompt {
             throw Fatal{1};
         }
         const int N = (int) g.n_embd, hc = (int) g.hc;
-        if (E.chunk_snaps.size() > snap_devs.size()) more_snap_dev();
+        if (E.chunk_snaps.size() > snap_devs.size()) more_snap_devs();
         E.ensure(E.pos() + T);
         const int64_t p0 = E.pos();
         for (int t = 0; t < T; ++t) E.seq.push_back(toks[t]);
@@ -4832,7 +4851,7 @@ struct Prompt {
             std::vector<uint8_t> bytes(snap_size);
             CK(cudaMemcpyAsync(bytes.data(), sd, snap_size, cudaMemcpyDeviceToHost, st));
             CK(cudaStreamSynchronize(st));
-            E.add_snapshot(S, std::move(bytes), S == E.media_snap);
+            E.add_snapshot(S, std::move(bytes), E.kept_at(S));
         }
         ++E.forwards;
         if (trace) {
@@ -5393,7 +5412,8 @@ struct Serve {
     std::atomic<bool> stop{false};
 
     Serve(Engine& e, int32_t eos_id, int drafts_) : E(e), eos(eos_id), drafts(drafts_) {}
-    int drafts = 0;   // the drafts a window (E.drafts_on)
+    int drafts = 0;                     // the drafts a window (E.drafts_on)
+    std::vector<int32_t> prev_prompt;   // the request before's prompt: where the next one leaves it
 
     // The server's image encoder, which runs in this process, holds no VRAM of its own between pictures where the
     // server has it borrow (its "vision" section's "lend"): for a new picture it asks for memory of the main GPU,
@@ -5593,13 +5613,46 @@ struct Serve {
         const int64_t fresh = (int64_t) (ids.size() - reuse);
         int64_t done = 0;
         auto last_pp = Clock::now();
-        E.media_snap = -1;   // the snapshot behind the prompt's last picture or video, where this read passes it
-        for (int64_t i = geni ? (int64_t) ids.size() : 0; i-- > 0;)
-            if (ir.cell_row[(size_t) i] >= 0) {
-                const int64_t at = (i + 1) / g.idx_pool * g.idx_pool;
-                if (at > (int64_t) reuse && E.snap_at(at) == nullptr) E.media_snap = at;
-                break;
-            }
+        // the read's snapshots besides the multiples of kSnapEvery, each at the last multiple of the indexer's pool at
+        // or before its place (and `past` cells or more past the start it resumes from): behind the prompt's last
+        // picture or video; where it leaves the request before (its pictures compared: their cells' ids are their
+        // keys') and a few cells before the end of a last message the request before held 256 tokens or more of, a
+        // message that grows between requests
+        {
+            const int64_t n = (int64_t) ids.size();
+            E.wanted.clear();
+            auto want = [&](int64_t place, Engine::Kept why, int64_t past) {
+                const int64_t at = place / g.idx_pool * g.idx_pool;
+                if (at > (int64_t) reuse + past && at < n && at % Engine::kSnapEvery != 0 && E.snap_at(at) == nullptr &&
+                    std::none_of(E.wanted.begin(), E.wanted.end(), [&](const auto& w) { return w.first == at; }))
+                    E.wanted.emplace_back(at, why);
+            };
+            for (int64_t i = geni ? n : 0; i-- > 0;)
+                if (ir.cell_row[(size_t) i] >= 0) {
+                    want(i + 1, Engine::Kept::media, 0);
+                    break;
+                }
+            int64_t d = 0;
+            while (d < (int64_t) prev_prompt.size() && d < n - 1 && prev_prompt[(size_t) d] == ids[(size_t) d]) ++d;
+            want(d, Engine::Kept::part, 256);
+            const Model& md = *E.m;
+            const bool tags = md.turn_start >= 0 && md.turn_middle >= 0 && md.turn_end >= 0;
+            int64_t q = n;   // the last message's turn (the answer's: the generation prompt)
+            for (int64_t i = n - 1; tags && i > (int64_t) reuse; --i)
+                if (ids[(size_t) i] == md.turn_start) {
+                    q = i;
+                    break;
+                }
+            for (int64_t i = q - 1; tags && i > (int64_t) reuse; --i)
+                if (ids[(size_t) i] == md.turn_end) {   // the message before it ends here
+                    int64_t body = i;                   // its text's first cell
+                    while (body > 0 && ids[(size_t) body - 1] != md.turn_middle) --body;
+                    if (d - body >= 256) want(i - 4, Engine::Kept::part, 256);
+                    break;
+                }
+            std::sort(E.wanted.begin(), E.wanted.end());
+            prev_prompt = ids;
+        }
         E.img = geni ? &ir : nullptr;
         E.dump_route(2, 0, 0, nullptr);
         const int last = E.feed(ids.data() + reuse, fresh, [&](int64_t d) {
@@ -5612,7 +5665,7 @@ struct Serve {
             return !stop.load();
         });
         E.img = nullptr;
-        E.media_snap = -1;
+        E.wanted.clear();
         E.trace_print("the prompt");
         const bool cancelled = last < 0;
         const double prompt_ms = ms_since(t0);
