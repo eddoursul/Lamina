@@ -58,6 +58,7 @@
 #include "lamina/prefill/split.hpp"
 #include "lamina/program/engine.hpp"
 #include "lamina/program/gpu_cards.hpp"
+#include "lamina/program/host_sampling.hpp"
 #include "lamina/program/options.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/spec/suffix_drafter.hpp"
@@ -4972,8 +4973,7 @@ int lamina::program::run(int argc, char** argv) {
             req_sp.temperature = req_temperature;
             req_sp.top_p = req_top_p;
             req_sp.top_k = req_top_k;
-            req_sp.seed =
-                req_seed ? req_seed : (unsigned long long) std::chrono::steady_clock::now().time_since_epoch().count();
+            req_sp.seed = lamina::program::draw_seed(req_seed);
             req_sp.min_p = std::clamp(req_min_p, 0.0f, 1.0f);
             req_sp.penalty_last_n = std::max(req_penalty_last_n, 0);
             req_sp.penalty_repeat = req_penalty_repeat;
@@ -5844,8 +5844,7 @@ int lamina::program::run(int argc, char** argv) {
             sp.top_p = (float) o.top_p;
             sp.top_k = o.top_k;
             sp.min_p = std::clamp((float) o.min_p, 0.0f, 1.0f);
-            sp.seed =
-                o.seed ? o.seed : (unsigned long long) std::chrono::steady_clock::now().time_since_epoch().count();
+            sp.seed = lamina::program::draw_seed(o.seed);
             ver.set_sampling(sp);
             mtp.set_sampling(sp);
         }

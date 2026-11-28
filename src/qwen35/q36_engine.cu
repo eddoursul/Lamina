@@ -5937,7 +5937,7 @@ struct Serve {
             cache_idle();
             return;
         }
-        std::mt19937_64 rng(smp.seed);
+        std::mt19937_64 rng(lamina::program::draw_seed(smp.seed));
         std::vector<int32_t> hist = ids;
         const auto d0 = Clock::now();
         long long produced = 0, offered = 0, accepted = 0;

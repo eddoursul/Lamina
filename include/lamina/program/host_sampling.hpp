@@ -1,9 +1,11 @@
 // include/lamina/program/host_sampling.hpp - the sampler of the engine paths that sample on the host (Qwen3.6's and
-// Hy4-flash's): a request's keys (GEN ... temperature= top_p= ...), one row of logits -> a token, and the id lists of
-// their command lines and requests.  Flash-Next's path samples on the GPU (lamina/kernels/sampler.hpp).
+// Hy4-flash's): a request's keys (GEN ... temperature= top_p= ...), the seed its draws start from, one row of logits ->
+// a token, and the id lists of their command lines and requests.  Flash-Next's path samples on the GPU
+// (lamina/kernels/sampler.hpp).
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -15,10 +17,16 @@
 
 namespace lamina::program {
 
+/// The seed a request's draws start from: its own, or the clock's when it gave none (0), so an unseeded sampled
+/// request sent again draws another text.  Every path's rule, the device sampler's too.
+inline unsigned long long draw_seed(unsigned long long seed) {
+    return seed != 0 ? seed : (unsigned long long) std::chrono::steady_clock::now().time_since_epoch().count();
+}
+
 struct Sampling {
     float temperature = 0.f, top_p = 1.f, min_p = 0.f, repeat = 1.f, freq = 0.f, present = 0.f;
     int top_k = 20, last_n = 0;
-    unsigned long long seed = 0;
+    unsigned long long seed = 0;   // 0: none given (draw_seed: the clock's)
     bool needs_logits() const { return temperature > 0.f || repeat != 1.f || freq != 0.f || present != 0.f; }
     /// a request's key=value: true when it is one of the sampler's
     bool set(const std::string& key, const char* v) {

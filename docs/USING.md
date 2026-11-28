@@ -113,7 +113,8 @@ penalties (`presence_penalty`, `frequency_penalty`, `repetition_penalty` with `p
 `repeat_penalty` and `repeat_last_n` too) are honored. What a request leaves out comes from the config's `sampling`
 block, else from the model card's settings for the request's thinking state (both:
 [PARAMETERS.md](PARAMETERS.md#request-defaults)). `"temperature": 0` decodes greedy; `top_k` keeps at most 64
-candidates.
+candidates. A request without a `seed` (or with one of 0 or less) takes its draws' seed from the clock, so the same
+request sent again draws another text.
 
 Every token, drafted or not, is the model's own pick: with sampling, a draft is kept only when it equals the token the
 model sampled for its position, so the drafts change the speed, never the distribution. The expert caches adapt to the

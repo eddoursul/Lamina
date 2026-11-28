@@ -7372,7 +7372,7 @@ struct Engine {
         const bool pen = q.repeat != 1.f || q.freq != 0.f || q.present != 0.f;
         hist_n = !pen || q.last_n == 0 ? 0 : q.last_n < 0 ? kHistCap : std::min(q.last_n, kHistCap);
         smp.penalty_last_n = hist_n;
-        smp.seed = q.seed ? q.seed : (unsigned long long) Clock::now().time_since_epoch().count();
+        smp.seed = lamina::program::draw_seed(q.seed);
         if (hist_n > 0 && hist_d == nullptr) {
             hist_d = dzero<int32_t>((size_t) kMaxT * kHistCap);
             hist_stage.assign((size_t) kMaxT * kHistCap, -1);

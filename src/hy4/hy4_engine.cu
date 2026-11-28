@@ -5695,7 +5695,7 @@ struct Serve {
                                                                                                      // the prompt's
                                                                                                      // routing, beside
                                                                                                      // the answer
-        std::mt19937_64 rng(smp.seed);
+        std::mt19937_64 rng(lamina::program::draw_seed(smp.seed));
         std::vector<int32_t> hist;   // the penalties' history: the prompt's text (as llama.cpp's sampler, no picture)
         for (const int32_t t : ids)
             if (t >= 0) hist.push_back(t);
