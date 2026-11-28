@@ -2237,6 +2237,12 @@ struct Engine {
                      (double) disk->bytes(*c.file) / (double) (1 << 20), (long long) from);
         park.push_back(std::move(c));
     }
+    /// Non-finite logits: the live state, its snapshots and every parked conversation (their files off the disk tier)
+    /// forgotten, so nothing continues from them - the next request reads its prompt from the start
+    void forget() {
+        rewind(0, true);   // (no snapshot at 0: the sequence and its snapshots go, and the live state's file)
+        park.clear();
+    }
     /// The live conversation into the park, with a snapshot at its end (the logits of its last token unknown: empty);
     /// the live state keeps copies of its snapshots up to `keep` (the start the next request shares with it)
     void park_live(int64_t keep) {
@@ -5755,8 +5761,15 @@ struct Serve {
             if (produced / 128 != before / 128) E.plan_moves(E.move_budget, true);
             E.maybe_lend(produced);
         }
-        if (E.drafts_on && E.m->has_mtp && !rows.empty() && E.pos() >= (int64_t) rows.size())   // the block caught up
+        if (std::strcmp(finish, "nonfinite") == 0) {   // the state holds the non-finite rows: not continued
+            E.forget();
+            std::fprintf(stderr,
+                         "lamina serve: non-finite logits: the request ends, and the next one reads its prompt from "
+                         "the start\n");
+        } else if (E.drafts_on && E.m->has_mtp && !rows.empty() && E.pos() >= (int64_t) rows.size()) {
+            // the block caught up
             E.mtp_catch_up(rows.data(), (int64_t) rows.size(), E.pos() - (int64_t) rows.size());
+        }
         const double decode_ms = ms_since(d0);
         E.trace_print("generation");
         const long long hits = E.hits - hits0, lookups = E.lookups - lookups0;
