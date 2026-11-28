@@ -416,7 +416,7 @@ std::vector<std::vector<int32_t>> profile_order(const std::vector<std::string>& 
 }
 
 bool load(const std::string& path, Model& m, int threads, double pin_gib, bool want_mtp, bool file_cache,
-          const std::vector<std::string>& profiles, std::string& err) {
+          const std::vector<std::string>& profiles, bool serving, std::string& err) {
     const auto t0 = Clock::now();
     const lamina::GgufModel gm = lamina::GgufModel::open(path);
     {   // what the file must hold for this path, before anything is read (lamina check says the same of it)
@@ -627,6 +627,21 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         src.push_back(s);
     }
     m.arena_gib = (double) total / (double) (1ull << 30);
+    {   // the RAM: every routed expert in host memory, weighed before any is taken
+        const lamina::platform::RamFit ram = lamina::platform::ram_fit(total);
+        const std::string what = "the routed experts (in RAM, every one)";
+        if (ram.total > 0)
+            std::fprintf(stderr, "lamina: RAM: %s take %.1f GiB, %.1f of this PC's %.1f GiB available\n", what.c_str(),
+                         (double) total / 1073741824.0, (double) ram.available / 1073741824.0,
+                         (double) ram.total / 1073741824.0);
+        if (ram.too_much()) {
+            err = ram.say(what, "a smaller quant of the model takes less");
+            return false;
+        }
+        if (ram.tight())
+            lamina::program::serve_warn(serving,
+                                        ram.say(what, "close other programs, or use a smaller quant of the model"));
+    }
     // each layer's blocks, in order, on a thread of its own.  Pinned while the limit allows: the GPUs copy from it at
     // their links' full rate, the host not waiting.  With a start profile each layer keeps its `hot` most used experts
     // (the GPUs' at the start, rarely streamed to a GPU) in a pageable block, as many in every layer as the pin budget
@@ -5978,7 +5993,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     }
     if (check_only) return 0;
     Model m;
-    if (!load(model, m, 8, arena_pin, use_mtp && dfly_path.empty(), file_cache, {profile_save, profile}, err) ||
+    if (!load(model, m, 8, arena_pin, use_mtp && dfly_path.empty(), file_cache, {profile_save, profile}, serve, err) ||
         (!dfly_path.empty() && !load_dfly(dfly_path, m, err))) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
