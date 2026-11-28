@@ -6083,14 +6083,7 @@ static int run_engine(int argc, char** argv, bool check_only) {
         } else if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // not a skip: it steers
             std::fprintf(stderr, "lamina: %s: control vectors run on Qwen3.8-Flash-Next's engine only\n", a.c_str());
             return 2;
-        } else if (serve_mode && !check_only && a.rfind("--", 0) == 0) {
-            // serve passes the config's args plus a few of its own: one this engine does not have is said and skipped
-            // (with its value), not fatal
-            const bool val = i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0;
-            std::fprintf(stderr, "lamina: ignoring %s%s%s (not an option of this engine)\n", a.c_str(), val ? " " : "",
-                         val ? argv[i + 1] : "");
-            if (val) ++i;
-        } else {
+        } else {   // under --serve too: a flag this path does not have is refused, not skipped
             std::fprintf(stderr, "lamina: unknown argument for Qwen3.6-35B-A3B and Qwen3.8-27B: %s\n", a.c_str());
             std::fprintf(stderr,
                          "usage: lamina-q36 --model GGUF [--max-context 32768] [--chunk 512] [--no-graph]\n"
