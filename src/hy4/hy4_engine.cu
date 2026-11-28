@@ -30,6 +30,7 @@
 #include "lamina/hy4/geometry.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/cpu/miss_jobs.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
 #include "lamina/kernels/cpu/q8_0_rows.hpp"
@@ -948,7 +949,7 @@ struct Engine {
     uint8_t* h_raw = nullptr;
     uint32_t* h_rows = nullptr;
     uint8_t* acts = nullptr;
-    std::vector<C::ExpertJobMulti> jobs;
+    C::MissJobs miss;   // the CPU pool's jobs a layer
     cudaEvent_t ev = nullptr;
     // the GPU's share of the routed experts: the entries grouped by slot, their input as q8_1, the kernels' scratch
     unsigned long long* grp_ptr = nullptr;
@@ -2689,33 +2690,17 @@ struct Engine {
                 tier_launch((int) gi, l, T);
             }
         const auto t2 = Clock::now();
-        jobs.clear();
-        std::map<int, size_t> open;
-        std::vector<char> quantized((size_t) T, 0);
+        miss.begin(T, (int) g.n_expert, l.fmt, h_rin, Ld, acts);
         for (int e = 0; e < T * Kk; ++e) {
             const int ex = h_ids[e], t = e / Kk;
             bool held = false;
             for (const SlotSet& s : l.held) held = held || (s.n > 0 && s.slot_of[(size_t) ex] >= 0);
             if (held) continue;
-            if (!quantized[(size_t) t]) {
-                C::native_quant_act(l.fmt, h_rin + (size_t) t * Ld, acts + (size_t) t * C::kNativeActBytes);
-                quantized[(size_t) t] = 1;
-            }
-            auto it = open.find(ex);
-            if (it == open.end() || jobs[it->second].nt == C::MAXT) {
-                C::ExpertJobMulti j;
-                j.blob = l.blob[(size_t) ex];
-                jobs.push_back(j);
-                it = open.insert_or_assign(ex, jobs.size() - 1).first;
-            }
-            C::ExpertJobMulti& j = jobs[it->second];
-            j.nact[j.nt] = acts + (size_t) t * C::kNativeActBytes;
-            j.out[j.nt] = h_out + (size_t) e * Ld;
-            ++j.nt;
+            miss.add(t, ex, l.blob[(size_t) ex], h_out + (size_t) e * Ld);
         }
         lookups += T * Kk;
         hits += T * Kk - n_miss;
-        if (n_miss > 0) pool->run_split_multi_native(l.fmt, jobs.data(), (int) jobs.size());
+        if (n_miss > 0) pool->run_split_multi_native(l.fmt, miss.jobs.data(), (int) miss.jobs.size());
         const auto t3 = Clock::now();
         bool tiers = false;
         for (size_t gi = 1; gi < tier_used.size(); ++gi)
@@ -2736,7 +2721,7 @@ struct Engine {
             ++x.layers;
             x.pool_layers += n_miss > 0;
             x.tier_layers += tiers;
-            x.cpu_experts += (int64_t) jobs.size();
+            x.cpu_experts += (int64_t) miss.jobs.size();
             x.cpu_entries += n_miss;
             if (l.il < 64) {
                 tr.l_ent[l.il] += T * Kk;

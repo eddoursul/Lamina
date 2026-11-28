@@ -49,6 +49,7 @@
 #include "q36_kernels.cuh"
 #include "q36_lora.cuh"
 #if defined(LAMINA_Q36_CPU_POOL)
+#include "lamina/kernels/cpu/miss_jobs.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
 #endif
@@ -1897,7 +1898,7 @@ struct Engine {
 #if defined(LAMINA_Q36_CPU_POOL)
     std::unique_ptr<lamina::kernels::cpu::ExpertPool> pool;
     std::unique_ptr<lamina::kernels::cpu::HostPin> host_pin;   // the host loop on the core the pool's workers leave
-    std::vector<lamina::kernels::cpu::ExpertJobMulti> jobs;
+    lamina::kernels::cpu::MissJobs miss;                       // the CPU pool's jobs a layer
 #endif
     float *h_h = nullptr, *cpu_out = nullptr, *ecpu = nullptr;
     int32_t *h_ids = nullptr, *h_miss = nullptr, *d_miss = nullptr, *h_cnt = nullptr;
@@ -3385,10 +3386,8 @@ struct Engine {
         while (cudaEventQuery(ev_route) == cudaErrorNotReady) {}
         const auto t0 = Clock::now();
         // the missed entries per expert (up to MAXT tokens per job)
-        jobs.clear();
-        std::vector<char> quantized((size_t) T, 0);
+        miss.begin(T, (int) m->g.n_expert, H.fmt, h_h, N, acts);
         int n_miss = 0;
-        std::map<int, size_t> open;   // expert -> its job with room
         const bool defer = rows_deferred && li < m->layers.size();
         if (defer) {
             if (row_ids.size() < m->layers.size()) row_ids.resize(m->layers.size());
@@ -3400,27 +3399,12 @@ struct Engine {
             h_miss[e] = H.slot_of[(size_t) ex] < 0;
             if (!h_miss[e]) continue;
             ++n_miss;
-            const int t = e / Kp;
-            if (!quantized[(size_t) t]) {
-                C::native_quant_act(H.fmt, h_h + (size_t) t * N, acts + (size_t) t * C::kNativeActBytes);
-                quantized[(size_t) t] = 1;
-            }
-            auto it = open.find(ex);
-            if (it == open.end() || jobs[it->second].nt == C::MAXT) {
-                C::ExpertJobMulti j;
-                j.blob = L.hblobs + (size_t) ex * L.stride;
-                jobs.push_back(j);
-                it = open.insert_or_assign(ex, jobs.size() - 1).first;
-            }
-            C::ExpertJobMulti& j = jobs[it->second];
-            j.nact[j.nt] = acts + (size_t) t * C::kNativeActBytes;
-            j.out[j.nt] = cpu_out + (size_t) e * N;
-            ++j.nt;
+            miss.add(e / Kp, ex, L.hblobs + (size_t) ex * L.stride, cpu_out + (size_t) e * N);
         }
         hy_cpu += n_miss;
         hy_gpu += n_ent - n_miss;
         if (n_miss == 0) return;
-        pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
+        pool->run_split_multi_native(H.fmt, miss.jobs.data(), (int) miss.jobs.size());
         hy_cpu_ms += ms_since(t0);
         CK(cudaMemcpyAsync(ecpu, cpu_out, (size_t) n_ent * N * 4, cudaMemcpyHostToDevice, st));
         CK(cudaMemcpyAsync(d_miss, h_miss, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
