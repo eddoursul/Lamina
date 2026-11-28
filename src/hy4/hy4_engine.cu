@@ -5550,7 +5550,8 @@ struct Serve {
             }
         }
         E.mrope_set(geni ? &ir : nullptr);
-        if ((int64_t) ids.size() + max_new > E.ctx - kMaxT) {
+        // (the room left, not the sum: that overflows for a huge max_new)
+        if ((int64_t) ids.size() > E.ctx - kMaxT || max_new > E.ctx - kMaxT - (int64_t) ids.size()) {
             serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%lld)\n", ids.size(), max_new,
                         (long long) (E.ctx - kMaxT));
             return;

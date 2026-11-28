@@ -8322,7 +8322,8 @@ struct Serve {
             ~Pictures() { e.img = nullptr; }
         } pictures{E};
         E.img = geni ? &ir : nullptr;
-        if ((int64_t) ids.size() + max_new > E.ctx) {
+        // (the room left, not the sum: that overflows for a huge max_new)
+        if ((int64_t) ids.size() > E.ctx || max_new > E.ctx - (int64_t) ids.size()) {
             serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%lld)\n", ids.size(), max_new,
                         (long long) E.ctx);
             return;
