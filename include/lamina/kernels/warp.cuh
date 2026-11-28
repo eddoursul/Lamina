@@ -26,6 +26,19 @@ __device__ __forceinline__ float warp_max(float v) {
     return v;
 }
 
+/// The largest of a warp's (value, index) pairs, the lower index of equals: every lane's (the XOR butterfly)
+__device__ __forceinline__ void warp_argmax(float& v, int& i) {
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+        const float ov = __shfl_xor_sync(0xffffffffu, v, o);
+        const int oi = __shfl_xor_sync(0xffffffffu, i, o);
+        if (ov > v || (ov == v && oi < i)) {
+            v = ov;
+            i = oi;
+        }
+    }
+}
+
 /// The sum over a block of 128 threads: `part` 4 floats of shared memory, read after one barrier (a caller that writes
 /// them again first waits for every thread's read).
 __device__ __forceinline__ float block128_sum(float v, float* part) {

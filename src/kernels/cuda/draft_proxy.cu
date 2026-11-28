@@ -205,15 +205,7 @@ score_kernel(const uint4* __restrict__ wq, const uint32_t* __restrict__ sc, cons
     for (int k = 0; k < PER; ++k) {   // the best left, the lowest row on a tie
         float bv = v;
         int bi = lane;
-#pragma unroll
-        for (int o = 16; o; o >>= 1) {
-            const float ov = __shfl_xor_sync(0xffffffffu, bv, o);
-            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
-            if (ov > bv || (ov == bv && oi < bi)) {
-                bv = ov;
-                bi = oi;
-            }
-        }
+        warp_argmax(bv, bi);
         if (lane == 0) cand[tile * PER + k] = make_float2(bv, __int_as_float(tile * 32 + bi));
         if (lane == bi) v = ninf;
     }

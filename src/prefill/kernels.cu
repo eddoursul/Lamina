@@ -366,15 +366,7 @@ __global__ void route_kernel(const float* __restrict__ logits, int32_t* __restri
                 best = v[i];
                 ex = lane + i * 32;
             }
-#pragma unroll
-        for (int m = 16; m; m >>= 1) {
-            const float ob = __shfl_xor_sync(0xffffffffu, best, m);
-            const int oi = __shfl_xor_sync(0xffffffffu, ex, m);
-            if (ob > best || (ob == best && oi < ex)) {
-                best = ob;
-                ex = oi;
-            }
-        }
+        lamina::kernels::warp_argmax(best, ex);
         if ((ex & 31) == lane) {
             v[ex / 32] = -INFINITY;
             selected_sum += best;

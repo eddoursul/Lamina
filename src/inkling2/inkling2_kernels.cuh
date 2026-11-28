@@ -67,18 +67,7 @@ __device__ __forceinline__ void q8_1_store(Q81* b, float x, int lane) {
     b->qs[lane] = q8_1_quant(x, d, amax);
     if (lane == 0) b->ds = q8_1_ds(d, s);
 }
-/// The largest of a warp's (value, index) pairs, the lower index of equals: every lane's
-__device__ __forceinline__ void warp_argmax(float& v, int& i) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        const float ov = __shfl_xor_sync(0xffffffffu, v, o);
-        const int oi = __shfl_xor_sync(0xffffffffu, i, o);
-        if (ov > v || (ov == v && oi < i)) {
-            v = ov;
-            i = oi;
-        }
-    }
-}
+using lamina::kernels::warp_argmax;   // the largest of a warp's (value, index) pairs, the lower index of equals
 
 // ---------------------------------------------------------------------------------------------- block-wide sums
 /// K values a thread summed over a block of kTB threads: every thread gets the K block sums (shared `red`: [8][K])

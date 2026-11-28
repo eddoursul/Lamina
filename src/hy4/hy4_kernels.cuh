@@ -739,14 +739,7 @@ __global__ void k_route(const float* logits, const float* bias, int n_expert, in
     for (int j = 0; j < k; ++j) {
         float v = e < n_expert ? sel[e] : -INFINITY;
         int id = e;
-        for (int o = 16; o > 0; o >>= 1) {
-            const float v2 = __shfl_xor_sync(0xffffffffu, v, o);
-            const int i2 = __shfl_xor_sync(0xffffffffu, id, o);
-            if (v2 > v || (v2 == v && i2 < id)) {
-                v = v2;
-                id = i2;
-            }
-        }
+        lamina::kernels::warp_argmax(v, id);
         if (lane == 0) {
             wv[warp] = v;
             wi[warp] = id;
@@ -942,14 +935,7 @@ __global__ void __launch_bounds__(256) k_route_w(const float* logits, const floa
             }
         int id = lane + 32 * bi;
         if (v == -INFINITY) id = 0x7fffffff;
-        for (int d = 16; d > 0; d >>= 1) {
-            const float v2 = __shfl_xor_sync(0xffffffffu, v, d);
-            const int i2 = __shfl_xor_sync(0xffffffffu, id, d);
-            if (v2 > v || (v2 == v && i2 < id)) {
-                v = v2;
-                id = i2;
-            }
-        }
+        lamina::kernels::warp_argmax(v, id);
         // the owner takes it out; its p to every lane (the sum in pick order, as k_route's)
         float pp = 0.f;
         if ((id & 31) == lane) {
