@@ -3057,11 +3057,7 @@ struct Engine {
     std::vector<int32_t> look_up(int32_t x, int n) {
         std::vector<int32_t> out;
         if (!sfx || n <= 0) return out;
-        if (sfx->size() > sfx_ok) sfx->truncate(sfx_ok);
-        if (seq.size() > sfx_ok) {
-            sfx->append(seq.data() + sfx_ok, seq.size() - sfx_ok);
-            sfx_ok = seq.size();
-        }
+        sfx->sync(seq.data(), seq.size(), sfx_ok);
         sfx->append(x);   // not in the state yet: the next sync takes it out
         out.resize(kMaxT - 1);
         const int k = sfx->propose(kMaxT - 1, out.data());

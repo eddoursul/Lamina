@@ -7642,14 +7642,8 @@ struct Drafts {
         }
         if (n <= 0) return out;
         if (sfx) {
-            // the history up to where it and seq agree: seq's tokens before sfx_ok are the ones it was given
-            sfx_ok = std::min(sfx_ok, seq.size());
-            if (sfx->size() > sfx_ok) sfx->truncate(sfx_ok);
-            if (seq.size() > sfx_ok) {
-                sfx->append(seq.data() + sfx_ok, seq.size() - sfx_ok);
-                sfx_ok = seq.size();
-            }
-            sfx->append(x);   // not in the state yet: the next call takes it out
+            sfx->sync(seq.data(), seq.size(), sfx_ok);   // (seq's tokens before sfx_ok are the ones it was given)
+            sfx->append(x);                              // not in the state yet: the next call takes it out
             out.resize((size_t) n);
             out.resize((size_t) std::max(0, sfx->propose(n, out.data())));
             if (!out.empty()) {

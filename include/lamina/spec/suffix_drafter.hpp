@@ -35,6 +35,9 @@ public:
     void assign(const int32_t* tokens, size_t n);
     /// The history's first `n` tokens alone: the positions past them undone, newest first (as `assign` undoes them).
     void truncate(size_t n);
+    /// The history made `seq`'s first `n` tokens, of which its first `ok` are the ones it was given (fewer when seq is
+    /// shorter now): the positions past those undone, the rest appended; `ok` becomes n
+    void sync(const int32_t* seq, size_t n, size_t& ok);
 
     /// Write up to `max_k` proposed next tokens to `out`; returns how many (0 = no match of at least min_match).
     int propose(int max_k, int32_t* out);

@@ -89,6 +89,15 @@ void SuffixDrafter::assign(const int32_t* tokens, size_t n) {
     append(tokens + keep, n - keep);
 }
 
+void SuffixDrafter::sync(const int32_t* seq, size_t n, size_t& ok) {
+    ok = std::min(ok, n);
+    if (hist_.size() > ok) truncate(ok);
+    if (n > ok) {
+        append(seq + ok, n - ok);
+        ok = n;
+    }
+}
+
 void SuffixDrafter::truncate(size_t keep) {
     if (keep >= hist_.size()) return;
     for (size_t e = hist_.size(); e-- > std::max<size_t>(keep, 2);)   // newest first: each trigram's last goes back
