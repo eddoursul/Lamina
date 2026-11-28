@@ -240,6 +240,9 @@ private:
     void* pinned_from_held(void* pageable);
     void trim();
     void release(Seq& seq, int64_t keep_upto);   // frees the checkpoints after `keep_upto`
+    template <class T> void set_ids(int64_t pos, const T* tokens, int64_t n);   // set()'s, for either id type
+    /// Checkpoint i of `seq` out of its chain: its buffer back, its slot in the conversation's file forgotten.
+    void drop_ckpt(Seq& seq, size_t i);
     /// Thins `seq`'s chain to the cap (chain_victim).
     void enforce_cap(Seq& seq);
     /// The state at `pos` (== the live length) in a buffer of its own (`filled`: prepare()'s, the device state in it
@@ -248,6 +251,11 @@ private:
     /// Parks a copy of the live sequence: its K/V cells, its checkpoints after `keep_upto` (the ones before stay with
     /// the live sequence, which continues from there) and one at its end.
     void stash_live(int64_t keep_upto);
+    /// The parked copy `s`'s chain: the live sequence's checkpoints after `keep_upto` moved into it, and one saved at
+    /// its end `L` where it has none (`has_end`).  Then, once it is kept, its record: the tokens, the tag and the
+    /// pictures that start before L.
+    void take_chain(Seq& s, int64_t keep_upto, int64_t L, bool has_end);
+    void take_record(Seq& s, int64_t L) const;
     /// The checkpoint at `pos` and, of a parked conversation (`parked`), its K/V cells: all of them, or with `prefix`
     /// only those before `pos` (a borrowed prefix).  A checkpoint in the conversation's file is read into a buffer,
     /// which it keeps (`keep`) or which goes back after the load (a start a parked conversation lends).

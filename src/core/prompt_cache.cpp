@@ -217,16 +217,7 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
     // its chain: the checkpoints after `keep_upto` and one at its end, capped (as stash_live's)
     const bool has_end = live_.find(L) != nullptr;
     Seq s;
-    for (size_t i = 0; i < live_.ckpts.size();) {
-        if (live_.ckpts[i].pos > keep_upto) {
-            s.ckpts.push_back(live_.ckpts[i]);
-            live_.ckpts.erase(live_.ckpts.begin() + (ptrdiff_t) i);
-        } else {
-            ++i;
-        }
-    }
-    if (!has_end)
-        if (void* h = save(L)) s.ckpts.push_back({L, h});   // the session is still at L
+    take_chain(s, keep_upto, L, has_end);
     // What a file the sequence came back with lacks: its cells from where it no longer holds them (the blocks past
     // there go), the checkpoints without a slot; without one, all of it.
     const DiskFile* had = live_.file.get();
@@ -275,10 +266,7 @@ void SequenceCache::park_on_disk(int64_t keep_upto) {
                          (long long) L, mib(need), room ? "its file could not be written" : "no room on the disk tier");
         return;
     }
-    s.tokens = live_.tokens;
-    s.tag = live_.tag;
-    for (const ImgKey& image : live_.imgs)
-        if (image.start < L) s.imgs.push_back(image);
+    take_record(s, L);
     s.kv_cells = L;
     s.kv_bytes = kv_bytes(L);
     s.disk_bytes = disk_->bytes(*s.file);
@@ -360,14 +348,15 @@ void SequenceCache::trim() {
 
 void SequenceCache::release(Seq& seq, int64_t keep_upto) {
     for (size_t i = 0; i < seq.ckpts.size();) {
-        if (seq.ckpts[i].pos > keep_upto) {
-            give_back(seq.ckpts[i].host);
-            forget_slot(seq, seq.ckpts[i].pos);
-            seq.ckpts.erase(seq.ckpts.begin() + (ptrdiff_t) i);
-        } else {
-            ++i;
-        }
+        if (seq.ckpts[i].pos > keep_upto) drop_ckpt(seq, i);
+        else ++i;
     }
+}
+
+void SequenceCache::drop_ckpt(Seq& seq, size_t i) {
+    give_back(seq.ckpts[i].host);
+    forget_slot(seq, seq.ckpts[i].pos);
+    seq.ckpts.erase(seq.ckpts.begin() + (ptrdiff_t) i);
 }
 
 void SequenceCache::enforce_cap(Seq& seq) {
@@ -375,10 +364,7 @@ void SequenceCache::enforce_cap(Seq& seq) {
     while ((int64_t) seq.ckpts.size() > chain_cap_) {
         pos.clear();
         for (const Ckpt& c : seq.ckpts) pos.push_back(c.pos);
-        const size_t v = chain_victim(pos.data(), pos.size());
-        give_back(seq.ckpts[v].host);
-        forget_slot(seq, seq.ckpts[v].pos);
-        seq.ckpts.erase(seq.ckpts.begin() + (ptrdiff_t) v);
+        drop_ckpt(seq, chain_victim(pos.data(), pos.size()));
     }
 }
 
@@ -537,9 +523,7 @@ void SequenceCache::drop_end() {
                 live_.ckpts[i].end = false;
                 continue;
             }
-            give_back(live_.ckpts[i].host);
-            forget_slot(live_, live_.ckpts[i].pos);
-            live_.ckpts.erase(live_.ckpts.begin() + (ptrdiff_t) i);
+            drop_ckpt(live_, i);
             return;
         }
 }
@@ -630,6 +614,17 @@ void SequenceCache::stash_live(int64_t keep_upto) {
                                                      },
                                                      this});
     if (!s.kv || !kv_copy(L, L, s.kv.get(), true)) return;
+    take_chain(s, keep_upto, L, has_end);
+    if (s.ckpts.empty()) return;
+    enforce_cap(s);
+    take_record(s, L);
+    s.kv_cells = L;
+    s.kv_bytes = bytes;
+    parked_.park(std::move(s));
+}
+
+void SequenceCache::take_chain(Seq& s, int64_t keep_upto, int64_t L, bool has_end) {
+    Seq& live_ = live();
     for (size_t i = 0; i < live_.ckpts.size();) {
         if (live_.ckpts[i].pos > keep_upto) {
             s.ckpts.push_back(live_.ckpts[i]);
@@ -640,15 +635,14 @@ void SequenceCache::stash_live(int64_t keep_upto) {
     }
     if (!has_end)
         if (void* h = save(L)) s.ckpts.push_back({L, h});   // the session is still at L
-    if (s.ckpts.empty()) return;
-    enforce_cap(s);
+}
+
+void SequenceCache::take_record(Seq& s, int64_t L) const {
+    const Seq& live_ = live();
     s.tokens = live_.tokens;
     s.tag = live_.tag;
     for (const ImgKey& image : live_.imgs)
         if (image.start < L) s.imgs.push_back(image);
-    s.kv_cells = L;
-    s.kv_bytes = bytes;
-    parked_.park(std::move(s));
 }
 
 bool SequenceCache::restore(Seq& seq, int64_t pos, bool prefix, bool parked, bool keep) {
@@ -796,7 +790,7 @@ int64_t SequenceCache::begin_from(const std::vector<int64_t>& ids, const std::ve
     return best;
 }
 
-void SequenceCache::set(int64_t pos, const int64_t* tokens, int64_t n) {
+template <class T> void SequenceCache::set_ids(int64_t pos, const T* tokens, int64_t n) {
     if (!enabled()) return;
     Seq& live_ = live();
     release(live_, pos);
@@ -804,6 +798,8 @@ void SequenceCache::set(int64_t pos, const int64_t* tokens, int64_t n) {
     live_.tokens.resize((size_t) pos);
     live_.tokens.insert(live_.tokens.end(), tokens, tokens + n);
 }
+
+void SequenceCache::set(int64_t pos, const int64_t* tokens, int64_t n) { set_ids(pos, tokens, n); }
 
 void SequenceCache::append(int s, int64_t token) {
     if (enabled()) lives_[(size_t) s].tokens.push_back(token);
@@ -825,14 +821,7 @@ void SequenceCache::use(int s) {
     touch(s);
 }
 
-void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) {
-    if (!enabled()) return;
-    Seq& live_ = live();
-    release(live_, pos);
-    cut(live_, pos);
-    live_.tokens.resize((size_t) pos);
-    for (int64_t i = 0; i < n; ++i) live_.tokens.push_back(tokens[i]);
-}
+void SequenceCache::set(int64_t pos, const int32_t* tokens, int64_t n) { set_ids(pos, tokens, n); }
 
 void SequenceCache::checkpoint(int64_t pos, void* filled, bool end) {
     const auto it = std::find(prepared_.begin(), prepared_.end(), filled);
