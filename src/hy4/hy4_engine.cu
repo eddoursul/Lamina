@@ -2426,7 +2426,7 @@ struct Engine {
         size_t li = 0;
         if (s == 0) {
             K::iq_embed_rows(m->embd_type, m->embd, m->embd_row, g.n_vocab, tok_d, T, N, emb, st);
-            if (vision) hy4k::k_image_rows<<<T, 256, 0, st>>>(emb, img_rows_d, img_slot_d, N);
+            if (vision) lamina::kernels::put_rows<<<T, 256, 0, st>>>(emb, img_rows_d, img_slot_d, N);
             hy4k::k_streams_init<<<T, hy4k::kThreads, 0, st>>>(emb, X, hc, N);
             hy4k::k_swa_cells<<<T, 256, 0, st>>>(pos_d, (int) g.n_swa, (int) ring, cells_swa, n_swa);
             ph(0);
@@ -2757,16 +2757,16 @@ struct Engine {
                                            wn, xn, g.eps, fq ? (void*) xq : nullptr);
         return fq;
     }
-    /// The entries the slots hold grouped by expert (k_group_slots_p, or the one-thread form for more experts)
+    /// The entries the slots hold grouped by expert (expert_groups.cuh's scan form, or the serial one for more)
     static void group_slots(const int32_t* ids_, int n_ent, int K_, int E_, const int32_t* slot_of,
                             const uint8_t* slots, size_t stride, unsigned long long* gptr, int32_t* gstart,
                             int32_t* ngroups, int32_t* edst, int32_t* etok, cudaStream_t s_) {
         if (E_ <= 512 && n_ent <= 128)
-            hy4k::k_group_slots_p<<<1, 512, 0, s_>>>(ids_, n_ent, K_, E_, slot_of, slots, stride, gptr, gstart, ngroups,
-                                                     edst, etok);
+            lamina::kernels::group_scan<true>
+                <<<1, 512, 0, s_>>>(ids_, n_ent, K_, E_, slot_of, slots, stride, gptr, gstart, ngroups, edst, etok);
         else
-            hy4k::k_group_slots<<<1, 512, 0, s_>>>(ids_, n_ent, K_, E_, slot_of, slots, stride, gptr, gstart, ngroups,
-                                                   edst, etok);
+            lamina::kernels::group_serial<1024, true>
+                <<<1, 512, 0, s_>>>(ids_, n_ent, K_, E_, slot_of, slots, stride, gptr, gstart, ngroups, edst, etok);
     }
     /// iHC's post of the decode's T rows: X += y * post, a thread a column of every stream
     void hc_post(int T) {
@@ -2782,7 +2782,7 @@ struct Engine {
             hy4k::k_moe_end_q<<<dim3((unsigned) (Ld / 256), T), 256, 0, st>>>(
                 parts, h_out_d, h_miss_d, wts, reinterpret_cast<hy4k::Q81*>(moeq), Kk, Ld);
         } else {
-            hy4k::k_merge_cpu<<<T * Kk, hy4k::kThreads, 0, st>>>(parts, h_out_d, h_miss_d, Ld);
+            lamina::kernels::merge_cpu_rows<<<T * Kk, hy4k::kThreads, 0, st>>>(parts, h_out_d, h_miss_d, Ld);
             hy4k::k_moe_sum_c<<<dim3((unsigned) ((Ld + 255) / 256), T), 256, 0, st>>>(parts, wts, moe, Kk, Ld);
             quant(moe, T, Ld, moeq);
         }

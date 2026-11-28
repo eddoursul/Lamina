@@ -1,7 +1,7 @@
 // q36_kernels.cuh - decode kernels of the Qwen3.6 engine (q36_engine.cu), written to give the SAME BITS as the shared
-// kernels they replace (native_small_mmvq_kernel, k_moe_out, k_add_rms, k_group, native_quantize_q8_1) with a layout
-// that keeps more bytes in flight and fewer launches.  Every kernel here is checked bit for bit against the old one on
-// the real activations (LAMINA_Q36_VERIFY=1, --no-graph).
+// kernels they replace (native_small_mmvq_kernel, k_moe_out, k_add_rms, the serial grouping, native_quantize_q8_1) with
+// a layout that keeps more bytes in flight and fewer launches.  Every kernel here is checked bit for bit against the
+// old one on the real activations (LAMINA_Q36_VERIFY=1, --no-graph).
 #pragma once
 
 #include "lamina/kernels/dp4a.hpp"
@@ -264,48 +264,9 @@ __global__ void __launch_bounds__(1024) k_moe_out_small(float* x, const float* p
     }
 }
 
-/// k_group / k_group_hy for n_ent <= 64 entries: one block of 64 threads ranks each entry by (expert id, entry) in
-/// parallel instead of one thread walking all the experts; the same group / entry arrays.  HY: only the entries whose
-/// expert has a VRAM slot (slot_of >= 0), the group's blob at blobs + slot * blob.
-template <bool HY>
-__global__ void k_group_small(const int32_t* ids, int n_ent, int K_, const int32_t* slot_of, const uint8_t* blobs,
-                              unsigned long long blob, unsigned long long* grp_ptr, int32_t* grp_start,
-                              int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok) {
-    __shared__ int sid[64];
-    const int e = threadIdx.x;
-    const int id = e < n_ent ? ids[e] : 0;
-    const bool valid = e < n_ent && (!HY || slot_of[id] >= 0);
-    int rank = 0;
-    if (valid) {
-        for (int e2 = 0; e2 < n_ent; ++e2) {
-            const int id2 = ids[e2];
-            if (HY && slot_of[id2] < 0) continue;
-            if (id2 < id || (id2 == id && e2 < e)) ++rank;
-        }
-        ent_dst[rank] = e;
-        ent_tok[rank] = e / K_;
-        sid[rank] = id;
-    }
-    __syncthreads();
-    int nv = 0;
-    for (int e2 = 0; e2 < n_ent; ++e2) nv += (!HY || slot_of[ids[e2]] >= 0) ? 1 : 0;
-    if (valid && (rank == 0 || sid[rank - 1] != sid[rank])) {
-        int g = 0;
-        for (int q = 1; q < rank; ++q) g += sid[q - 1] != sid[q] ? 1 : 0;
-        g += rank > 0 ? 1 : 0;
-        grp_ptr[g] = (unsigned long long) (blobs + (size_t) (HY ? slot_of[id] : id) * blob);
-        grp_start[g] = rank;
-    }
-    if (e == 0) {
-        int G = nv > 0 ? 1 : 0;
-        for (int q = 1; q < nv; ++q) G += sid[q - 1] != sid[q] ? 1 : 0;
-        grp_start[G] = nv;
-        *n_groups = G;
-    }
-}
-
 /// route_topk<256, 8> (native_router.cu, copied: the same expressions) for n_tok <= 8 tokens (one warp each) and, in
-/// the same launch, k_group_small's grouping of the picks.  block (32, 8).  HY as k_group_small.
+/// the same launch, group_rank (lamina/kernels/expert_groups.cuh)'s grouping of the picks.  block (32, 8).  HY as
+/// group_rank.
 template <bool HY>
 __global__ void __launch_bounds__(256)
 k_route_group(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ weights, int n_tok,

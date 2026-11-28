@@ -9,6 +9,7 @@
 // to the Q8_0 matrices, the rope of rope.cu's rope_norm.
 #pragma once
 
+#include "lamina/kernels/expert_groups.cuh"
 #include "lamina/kernels/q8_1_finite.hpp"
 #include "lamina/kernels/q8_halves.cuh"
 #include "lamina/kernels/warp.cuh"
@@ -544,8 +545,8 @@ __global__ void k_swiglu(const float* g, const float* u, float* h, int64_t n) {
 }
 // ------------------------------------------------------------------------------------------------ fused forms
 /// The MoE's end of row t in one: each entry's row (the CPU's or a tier's through the mapping where miss, else the
-/// GPU's own), weighted and summed in pick order (k_merge_cpu then k_moe_sum_c), into q8_1 rows (n a multiple of 32).
-/// Grid (n / 256, T), 256.
+/// GPU's own), weighted and summed in pick order (merge_cpu_rows then k_moe_sum_c), into q8_1 rows (n a multiple of
+/// 32). Grid (n / 256, T), 256.
 __global__ void k_moe_end_q(const float* __restrict__ parts, const float* cpu, const int32_t* miss, const float* w,
                             Q81* y, int k, int n) {
     const int t = blockIdx.y, c = blockIdx.x * blockDim.x + threadIdx.x;
@@ -788,105 +789,6 @@ __global__ void k_moe_sum_c(const float* parts, const float* w, float* y, int k,
     y[(size_t) t * n + c] = acc;
 }
 
-/// The routed entries (n_ent = T * K, ids[t * K + j]) whose expert holds a VRAM slot (slot_of[x] >= 0) grouped per
-/// expert in ascending id: group g's blob at slots + slot * stride, its entries [grp_start[g], grp_start[g + 1])
-/// writing row ent_dst (the entry) from token ent_tok.  The others are the CPU pool's (k_merge_cpu).  One block of 512.
-__global__ void k_group_slots(const int32_t* ids, int n_ent, int K_, int n_expert, const int32_t* slot_of,
-                              const uint8_t* slots, unsigned long long stride, unsigned long long* grp_ptr,
-                              int32_t* grp_start, int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok) {
-    __shared__ int cnt[1024], off[1024];
-    for (int x = threadIdx.x; x < n_expert; x += blockDim.x) cnt[x] = 0;
-    __syncthreads();
-    for (int e = threadIdx.x; e < n_ent; e += blockDim.x)
-        if (slot_of[ids[e]] >= 0) atomicAdd(&cnt[ids[e]], 1);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        int g = 0, pos = 0;
-        for (int x = 0; x < n_expert; ++x) {
-            off[x] = pos;
-            if (cnt[x] == 0) continue;
-            grp_ptr[g] = (unsigned long long) (slots + (size_t) slot_of[x] * stride);
-            grp_start[g] = pos;
-            pos += cnt[x];
-            ++g;
-        }
-        grp_start[g] = pos;
-        *n_groups = g;
-        for (int e = 0; e < n_ent; ++e) {
-            if (slot_of[ids[e]] < 0) continue;
-            const int p = off[ids[e]]++;
-            ent_dst[p] = e;
-            ent_tok[p] = e / K_;
-        }
-    }
-}
-/// k_group_slots' results without its one thread's loops: the experts' counts, two scans over them (a held expert's
-/// group and its first place), each entry's place by the entries of its expert before it.  One block of 512 threads,
-/// n_expert <= 512 (else k_group_slots).
-__global__ void __launch_bounds__(512) k_group_slots_p(const int32_t* ids, int n_ent, int K_, int n_expert,
-                                                       const int32_t* slot_of, const uint8_t* slots,
-                                                       unsigned long long stride, unsigned long long* grp_ptr,
-                                                       int32_t* grp_start, int32_t* n_groups, int32_t* ent_dst,
-                                                       int32_t* ent_tok) {
-    __shared__ int cnt[512];
-    __shared__ int wsum[2][16];
-    __shared__ int e_ids[128];
-    const int x = threadIdx.x, lane = x & 31, warp = x >> 5;
-    cnt[x] = 0;
-    if (x < n_ent) e_ids[x] = ids[x];
-    __syncthreads();
-    if (x < n_ent && slot_of[e_ids[x]] >= 0) atomicAdd(&cnt[e_ids[x]], 1);
-    __syncthreads();
-    const int c = x < n_expert ? cnt[x] : 0;
-    // inclusive warp scans of (c > 0) and c, then the warps' totals
-    int g = c > 0 ? 1 : 0, o = c;
-#pragma unroll
-    for (int d = 1; d < 32; d <<= 1) {
-        const int g2 = __shfl_up_sync(0xffffffffu, g, d), o2 = __shfl_up_sync(0xffffffffu, o, d);
-        if (lane >= d) {
-            g += g2;
-            o += o2;
-        }
-    }
-    if (lane == 31) {
-        wsum[0][warp] = g;
-        wsum[1][warp] = o;
-    }
-    __syncthreads();
-    int gb = 0, ob = 0;
-    for (int i = 0; i < warp; ++i) {
-        gb += wsum[0][i];
-        ob += wsum[1][i];
-    }
-    const int grp = gb + g - (c > 0 ? 1 : 0), off = ob + o - c;   // exclusive
-    if (c > 0) {
-        grp_ptr[grp] = (unsigned long long) (slots + (size_t) slot_of[x] * stride);
-        grp_start[grp] = off;
-    }
-    if (x == 511) {
-        int gt = 0, ot = 0;
-        for (int i = 0; i < 16; ++i) {
-            gt += wsum[0][i];
-            ot += wsum[1][i];
-        }
-        grp_start[gt] = ot;
-        *n_groups = gt;
-    }
-    __syncthreads();
-    cnt[x] = off;   // each expert's first place
-    __syncthreads();
-    if (x < n_ent) {
-        const int ex = e_ids[x];
-        if (slot_of[ex] >= 0) {
-            int rank = 0;
-            for (int e = 0; e < x; ++e) rank += e_ids[e] == ex ? 1 : 0;
-            const int p = cnt[ex] + rank;
-            ent_dst[p] = x;
-            ent_tok[p] = x / K_;
-        }
-    }
-}
-
 /// k_route as a warp a row (grid ceil(T / 8) of 256, n_expert <= 1024): each lane holds n_expert / 32 of the row's
 /// candidates; k rounds of a warp-wide pick (the largest p + bias, ties to the lower expert), no block syncs.  The same
 /// picks, order and weights as k_route.
@@ -1009,13 +911,6 @@ __global__ void __launch_bounds__(1024) k_pick(const float* __restrict__ lg, int
             out[1] = __float_as_int(sum);
         }
     }
-}
-
-/// The CPU pool's rows into the entries' rows: parts[e] = cpu[e] where miss[e].  A block per entry.
-__global__ void k_merge_cpu(float* parts, const float* cpu, const int32_t* miss, int n) {
-    const int e = blockIdx.x;
-    if (!miss[e]) return;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) parts[(size_t) e * n + i] = cpu[(size_t) e * n + i];
 }
 
 // ------------------------------------------------------------------------------------------------ Engram
@@ -1309,13 +1204,6 @@ __global__ void k_gather_states(const float* ring, const float* own, const int32
     const int t = blockIdx.x, sr = src[t];
     const float* from = sr >= 0 ? ring + (size_t) sr * n : sr == kNoState ? nullptr : own + (size_t) (-1 - sr) * n;
     for (int i = threadIdx.x; i < n; i += blockDim.x) hs[(size_t) t * n + i] = from ? from[i] : 0.f;
-}
-
-/// A picture's rows into the embeddings: row t from rows[slot[t]] where slot[t] >= 0 (a forward's image cells)
-__global__ void k_image_rows(float* emb, const float* rows, const int32_t* slot, int n) {
-    const int t = blockIdx.x, s = slot[t];
-    if (s < 0) return;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) emb[(size_t) t * n + i] = rows[(size_t) s * n + i];
 }
 
 // ------------------------------------------------------------------------------------------------ DFly2

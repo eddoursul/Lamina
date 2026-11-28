@@ -29,6 +29,7 @@
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/core/run_owned.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/expert_groups.cuh"
 #include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
 #include "lamina/kernels/gemm.hpp"
@@ -509,83 +510,10 @@ __global__ void k_attn_merge(const float* pacc, const float* pm, const float* pl
     out[gi] = num / den * sigm(gate[gi]);
 }
 
-/// The routed entries (T tokens x K picks, entry e = t * K + k) grouped per expert, on the device: one group per
-/// expert used (ascending id), its blob address, its entries in entry order.  One block.
-__global__ void k_group(const int32_t* ids, int n_ent, int K_, int n_expert, const uint8_t* blobs,
-                        unsigned long long blob, unsigned long long* grp_ptr, int32_t* grp_start, int32_t* n_groups,
-                        int32_t* ent_dst, int32_t* ent_tok) {
-    __shared__ int cnt[512], off[512];
-    for (int x = threadIdx.x; x < n_expert; x += blockDim.x) cnt[x] = 0;
-    __syncthreads();
-    for (int e = threadIdx.x; e < n_ent; e += blockDim.x) atomicAdd(&cnt[ids[e]], 1);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        int g = 0, pos = 0;
-        for (int x = 0; x < n_expert; ++x) {
-            off[x] = pos;
-            if (cnt[x] == 0) continue;
-            grp_ptr[g] = (unsigned long long) (blobs + (size_t) x * blob);
-            grp_start[g] = pos;
-            pos += cnt[x];
-            ++g;
-        }
-        grp_start[g] = pos;
-        *n_groups = g;
-        for (int e = 0; e < n_ent; ++e) {
-            const int p = off[ids[e]]++;
-            ent_dst[p] = e;
-            ent_tok[p] = e / K_;
-        }
-    }
-}
-/// k_group for the hybrid mode: only the entries whose expert has a VRAM slot (slot_of[x] >= 0) are grouped, each
-/// group's blob at blobs + slot * blob; the others are the CPU pool's (their rows come from k_merge_cpu).  One block.
-__global__ void k_group_hy(const int32_t* ids, int n_ent, int K_, int n_expert, const int32_t* slot_of,
-                           const uint8_t* blobs, unsigned long long blob, unsigned long long* grp_ptr,
-                           int32_t* grp_start, int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok) {
-    __shared__ int cnt[512], off[512];
-    for (int x = threadIdx.x; x < n_expert; x += blockDim.x) cnt[x] = 0;
-    __syncthreads();
-    for (int e = threadIdx.x; e < n_ent; e += blockDim.x)
-        if (slot_of[ids[e]] >= 0) atomicAdd(&cnt[ids[e]], 1);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        int g = 0, pos = 0;
-        for (int x = 0; x < n_expert; ++x) {
-            off[x] = pos;
-            if (cnt[x] == 0) continue;
-            grp_ptr[g] = (unsigned long long) (blobs + (size_t) slot_of[x] * blob);
-            grp_start[g] = pos;
-            pos += cnt[x];
-            ++g;
-        }
-        grp_start[g] = pos;
-        *n_groups = g;
-        for (int e = 0; e < n_ent; ++e) {
-            if (slot_of[ids[e]] < 0) continue;
-            const int p = off[ids[e]]++;
-            ent_dst[p] = e;
-            ent_tok[p] = e / K_;
-        }
-    }
-}
-/// The CPU pool's expert rows into the entries' rows: parts[e] = cpu[e] where miss[e].  grid (n_ent), block 256.
-__global__ void k_merge_cpu(float* parts, const float* cpu, const int32_t* miss, int n) {
-    const int e = blockIdx.x;
-    if (!miss[e]) return;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) parts[(size_t) e * n + i] = cpu[(size_t) e * n + i];
-}
+// (the routed entries' grouping per expert, the CPU pool's rows and picture rows: lamina/kernels/expert_groups.cuh)
 
-/// Picture rows over the embeddings of a chunk: x[r] = img[map[r]] for the rows with map[r] >= 0 (the rows of a
-/// picture's <|image_pad|> cells).  grid (T), block 256.
 /// *p = v (a position for the stream's next kernels, without the pinned staging a later chunk would reuse)
 __global__ void k_set_i32(int32_t* p, int32_t v) { *p = v; }
-__global__ void k_put_rows(float* x, const float* img, const int32_t* map, int n) {
-    const int r = blockIdx.x;
-    const int m = map[r];
-    if (m < 0) return;
-    for (int i = threadIdx.x; i < n; i += blockDim.x) x[(size_t) r * n + i] = img[(size_t) m * n + i];
-}
 
 /// The prompt's routed entries sorted by expert for MMQ: bounds[x] .. bounds[x + 1] are expert x's rows; sorted row r
 /// holds entry dst[r] (= t * K + k, the row of the per-slot outputs) of token src[r].  The order inside an expert is
@@ -2563,11 +2491,11 @@ struct Engine {
                    int32_t* o_ng, int32_t* o_dst, int32_t* o_tok) {
         const int Kp = (int) m->top_k, n_ent = T * Kp;
         if (slot_of)
-            k_group_hy<<<1, kThreads, 0, st>>>(ids, n_ent, Kp, (int) m->g.n_expert, slot_of, L.blobs, L.stride, o_ptr,
-                                               o_start, o_ng, o_dst, o_tok);
+            K::group_serial<512, true><<<1, kThreads, 0, st>>>(ids, n_ent, Kp, (int) m->g.n_expert, slot_of, L.blobs,
+                                                               L.stride, o_ptr, o_start, o_ng, o_dst, o_tok);
         else
-            k_group<<<1, kThreads, 0, st>>>(ids, n_ent, Kp, (int) m->g.n_expert, L.blobs, L.stride, o_ptr, o_start,
-                                            o_ng, o_dst, o_tok);
+            K::group_serial<512, false><<<1, kThreads, 0, st>>>(ids, n_ent, Kp, (int) m->g.n_expert, nullptr, L.blobs,
+                                                                L.stride, o_ptr, o_start, o_ng, o_dst, o_tok);
     }
     /// VERIFY: the old grouping of the current `ids` into scratch,
     /// compared with grp_ptr / grp_start / n_groups / ent_dst / ent_tok.
@@ -2635,7 +2563,8 @@ struct Engine {
         }
         return true;
     }
-    /// The routed entries of T rows grouped per expert (k_group; with slot_of the hybrid mode's k_group_hy).
+    /// The routed entries of T rows grouped per expert (expert_groups.cuh: the rank or the serial form; with slot_of
+    /// the hybrid mode's entries alone).
     void group_entries(const Layer& L, const int32_t* slot_of, int T) {
         if (grouped_by_route) {   // route_group did it
             grouped_by_route = false;
@@ -2644,11 +2573,11 @@ struct Engine {
         const int Kp = (int) m->top_k, n_ent = T * Kp;
         if (fast_k && n_ent <= 64) {
             if (slot_of)
-                q36k::k_group_small<true><<<1, 64, 0, st>>>(ids, n_ent, Kp, slot_of, L.blobs, L.stride, grp_ptr,
-                                                            grp_start, n_groups, ent_dst, ent_tok);
+                K::group_rank<true><<<1, 64, 0, st>>>(ids, n_ent, Kp, slot_of, L.blobs, L.stride, grp_ptr, grp_start,
+                                                      n_groups, ent_dst, ent_tok);
             else
-                q36k::k_group_small<false><<<1, 64, 0, st>>>(ids, n_ent, Kp, nullptr, L.blobs, L.stride, grp_ptr,
-                                                             grp_start, n_groups, ent_dst, ent_tok);
+                K::group_rank<false><<<1, 64, 0, st>>>(ids, n_ent, Kp, nullptr, L.blobs, L.stride, grp_ptr, grp_start,
+                                                       n_groups, ent_dst, ent_tok);
             if (verify_k) group_verify(L, slot_of, T);
             return;
         }
@@ -3169,7 +3098,7 @@ struct Engine {
         }
         if (l0 == 0) {
             K::iq_embed_rows(m->embd_type, m->embd, m->embd_row, m->embd_rows, tok, T, N, x, st);
-            if (map_on) k_put_rows<<<T, kThreads, 0, st>>>(x, d_img, d_map, N);   // a picture's cells take its rows
+            if (map_on) K::put_rows<<<T, kThreads, 0, st>>>(x, d_img, d_map, N);   // a picture's cells take its rows
         }
         // the stage's first layer's norm (later layers: from k_moe_out; a later stage: over the residual handed in),
         // its q8_1 image made by the layer
@@ -3272,7 +3201,7 @@ struct Engine {
         const int N = (int) g.n_embd;
         if (streamed(T) && lhy(m->layers.size())) stream_begin({(int) m->layers.size()});
         K::iq_embed_rows(m->embd_type, m->embd_mtp, m->embd_row, m->embd_rows, tok_m, T, N, y, st);
-        if (map_on) k_put_rows<<<T, kThreads, 0, st>>>(y, d_img, d_map, N);
+        if (map_on) K::put_rows<<<T, kThreads, 0, st>>>(y, d_img, d_map, N);
         k_rms_ld<<<T, kThreads, 0, st>>>(y, N, m->mtp_enorm, mtp_cat, 2 * N, N, m->eps);           // [e | ...]
         k_rms_ld<<<T, kThreads, 0, st>>>(seeds, N, m->mtp_hnorm, mtp_cat + N, 2 * N, N, m->eps);   // [... | h]
         mm(m->eh_proj, mtp_cat, x, T);
@@ -3407,7 +3336,7 @@ struct Engine {
         pool->run_split_multi_native(H.fmt, miss.jobs.data(), (int) miss.jobs.size());
         hy_cpu_ms += ms_since(t0);
         // (the CPU's rows and the flags read through the mapping: only the rows the CPU computed cross the bus)
-        k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, cpu_out_d, h_miss_d, N);
+        K::merge_cpu_rows<<<n_ent, kThreads, 0, st>>>(eparts, cpu_out_d, h_miss_d, N);
 #else
         (void) li;
         (void) T;
