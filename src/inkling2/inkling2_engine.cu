@@ -22,6 +22,7 @@
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/model_check.hpp"
 #include "lamina/core/prompt_cache.hpp"
+#include "lamina/core/run_owned.hpp"
 #include "lamina/core/safetensors.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/inkling2/engine.hpp"
@@ -88,95 +89,20 @@ using lamina::core::ms_since;
 using lamina::inkling2::Geometry;
 using Clock = std::chrono::steady_clock;
 
-#define CK(x)                                                                                                          \
-    do {                                                                                                               \
-        cudaError_t e_ = (x);                                                                                          \
-        if (e_ != cudaSuccess) {                                                                                       \
-            std::fprintf(stderr, "lamina: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__);   \
-            throw Fatal{1};                                                                                            \
-        }                                                                                                              \
-    } while (0)
-
-/// A CUDA call that may fail without ending the run (a checkpoint's copy): false then, the error cleared
-inline bool soft(cudaError_t e) {
-    if (e == cudaSuccess) return true;
-    (void) cudaGetLastError();
-    return false;
-}
-
-/// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina's
-/// process, which an exit would end).
-struct Fatal {
-    int code;
-};
-
-/// What a run allocates, freed when it ends: device and pinned memory, streams, events, graphs.
-struct Owned {
-    std::mutex mu;
-    std::vector<void*> dev, pinned;
-    std::vector<cudaStream_t> streams;
-    std::vector<cudaEvent_t> events;
-    std::vector<cudaGraphExec_t> graphs;
-    ~Owned() {
-        cudaDeviceSynchronize();
-        for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
-        for (cudaEvent_t e : events) cudaEventDestroy(e);
-        for (cudaStream_t st : streams) cudaStreamDestroy(st);
-        for (void* d : dev) cudaFree(d);
-        for (void* h : pinned) cudaFreeHost(h);
-        (void) cudaGetLastError();
-    }
-};
-Owned* g_owned = nullptr;
-template <class V, class T> void own(std::vector<V> Owned::* list, T v) {
-    if (g_owned == nullptr) return;
-    std::lock_guard<std::mutex> lk(g_owned->mu);
-    (g_owned->*list).push_back((V) v);
-}
-template <class T> T* dalloc(size_t n) {
-    void* p = nullptr;
-    CK(cudaMalloc(&p, std::max<size_t>(n * sizeof(T), 256)));
-    own(&Owned::dev, p);
-    return (T*) p;
-}
-template <class T> T* dzero(size_t n) {
-    T* p = dalloc<T>(n);
-    CK(cudaMemset(p, 0, std::max<size_t>(n * sizeof(T), 256)));
-    return p;
-}
-template <class T> T* halloc(size_t n) {   // pinned, zeroed (pages given back and taken again are not)
-    void* p = nullptr;
-    CK(cudaHostAlloc(&p, std::max<size_t>(n * sizeof(T), 256), cudaHostAllocPortable));
-    std::memset(p, 0, std::max<size_t>(n * sizeof(T), 256));
-    own(&Owned::pinned, p);
-    return (T*) p;
-}
-/// An event of the current card's
-cudaEvent_t event_new(unsigned flags = cudaEventDisableTiming) {
-    cudaEvent_t e = nullptr;
-    CK(cudaEventCreateWithFlags(&e, flags));
-    own(&Owned::events, e);
-    return e;
-}
-/// The work captured on stream `s` since its capture began, as a graph
-cudaGraphExec_t graph_end(cudaStream_t s) {
-    cudaGraph_t graph = nullptr;
-    cudaGraphExec_t exec = nullptr;
-    CK(cudaStreamEndCapture(s, &graph));
-    CK(cudaGraphInstantiate(&exec, graph, 0));
-    CK(cudaGraphDestroy(graph));
-    own(&Owned::graphs, exec);
-    return exec;
-}
-/// A graph the pointers it was captured on no longer hold for, freed now (or once a launch of it is through)
-void graph_drop(cudaGraphExec_t g) {
-    if (g == nullptr) return;
-    if (g_owned != nullptr) {
-        std::lock_guard<std::mutex> lk(g_owned->mu);
-        g_owned->graphs.erase(std::remove(g_owned->graphs.begin(), g_owned->graphs.end(), g), g_owned->graphs.end());
-    }
-    (void) cudaGraphExecDestroy(g);
-}
+#define CK(x) LAMINA_CK(x)
+using lamina::core::dalloc;
+using lamina::core::dfree;
+using lamina::core::dzero;
+using lamina::core::event_new;
+using lamina::core::Fatal;
+using lamina::core::g_owned;
+using lamina::core::graph_drop;
+using lamina::core::graph_end;
+using lamina::core::hfree;
+using lamina::core::hmalloc;
+using lamina::core::hzero;
+using lamina::core::soft;
+using lamina::core::stream_new;
 /// An environment switch set to a number other than 0
 bool env_on(const char* name) {
     const char* v = std::getenv(name);
@@ -861,10 +787,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             }
             m.in_ram = true;
             if (m.arena_bytes > 0) {
-                if (cudaHostAlloc((void**) &m.arena, m.arena_bytes, cudaHostAllocPortable) == cudaSuccess) {
-                    own(&Owned::pinned, m.arena);
-                } else {
-                    (void) cudaGetLastError();
+                if (!soft(hmalloc(&m.arena, m.arena_bytes, cudaHostAllocPortable))) {
                     m.arena_heap.reset(new (std::nothrow) uint8_t[m.arena_bytes]);
                     m.arena = m.arena_heap.get();
                     if (m.arena == nullptr) {
@@ -981,11 +904,9 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     // the experts: every one in a slot of its layer, read in large pieces through a pinned stage
     uint8_t* stage = nullptr;
     const bool stage_pinned =
-        cudaHostAlloc((void**) &stage, stage_max, m.sat_dev >= 0 ? cudaHostAllocPortable : cudaHostAllocDefault) ==
-        cudaSuccess;
+        soft(cudaHostAlloc((void**) &stage, stage_max, m.sat_dev >= 0 ? cudaHostAllocPortable : cudaHostAllocDefault));
     std::unique_ptr<uint8_t[]> stage_heap;
     if (!stage_pinned) {
-        (void) cudaGetLastError();
         stage_heap.reset(new (std::nothrow) uint8_t[stage_max]);
         stage = stage_heap.get();
         if (!stage) {
@@ -2144,7 +2065,7 @@ struct Engine {
         R.logits = dzero<float>(Th * (size_t) g.n_vocab);
         R.pick = dzero<int32_t>(2 * Th);
         R.bad = R.pick + Th;
-        R.pick_h = halloc<int32_t>(2 * Th);
+        R.pick_h = hzero<int32_t>(2 * Th);
         if (sp != nullptr) {
             const size_t L = (size_t) sp->n_layer, KVs = (size_t) sp->HK * (size_t) sp->D;
             R.f_fused = dzero<float>((L + 1) * T * N);
@@ -2152,7 +2073,7 @@ struct Engine {
             R.f_vc = dzero<float>(T * KVs);
             R.f_kn = dzero<float>(T * KVs);
             R.f_cs = dzero<float>(T * (size_t) sp->D);
-            R.f_cs_h = halloc<float>(T * (size_t) sp->D);
+            R.f_cs_h = hzero<float>(T * (size_t) sp->D);
             if (batch) R.f_q = dzero<uint8_t>(MMQ::q8_bytes((int64_t) T, (int64_t) N));
             else R.f_img = dzero<ik::Q81>(L * T * (N / 32));
         }
@@ -2160,8 +2081,8 @@ struct Engine {
         R.pos_d = R.step_d;
         R.live_d = R.step_d + T;
         R.dyn_d = R.step_d + T + 1;   // {the first cell in use, the stretches in use, the first one's number}
-        R.emb_h = halloc<float>(T * N);
-        R.step_h = halloc<int32_t>(T + 4);
+        R.emb_h = hzero<float>(T * N);
+        R.step_h = hzero<int32_t>(T + 4);
         R.ns = dzero<float>(T * H);
         if (batch) R.spart = dzero<float>((size_t) seg_cap() * H * (D_ + 2));
         if (batch) R.qh = dzero<__half>(T * Q);   // (a chunk's q as halves for the cell cards)
@@ -2202,16 +2123,16 @@ struct Engine {
         R.bounds = dzero<int32_t>(E + 1);
         R.wk = dzero<uint8_t>((T + (size_t) g.n_swa) * cell_bytes);
         R.wv = dzero<uint8_t>((T + (size_t) g.n_swa) * cell_bytes);
-        R.ids_h = halloc<int32_t>(n_ent);
-        R.ent_row_h = halloc<int32_t>(n_ent);
-        R.ent_dst_h = halloc<int32_t>(n_ent);
-        R.ent_exp_h = halloc<int32_t>(n_ent);
-        R.bounds_h = halloc<int32_t>(E + 1);
+        R.ids_h = hzero<int32_t>(n_ent);
+        R.ent_row_h = hzero<int32_t>(n_ent);
+        R.ent_dst_h = hzero<int32_t>(n_ent);
+        R.ent_exp_h = hzero<int32_t>(n_ent);
+        R.bounds_h = hzero<int32_t>(E + 1);
         const size_t n_tiles = n_ent / (size_t) K::kNvfp4GemmEntries + E;
         R.pptr = dzero<unsigned long long>(E);
-        R.pptr_h = halloc<unsigned long long>(E);
+        R.pptr_h = hzero<unsigned long long>(E);
         R.tiles = dzero<int32_t>(n_tiles);
-        R.tiles_h = halloc<int32_t>(n_tiles);
+        R.tiles_h = hzero<int32_t>(n_tiles);
         R.grp = dzero<int>((size_t) ik::kExpertMax + (size_t) E * (size_t) ((T + 31) / 32));
     }
 
@@ -2667,12 +2588,8 @@ struct Engine {
             for (const auto& [dev, list] : by)
                 if (xfer_pin.count(dev) == 0) {
                     void* p = nullptr;
-                    if (cudaHostAlloc(&p, 2 * kXferHalf, cudaHostAllocPortable) != cudaSuccess) {
-                        (void) cudaGetLastError();
-                        p = nullptr;
-                    }
+                    if (!soft(hmalloc(&p, 2 * kXferHalf, cudaHostAllocPortable))) p = nullptr;
                     xfer_pin[dev] = static_cast<uint8_t*>(p);
-                    if (p != nullptr) own(&Owned::pinned, p);
                 }
         std::atomic<bool> ok{true};
         auto work = [&](int dev, const std::vector<const Xfer*>& list, uint8_t* pin) {
@@ -2684,10 +2601,7 @@ struct Engine {
                                                       // before the host fills it again)
             if (pin != nullptr)
                 for (cudaEvent_t& e : ev)
-                    if (cudaEventCreateWithFlags(&e, cudaEventDisableTiming) != cudaSuccess) {
-                        (void) cudaGetLastError();
-                        pin = nullptr;
-                    }
+                    if (!soft(cudaEventCreateWithFlags(&e, cudaEventDisableTiming))) pin = nullptr;
             for (const Xfer* j : list) {
                 if (pin == nullptr) {   // (pageable: the copy holds this thread)
                     if (!soft(j->to_host ? cudaMemcpyAsync(j->h, j->d, j->n, cudaMemcpyDeviceToHost, j->s)
@@ -3079,15 +2993,8 @@ struct Engine {
             // (kept when the chunk shrinks: their pages are most of a resize's time; the way back is the stages')
             auto regrow = [&](float*& q, int& have, int want) {
                 if (want <= have) return;
-                if (q != nullptr) {
-                    if (g_owned) {
-                        const std::lock_guard<std::mutex> lk(g_owned->mu);
-                        g_owned->pinned.erase(std::remove(g_owned->pinned.begin(), g_owned->pinned.end(), (void*) q),
-                                              g_owned->pinned.end());
-                    }
-                    CK(cudaFreeHost(q));
-                }
-                q = halloc<float>((size_t) carry_n * (size_t) want * (size_t) m->g.n_embd);
+                if (q != nullptr) CK(hfree(q));
+                q = hzero<float>((size_t) carry_n * (size_t) want * (size_t) m->g.n_embd);
                 have = want;
             };
             regrow(sat->cpin, sat->carry_rows, rows);
@@ -3128,18 +3035,8 @@ struct Engine {
     }
     /// A card's chunk buffers (VRAM and pinned memory, the current card's) out of the run's lists, back to the driver
     static void bufs_free(std::vector<void*>& dev, std::vector<void*>& pin) {
-        if (g_owned) {
-            std::lock_guard<std::mutex> lk(g_owned->mu);
-            auto drop = [](std::vector<void*>& all, const std::vector<void*>& gone) {
-                all.erase(std::remove_if(all.begin(), all.end(),
-                                         [&](void* q) { return std::find(gone.begin(), gone.end(), q) != gone.end(); }),
-                          all.end());
-            };
-            drop(g_owned->dev, dev);
-            drop(g_owned->pinned, pin);
-        }
-        for (void* q : dev) CK(cudaFree(q));
-        for (void* q : pin) CK(cudaFreeHost(q));
+        for (void* q : dev) CK(dfree(q));
+        for (void* q : pin) CK(hfree(q));
         dev.clear();
         pin.clear();
     }
@@ -3345,12 +3242,11 @@ struct Engine {
         if (nan_probe) nan_at = dzero<long long>(1);
         const Geometry& g = m->g;
         const size_t N = (size_t) g.n_embd, D_ = (size_t) g.head_dim, C = (size_t) g.n_conv;
-        CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
-        own(&Owned::streams, st);
+        st = stream_new();
         CK(cudaGetDevice(&main_dev));
         cell_bytes = (size_t) g.cell_bytes(kv_q8);
         make_rows(D, kMaxT, false);
-        logits_h = halloc<float>((size_t) g.n_vocab);
+        logits_h = hzero<float>((size_t) g.n_vocab);
         il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));   // (the drafter's start
                                                                           // multiplies through the head)
         for (void*& b : il_att) b = dzero<uint8_t>(K::native_q8_1_il_bytes((int) g.n_embd, kMaxT));
@@ -3373,8 +3269,7 @@ struct Engine {
             const OnDev dv(sat->dev);
             for (cudaEvent_t* e : {&ev_took[0], &ev_took[1], &ev_back[0], &ev_back[1], &ev_q[1]}) *e = event_new();
             for (cudaEvent_t& ev : lag_ev[1]) ev = event_new();
-            CK(cudaStreamCreateWithFlags(&sat->st, cudaStreamNonBlocking));
-            own(&Owned::streams, sat->st);
+            sat->st = stream_new();
             sat->il_buf = dzero<uint8_t>(K::native_q8_1_il_bytes(kIlIn, kMaxT));
             for (void*& b : sat->il_att) b = dzero<uint8_t>(K::native_q8_1_il_bytes((int) g.n_embd, kMaxT));
             cudaDeviceProp prop{};
@@ -3409,7 +3304,7 @@ struct Engine {
         }
         if (sat) {
             sat->pack_main = dzero<float>((size_t) ik::kCarry * kMaxT * N);
-            sat->pin = halloc<float>((size_t) ik::kCarry * kMaxT * N);
+            sat->pin = hzero<float>((size_t) ik::kCarry * kMaxT * N);
             use_card(true);   // (a rows' start-up work goes to the current card's stream)
             make_rows(sat->D, kMaxT, false);
             use_card(false);
@@ -3448,12 +3343,12 @@ struct Engine {
                 heat[(size_t) m->ranked[r].first][(size_t) m->ranked[r].second] =
                     h0 * (1.f - (float) r / (float) m->ranked.size());
             n_held = m->n_fixed;
-            swap_h = halloc<int32_t>(2 * kSwaps);
+            swap_h = hzero<int32_t>(2 * kSwaps);
             pool = std::make_unique<C::ExpertPool>(cpu_threads);
             const size_t n_ent = (size_t) kMaxT * (size_t) g.top_k;
-            moe_h = halloc<int32_t>(n_ent + (size_t) kMaxT * N);
-            bell_h = halloc<int32_t>(1);
-            rows_h = halloc<float>(n_ent * N);
+            moe_h = hzero<int32_t>(n_ent + (size_t) kMaxT * N);
+            bell_h = hzero<int32_t>(1);
+            rows_h = hzero<float>(n_ent * N);
             D.crows = dzero<float>(n_ent * N);
             size_t xbytes = 0;   // (every expert with a RAM copy: one on the card of the RAM experts too)
             for (const Layer& L : m->layers)
@@ -3477,8 +3372,7 @@ struct Engine {
                 xc = std::make_unique<XCard>();
                 xc->dev = expert_gpu;
                 const OnDev dv(xc->dev);
-                CK(cudaStreamCreateWithFlags(&xc->st, cudaStreamNonBlocking));
-                own(&Owned::streams, xc->st);
+                xc->st = stream_new();
                 xc->ev = event_new();
                 const size_t bytes = xbytes;
                 uint8_t* const at = dalloc<uint8_t>(bytes + kWeightPad);
@@ -3494,9 +3388,9 @@ struct Engine {
                     }
                 }
                 CK(cudaMemset(at + bytes, 0, kWeightPad));
-                xc->ptr_h = halloc<unsigned long long>(n_ent);
+                xc->ptr_h = hzero<unsigned long long>(n_ent);
                 xc->ptr_d = dzero<unsigned long long>(n_ent);
-                xc->tab_h = halloc<int32_t>(3 * n_ent + 2);
+                xc->tab_h = hzero<int32_t>(3 * n_ent + 2);
                 xc->tab_d = dzero<int32_t>(3 * n_ent + 2);
                 xc->x_d = dzero<float>((size_t) kMaxT * N);
                 xc->xq_d = dzero<uint8_t>((size_t) kMaxT * (N / 32) * 36);
@@ -3575,13 +3469,12 @@ struct Engine {
                         std::fprintf(stderr, "lamina: the address range of a chunk's experts could not be reserved\n");
                         throw Fatal{1};
                     }
-                    CK(cudaStreamCreateWithFlags(&st_up, cudaStreamNonBlocking));
-                    own(&Owned::streams, st_up);
+                    st_up = stream_new();
                     for (cudaEvent_t& e : up_ev) e = event_new(cudaEventDefault);
                     rates();
-                    nrm_p = halloc<float>((size_t) chunk_most() * N);
-                    crow_p = halloc<float>((size_t) kChunkCpu * N);
-                    cdst_p = halloc<int32_t>(kChunkCpu);
+                    nrm_p = hzero<float>((size_t) chunk_most() * N);
+                    crow_p = hzero<float>((size_t) kChunkCpu * N);
+                    cdst_p = hzero<int32_t>(kChunkCpu);
                     x_rows = dzero<float>((size_t) kChunkCpu * N);
                     x_dst = dzero<int32_t>(kChunkCpu);
                     cacts.resize((size_t) chunk_most() * C::kNativeActBytes);
@@ -3646,9 +3539,8 @@ struct Engine {
                 for (cudaEvent_t& e : b.ev_conv) e = event_new();
             };
             snap = dalloc<uint8_t>(state_bytes());
-            snap_via = halloc<uint8_t>(state_bytes());
-            CK(cudaStreamCreateWithFlags(&st_snap, cudaStreamNonBlocking));
-            own(&Owned::streams, st_snap);
+            snap_via = hzero<uint8_t>(state_bytes());
+            st_snap = stream_new();
             ev_snap = event_new();
             ev_landed = event_new();
             CK(cudaEventRecord(ev_landed, st_snap));
@@ -3658,8 +3550,7 @@ struct Engine {
                 const size_t per = 2 * (size_t) ring_cap * cell_bytes;
                 sat->snap = dalloc<uint8_t>((size_t) (sat->w1 - sat->w0) * per +
                                             (size_t) (sat->v1 - sat->v0) * conv_floats * 4);
-                CK(cudaStreamCreateWithFlags(&sat->st_snap, cudaStreamNonBlocking));
-                own(&Owned::streams, sat->st_snap);
+                sat->st_snap = stream_new();
                 sat->ev_snap = event_new();
                 sat->ev_landed = event_new();
                 CK(cudaEventRecord(sat->ev_landed, sat->st_snap));
@@ -3853,8 +3744,8 @@ struct Engine {
             for (const Card& c : cards)
                 card_lock(c);   // (every lock is known by now: none is added after the first of these)
             const size_t rows = (size_t) kMaxT * (size_t) g.n_head;
-            xq_h = halloc<float>(rows * D_);
-            xs_h = halloc<float>(rows);
+            xq_h = hzero<float>(rows * D_);
+            xs_h = hzero<float>(rows);
             D.rpart = dzero<float>(cards.size() * rows * (D_ + 2));
             if (sat) {
                 const OnDev dv(sat->dev);
@@ -3862,14 +3753,14 @@ struct Engine {
             }
             if (prefill > 0) {   // a chunk's rows (the cards' and the pinned ones for the most a chunk grows to)
                 const size_t prow = (size_t) chunk_most() * (size_t) g.n_head;
-                pq_h = halloc<float>(prow * D_);
-                ps_h = halloc<float>(prow);
+                pq_h = hzero<float>(prow * D_);
+                ps_h = hzero<float>(prow);
                 // (a staged run's second driver: its own, for the rows a staged chunk has at most)
                 const size_t srow =
                     chunk_sets() > 1 ? (size_t) std::min(chunk_most(), kStageRows) * (size_t) g.n_head : 0;
                 if (srow > 0) {
-                    pq_h2 = halloc<float>(srow * D_);
-                    ps_h2 = halloc<float>(srow);
+                    pq_h2 = hzero<float>(srow * D_);
+                    ps_h2 = hzero<float>(srow);
                 }
                 chunk_parts(P, ck_dev);
                 if (P2.cap > 0) chunk_parts(P2, ck_dev);
@@ -3900,7 +3791,7 @@ struct Engine {
                 }
                 CK(cudaSetDevice(main_dev));
             }
-            for (uint8_t*& h : stage_h) h = halloc<uint8_t>((size_t) unit * cell_bytes);
+            for (uint8_t*& h : stage_h) h = hzero<uint8_t>((size_t) unit * cell_bytes);
         }
         mapped = grow ? 0 : ctx;
         if (!ensure(std::min<int64_t>(ctx, kGrow))) {
@@ -6386,10 +6277,10 @@ struct Engine {
         b.n_step = 2 * (int) T + 11 + 3 * s.n_layer;
         b.step = dzero<int32_t>((size_t) b.n_step);
         b.out = dzero<int32_t>(2 * T);
-        b.emb_h = halloc<float>(N);
-        b.cs_h = halloc<float>(T * (size_t) s.D);
-        b.step_h = halloc<int32_t>((size_t) b.n_step);
-        b.out_h = halloc<int32_t>(2 * T);
+        b.emb_h = hzero<float>(N);
+        b.cs_h = hzero<float>(T * (size_t) s.D);
+        b.step_h = hzero<int32_t>((size_t) b.n_step);
+        b.out_h = hzero<int32_t>(2 * T);
         // a block's rows before its layers: the token's row comes into the first, the others are the mask's
         for (size_t t = 1; t < T; ++t)
             CK(cudaMemcpy(b.x0 + t * N, s.mask + (s.mask_rows > 1 ? (t - 1) * N : 0), N * 4, cudaMemcpyDeviceToDevice));
@@ -9080,25 +8971,9 @@ int run_engine(int argc, char** argv, bool check_only) {
 }   // namespace
 
 int lamina::inkling2::run(int argc, char** argv) {
-    Owned owned;
-    g_owned = &owned;
-    struct Unset {
-        ~Unset() { g_owned = nullptr; }
-    } unset;
-    try {
-        return run_engine(argc, argv, false);
-    } catch (const Fatal& f) {
-        return f.code;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "lamina: %s\n", e.what());
-        return 1;
-    }
+    return lamina::core::run_owned([&] { return run_engine(argc, argv, false); });
 }
 
 int lamina::inkling2::check_args(int argc, char** argv) {
-    try {
-        return run_engine(argc, argv, true);
-    } catch (const Fatal& f) {
-        return f.code;
-    }
+    return lamina::core::check_owned([&] { return run_engine(argc, argv, true); });
 }

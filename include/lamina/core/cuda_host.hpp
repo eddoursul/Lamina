@@ -1,5 +1,5 @@
-// include/lamina/core/cuda_host.hpp - host-side helpers the engine's parts share: a GPU current for one scope, mapped
-// host memory, a bump allocator over one buffer, milliseconds on the steady clock.
+// include/lamina/core/cuda_host.hpp - host-side helpers the engine's parts share: a GPU current for one scope, a CUDA
+// call that may fail, mapped host memory, a bump allocator over one buffer, milliseconds on the steady clock.
 #pragma once
 
 #include <cuda_runtime.h>
@@ -24,6 +24,13 @@ struct DeviceScope {
     DeviceScope(const DeviceScope&) = delete;
     DeviceScope& operator=(const DeviceScope&) = delete;
 };
+
+/// A CUDA call that may fail without ending the run (a checkpoint's copy): false then, the error cleared
+inline bool soft(cudaError_t e) {
+    if (e == cudaSuccess) return true;
+    (void) cudaGetLastError();
+    return false;
+}
 
 /// zeroed host memory the GPU maps: the host pointer in *h, the device's in *d
 inline bool mapped(size_t bytes, void** h, void** d, unsigned flags = cudaHostAllocMapped) {

@@ -23,6 +23,7 @@
 #include "lamina/core/disk_tier.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/model_check.hpp"
+#include "lamina/core/run_owned.hpp"
 #include "lamina/core/vmm.hpp"
 #include "lamina/hy4/engine.hpp"
 #include "lamina/hy4/geometry.hpp"
@@ -79,71 +80,18 @@ namespace C = lamina::kernels::cpu;
 using lamina::core::ms_since;
 using Clock = std::chrono::steady_clock;
 
-#define CK(x)                                                                                                          \
-    do {                                                                                                               \
-        cudaError_t e_ = (x);                                                                                          \
-        if (e_ != cudaSuccess) {                                                                                       \
-            std::fprintf(stderr, "lamina: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__);   \
-            throw Fatal{1};                                                                                            \
-        }                                                                                                              \
-    } while (0)
-
-/// The run's end on an error: its message is printed, run() returns `code` (the engine may run in lamina's
-/// process, which an exit would end).
-struct Fatal {
-    int code;
-};
-
-/// What a run allocates, freed when it ends: device, pinned and heap memory, streams, events.
-struct Owned {
-    std::mutex mu;
-    std::vector<void*> dev, pinned, heap;
-    std::vector<cudaStream_t> streams;
-    std::vector<cudaEvent_t> events;
-    std::vector<cudaGraphExec_t> graphs;
-    ~Owned() {
-        cudaDeviceSynchronize();
-        for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
-        for (cudaEvent_t e : events) cudaEventDestroy(e);
-        for (cudaStream_t st : streams) cudaStreamDestroy(st);
-        for (void* d : dev) cudaFree(d);
-        for (void* h : pinned) cudaFreeHost(h);
-        for (void* h : heap) std::free(h);
-        (void) cudaGetLastError();
-    }
-};
-Owned* g_owned = nullptr;
-template <class V, class T> void own(std::vector<V> Owned::* list, T v) {
-    if (g_owned == nullptr) return;
-    std::lock_guard<std::mutex> lk(g_owned->mu);
-    (g_owned->*list).push_back((V) v);
-}
-template <class T> T* dalloc(size_t n) {
-    void* p = nullptr;
-    CK(cudaMalloc(&p, std::max<size_t>(n * sizeof(T), 256)));
-    own(&Owned::dev, p);
-    return (T*) p;
-}
-template <class T> T* halloc(size_t n) {   // pinned
-    void* p = nullptr;
-    CK(cudaHostAlloc(&p, std::max<size_t>(n * sizeof(T), 256), cudaHostAllocPortable));   // the tiers copy from it
-    own(&Owned::pinned, p);
-    return (T*) p;
-}
-/// pinned host memory the GPU reads through the mapping: the host pointer, the device's in *dev
-template <class T> T* hmapped(size_t n, T** dev) {
-    void* p = nullptr;
-    CK(cudaHostAlloc(&p, std::max<size_t>(n * sizeof(T), 256), cudaHostAllocMapped | cudaHostAllocPortable));
-    own(&Owned::pinned, p);
-    std::memset(p, 0, std::max<size_t>(n * sizeof(T), 256));
-    CK(cudaHostGetDevicePointer((void**) dev, p, 0));
-    return (T*) p;
-}
-void* heap_new(size_t n) {
-    void* h = std::malloc(n);
-    if (h != nullptr) own(&Owned::heap, h);
-    return h;
-}
+#define CK(x) LAMINA_CK(x)
+using lamina::core::dalloc;
+using lamina::core::dmalloc;
+using lamina::core::event_new;
+using lamina::core::Fatal;
+using lamina::core::graph_end;
+using lamina::core::halloc;
+using lamina::core::heap_new;
+using lamina::core::hmalloc;
+using lamina::core::hmapped;
+using lamina::core::soft;
+using lamina::core::stream_new;
 
 constexpr int kMaxT = 8;                       // rows a forward takes at most (native_mmvq's columns)
 constexpr int kTail = 16;                      // the indexer's per-cell value / gate rows kept (four groups of 4)
@@ -684,11 +632,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         auto pin = [&](size_t bytes) -> uint8_t* {   // pinned within the budget, else null
             void* h = nullptr;
             if (bytes == 0 || (double) (pinned + bytes) > pin_gib * (double) (1ull << 30)) return nullptr;
-            if (cudaHostAlloc(&h, bytes, cudaHostAllocPortable) != cudaSuccess) {
-                (void) cudaGetLastError();
-                return nullptr;
-            }
-            own(&Owned::pinned, h);
+            if (!soft(hmalloc(&h, bytes, cudaHostAllocPortable))) return nullptr;
             pinned += bytes;
             return (uint8_t*) h;
         };
@@ -993,7 +937,7 @@ struct CopyQueue {
     /// dst <- src in pieces on the queue's stream
     bool copy(uint8_t* dst, const uint8_t* src, size_t n) {
         for (size_t o = 0; o < n; o += piece)
-            if (cudaMemcpyAsync(dst + o, src + o, std::min(piece, n - o), cudaMemcpyHostToDevice, st) != cudaSuccess)
+            if (!soft(cudaMemcpyAsync(dst + o, src + o, std::min(piece, n - o), cudaMemcpyHostToDevice, st)))
                 return false;
         return true;
     }
@@ -1027,11 +971,9 @@ struct CopyQueue {
         (void) cudaSetDevice(dev);
         if (bounce)
             for (int i = 0; i < kStage; ++i)
-                if (cudaHostAlloc((void**) &stage[i], stage_bytes, cudaHostAllocPortable) != cudaSuccess ||
-                    cudaEventCreateWithFlags(&staged[i], cudaEventDisableTiming) != cudaSuccess) {
-                    (void) cudaGetLastError();
+                if (!soft(cudaHostAlloc((void**) &stage[i], stage_bytes, cudaHostAllocPortable)) ||
+                    !soft(cudaEventCreateWithFlags(&staged[i], cudaEventDisableTiming)))
                     bounce = false;
-                }
         for (;;) {
             SlotMove* m = nullptr;
             {
@@ -1048,18 +990,13 @@ struct CopyQueue {
                 (void) cudaEventSynchronize(staged[b]);   // its last copy gone
                 std::memcpy(stage[b], m->src, m->bytes);
                 src = stage[b];
-                if (!copy(m->dst, src, m->bytes) || cudaEventRecord(staged[b], st) != cudaSuccess ||
-                    cudaEventRecord(m->ev, st) != cudaSuccess) {
-                    (void) cudaGetLastError();
+                if (!copy(m->dst, src, m->bytes) || !soft(cudaEventRecord(staged[b], st)) ||
+                    !soft(cudaEventRecord(m->ev, st)))
                     m->ok.store(false);
-                }
                 m->issued.store(true, std::memory_order_release);
                 continue;
             }
-            if (!copy(m->dst, src, m->bytes) || cudaEventRecord(m->ev, st) != cudaSuccess) {
-                (void) cudaGetLastError();
-                m->ok.store(false);
-            }
+            if (!copy(m->dst, src, m->bytes) || !soft(cudaEventRecord(m->ev, st))) m->ok.store(false);
             m->issued.store(true, std::memory_order_release);
         }
     }
@@ -1255,19 +1192,14 @@ struct Engine {
         const auto& g = m->g;
         ctx = (max_ctx + g.idx_pool - 1) / g.idx_pool * g.idx_pool;
         ring = g.n_swa + kMaxT;
-        CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
-        own(&Owned::streams, st);
-        CK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
-        own(&Owned::events, ev);
-        CK(cudaEventCreateWithFlags(&ev_mtp, cudaEventDisableTiming));
-        own(&Owned::events, ev_mtp);
+        st = stream_new();
+        ev = event_new();
+        ev_mtp = event_new();
         for (cudaStream_t* b : {&sb1, &sb2}) {
-            CK(cudaStreamCreateWithFlags(b, cudaStreamNonBlocking));
-            own(&Owned::streams, *b);
+            *b = stream_new();
         }
         for (cudaEvent_t* e : {&ev_fork, &ev_j1, &ev_j2, &ev_q}) {
-            CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
-            own(&Owned::events, *e);
+            *e = event_new();
         }
         ev_moe = ev;
         const size_t T = kMaxT, N = (size_t) g.n_embd, hc = (size_t) g.hc;
@@ -2089,17 +2021,13 @@ struct Engine {
             const size_t kr = l.kv_row(), kb = (size_t) (hi - lo) * kr;
             uint8_t* const dk = l.kv + (size_t) lo * kr;
             uint8_t* const dp = reinterpret_cast<uint8_t*>(l.pooled) + (size_t) g0 * pk;
-            if (kb > 0)
-                ok = ok && cudaMemcpyAsync(to_host ? host : dk, to_host ? dk : host, kb, kind, st) == cudaSuccess;
+            if (kb > 0) ok = ok && soft(cudaMemcpyAsync(to_host ? host : dk, to_host ? dk : host, kb, kind, st));
             host += (size_t) (held - lo) * kr;
             if (gn > 0)
-                ok = ok && cudaMemcpyAsync(to_host ? host : dp, to_host ? dp : host, (size_t) gn * pk, kind, st) ==
-                               cudaSuccess;
+                ok = ok && soft(cudaMemcpyAsync(to_host ? host : dp, to_host ? dp : host, (size_t) gn * pk, kind, st));
             host += (size_t) gheld * pk;
         }
-        ok = cudaStreamSynchronize(st) == cudaSuccess && ok;
-        if (!ok) (void) cudaGetLastError();
-        return ok;
+        return soft(cudaStreamSynchronize(st)) && ok;
     }
     uint64_t cells_bytes(int64_t lo, int64_t held) const {
         const int64_t per = m->g.idx_pool;
@@ -2583,12 +2511,7 @@ struct Engine {
         if (it == graphs.end()) {
             CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
             enqueue_segment(s, T);
-            cudaGraph_t gr = nullptr;
-            CK(cudaStreamEndCapture(st, &gr));
-            cudaGraphExec_t ex = nullptr;
-            CK(cudaGraphInstantiate(&ex, gr, 0));
-            cudaGraphDestroy(gr);
-            own(&Owned::graphs, ex);
+            cudaGraphExec_t ex = graph_end(st);
             it = graphs.emplace(key, ex).first;
         }
         CK(cudaGraphLaunch(it->second, st));
@@ -3109,12 +3032,7 @@ struct Engine {
             if (it == dfly_graphs.end()) {
                 CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
                 dfly_block(W, false);
-                cudaGraph_t gr = nullptr;
-                CK(cudaStreamEndCapture(st, &gr));
-                cudaGraphExec_t ex = nullptr;
-                CK(cudaGraphInstantiate(&ex, gr, 0));
-                cudaGraphDestroy(gr);
-                own(&Owned::graphs, ex);
+                cudaGraphExec_t ex = graph_end(st);
                 it = dfly_graphs.emplace(W, ex).first;
             }
             CK(cudaGraphLaunch(it->second, st));
@@ -3429,10 +3347,8 @@ struct Engine {
             t.dev = d;
             CK(cudaGetDeviceProperties(&pr, d));
             t.name = pr.name;
-            CK(cudaStreamCreateWithFlags(&t.st, cudaStreamNonBlocking));
-            own(&Owned::streams, t.st);
-            CK(cudaEventCreateWithFlags(&t.ev, cudaEventDisableTiming));
-            own(&Owned::events, t.ev);
+            t.st = stream_new();
+            t.ev = event_new();
             const size_t n_ent = (size_t) kMaxT * (size_t) g.top_k;
             t.ids_d = dalloc<int32_t>(n_ent);
             t.rin_d = dalloc<float>((size_t) kMaxT * (size_t) g.n_latent);
@@ -3457,8 +3373,7 @@ struct Engine {
         }
         for (Gpu& gp : gpus) {   // the slots' copies: a stream and an issuing thread a GPU
             lamina::core::DeviceScope ds(gp.dev, main_dev, gp.dev != main_dev);
-            CK(cudaStreamCreateWithFlags(&gp.cst, cudaStreamNonBlocking));
-            own(&Owned::streams, gp.cst);
+            gp.cst = stream_new();
             size_t blob = 0;
             for (const Layer& l : m->layers)
                 if (!l.dense) blob = std::max(blob, l.fmt.bytes);
@@ -3825,8 +3740,7 @@ struct Engine {
         if (gp.free_ev.empty()) {
             lamina::core::DeviceScope ds(gp.dev, main_dev, gi > 0);
             cudaEvent_t made = nullptr;
-            CK(cudaEventCreateWithFlags(&made, cudaEventDisableTiming));
-            own(&Owned::events, made);
+            made = event_new();
             gp.free_ev.push_back(made);
         }
         gp.moves.emplace_back();
@@ -3944,8 +3858,7 @@ struct Engine {
             if (it == gp.door_graphs.end()) {
                 while ((int) gp.door_ev.size() < n_seg) {
                     cudaEvent_t e = nullptr;
-                    CK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
-                    own(&Owned::events, e);
+                    e = event_new();
                     gp.door_ev.push_back(e);
                 }
                 CK(cudaStreamBeginCapture(gp.st, cudaStreamCaptureModeThreadLocal));
@@ -3954,12 +3867,7 @@ struct Engine {
                     tier_enqueue(gp, (int) gi, m->layers[(size_t) moe_layers[(size_t) s - 1]], T,
                                  gp.door_ev[(size_t) s]);
                 }
-                cudaGraph_t gr = nullptr;
-                CK(cudaStreamEndCapture(gp.st, &gr));
-                cudaGraphExec_t ex = nullptr;
-                CK(cudaGraphInstantiate(&ex, gr, 0));
-                cudaGraphDestroy(gr);
-                own(&Owned::graphs, ex);
+                cudaGraphExec_t ex = graph_end(gp.st);
                 it = gp.door_graphs.emplace(T, ex).first;
             }
             CK(cudaGraphLaunch(it->second, gp.st));
@@ -3977,12 +3885,7 @@ struct Engine {
         if (it == gp.graphs.end()) {
             CK(cudaStreamBeginCapture(gp.st, cudaStreamCaptureModeThreadLocal));
             tier_enqueue(gp, gi, l, T);
-            cudaGraph_t gr = nullptr;
-            CK(cudaStreamEndCapture(gp.st, &gr));
-            cudaGraphExec_t ex = nullptr;
-            CK(cudaGraphInstantiate(&ex, gr, 0));
-            cudaGraphDestroy(gr);
-            own(&Owned::graphs, ex);
+            cudaGraphExec_t ex = graph_end(gp.st);
             it = gp.graphs.emplace(key, ex).first;
         }
         CK(cudaGraphLaunch(it->second, gp.st));
@@ -4079,8 +3982,7 @@ struct Engine {
             lamina::core::DeviceScope ds(gpus[gi].dev, main_dev, gi > 0);
             int lo = 0, hi = 0;
             CK(cudaDeviceGetStreamPriorityRange(&lo, &hi));
-            CK(cudaStreamCreateWithPriority(&warm_st[gi], cudaStreamNonBlocking, lo));
-            own(&Owned::streams, warm_st[gi]);
+            warm_st[gi] = stream_new(cudaStreamNonBlocking, lo);
             hy4k::k_keep<<<1, 32, 0, warm_st[gi]>>>(1000ull);   // its first launch's setup now too
         }
     }
@@ -4330,8 +4232,7 @@ struct Prompt {
         CK(cudaGetDevice(&main_dev));
         st = E.st;
         for (cudaEvent_t* e : {&routed, &routed2}) {
-            CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
-            own(&Owned::events, *e);
+            *e = event_new();
         }
         const size_t T = (size_t) cap, N = (size_t) g.n_embd, hc = (size_t) g.hc, Ld = (size_t) g.n_latent,
                      F = (size_t) g.n_ff_exp, Ex = (size_t) g.n_expert, K = (size_t) g.top_k;
@@ -4447,14 +4348,11 @@ struct Prompt {
             if (i == 0) {
                 d.st = st;
             } else {
-                CK(cudaStreamCreateWithFlags(&d.st, cudaStreamNonBlocking));
-                own(&Owned::streams, d.st);
+                d.st = stream_new();
             }
-            CK(cudaStreamCreateWithFlags(&d.cst, cudaStreamNonBlocking));
-            own(&Owned::streams, d.cst);
+            d.cst = stream_new();
             for (cudaEvent_t* e : {&d.done, &d.done2, &d.copied[0], &d.copied[1], &d.used[0], &d.used[1]}) {
-                CK(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
-                own(&Owned::events, *e);
+                *e = event_new();
             }
             CK(cudaEventRecord(d.used[0], d.st));
             CK(cudaEventRecord(d.used[1], d.st));
@@ -4671,12 +4569,10 @@ struct Prompt {
         auto& v = E.chunk_snaps;
         while (v.size() > snap_devs.size()) {
             void* b = nullptr;
-            if (cudaMalloc(&b, snap_size) == cudaSuccess) {
-                own(&Owned::dev, b);
+            if (soft(dmalloc(&b, snap_size))) {
                 snap_devs.push_back(static_cast<uint8_t*>(b));
                 continue;
             }
-            (void) cudaGetLastError();
             const auto w = std::find_if(v.rbegin(), v.rend(), [](int64_t p) { return p % Engine::kSnapEvery != 0; });
             if (w == v.rend()) break;   // (init() made the multiples' buffers)
             v.erase(std::next(w).base());
@@ -6172,25 +6068,9 @@ int run_engine(int argc, char** argv, bool check_only) {
 }   // namespace
 
 int lamina::hy4::run(int argc, char** argv) {
-    Owned owned;
-    g_owned = &owned;
-    struct Unset {
-        ~Unset() { g_owned = nullptr; }
-    } unset;
-    try {
-        return run_engine(argc, argv, false);
-    } catch (const Fatal& f) {
-        return f.code;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "lamina: %s\n", e.what());
-        return 1;
-    }
+    return lamina::core::run_owned([&] { return run_engine(argc, argv, false); });
 }
 
 int lamina::hy4::check_args(int argc, char** argv) {
-    try {
-        return run_engine(argc, argv, true);
-    } catch (const Fatal& f) {
-        return f.code;
-    }
+    return lamina::core::check_owned([&] { return run_engine(argc, argv, true); });
 }

@@ -25,6 +25,7 @@
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/model_check.hpp"
 #include "lamina/core/prompt_cache.hpp"
+#include "lamina/core/run_owned.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
 #include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
@@ -79,85 +80,17 @@ namespace {
 namespace K = lamina::kernels;
 namespace MMQ = lamina::prefill::mmq;
 
-#define CK(x)                                                                                                          \
-    do {                                                                                                               \
-        cudaError_t e_ = (x);                                                                                          \
-        if (e_ != cudaSuccess) {                                                                                       \
-            std::fprintf(stderr, "lamina: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__);   \
-            throw Fatal{1};                                                                                            \
-        }                                                                                                              \
-    } while (0)
-
-/// The run's end on an error (CK's, a missing tensor's ...): its message is printed, run() returns `code`.  The engine
-/// may run in the server's process (lamina), which an exit would end.
-struct Fatal {
-    int code;
-};
-
-/// What a run allocates, freed when it ends (the server starts the engine again in its process after an unload):
-/// device, pinned and heap memory, streams, events and graphs, each recorded by the helpers below.  One run at a time
-/// per process.
-struct Owned {
-    std::mutex mu;
-    std::vector<void*> dev, pinned, heap;
-    std::vector<cudaStream_t> streams;
-    std::vector<cudaEvent_t> events;
-    std::vector<cudaGraphExec_t> graphs;
-    ~Owned() {
-        cudaDeviceSynchronize();
-        for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
-        for (cudaEvent_t e : events) cudaEventDestroy(e);
-        for (cudaStream_t st : streams) cudaStreamDestroy(st);
-        for (void* d : dev) cudaFree(d);
-        for (void* h : pinned) cudaFreeHost(h);
-        for (void* h : heap) std::free(h);
-        (void) cudaGetLastError();
-    }
-};
-Owned* g_owned = nullptr;
-template <class V, class T> void own(std::vector<V> Owned::* list, T v) {
-    if (g_owned == nullptr) return;
-    std::lock_guard<std::mutex> lk(g_owned->mu);
-    (g_owned->*list).push_back((V) v);
-}
-template <class T> cudaError_t dmalloc(T** p, size_t n) {
-    const cudaError_t e = cudaMalloc((void**) p, n);
-    if (e == cudaSuccess) own(&Owned::dev, (void*) *p);
-    return e;
-}
-template <class T> cudaError_t hmalloc(T** p, size_t n, unsigned flags) {
-    const cudaError_t e = cudaHostAlloc((void**) p, n, flags);
-    if (e == cudaSuccess) own(&Owned::pinned, (void*) *p);
-    return e;
-}
-cudaError_t dfree(void* p) {
-    if (g_owned != nullptr) {
-        std::lock_guard<std::mutex> lk(g_owned->mu);
-        auto& d = g_owned->dev;
-        d.erase(std::remove(d.begin(), d.end(), p), d.end());
-    }
-    return cudaFree(p);
-}
-cudaError_t stream_new(cudaStream_t* st, unsigned flags) {
-    const cudaError_t e = cudaStreamCreateWithFlags(st, flags);
-    if (e == cudaSuccess) own(&Owned::streams, *st);
-    return e;
-}
-cudaError_t event_new(cudaEvent_t* ev, unsigned flags) {
-    const cudaError_t e = cudaEventCreateWithFlags(ev, flags);
-    if (e == cudaSuccess) own(&Owned::events, *ev);
-    return e;
-}
-cudaError_t graph_new(cudaGraphExec_t* gx, cudaGraph_t graph) {
-    const cudaError_t e = cudaGraphInstantiate(gx, graph, 0);
-    if (e == cudaSuccess) own(&Owned::graphs, *gx);
-    return e;
-}
-void* heap_new(size_t n) {
-    void* h = std::malloc(n);
-    if (h != nullptr) own(&Owned::heap, h);
-    return h;
-}
+#define CK(x) LAMINA_CK(x)
+using lamina::core::dfree;
+using lamina::core::dmalloc;
+using lamina::core::dzero;
+using lamina::core::event_new;
+using lamina::core::Fatal;
+using lamina::core::graph_new;
+using lamina::core::heap_new;
+using lamina::core::hmalloc;
+using lamina::core::soft;
+using lamina::core::stream_new;
 
 using Clock = std::chrono::steady_clock;
 using lamina::core::ms_since;
@@ -1857,18 +1790,6 @@ void expert_blob(const Layer& L, int64_t e, uint8_t* dst) {
 }
 
 // ------------------------------------------------------------------------------------------------ the engine
-float* dalloc(size_t n) {
-    float* p = nullptr;
-    CK(dmalloc(&p, n * 4));
-    CK(cudaMemset(p, 0, n * 4));
-    return p;
-}
-template <class T> T* dalloc_t(size_t n) {
-    T* p = nullptr;
-    CK(dmalloc(&p, n * sizeof(T)));
-    CK(cudaMemset(p, 0, n * sizeof(T)));
-    return p;
-}
 
 /// A picture in a prompt: its first cell, its rows, and the hash the conversation cache compares it by.
 struct ImgKey {
@@ -2162,11 +2083,12 @@ struct Engine {
             if (L.attn) {
                 ss.conv.push_back(nullptr);
                 ss.S.push_back(nullptr);
-                ss.kc.push_back(here ? dalloc_t<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
-                ss.vc.push_back(here ? dalloc_t<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
+                ss.kc.push_back(here ? dzero<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
+                ss.vc.push_back(here ? dzero<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
             } else {
-                ss.conv.push_back(here ? dalloc(C * (g.ssm_d_conv - 1)) : nullptr);
-                ss.S.push_back(here ? dalloc((size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size) : nullptr);
+                ss.conv.push_back(here ? dzero<float>(C * (g.ssm_d_conv - 1)) : nullptr);
+                ss.S.push_back(here ? dzero<float>((size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size)
+                                    : nullptr);
                 ss.kc.push_back(nullptr);
                 ss.vc.push_back(nullptr);
             }
@@ -2175,10 +2097,10 @@ struct Engine {
             const bool here = lst == this;
             ss.conv.push_back(nullptr);
             ss.S.push_back(nullptr);
-            ss.kc.push_back(here ? dalloc_t<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
-            ss.vc.push_back(here ? dalloc_t<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
+            ss.kc.push_back(here ? dzero<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
+            ss.vc.push_back(here ? dzero<__half>((size_t) g.n_head_kv * ctx * m->kv_row() / 2) : nullptr);
         }
-        ss.hlast = dalloc((size_t) g.n_embd);
+        ss.hlast = dzero<float>((size_t) g.n_embd);
     }
 
     /// The current session: `i`'s state, cache and position become the engine's (conv / S / kc / vc / pos / hlast).
@@ -2224,33 +2146,33 @@ struct Engine {
                      FF = (size_t) g.n_ff;
         const int64_t FW = m->moe ? g.n_ff_shexp : g.n_ff;   // the shared expert's width, or the dense FFN's
         const size_t C = (size_t) g.ssm_conv_channels;
-        CK(stream_new(&st, cudaStreamNonBlocking));
-        x = dalloc(T * N);
-        h = dalloc(T * N);
-        y = dalloc(T * N);
-        hmain = dalloc(T * N);
-        qkv = dalloc(T * C);
-        hc = dalloc(T * C);
-        z = dalloc(T * g.ssm_value_dim);
-        alpha = dalloc(T * g.ssm_v_heads);
-        beta = dalloc(T * g.ssm_v_heads);
-        gdn_y = dalloc(T * g.ssm_value_dim);
-        qg = dalloc(T * 2 * g.n_head * g.head_dim);
-        kx = dalloc(T * g.n_head_kv * g.head_dim);
-        vx = dalloc(T * g.n_head_kv * g.head_dim);
-        q = dalloc(T * g.n_head * g.head_dim);
-        gate = dalloc(T * g.n_head * g.head_dim);
-        att = dalloc(T * g.n_head * g.head_dim);
-        logits_r = dalloc(T * (g.n_expert + 1));
-        eparts = dalloc(T * Kp * N);
-        moe_out = dalloc(T * N);
-        sg = dalloc(T * FW);
-        su = dalloc(T * FW);
-        shh = dalloc(T * FW);
-        sy = dalloc(T * N);
-        sgate = dalloc(T);
-        ewts = dalloc(T * Kp);
-        logits = dalloc((size_t) kVerify * g.n_vocab);
+        st = stream_new();
+        x = dzero<float>(T * N);
+        h = dzero<float>(T * N);
+        y = dzero<float>(T * N);
+        hmain = dzero<float>(T * N);
+        qkv = dzero<float>(T * C);
+        hc = dzero<float>(T * C);
+        z = dzero<float>(T * g.ssm_value_dim);
+        alpha = dzero<float>(T * g.ssm_v_heads);
+        beta = dzero<float>(T * g.ssm_v_heads);
+        gdn_y = dzero<float>(T * g.ssm_value_dim);
+        qg = dzero<float>(T * 2 * g.n_head * g.head_dim);
+        kx = dzero<float>(T * g.n_head_kv * g.head_dim);
+        vx = dzero<float>(T * g.n_head_kv * g.head_dim);
+        q = dzero<float>(T * g.n_head * g.head_dim);
+        gate = dzero<float>(T * g.n_head * g.head_dim);
+        att = dzero<float>(T * g.n_head * g.head_dim);
+        logits_r = dzero<float>(T * (g.n_expert + 1));
+        eparts = dzero<float>(T * Kp * N);
+        moe_out = dzero<float>(T * N);
+        sg = dzero<float>(T * FW);
+        su = dzero<float>(T * FW);
+        shh = dzero<float>(T * FW);
+        sy = dzero<float>(T * N);
+        sgate = dzero<float>(T);
+        ewts = dzero<float>(T * Kp);
+        logits = dzero<float>((size_t) kVerify * g.n_vocab);
         const int max_in = (int) std::max<int64_t>({2 * g.n_embd, g.ssm_value_dim, g.n_head * g.head_dim, FW});
         CK(dmalloc(&q8, K::native_q8_1_bytes(max_in, 1) * T));
         CK(dmalloc(&xq, K::native_q8_1_bytes((int) N, 1) * T));
@@ -2262,10 +2184,10 @@ struct Engine {
                                      &L.sh_down, &L.ffn_gate, &L.ffn_up, &L.ffn_down})
                     il_quant = il_quant || (w->d != nullptr && w->type != 8 && il_pays(w->type, 3));
         }
-        x16 = dalloc_t<__half>(T * (size_t) max_in);
+        x16 = dzero<__half>(T * (size_t) max_in);
         // the F32 projections' widest output: the router with the
         // shared expert's gate (n_expert + 1), or GDN alpha / beta
-        sk_part = dalloc((size_t) kSplitK * T * (size_t) std::max<int64_t>(g.n_expert + 1, g.ssm_v_heads));
+        sk_part = dzero<float>((size_t) kSplitK * T * (size_t) std::max<int64_t>(g.n_expert + 1, g.ssm_v_heads));
         const bool mmq_built = MMQ::built() && std::getenv("LAMINA_Q36_NO_MMQ") == nullptr;
         use_mmq = mmq_built && m->moe;   // the prompt's experts on MMQ
         auto mmq_ok = [&](const Layer& L) {
@@ -2280,20 +2202,20 @@ struct Engine {
         }
         if (use_mmq) {
             const int64_t ne = (int64_t) T * Kp;
-            rcnt = dalloc_t<int32_t>((size_t) g.n_expert);
-            rcur = dalloc_t<int32_t>((size_t) g.n_expert);
-            rbounds = dalloc_t<int32_t>((size_t) g.n_expert + 1);
-            rmax = dalloc_t<int32_t>(1);
+            rcnt = dzero<int32_t>((size_t) g.n_expert);
+            rcur = dzero<int32_t>((size_t) g.n_expert);
+            rbounds = dzero<int32_t>((size_t) g.n_expert + 1);
+            rmax = dzero<int32_t>(1);
             ident_rows = MMQ::ids_table_rows(ne);
-            ident = dalloc_t<int32_t>((size_t) ident_rows);
-            rinv = dalloc_t<int32_t>((size_t) ne);
+            ident = dzero<int32_t>((size_t) ident_rows);
+            rinv = dzero<int32_t>((size_t) ne);
             CK(cudaDeviceSynchronize());   // ident's cudaMemset (legacy stream) before
                                            // the iota on the non-blocking stream
             MMQ::iota(ident, ident_rows, st);
             CK(dmalloc(&mq_x, MMQ::q8_bytes(ne, g.n_embd)));
             CK(dmalloc(&mq_hq, MMQ::q8_bytes(ne, g.n_ff)));
-            mq_gu = dalloc((size_t) ne * 2 * FF);
-            mq_h = dalloc((size_t) ne * FF);
+            mq_gu = dzero<float>((size_t) ne * 2 * FF);
+            mq_h = dzero<float>((size_t) ne * FF);
         }
         if (m->moe)
             std::fprintf(stderr, "lamina: prompt experts on %s\n",
@@ -2312,24 +2234,24 @@ struct Engine {
             }
             gemm.init(st);
             constexpr size_t kGemmWs = 32u << 20;   // the products' scratch, as the Flash-Next prompt path's
-            uint16_t* gscr = dalloc_t<uint16_t>((size_t) big);
+            uint16_t* gscr = dzero<uint16_t>((size_t) big);
             void* gws = nullptr;
             CK(dmalloc(&gws, kGemmWs));
             gemm.set_buffers(gscr, big, gws, kGemmWs);
             gscratch = {gws, kGemmWs};
         }
         CK(dmalloc(&escr, K::native_expert_scratch_bytes((int64_t) (T * Kp), (int64_t) FF)));
-        ids = dalloc_t<int32_t>(T * Kp);
-        grp_ptr = dalloc_t<unsigned long long>(std::min<size_t>(T * Kp, (size_t) g.n_expert) + 1);
-        grp_start = dalloc_t<int32_t>(std::min<size_t>(T * Kp, (size_t) g.n_expert) + 1);
-        n_groups = dalloc_t<int32_t>(1);
-        ent_dst = dalloc_t<int32_t>(T * Kp);
-        ent_tok = dalloc_t<int32_t>(T * Kp);
-        tok = dalloc_t<int32_t>(T);
-        pos0 = dalloc_t<int32_t>(1);
-        pick = dalloc_t<int32_t>(kVerify);
-        amv = dalloc((size_t) kArgBlocks * kVerify);
-        ami = dalloc_t<int32_t>((size_t) kArgBlocks * kVerify);
+        ids = dzero<int32_t>(T * Kp);
+        grp_ptr = dzero<unsigned long long>(std::min<size_t>(T * Kp, (size_t) g.n_expert) + 1);
+        grp_start = dzero<int32_t>(std::min<size_t>(T * Kp, (size_t) g.n_expert) + 1);
+        n_groups = dzero<int32_t>(1);
+        ent_dst = dzero<int32_t>(T * Kp);
+        ent_tok = dzero<int32_t>(T * Kp);
+        tok = dzero<int32_t>(T);
+        pos0 = dzero<int32_t>(1);
+        pick = dzero<int32_t>(kVerify);
+        amv = dzero<float>((size_t) kArgBlocks * kVerify);
+        ami = dzero<int32_t>((size_t) kArgBlocks * kVerify);
         CK(hmalloc((void**) &hpin, 64 * sizeof(int32_t), cudaHostAllocDefault));
         n_chunk = (ctx + kChunkCells - 1) / kChunkCells;
         for (int r = 1; r <= kVerify; ++r)   // the decode attention's shared memory: past 48 KB from 3 rows
@@ -2338,40 +2260,40 @@ struct Engine {
         CK(cudaFuncSetAttribute(kFaPrompt[m->kv_q8][g.n_head / g.n_head_kv - 1],
                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int) sizeof(q36a::FaSmem)));
         att_rows = (int) (g.n_head * std::min<int64_t>((int64_t) T, kGemmT));   // the decode branch's rows
-        pacc = dalloc((size_t) att_rows * n_chunk * g.head_dim);
-        pm = dalloc((size_t) att_rows * n_chunk);
-        pl = dalloc((size_t) att_rows * n_chunk);
+        pacc = dzero<float>((size_t) att_rows * n_chunk * g.head_dim);
+        pm = dzero<float>((size_t) att_rows * n_chunk);
+        pl = dzero<float>((size_t) att_rows * n_chunk);
         for (size_t l = 0; l < m->layers.size(); ++l) {   // the verify windows' GDN inputs
                                                           // (one set, whichever session runs)
             const Layer& L = m->layers[l];
             if (L.attn || l < l0 || l >= l1) {
                 for (auto* v : {&v_qkv, &v_hc, &v_alpha, &v_beta}) v->push_back(nullptr);
             } else {
-                v_qkv.push_back(dalloc((size_t) kVerify * C));
-                v_hc.push_back(dalloc((size_t) kVerify * C));
-                v_alpha.push_back(dalloc((size_t) kVerify * g.ssm_v_heads));
-                v_beta.push_back(dalloc((size_t) kVerify * g.ssm_v_heads));
+                v_qkv.push_back(dzero<float>((size_t) kVerify * C));
+                v_hc.push_back(dzero<float>((size_t) kVerify * C));
+                v_alpha.push_back(dzero<float>((size_t) kVerify * g.ssm_v_heads));
+                v_beta.push_back(dzero<float>((size_t) kVerify * g.ssm_v_heads));
             }
         }
         if (m->has_mtp) {
-            mtp_cat = dalloc(T * 2 * N);
-            hmtp = dalloc(T * N);
-            logits_m = dalloc((size_t) g.n_vocab);
-            tok_m = dalloc_t<int32_t>(T);
-            pos0_m = dalloc_t<int32_t>(1);
-            pick_m = dalloc_t<int32_t>(1);
-            p_draft = dalloc(1);
+            mtp_cat = dzero<float>(T * 2 * N);
+            hmtp = dzero<float>(T * N);
+            logits_m = dzero<float>((size_t) g.n_vocab);
+            tok_m = dzero<int32_t>(T);
+            pos0_m = dzero<int32_t>(1);
+            pick_m = dzero<int32_t>(1);
+            p_draft = dzero<float>(1);
         }
         sess.resize((size_t) n_sess);
         gsets.resize((size_t) n_sess * 2);
         n_ad = (int) m->loras.size();
         if (n_ad > 0) {
-            d_lscale = dalloc((size_t) kVerify * n_ad);
+            d_lscale = dzero<float>((size_t) kVerify * n_ad);
             h_lscale.assign((size_t) kVerify * n_ad, 0.f);
             const size_t ks_max = (size_t) (max_in + q36lora::kChunk - 1) / q36lora::kChunk;
-            l_part = dalloc(ks_max * kVerify * q36lora::kMaxR);
-            l_t = dalloc(T * q36lora::kMaxR);   // a prompt chunk's t (one pair a GEMM)
-            l_dab = dalloc((size_t) kVerify * 2 * g.ssm_v_heads);
+            l_part = dzero<float>(ks_max * kVerify * q36lora::kMaxR);
+            l_t = dzero<float>(T * q36lora::kMaxR);   // a prompt chunk's t (one pair a GEMM)
+            l_dab = dzero<float>((size_t) kVerify * 2 * g.ssm_v_heads);
         }
         {   // the sessions' caches: said before they fail (a slot's K / V at the context, in the --kv format, for the
             // attention layers and the MTP block, and its recurrent state)
@@ -2415,26 +2337,26 @@ struct Engine {
             upload((void**) &d_S_tab, hs.data(), hs.size() * sizeof(float*));
             upload((void**) &d_kc_tab, hk.data(), hk.size() * sizeof(__half*));
             upload((void**) &d_vc_tab, hv.data(), hv.size() * sizeof(__half*));
-            d_rcell = dalloc_t<int32_t>(kVerify);
-            d_rslot = dalloc_t<int32_t>(kVerify);
-            d_rdelta = dalloc_t<int32_t>(kVerify);
-            d_gslot = dalloc_t<int32_t>(kVerify);
-            d_grow0 = dalloc_t<int32_t>(kVerify);
-            d_gcnt = dalloc_t<int32_t>(kVerify);
+            d_rcell = dzero<int32_t>(kVerify);
+            d_rslot = dzero<int32_t>(kVerify);
+            d_rdelta = dzero<int32_t>(kVerify);
+            d_gslot = dzero<int32_t>(kVerify);
+            d_grow0 = dzero<int32_t>(kVerify);
+            d_gcnt = dzero<int32_t>(kVerify);
             CK(hmalloc((void**) &hrow, 128 * sizeof(int32_t), cudaHostAllocDefault));
         }
         if (vision) {
-            d_mtab = dalloc_t<int32_t>((size_t) ctx * 3);
-            d_map = dalloc_t<int32_t>(T);
+            d_mtab = dzero<int32_t>((size_t) ctx * 3);
+            d_map = dzero<int32_t>(T);
             CK(hmalloc((void**) &h_map, T * sizeof(int32_t), cudaHostAllocDefault));
         }
-        d_delta = dalloc_t<int32_t>(1);
-        if (nxt != nullptr) CK(event_new(&ev_hand, cudaEventDisableTiming));
+        d_delta = dzero<int32_t>(1);
+        if (nxt != nullptr) ev_hand = event_new();
         for (int i = 0; i < 2 && split; ++i) {
-            if (nxt != nullptr) CK(event_new(&ev_out[i], cudaEventDisableTiming));
+            if (nxt != nullptr) ev_out[i] = event_new();
             if (l0 > 0) {
-                x_in[i] = dalloc(T * N);
-                CK(event_new(&ev_free[i], cudaEventDisableTiming));
+                x_in[i] = dzero<float>(T * N);
+                ev_free[i] = event_new();
             }
         }
         cur = 0;
@@ -2446,22 +2368,22 @@ struct Engine {
                 if (conv[l])
                     at += C * (g.ssm_d_conv - 1) * 4 + (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4;
             }
-            snap = dalloc_t<uint8_t>((size_t) state_bytes_own());
-            snap_end = dalloc_t<uint8_t>((size_t) state_bytes_own());
-            CK(stream_new(&st_snap, cudaStreamNonBlocking));
-            CK(event_new(&ev_snap, cudaEventDisableTiming));
-            CK(event_new(&ev_landed, cudaEventDisableTiming));
-            CK(event_new(&ev_landed_end, cudaEventDisableTiming));
+            snap = dzero<uint8_t>((size_t) state_bytes_own());
+            snap_end = dzero<uint8_t>((size_t) state_bytes_own());
+            st_snap = stream_new();
+            ev_snap = event_new();
+            ev_landed = event_new();
+            ev_landed_end = event_new();
             // (a GDN layer's part: its conv history and state; a tail: hlast's part and the word)
             ring_slot =
                 ((C * (g.ssm_d_conv - 1) + (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size) * 4 + 255) &
                 ~(size_t) 255;
             tail_slot = ((size_t) g.n_embd * 4 + 4 + 255) & ~(size_t) 255;
-            ring = dalloc_t<uint8_t>(kRingSlots * ring_slot);
-            tail = dalloc_t<uint8_t>(kMaxMarks * tail_slot);
-            CK(event_new(&ev_ring_in, cudaEventDisableTiming));
-            for (cudaEvent_t& e : ev_ring_free) CK(event_new(&e, cudaEventDisableTiming));
-            CK(event_new(&ev_tail_free, cudaEventDisableTiming));
+            ring = dzero<uint8_t>(kRingSlots * ring_slot);
+            tail = dzero<uint8_t>(kMaxMarks * tail_slot);
+            ev_ring_in = event_new();
+            for (cudaEvent_t& e : ev_ring_free) e = event_new();
+            ev_tail_free = event_new();
         }
         CK(cudaDeviceSynchronize());   // every legacy-stream cudaMemset of the buffers above is done
         size_t fr = 0, tot = 0;
@@ -3718,7 +3640,7 @@ struct Engine {
             CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
             body();
             CK(cudaStreamEndCapture(st, &graph));
-            CK(graph_new(&gx, graph));
+            gx = graph_new(graph);
             CK(cudaGraphDestroy(graph));
         }
         CK(cudaGraphLaunch(gx, st));
@@ -4053,8 +3975,8 @@ struct Engine {
         const auto& g = m->g;
         const int N = (int) g.n_embd;
         if (!logits_mr) {
-            logits_mr = dalloc((size_t) kVerify * g.n_vocab);
-            pick_mr = dalloc_t<int32_t>(kVerify);
+            logits_mr = dzero<float>((size_t) kVerify * g.n_vocab);
+            pick_mr = dzero<int32_t>(kVerify);
         }
         sess[(size_t) cur].pos = pos;
         CK(cudaStreamSynchronize(st));
@@ -4151,11 +4073,6 @@ struct Engine {
     // first cells of every attention layer's K and V (the MTP block's too), each KV head's cells back to back.  The
     // K / V cells are indexed by position, so the state of a checkpoint at `p` continues the sequence from there over
     // the cells it finds.  A copy that fails is said by its false (the cache drops what it was for): not fatal.
-    static bool soft(cudaError_t e) {
-        if (e == cudaSuccess) return true;
-        (void) cudaGetLastError();
-        return false;
-    }
     /// The last stage's image ends with the engine's output at a prompt's end - the logits, the pick - and whether it
     /// holds one (two words): a checkpoint of a prompt's end serves the same prompt again with nothing to read.
     size_t out_bytes() const { return lst == this ? (size_t) m->g.n_vocab * 4 + 8 : 0; }
@@ -4793,16 +4710,16 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     CK(dmalloc(&E.ecpu, T * Kp * N * 4));
     CK(dmalloc(&E.d_miss, T * Kp * 4));
     E.acts = (uint8_t*) heap_new(T * C::kNativeActBytes + 64);
-    CK(event_new(&E.ev_route, cudaEventDisableTiming));
+    E.ev_route = event_new();
     if (staging) {
-        CK(stream_new(&E.cst, cudaStreamNonBlocking));
+        E.cst = stream_new();
         CK(dmalloc(&E.stage[0], staging));
         CK(cudaMemset(E.stage[0], 0, staging));
         E.stage[1] = E.stage[0] + stage_one;
         E.stage_bytes = staging;
         for (int b = 0; b < 2; ++b) {
-            CK(event_new(&E.ev_copy[b], cudaEventDisableTiming));
-            CK(event_new(&E.ev_used[b], cudaEventDisableTiming));
+            E.ev_copy[b] = event_new();
+            E.ev_used[b] = event_new();
             CK(cudaEventRecord(E.ev_used[b], E.st));
         }
     }
@@ -6707,26 +6624,9 @@ static int run_engine(int argc, char** argv, bool check_only) {
 }
 
 int lamina::qwen35::run(int argc, char** argv) {
-    // what the run allocates goes when it ends, on an error too (Fatal: its message is printed)
-    Owned owned;
-    g_owned = &owned;
-    struct Unset {
-        ~Unset() { g_owned = nullptr; }
-    } unset;
-    try {
-        return run_engine(argc, argv, false);
-    } catch (const Fatal& f) {
-        return f.code;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "lamina: %s\n", e.what());
-        return 1;
-    }
+    return lamina::core::run_owned([&] { return run_engine(argc, argv, false); });
 }
 
 int lamina::qwen35::check_args(int argc, char** argv) {
-    try {
-        return run_engine(argc, argv, true);
-    } catch (const Fatal& f) {
-        return f.code;
-    }
+    return lamina::core::check_owned([&] { return run_engine(argc, argv, true); });
 }
