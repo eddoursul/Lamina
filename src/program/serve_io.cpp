@@ -222,6 +222,66 @@ uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const floa
                           : fnv1a(rows + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
 }
 
+std::string parse_gen(const char* p, bool geni, GenRequest& r,
+                      const std::function<void(const std::string&, const char*)>& own) {
+    r = GenRequest{};
+    char* e = nullptr;
+    r.max_new = std::strtoll(p, &e, 10);
+    p = e;
+    for (;;) {
+        while (*p == ' ') ++p;
+        const char* st0 = p;
+        while (*p && *p != ' ') ++p;
+        const std::string tk(st0, (size_t) (p - st0));
+        const size_t eq = tk.find('=');
+        if (tk.empty() || eq == std::string::npos) {
+            p = st0;
+            break;
+        }
+        const std::string key = tk.substr(0, eq);
+        const char* v = tk.c_str() + eq + 1;
+        if (r.smp.set(key, v)) continue;
+        if (key == "img_keys") {
+            r.img_keys.clear();
+            for (const char* q = v; *q;) {
+                char* qe = nullptr;
+                const unsigned long long x = std::strtoull(q, &qe, 16);
+                if (qe == q || (*qe != ',' && *qe != '\0')) {
+                    r.img_keys.clear();
+                    break;
+                }
+                r.img_keys.push_back((uint64_t) x);
+                q = *qe == ',' ? qe + 1 : qe;
+            }
+        } else if (own) {
+            own(key, v);
+        }
+    }
+    if (geni) {
+        while (*p == ' ') ++p;
+        const char* e0 = p;
+        while (*p && *p != ' ') ++p;
+        r.emb.assign(e0, (size_t) (p - e0));
+    }
+    if (r.max_new < 1) return "bad request: max_new";
+    if (geni && r.emb.empty()) return "bad request: GENI names no file of picture rows";
+    std::string err;
+    if (!parse_id_list(p, r.ids, err)) return "bad request: " + err;
+    return "";
+}
+
+std::string gen_fits(const GenRequest& r, int64_t n_vocab, int64_t room) {
+    for (const int32_t t : r.ids)
+        if (t < 0 || t >= n_vocab) return "a token id is outside the vocabulary";
+    if ((int64_t) r.ids.size() > room || r.max_new > room - (int64_t) r.ids.size()) {
+        char b[160];
+        std::snprintf(b, sizeof b, "prompt (%zu tokens) + max_new (%lld) exceeds the context (%lld)", r.ids.size(),
+                      r.max_new, (long long) room);
+        return b;
+    }
+    return "";
+}
+
 void print_done(const DoneLine& d) {
     serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld 0 0 0.0 %lld 0\n", d.produced, d.prompt,
                 d.prompt_ms, d.decode_ms, d.finish, d.accepted, d.offered, d.reused, d.hits, d.lookups, d.read);

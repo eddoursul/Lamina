@@ -8050,54 +8050,18 @@ struct Serve {
             std::fprintf(stderr, "lamina: a request came while the image encoder's loan was out: taken back\n");
             enc_back();
         }
-        const char* p = line.c_str() + (geni ? 5 : 4);
-        char* e = nullptr;
-        const long long max_new = std::strtoll(p, &e, 10);
-        p = e;
-        lamina::program::Sampling smp;
-        std::vector<uint64_t> img_keys;   // img_keys=<hex>,..: each picture's key from the server, in prompt order
-        for (;;) {
-            while (*p == ' ') ++p;
-            const char* st0 = p;
-            while (*p && *p != ' ') ++p;
-            const std::string tk(st0, (size_t) (p - st0));
-            const size_t eq = tk.find('=');
-            if (tk.empty() || eq == std::string::npos) {
-                p = st0;
-                break;
-            }
-            if (tk.compare(0, eq, "img_keys") == 0) {
-                for (const char* q = tk.c_str() + eq + 1; *q;) {
-                    char* qe = nullptr;
-                    const unsigned long long x = std::strtoull(q, &qe, 16);
-                    if (qe == q || (*qe != ',' && *qe != '\0')) {
-                        img_keys.clear();
-                        break;
-                    }
-                    img_keys.push_back((uint64_t) x);
-                    q = *qe == ',' ? qe + 1 : qe;
-                }
-            } else {
-                smp.set(tk.substr(0, eq), tk.c_str() + eq + 1);   // keys of other paths are left
-            }
-        }
-        std::string emb;   // GENI: the request's file of picture rows before the ids
-        if (geni) {
-            while (*p == ' ') ++p;
-            const char* e0 = p;
-            while (*p && *p != ' ') ++p;
-            emb.assign(e0, (size_t) (p - e0));
-        }
-        std::vector<int32_t> ids = lamina::program::parse_ids(p);
-        if (max_new < 1 || ids.empty() || (geni && emb.empty())) {
-            serve_print("ERR bad request: max_new or the ids\n");
+        lamina::program::GenRequest rq;   // max_new, the sampler's keys, img_keys, GENI's file, the ids
+        std::string bad = lamina::program::parse_gen(line.c_str() + (geni ? 5 : 4), geni, rq);
+        if (bad.empty()) bad = lamina::program::gen_fits(rq, g.n_vocab, E.ctx);
+        if (!bad.empty()) {
+            serve_print("ERR %s\n", bad.c_str());
             return;
         }
-        for (const int32_t t : ids)
-            if (t < 0 || t >= g.n_vocab) {
-                serve_print("ERR a token id is outside the vocabulary\n");
-                return;
-            }
+        const long long max_new = rq.max_new;
+        lamina::program::Sampling& smp = rq.smp;
+        std::vector<int32_t>& ids = rq.ids;
+        const std::vector<uint64_t>& img_keys = rq.img_keys;
+        const std::string& emb = rq.emb;
         ImgReq ir;
         if (geni) {
             if (!E.vision) {
@@ -8115,12 +8079,6 @@ struct Serve {
             ~Pictures() { e.img = nullptr; }
         } pictures{E};
         E.img = geni ? &ir : nullptr;
-        // (the room left, not the sum: that overflows for a huge max_new)
-        if ((int64_t) ids.size() > E.ctx || max_new > E.ctx - (int64_t) ids.size()) {
-            serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%lld)\n", ids.size(), max_new,
-                        (long long) E.ctx);
-            return;
-        }
         in->stop.store(false);
         // (cells on cards, a split's card, the first card's own lock: their clocks, where locked for a request, until
         // it ends - a cell card that holds none sleeps meanwhile: card_lock)

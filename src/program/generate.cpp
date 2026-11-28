@@ -426,28 +426,12 @@ void usage(bool all = false) {
                stderr);
 }
 
+/// parse_id_list's ids (a request's rule) as the 64-bit list the command line keeps
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
-    out.clear();
-    std::string text(s);
-    for (char& c : text)
-        if (c == ',') c = ' ';
-    std::istringstream input(text);
-    std::string token;
-    while (input >> token) {
-        int32_t id = 0;
-        const auto parsed = std::from_chars(token.data(), token.data() + token.size(), id);
-        if (parsed.ec != std::errc{} || parsed.ptr != token.data() + token.size() || id < 0) {
-            err = "invalid token id: expected an integer in [0, 2147483647]";
-            out.clear();
-            return false;
-        }
-        out.push_back(id);
-    }
-    if (out.empty()) {
-        err = "token list was empty";
-        return false;
-    }
-    return true;
+    std::vector<int32_t> ids;
+    const bool ok = lamina::program::parse_id_list(s, ids, err);
+    out.assign(ids.begin(), ids.end());
+    return ok;
 }
 
 /// A serve request that failed on a CUDA fault (an illegal address: the context is lost for the whole process) hands
@@ -4721,46 +4705,19 @@ int lamina::program::run_paths(int argc, char** argv) {
                 serve_print("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;
             }
-            char* endp = nullptr;
-            const long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);
-            // optional keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F, penalty_last_n=N,
-            // penalty_repeat=F, penalty_freq=F, penalty_present=F, seed=N, spec_min_p=F (this request's draft floor),
-            // score=ID:ID:... (an `LP` line with those ids' log-probabilities after the prompt, before the first `T`);
-            // unknown keys are skipped.  Absent keys: greedy, no penalties.
-            lamina::program::Sampling req_smp;   // the sampler's keys
+            // optional keys between max_new and the ids: the sampler's (temperature=F, top_p=F, top_k=N, min_p=F,
+            // penalty_last_n=N, penalty_repeat=F, penalty_freq=F, penalty_present=F, seed=N), img_keys (each
+            // picture's key from the server, its normalized bytes' hash, in prompt order: the conversation cache then
+            // matches a picture by key and grid, not by its embedding floats), and this path's spec_min_p=F (this
+            // request's draft floor) and score=ID:ID:... (an `LP` line with those ids' log-probabilities after the
+            // prompt, before the first `T`); unknown keys are skipped.  Absent keys: greedy, no penalties.
+            lamina::program::GenRequest gq;
             double req_spec_min_p = o.spec_min_p;
             std::vector<int32_t> req_score;   // score=ID:ID:...: see the first window
-            // img_keys=<hex>,<hex>,...: each picture's key from the server (its normalized bytes' hash), in prompt
-            // order; the conversation cache then matches a picture by key and grid, not by its embedding floats
-            std::vector<uint64_t> req_img_keys;
-            if (endp != nullptr) {
-                for (;;) {
-                    while (*endp == ' ') ++endp;
-                    const char* start = endp;
-                    while (*endp != '\0' && *endp != ' ') ++endp;
-                    if (endp == start) break;
-                    const std::string kv(start, (size_t) (endp - start));
-                    const size_t eq = kv.find('=');
-                    if (eq == std::string::npos) {
-                        endp = const_cast<char*>(start);
-                        break;
-                    }
-                    const std::string key = kv.substr(0, eq);
-                    const char* v = kv.c_str() + eq + 1;
-                    if (req_smp.set(key, v)) continue;
-                    if (key == "spec_min_p") req_spec_min_p = std::clamp((double) std::strtof(v, nullptr), 0.0, 1.0);
-                    else if (key == "img_keys") {
-                        req_img_keys.clear();
-                        for (const char* q = v; *q != '\0';) {
-                            char* qe = nullptr;
-                            const unsigned long long hk = std::strtoull(q, &qe, 16);
-                            if (qe == q || (*qe != ',' && *qe != '\0')) {
-                                req_img_keys.clear();
-                                break;
-                            }
-                            req_img_keys.push_back((uint64_t) hk);
-                            q = *qe == ',' ? qe + 1 : qe;
-                        }
+            std::string bad = lamina::program::parse_gen(
+                line.c_str() + (geni ? 5 : 4), geni, gq, [&](const std::string& key, const char* v) {
+                    if (key == "spec_min_p") {
+                        req_spec_min_p = std::clamp((double) std::strtof(v, nullptr), 0.0, 1.0);
                     } else if (key == "score") {
                         for (const char* q = v; *q != '\0';) {
                             char* qe = nullptr;
@@ -4770,31 +4727,19 @@ int lamina::program::run_paths(int argc, char** argv) {
                             q = (*qe == ':') ? qe + 1 : qe;
                         }
                     }
-                }
-            }
-            std::string emb_path;
-            if (geni && endp != nullptr) {
-                while (*endp == ' ') ++endp;
-                char* gap = std::strchr(endp, ' ');
-                if (gap != nullptr) {
-                    emb_path.assign(endp, (size_t) (gap - endp));
-                    endp = gap;
-                }
-            }
-            std::vector<int64_t> ids;
-            std::string pe;
-            if (max_new < 1 || endp == nullptr || (geni && emb_path.empty()) || !parse_i64_list(endp, ids, pe)) {
-                serve_print("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
+                });
+            // the room: before a cell's position is written (the image path's table holds max_context + 64 of them)
+            if (bad.empty()) bad = lamina::program::gen_fits(gq, n_vocab, o.max_context - 8);
+            if (!bad.empty()) {
+                serve_print("ERR %s\n", bad.c_str());
                 continue;
             }
+            const long long max_new = gq.max_new;
+            const lamina::program::Sampling& req_smp = gq.smp;   // the sampler's keys
+            const std::vector<uint64_t>& req_img_keys = gq.img_keys;
+            const std::string& emb_path = gq.emb;
+            const std::vector<int64_t> ids(gq.ids.begin(), gq.ids.end());
             const int64_t n = (int64_t) ids.size();
-            // before a cell's position is written (the image path's table holds max_context + 64 of them), and as a
-            // difference: n + max_new overflows for a huge max_new
-            if (n > o.max_context - 8 || max_new > o.max_context - 8 - n) {
-                serve_print("ERR prompt (%lld tokens) + max_new (%lld) exceeds the context (%lld)\n", (long long) n,
-                            (long long) max_new, (long long) o.max_context);
-                continue;
-            }
             req_imgs.clear();
             if (geni && !o.vision) {
                 serve_print("ERR this engine was started without --vision\n");
@@ -4845,12 +4790,6 @@ int lamina::program::run_paths(int argc, char** argv) {
                 mrope_identity = !geni;
             }
             prefill.embd_rows = geni ? row_ptr.data() : nullptr;
-            bool bad = false;
-            for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
-            if (bad) {
-                serve_print("ERR a token id is outside the vocabulary\n");
-                continue;
-            }
             // the elastic K/V: room for this prompt before the prompt cache restores or the prompt path writes a cell
             // (the decode grows it further).  A K/V far longer than the request is given back only after two such
             // requests in a row: an agent's short side requests (a title, a summary) between the turns of a long

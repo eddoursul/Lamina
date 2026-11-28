@@ -7,10 +7,12 @@
 #include "lamina/kernels/sampler.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace lamina::program {
@@ -64,7 +66,34 @@ inline lamina::kernels::SamplerParams sampler_params(const Sampling& q) {
     return p;
 }
 
-/// "1,2,3" (or space-separated) -> ids, up to the first character that is not part of the list
+/// A request's ids, strictly: decimal integers in [0, 2^31) separated by commas or spaces; anything else, a value out
+/// of that range or no id at all refuses them (false, why in `err`)
+inline bool parse_id_list(const char* s, std::vector<int32_t>& out, std::string& err) {
+    out.clear();
+    auto sep = [](char c) { return c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    while (*s) {
+        while (*s && sep(*s)) ++s;
+        if (!*s) break;
+        const char* e = s;
+        while (*e && !sep(*e)) ++e;
+        int32_t id = 0;
+        const std::from_chars_result r = std::from_chars(s, e, id);
+        if (r.ec != std::errc{} || r.ptr != e || id < 0) {
+            err = "invalid token id: expected an integer in [0, 2147483647]";
+            out.clear();
+            return false;
+        }
+        out.push_back(id);
+        s = e;
+    }
+    if (out.empty()) {
+        err = "token list was empty";
+        return false;
+    }
+    return true;
+}
+
+/// "1,2,3" (or space-separated) -> ids, up to the first character that is not part of the list (the command lines')
 inline std::vector<int32_t> parse_ids(const char* s) {
     std::vector<int32_t> v;
     while (*s) {

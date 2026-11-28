@@ -5457,93 +5457,47 @@ struct Serve {
                 return;
             }
         }
-        const long long max_new = std::strtoll(p, &p, 10);
-        Sampling smp;
-        std::vector<uint64_t> img_keys;
         std::vector<float> lsc = E.lora_default;   // the adapters' scales (lora=: the request's, in their order)
         bool bad_lora = false;
-        for (;;) {
-            while (*p == ' ') ++p;
-            const char* st0 = p;
-            while (*p && *p != ' ') ++p;
-            const std::string tk(st0, (size_t) (p - st0));
-            const size_t eq = tk.find('=');
-            if (tk.empty() || eq == std::string::npos) {
-                p = const_cast<char*>(st0);
-                break;
-            }
-            const std::string key = tk.substr(0, eq);
-            const char* v = tk.c_str() + eq + 1;
-            if (key == "lora") {   // every adapter's scale, comma-separated in --lora's order (the ones left out: 0)
-                lsc.assign((size_t) E.n_ad, 0.f);
-                size_t k = 0;
-                for (const char* q = v; *q;) {
-                    char* qe = nullptr;
-                    const float s_ = std::strtof(q, &qe);
-                    if (qe == q || k >= lsc.size() || !std::isfinite(s_)) {
-                        bad_lora = true;
-                        break;
-                    }
-                    lsc[k++] = s_;
-                    q = *qe == ',' ? qe + 1 : qe;
-                    if (*qe != ',' && *qe != '\0') {
-                        bad_lora = true;
-                        break;
-                    }
+        lamina::program::GenRequest rq;   // max_new, the sampler's keys, img_keys, GENI's file, the ids
+        std::string bad = lamina::program::parse_gen(p, geni, rq, [&](const std::string& key, const char* v) {
+            if (key != "lora")
+                return;   // every adapter's scale, comma-separated in --lora's order (the ones left out: 0)
+            lsc.assign((size_t) E.n_ad, 0.f);
+            size_t k = 0;
+            for (const char* q = v; *q;) {
+                char* qe = nullptr;
+                const float s_ = std::strtof(q, &qe);
+                if (qe == q || k >= lsc.size() || !std::isfinite(s_)) {
+                    bad_lora = true;
+                    break;
                 }
-            } else if (key == "img_keys") {
-                const char* q = v;
-                img_keys.clear();
-                while (*q) {
-                    char* qe = nullptr;
-                    const unsigned long long x = std::strtoull(q, &qe, 16);
-                    if (qe == q) {
-                        img_keys.clear();
-                        break;
-                    }
-                    img_keys.push_back((uint64_t) x);
-                    q = *qe == ',' ? qe + 1 : qe;
-                    if (*qe != ',' && *qe != '\0') {
-                        img_keys.clear();
-                        break;
-                    }
+                lsc[k++] = s_;
+                q = *qe == ',' ? qe + 1 : qe;
+                if (*qe != ',' && *qe != '\0') {
+                    bad_lora = true;
+                    break;
                 }
-            } else {
-                smp.set(key, v);   // the sampler's keys (another path's are left)
             }
-        }
-        std::string emb;
-        if (geni) {
-            while (*p == ' ') ++p;
-            const char* e = p;
-            while (*e && *e != ' ') ++e;
-            emb.assign(p, (size_t) (e - p));
-            p = const_cast<char*>(e);
-        }
-        const std::vector<int32_t> ids = parse_ids(p);
-        if (max_new < 1 || ids.empty() || (geni && emb.empty())) {
-            serve_print("ERR bad request: max_new or the ids\n");
+        });
+        if (bad.empty()) bad = lamina::program::gen_fits(rq, E.m->g.n_vocab, E.ctx);
+        if (!bad.empty()) {
+            serve_print("ERR %s\n", bad.c_str());
             return;
         }
         if (geni && !E.vision) {
             serve_print("ERR this engine was started without --vision\n");
             return;
         }
-        if ((int64_t) ids.size() > E.ctx || max_new > (long long) E.ctx - (long long) ids.size()) {
-            serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%d)\n", ids.size(), max_new,
-                        E.ctx);
-            return;
-        }
-        bool bad = false;
-        for (int32_t t : ids) bad |= t < 0 || t >= (int32_t) E.m->g.n_vocab;
-        if (bad) {
-            serve_print("ERR a token id is outside the vocabulary\n");
-            return;
-        }
         if (bad_lora) {
             serve_print("ERR lora=: a scale for each of the %d LoRA adapters at most, comma-separated\n", E.n_ad);
             return;
         }
+        const long long max_new = rq.max_new;
+        const Sampling& smp = rq.smp;
+        const std::vector<int32_t>& ids = rq.ids;
+        const std::vector<uint64_t>& img_keys = rq.img_keys;
+        const std::string& emb = rq.emb;
         ImgReq ir;
         if (geni) {
             const std::string ve = build_images(emb, ids, E.m->g.n_embd, img_keys, ir);

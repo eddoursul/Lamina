@@ -5,6 +5,7 @@
 #pragma once
 
 #include "lamina/platform/console_quit.hpp"
+#include "lamina/program/sampling.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -135,6 +136,23 @@ struct ImageCells {
     std::vector<Picture> pictures;
     int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
 };
+/// A GEN / GENI request's parts: max_new, the sampler's keys, the pictures' keys, GENI's file of picture rows, the ids
+struct GenRequest {
+    long long max_new = 0;
+    Sampling smp;
+    std::vector<uint64_t> img_keys;   ///< img_keys=<hex>,..: each picture's key from the server, in prompt order
+    std::string emb;                  ///< GENI: the file of the pictures' rows (the image encoder's)
+    std::vector<int32_t> ids;
+};
+/// The line after GEN / GENI (and BGEN's slot) into `r`: "" or the ERR text.  max_new, then the key=value words up to
+/// the first without '=' (the sampler's keys, img_keys, the others to `own`: the path's own keys, else left), GENI's
+/// file, then the ids (parse_id_list's rule)
+std::string parse_gen(const char* p, bool geni, GenRequest& r,
+                      const std::function<void(const std::string& key, const char* value)>& own = nullptr);
+/// The request's ids inside the vocabulary, and its prompt with max_new inside `room` tokens of context (the room
+/// left, not the sum, which overflows for a huge max_new): "" or the ERR text
+std::string gen_fits(const GenRequest& r, int64_t n_vocab, int64_t room);
+
 /// Why an answer ends after the token just out, every path's rule: the end-of-text token ("stop"), a stop the client
 /// asked for ("cancel", where the length is reached too), the request's max_new or the context ("length"); null: it
 /// goes on.
