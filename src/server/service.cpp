@@ -754,6 +754,10 @@ std::optional<int64_t> Service::free_vram_mib() {
 }
 
 std::string Service::say_died(const std::exception& e) {
+    if (const std::string why = engine->given_up(); !why.empty()) {   // (no new engine: its words say so)
+        say("[lamina] " + why);
+        return "[lamina] " + why;
+    }
     const std::string note = engine->death_note();
     const std::string line =
         "[lamina] " + std::string(e.what()) + ". " + note + " The next request starts the engine again.";
@@ -838,6 +842,7 @@ void Service::ensure_loaded() {
         vision_started = true;
     }
     if (loaded()) return;
+    if (const std::string why = engine->given_up(); !why.empty()) throw EngineGivenUp(why);
     if (engine->unloaded()) {
         say("[lamina] loading the model again (it was unloaded) ...");
     } else {

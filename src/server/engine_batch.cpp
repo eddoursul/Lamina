@@ -135,6 +135,10 @@ void LaminaEngine::pump() {
             loan->push(line);
             continue;
         }
+        if (starts_with(line, "FAULT ")) {   // a CUDA fault: every slot's request ends with it (throw_stopped)
+            ended_ = true;
+            for (const auto& q : qs) q->close();
+        }
         ctl->push(line);
     }
     ctl->close();
@@ -289,7 +293,7 @@ void LaminaEngine::control(Cancel& cancel, const std::function<void(int32_t)>& o
         beat_at = mono();
         if (got < 0) {
             ended_ = true;
-            throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
+            throw_stopped();
         }
         if (starts_with(line, "T ")) {
             on_token((int32_t) std::atoi(line.c_str() + 2));
@@ -908,7 +912,7 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                 if (got < 0) {
                     phase = "none";
                     ended_ = true;
-                    throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
+                    throw_stopped();
                 }
                 if (starts_with(line, "BT ")) {
                     const std::vector<std::string> f = split_ws(line);

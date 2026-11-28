@@ -18,6 +18,7 @@
 #endif
 #include "lamina/core/adaptive_tier.hpp"
 #include "lamina/core/control_vector.hpp"
+#include "lamina/core/cuda_fault.hpp"
 #include "lamina/core/expert_cache.hpp"
 #include "lamina/core/expert_source.hpp"
 #include "lamina/core/gpu_select.hpp"
@@ -449,23 +450,15 @@ bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) 
     return true;
 }
 
-/// A serve request that failed on a CUDA fault (an illegal address) leaves at once (#224): the fault poisons the
-/// context for the whole process, and the destructors run on it can hang until the server's watchdog.  An
-/// out-of-memory (a window's graph that did not fit) poisons nothing: it is taken off the thread and the engine ends
-/// the ordinary way, so the request's ERR reaches the client and the next request starts the engine again (#37).
-/// cudaGetLastError() clears a sticky fault from the thread too, and one of work queued before the out-of-memory can
-/// land unseen: cudaMemGetInfo asks the context, without waiting for its queued work, and a fault still leaves at once.
-void exit_on_cuda_fault() {
-    const cudaError_t e = cudaPeekAtLastError();
-    if (e == cudaSuccess) return;
-    if (e == cudaErrorMemoryAllocation) {
-        (void) cudaGetLastError();
-        size_t free_b = 0, total_b = 0;
-        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) return;
-    }
-    std::fflush(stderr);
-    lamina::core::GpuClocks::release_now();   // --second-gpu-clocks: no destructor runs
-    std::_Exit(1);
+/// A serve request that failed on a CUDA fault (an illegal address: the context is lost for the whole process) hands
+/// it on at once (#224), the clock locks released first: the server gives the engine up, a standalone engine ends
+/// (destructors run on the lost context can hang).  An out-of-memory (a window's graph that did not fit) loses nothing:
+/// it is taken off the thread and the engine ends the ordinary way, so the request's ERR reaches the client and the
+/// next request starts the engine again (#37).  cudaGetLastError() clears a fault from the thread too: the probe asks
+/// each context (cudaMemGetInfo, which does not wait for queued work).
+void hand_on_cuda_fault() {
+    if (cudaPeekAtLastError() == cudaErrorMemoryAllocation) (void) cudaGetLastError();
+    (void) lamina::core::failed_call_code();
 }
 
 /// The pool's adapter plus the wall-clock it spent, so the report can say how much of the token was the CPU.
@@ -1971,7 +1964,43 @@ const char* lamina::program::option_default(const char* flag) {
     return "";
 }
 
+namespace lamina::program {
+/// run()'s body: the family switch, then Qwen3.8-Flash-Next's engine
+int run_paths(int argc, char** argv);
+}   // namespace lamina::program
+
+namespace {
+bool g_fault_serving = false;   // the run is a --serve loop: a fault is a FAULT line too
+/// A CUDA fault's hand-on, after the clock locks: said on stderr and to the serve loop's reader (lamina gives the
+/// engine up: no new engine in its process); a standalone engine ends here, as destructors run on the lost context
+/// could wait for ever
+void hand_on_fault(const std::string& what) {
+    std::fprintf(stderr, "lamina: a CUDA fault (%s): CUDA cannot be used again in this process\n", what.c_str());
+    std::fflush(stderr);
+    if (g_fault_serving) lamina::program::serve_print("FAULT %s\n", what.c_str());
+    if (!lamina::program::serve_io().in_process) {
+        std::fflush(nullptr);
+        std::_Exit(lamina::core::kCudaFault);
+    }
+}
+}   // namespace
+
 int lamina::program::run(int argc, char** argv) {
+    g_fault_serving = false;
+    for (int i = 1; i < argc; ++i) g_fault_serving = g_fault_serving || std::strcmp(argv[i], "--serve") == 0;
+    lamina::core::set_cuda_fault_hook(&hand_on_fault);
+    int rc = 1;
+    try {
+        rc = run_paths(argc, argv);
+    } catch (...) {   // (the caller says what it was; a lost context is reported first)
+        (void) lamina::core::failed_call_code();
+        throw;
+    }
+    if (rc != 0) (void) lamina::core::failed_call_code();
+    return lamina::core::cuda_faulted() ? lamina::core::kCudaFault : rc;
+}
+
+int lamina::program::run_paths(int argc, char** argv) {
     // device ordinals in nvidia-smi's order, not CUDA's fastest-first guess (before the first CUDA call)
     if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
 #if defined(_WIN32)
@@ -4853,8 +4882,8 @@ int lamina::program::run(int argc, char** argv) {
             const Clock::time_point r0 = Clock::now();
             auto report = [&](const std::string& e) {   // a failed request: the engine exits after it
                 std::fprintf(stderr, "lamina serve: %s\n", e.c_str());
+                hand_on_cuda_fault();   // (a fault's FAULT first: lamina's read of the request ends at an ERR)
                 serve_print("ERR %s\n", e.c_str());
-                exit_on_cuda_fault();
             };
             // ---- the prompt cache: continue from the longest prefix it holds (or start from an empty sequence).
             // GENI requests are cacheable too, but only after the parser has supplied embedding/grid identities.

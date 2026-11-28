@@ -1,6 +1,8 @@
 // src/core/gpu_select.cpp - see include/lamina/core/gpu_select.hpp.
 #include "lamina/core/gpu_select.hpp"
 
+#include "lamina/core/cuda_fault.hpp"
+
 #include <cuda_runtime.h>
 
 #if defined(_WIN32)
@@ -499,6 +501,7 @@ void GpuClocks::start() {
     st_->since.assign(gpus_.size(), std::chrono::steady_clock::time_point{});
     st_->thread = std::thread([this] { run(); });
     g_clocks.store(this);
+    set_cuda_fault_release(&GpuClocks::release_now);   // a CUDA fault releases them before it is handed on
     static const int at_exit = std::atexit([] { GpuClocks::release_now(); });   // std::exit from a failed launch
     (void) at_exit;
 }

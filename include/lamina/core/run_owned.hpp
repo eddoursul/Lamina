@@ -1,8 +1,11 @@
 // include/lamina/core/run_owned.hpp - a model path's run (the qwen35, Hy4-flash and Inkling 2 paths): its end on an
 // error (Fatal, LAMINA_CK), and what it allocates freed when it ends, on an error too (Owned), with the helpers that
 // record each allocation.  The engine may run in the server's process (lamina), which an exit would end, and the
-// server starts it again there after an unload: a run gives back all it took.
+// server starts it again there after an unload: a run gives back all it took.  A CUDA fault (core/cuda_fault.hpp) is
+// reported where a call fails on it, and the run's end then makes no call on the lost context.
 #pragma once
+
+#include "lamina/core/cuda_fault.hpp"
 
 #include <cuda_runtime.h>
 
@@ -15,13 +18,14 @@
 #include <mutex>
 #include <vector>
 
-/// A CUDA call that must succeed: a failure prints the call, its error and its place, and ends the run (Fatal{1})
+/// A CUDA call that must succeed: a failure prints the call, its error and its place, and ends the run (Fatal{1}, or
+/// Fatal{kCudaFault} where a GPU's context holds a fault: reported first)
 #define LAMINA_CK(x)                                                                                                   \
     do {                                                                                                               \
         cudaError_t e_ = (x);                                                                                          \
         if (e_ != cudaSuccess) {                                                                                       \
             std::fprintf(stderr, "lamina: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__);   \
-            throw ::lamina::core::Fatal{1};                                                                            \
+            throw ::lamina::core::Fatal{::lamina::core::failed_call_code()};                                           \
         }                                                                                                              \
     } while (0)
 
@@ -44,12 +48,14 @@ struct Owned {
     Owned(const Owned&) = delete;
     Owned& operator=(const Owned&) = delete;
     ~Owned() {
-        cudaDeviceSynchronize();
-        for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
-        for (cudaEvent_t e : events) cudaEventDestroy(e);
-        for (cudaStream_t st : streams) cudaStreamDestroy(st);
-        for (void* d : dev) cudaFree(d);
-        for (void* h : pinned) cudaFreeHost(h);
+        if (!cuda_faulted()) {   // (a lost context gets no call: the process's end frees it)
+            cudaDeviceSynchronize();
+            for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
+            for (cudaEvent_t e : events) cudaEventDestroy(e);
+            for (cudaStream_t st : streams) cudaStreamDestroy(st);
+            for (void* d : dev) cudaFree(d);
+            for (void* h : pinned) cudaFreeHost(h);
+        }
         for (void* h : heap) std::free(h);
         (void) cudaGetLastError();
     }
@@ -177,21 +183,25 @@ inline void* heap_new(size_t n) {
 }
 
 /// A path's run (`f`: the engine's run, an int its exit code) under an Owned: what it allocates goes when it ends,
-/// on an error too (Fatal's code; another exception's message printed, 1)
+/// on an error too (Fatal's code; another exception's message printed, 1); a failed run whose GPU context holds a
+/// fault reports it here at the latest and ends with kCudaFault
 template <class F> int run_owned(F&& f) {
     Owned owned;
     g_owned = &owned;
     struct Unset {
         ~Unset() { g_owned = nullptr; }
     } unset;
+    int rc = 1;
     try {
-        return f();
+        rc = f();
     } catch (const Fatal& end) {
-        return end.code;
+        rc = end.code;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "lamina: %s\n", e.what());
-        return 1;
+        rc = 1;
     }
+    if (rc != 0 && failed_call_code() == kCudaFault) rc = kCudaFault;
+    return rc;
 }
 /// A path's command line checked (`f`: the engine's run in its check mode, which allocates nothing): Fatal's code
 template <class F> int check_owned(F&& f) {

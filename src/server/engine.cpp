@@ -1,5 +1,6 @@
 #include "engine.hpp"
 
+#include "lamina/core/cuda_fault.hpp"
 #include "lamina/program/engine.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "log.hpp"
@@ -131,6 +132,7 @@ void LaminaEngine::start() {
             std::fprintf(stderr, "lamina: the engine failed\n");
             rc_ = 1;
         }
+        if (lamina::core::cuda_faulted()) rc_ = lamina::core::kCudaFault;
         ended_ = true;
         out->close();
         finished_ = true;
@@ -228,6 +230,8 @@ void LaminaEngine::unload() {
 }
 
 void LaminaEngine::load() {
+    // a CUDA fault lost a GPU's context for this process: an engine started in it again would fail at its first call
+    if (lamina::core::cuda_faulted()) throw EngineGivenUp(fault_note());
     if (!alive()) {
         close();
         starting_ = true;
@@ -329,12 +333,24 @@ void LaminaEngine::unlend() {
 }
 
 void LaminaEngine::send(const std::string& line) {
-    if (in_ == nullptr || ended_.load())
-        throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
+    if (in_ == nullptr || ended_.load()) throw_stopped();
     in_->push(line);
 }
 
+std::string LaminaEngine::fault_note() {
+    return "a CUDA fault (" + lamina::core::cuda_fault_what() +
+           ") lost the GPU's context for this process: the engine was given up (restart the server)";
+}
+
+void LaminaEngine::throw_stopped() const {
+    if (lamina::core::cuda_faulted()) throw EngineGivenUp(fault_note());
+    throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
+}
+
+std::string LaminaEngine::given_up() { return lamina::core::cuda_faulted() ? fault_note() : std::string(); }
+
 std::string LaminaEngine::death_note() {
+    if (lamina::core::cuda_faulted()) return fault_note();
     if (!silent_note_.empty()) return silent_note_;
     std::string wide;
     if (!log_.empty()) {
@@ -633,7 +649,13 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
         if (got < 0) {
             done = true;
             ended_ = true;
-            throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
+            throw_stopped();
+        }
+        if (starts_with(l, "FAULT ")) {   // a CUDA fault: the engine is gone for this process
+            silent_note_ = fault_note();
+            ended_ = true;
+            done = true;
+            throw EngineGivenUp(silent_note_);
         }
         for (const char* p : kFatalPrefixes)
             if (starts_with(l, p)) {

@@ -177,6 +177,12 @@ blue screen in `nvlddmkm` (0x116) points at the NVIDIA driver: try another versi
 The end of its log says why. On Linux the usual cause is the RAM running out: `sudo dmesg | grep -i -E 'killed
 process|out of memory'`.
 
+**"a CUDA fault (...) lost the GPU's context for this process: the engine was given up (restart the server)".** Work on
+a GPU failed in a way CUDA cannot recover from inside the process (an illegal address, a launch failure): the server
+answers every request with this until it is restarted, and the GPUs' clock locks were released at once. Once is
+worth a report with the log (github.com/eddoursul/Lamina/issues); if it comes back under load, test the RAM and the
+GPU's clocks as above. `lamina-engine` run on its own ends with exit code 3.
+
 **"request exceeds the context window".** The conversation and the answer's room are longer than the context. Start a
 new conversation, or start the server with a larger `--max-context` (with `--kv-grow`, the configs' setting, a larger
 context takes VRAM only as a conversation reaches it).

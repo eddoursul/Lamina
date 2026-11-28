@@ -61,6 +61,15 @@ struct EngineDied : std::runtime_error {
 struct EngineSilent : EngineDied {
     using EngineDied::EngineDied;
 };
+/// no request starts the engine again in this process (a CUDA fault lost a GPU's context): the server is restarted
+struct EngineGivenUp : EngineDied {
+    using EngineDied::EngineDied;
+};
+/// what a client is told of an engine that ended: what happened, and that the next request restarts it (not after
+/// EngineGivenUp)
+inline std::string died_text(const EngineDied& e) {
+    return std::string(e.what()) + (dynamic_cast<const EngineGivenUp*>(&e) ? "" : "; the next request restarts it");
+}
 /// the engine is (re)starting and has not said READY yet: a 503
 struct EngineStarting : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -115,6 +124,8 @@ public:
     virtual int batch() const { return batch_; }
     /// the engine's own words on why it ended
     virtual std::string death_note() { return ""; }
+    /// why no engine may start again in this process (a CUDA fault), else ""
+    virtual std::string given_up() { return ""; }
     /// the tokens this thread's request got from the engine after a STOP (the engine holds them)
     virtual std::vector<int32_t> drained_tokens() const { return drained; }
 
@@ -196,6 +207,7 @@ public:
     bool auto_load() const override { return true; }
     /// the engine's own words on why it ended (its log's tail)
     std::string death_note() override;
+    std::string given_up() override;
     static std::string sampling_keys(const json& sampling);
     /// the engine's start: READY within this many seconds (0: no limit)
     static double ready_timeout_s;
@@ -213,6 +225,10 @@ private:
     std::string ask(const std::string& line, const char* answer, double timeout_s);
     /// UNLEND and its answer: false when none came (the next lend() asks again before it borrows)
     bool unlend_now();
+    /// the words for a CUDA fault the engine reported (FAULT): the engine given up, the server to be restarted
+    static std::string fault_note();
+    /// an engine that ended under a request: EngineGivenUp with the fault's words, else EngineDied with its exit code
+    [[noreturn]] void throw_stopped() const;
     bool note_line(const std::string& line);
     /// a CACHE line: the prompt cache's state at READY and after each request (the Conversation cache card)
     void cache_line(const std::string& line);

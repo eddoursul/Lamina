@@ -1267,8 +1267,7 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
             }
             write(sink, "data: [DONE]\n\n");
         } catch (const EngineDied& e) {   // mid-stream: said, then the stream ends properly
-            fail({{"error",
-                   {{"type", "server_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
+            fail({{"error", {{"type", "server_error"}, {"message", died_text(e)}}}});
         } catch (const QueueWaitExpired& e) {
             fail({{"error", {{"type", "rate_limit_error"}, {"code", "queue_wait_timeout"}, {"message", e.what()}}}});
         } catch (const StructuredOutputError& e) {
@@ -1341,9 +1340,7 @@ void post_anthropic(std::shared_ptr<Exchange> xp, json req) {
                 x.svc.note_client_disconnect(*x.cancel);
             }
         } catch (const EngineDied& e) {   // mid-stream: Anthropic's error event
-            fail({{"type", "error"},
-                  {"error",
-                   {{"type", "api_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
+            fail({{"type", "error"}, {"error", {{"type", "api_error"}, {"message", died_text(e)}}}});
         } catch (const QueueWaitExpired& e) {
             fail({{"type", "error"},
                   {"error", {{"type", "rate_limit_error"}, {"code", "queue_wait_timeout"}, {"message", e.what()}}}});
@@ -1616,8 +1613,7 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
                     1);
             return;
         } catch (const EngineDied& e) {
-            x.reply(503, responses::error_body(std::string(e.what()) + "; the next request restarts it", "server_error",
-                                               nullptr, "server_error"));
+            x.reply(503, responses::error_body(died_text(e), "server_error", nullptr, "server_error"));
             return;
         } catch (const EngineNonFinite& e) {   // #879, twice: not the request's fault
             x.reply(503, responses::error_body(e.what(), "server_error", nullptr, "server_error"));
@@ -1668,7 +1664,7 @@ void post_responses(std::shared_ptr<Exchange> xp, json req) {
                 x.svc.note_client_disconnect(*x.cancel);
             }
         } catch (const EngineDied& e) {   // mid-stream: response.failed, then the stream ends
-            failed(std::string(e.what()) + "; the next request restarts it", "server_error");
+            failed(died_text(e), "server_error");
         } catch (const QueueWaitExpired& e) {
             failed(e.what(), "queue_wait_timeout");
         } catch (const StructuredOutputError& e) {
@@ -1865,9 +1861,7 @@ void do_post(Service& svc, HttpServer& server, const httplib::Request& req, http
         x.reply(400, path == "/v1/responses" ? responses::error_body(m)
                                              : json{{"error", {{"type", "invalid_request_error"}, {"message", m}}}});
     } catch (const EngineDied& e) {   // before the answer started (not streamed)
-        x.reply(503,
-                {{"error",
-                  {{"type", "server_error"}, {"message", std::string(e.what()) + "; the next request restarts it"}}}});
+        x.reply(503, {{"error", {{"type", "server_error"}, {"message", died_text(e)}}}});
     } catch (const EngineStuck& e) {   // an unload or restart that could not end the engine
         x.reply(503, {{"error", {{"type", "server_error"}, {"message", e.what()}}}});
     } catch (const ClientGone&) {   // #1999: the client left while the request was prepared
