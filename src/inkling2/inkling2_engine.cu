@@ -432,6 +432,11 @@ struct Loader {
         for (const auto& [t, o] : at) pre[t] = b + o;
         return true;
     }
+    /// The read-ahead freed (the mapping's from here)
+    void drop_ahead() {
+        pre.clear();
+        pre_buf.reset();
+    }
     const lamina::TensorInfo* find(const std::string& name, size_t* s = nullptr) {
         const lamina::TensorInfo* t = gm.find(name, s);
         if (!t) {
@@ -815,10 +820,16 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                 m.ranked = std::move(r);
                 m.n_fixed = n_must;
             }
-            // RAM: the experts from the ranking's end, as many as it holds above what it leaves free
+            // RAM: the experts from the ranking's end, as many as it holds above what it leaves free and what the
+            // load takes beside them: the embedding table, and the dense tensors' read-ahead, then the experts'
+            // stage (the one gone before the other comes)
             uint64_t avail = 0;
             const bool known = lamina::platform::available_ram(avail);
-            const uint64_t ram = !known ? UINT64_MAX : avail > o.ram_reserve ? avail - o.ram_reserve : 0;
+            const lamina::TensorInfo* te = gm.find("token_embd.weight");
+            const uint64_t ram_beside = (te ? lamina::tensor_payload_bytes(*te) : 0) + std::max(dense, stage_max);
+            const uint64_t ram = !known                               ? UINT64_MAX
+                                 : avail > o.ram_reserve + ram_beside ? avail - o.ram_reserve - ram_beside
+                                                                      : 0;
             int64_t a0 = (int64_t) m.ranked.size();
             while (a0 > m.n_fixed) {
                 const uint64_t b = m.layers[(size_t) m.ranked[(size_t) (a0 - 1)].first].stride;
@@ -840,10 +851,11 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
                     "the model's %.2f GiB of experts fit neither this GPU nor the RAM: beside the %.2f "
                     "GiB of dense weights, the cells of %lld tokens and the %.1f GiB left free the GPU's %.2f GiB of "
                     "free VRAM%s hold under the %.2f GiB of them that the RAM has no room for (%.1f GiB available, "
-                    "%.1f GiB of it left free: --ram-reserve-mib).  A smaller quant of the model fits",
+                    "%.1f GiB of it left free: --ram-reserve-mib, %.1f GiB for the load's other buffers).  A smaller "
+                    "quant of the model fits",
                     expert_gib, dense_gib, (long long) least, (double) reserve / gib, (double) fr / gib,
                     o.expert_vram > 0 ? " (and --expert-cache)" : "", (double) fixed_bytes / gib, (double) avail / gib,
-                    (double) o.ram_reserve / gib);
+                    (double) o.ram_reserve / gib, (double) ram_beside / gib);
                 err = b;
                 return false;
             }
@@ -963,6 +975,8 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             dense_of(m.twin[(size_t) l], l);
         }
     }
+
+    L.drop_ahead();   // (its copies to the cards were synchronous)
 
     // the experts: every one in a slot of its layer, read in large pieces through a pinned stage
     uint8_t* stage = nullptr;
