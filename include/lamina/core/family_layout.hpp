@@ -157,10 +157,7 @@ inline LayerKind layer_kind(const ModelGeometry& g, int64_t layer) {
 
 /// One tensor of the layout table: its name (a blk.N. suffix for a layer's, the full name for a global one) and
 /// its GGUF shape.
-struct TensorWant {
-    std::string name;
-    std::vector<int64_t> shape;
-};
+using lamina::TensorWant;
 
 /// Every tensor of layer `layer` (kind from `layer_kind`), by family.
 inline std::vector<TensorWant> layer_tensors(const ModelGeometry& g, int64_t layer) {
@@ -259,48 +256,12 @@ inline bool layout_table_complete(const ModelGeometry& g) {
 /// Checks the model `m` (all shards) against the layout table of `g`.  `checked` counts the tensors found.
 inline bool check_gguf_layout(const lamina::GgufModel& m, const ModelGeometry& g, std::string& err,
                               size_t* checked = nullptr) {
-    std::set<std::string> named;
-    size_t n = 0;
-    auto check = [&](const std::string& name, const std::vector<int64_t>& shape) {
-        named.insert(name);
-        size_t s = 0;
-        const lamina::TensorInfo* t = m.find(name, &s);
-        if (!t) {
-            err = "missing " + name;
-            return false;
-        }
-        bool same = t->shape.size() == shape.size();
-        for (size_t i = 0; same && i < shape.size(); ++i) same = t->shape[i] == (uint64_t) shape[i];
-        if (!same) {
-            std::string got, want;
-            for (uint64_t d : t->shape) got += (got.empty() ? "" : ", ") + std::to_string(d);
-            for (int64_t d : shape) want += (want.empty() ? "" : ", ") + std::to_string(d);
-            err = name + " is [" + got + "], the " + lamina::model_family_title(g.family) + " layout wants [" + want +
-                  "]";
-            return false;
-        }
-        if (!m.in_bounds(*t, s)) {
-            err = name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
-            return false;
-        }
-        ++n;
-        return true;
-    };
-    for (const TensorWant& w : global_tensors(g))
-        if (!check(w.name, w.shape)) return false;
+    std::vector<TensorWant> want = global_tensors(g);
     for (int64_t l = 0; l < g.n_layers + g.n_mtp_layers; ++l)
-        for (const TensorWant& w : layer_tensors(g, l))
-            if (!check("blk." + std::to_string(l) + "." + w.name, w.shape)) return false;
-    if (layout_table_complete(g)) {
-        for (size_t s = 0; s < m.size(); ++s)
-            for (const lamina::TensorInfo& t : m.shard(s).tensors())
-                if (!named.count(t.name)) {
-                    err = t.name + " is not in the " + std::string(lamina::model_family_title(g.family)) + " layout";
-                    return false;
-                }
-    }
-    if (checked) *checked = n;
-    return true;
+        for (TensorWant& w : layer_tensors(g, l)) want.push_back({"blk." + std::to_string(l) + "." + w.name, w.shape});
+    err = lamina::check_tensor_table(m, want, "the " + std::string(lamina::model_family_title(g.family)) + " layout",
+                                     layout_table_complete(g), checked);
+    return err.empty();
 }
 
 }   // namespace lamina::core

@@ -1070,6 +1070,49 @@ inline std::string check_architecture(const GgufFile& f) {
     return err;
 }
 
+/// One tensor of a layout table: its GGUF name, its GGUF shape, and whether a file may leave it out
+struct TensorWant {
+    std::string name;
+    std::vector<int64_t> shape;
+    bool optional = false;
+};
+
+/// Every entry of `want` present in `m` (all shards) with its shape, inside its file, of a type with a known block
+/// size (an optional one may be missing), and with `complete` no tensor the table does not name: "" when they hold,
+/// else what does not (the first in the table's order).  `title` names the layout in the messages ("the
+/// Qwen3.6-35B-A3B layout", "Hy4-flash's layout"); `checked` counts the entries found.
+inline std::string check_tensor_table(const GgufModel& m, const std::vector<TensorWant>& want, const std::string& title,
+                                      bool complete, size_t* checked = nullptr) {
+    std::set<std::string> named;
+    size_t n = 0;
+    for (const TensorWant& w : want) {
+        named.insert(w.name);
+        size_t s = 0;
+        const TensorInfo* t = m.find(w.name, &s);
+        if (!t) {
+            if (w.optional) continue;
+            return "missing " + w.name;
+        }
+        bool same = t->shape.size() == w.shape.size();
+        for (size_t i = 0; same && i < w.shape.size(); ++i) same = t->shape[i] == (uint64_t) w.shape[i];
+        if (!same) {
+            std::string got, wanted;
+            for (uint64_t x : t->shape) got += (got.empty() ? "" : ", ") + std::to_string(x);
+            for (int64_t x : w.shape) wanted += (wanted.empty() ? "" : ", ") + std::to_string(x);
+            return w.name + " is [" + got + "], " + title + " wants [" + wanted + "]";
+        }
+        if (!m.in_bounds(*t, s))
+            return w.name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
+        ++n;
+    }
+    if (complete)
+        for (size_t s = 0; s < m.size(); ++s)
+            for (const TensorInfo& t : m.shard(s).tensors())
+                if (!named.count(t.name)) return t.name + " is not in " + title;
+    if (checked) *checked = n;
+    return {};
+}
+
 /// The engine's guard: `check_architecture`, then a family this engine has a path for.  A recognised family
 /// it does not run (Qwen3.6 in a build without src/qwen35's path) is refused with a message that says so.
 inline std::string check_engine_architecture(const GgufFile& g) {

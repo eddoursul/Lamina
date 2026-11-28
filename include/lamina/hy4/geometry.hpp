@@ -228,10 +228,7 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     return {};
 }
 
-struct TensorWant {
-    std::string name;
-    std::vector<int64_t> shape;
-};
+using lamina::TensorWant;
 
 /// Every tensor of block l (a trunk layer, or the MTP block at
 /// l >= n_layers): GGUF names (blk.N.<suffix>), GGUF shapes.
@@ -318,36 +315,10 @@ inline std::vector<TensorWant> global_tensors(const Geometry& g) {
 /// Every table entry present with its shape, inside its file, of a type with a known block size, and no tensor the
 /// table does not name; `checked` counts them.
 inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* checked = nullptr) {
-    std::set<std::string> named;
-    size_t n = 0;
-    auto check = [&](const std::string& name, const std::vector<int64_t>& shape) -> std::string {
-        named.insert(name);
-        size_t s = 0;
-        const TensorInfo* t = m.find(name, &s);
-        if (!t) return "missing " + name;
-        bool same = t->shape.size() == shape.size();
-        for (size_t i = 0; same && i < shape.size(); ++i) same = t->shape[i] == (uint64_t) shape[i];
-        if (!same) {
-            std::string got, want;
-            for (uint64_t x : t->shape) got += (got.empty() ? "" : ", ") + std::to_string(x);
-            for (int64_t x : shape) want += (want.empty() ? "" : ", ") + std::to_string(x);
-            return name + " is [" + got + "], Hy4-flash's layout wants [" + want + "]";
-        }
-        if (!m.in_bounds(*t, s))
-            return name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
-        ++n;
-        return {};
-    };
-    for (const TensorWant& w : global_tensors(g))
-        if (std::string e = check(w.name, w.shape); !e.empty()) return e;
+    std::vector<TensorWant> want = global_tensors(g);
     for (int64_t l = 0; l < g.n_layers + g.n_mtp; ++l)
-        for (const TensorWant& w : layer_tensors(g, l))
-            if (std::string e = check("blk." + std::to_string(l) + "." + w.name, w.shape); !e.empty()) return e;
-    for (size_t s = 0; s < m.size(); ++s)
-        for (const TensorInfo& t : m.shard(s).tensors())
-            if (!named.count(t.name)) return t.name + " is not in Hy4-flash's layout";
-    if (checked) *checked = n;
-    return {};
+        for (TensorWant& w : layer_tensors(g, l)) want.push_back({"blk." + std::to_string(l) + "." + w.name, w.shape});
+    return check_tensor_table(m, want, "Hy4-flash's layout", true, checked);
 }
 
 }   // namespace lamina::hy4

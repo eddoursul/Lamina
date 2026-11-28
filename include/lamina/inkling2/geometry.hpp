@@ -216,11 +216,7 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
     return {};
 }
 
-struct TensorWant {
-    std::string name;             ///< GGUF name
-    std::vector<int64_t> shape;   ///< GGUF order
-    bool optional = false;        ///< a tensor some files leave out (an expert matrix's per-expert scale)
-};
+using lamina::TensorWant;   // (optional: a tensor some files leave out, an expert matrix's per-expert scale)
 
 /// A looped layer's controller matrix for message `c`: "down" [2 n_embd, rank], "gain" and "forget" [rank, n_embd]
 inline std::string ctrl_name(const Geometry& g, int64_t l, int c, const char* part) {
@@ -312,36 +308,10 @@ inline std::vector<TensorWant> global_tensors(const Geometry& g) {
 /// Every table entry present with its shape, inside its file, of a type with a known block size, and no tensor the
 /// table does not name; `checked` counts them.
 inline std::string check_layout(const GgufModel& m, const Geometry& g, size_t* checked = nullptr) {
-    std::set<std::string> named;
-    size_t n = 0;
-    auto check = [&](const TensorWant& w) -> std::string {
-        named.insert(w.name);
-        size_t s = 0;
-        const TensorInfo* t = m.find(w.name, &s);
-        if (!t) return w.optional ? std::string() : "missing " + w.name;
-        bool same = t->shape.size() == w.shape.size();
-        for (size_t i = 0; same && i < w.shape.size(); ++i) same = t->shape[i] == (uint64_t) w.shape[i];
-        if (!same) {
-            std::string got, want;
-            for (uint64_t x : t->shape) got += (got.empty() ? "" : ", ") + std::to_string(x);
-            for (int64_t x : w.shape) want += (want.empty() ? "" : ", ") + std::to_string(x);
-            return w.name + " is [" + got + "], Inkling 2's layout wants [" + want + "]";
-        }
-        if (!m.in_bounds(*t, s))
-            return w.name + " (" + t->type_name() + ") has no known size inside " + m.shard(s).path();
-        ++n;
-        return {};
-    };
-    for (const TensorWant& w : global_tensors(g))
-        if (std::string e = check(w); !e.empty()) return e;
+    std::vector<TensorWant> want = global_tensors(g);
     for (int64_t l = 0; l < g.n_layers; ++l)
-        for (const TensorWant& w : layer_tensors(g, l))
-            if (std::string e = check(w); !e.empty()) return e;
-    for (size_t s = 0; s < m.size(); ++s)
-        for (const TensorInfo& t : m.shard(s).tensors())
-            if (!named.count(t.name)) return t.name + " is not in Inkling 2's layout";
-    if (checked) *checked = n;
-    return {};
+        for (TensorWant& w : layer_tensors(g, l)) want.push_back(std::move(w));
+    return check_tensor_table(m, want, "Inkling 2's layout", true, checked);
 }
 
 // ---- the model's block drafter (DSpark: a dflash GGUF): the rings of context cells the engine keeps a layer
