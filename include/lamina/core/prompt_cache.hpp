@@ -37,7 +37,8 @@
 // sessions two more (the session the others act on, K/V cells from one session to another), and for the disk tier
 // its copies of a range of cells (kv_range and the hooks beside it); PromptCache is
 // Flash-Next's: its session state (session_ckpt_*) and the cells of its QSA layers.  The qwen35 path has its own
-// (src/qwen35/q36_engine.cu), over its batch slots' sessions.
+// (src/qwen35/q36_engine.cu), over its batch slots' sessions, and so has the Inkling 2 path
+// (src/inkling2/inkling2_engine.cu).
 #pragma once
 
 #include "lamina/core/conversation_cache.hpp"

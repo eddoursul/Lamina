@@ -4891,7 +4891,6 @@ std::string build_images(const std::string& path, const std::vector<int32_t>& id
 }
 
 // ------------------------------------------------------------------------------------------------ serve
-/// A batch slot: a session decoding (its next token is `x`, not yet in the state).
 /// s as the inside of a JSON string
 std::string json_escape(const std::string& s) {
     std::string o;
@@ -4910,6 +4909,7 @@ std::string json_escape(const std::string& s) {
     return o;
 }
 
+/// A batch slot: a session decoding (its next token is `x`, not yet in the state).
 struct Slot {
     bool active = false, stop = false;
     int sess = 0;   // the session it decodes in (the prompt cache's choice; without the cache its own number)
