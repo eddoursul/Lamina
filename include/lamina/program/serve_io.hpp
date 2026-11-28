@@ -153,6 +153,14 @@ std::string parse_gen(const char* p, bool geni, GenRequest& r,
 /// left, not the sum, which overflows for a huge max_new): "" or the ERR text
 std::string gen_fits(const GenRequest& r, int64_t n_vocab, int64_t room);
 
+/// Generate mode's inputs (--tokens, --force, --n): the prompt's and the forced continuation's ids (parse_id_list's
+/// rule), n_gen the forced ids' count + 1 where they are given, every id inside the vocabulary and the prompt with
+/// n_gen inside `room` tokens of context; "" or the message
+std::string gen_inputs(const std::string& tokens, const std::string& force, int64_t n_vocab, int64_t room,
+                       std::vector<int32_t>& prompt, std::vector<int32_t>& forced, int& n_gen);
+/// Generate mode's answer: "gen: <id> <id> ..." on the serve output (stdout)
+void print_gen(const std::vector<int32_t>& gen);
+
 /// Why an answer ends after the token just out, every path's rule: the end-of-text token ("stop"), a stop the client
 /// asked for ("cancel", where the length is reached too), the request's max_new or the context ("length"); null: it
 /// goes on.

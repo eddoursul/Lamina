@@ -93,7 +93,8 @@ inline bool parse_id_list(const char* s, std::vector<int32_t>& out, std::string&
     return true;
 }
 
-/// "1,2,3" (or space-separated) -> ids, up to the first character that is not part of the list (the command lines')
+/// "1,2,3" (or space-separated) -> ids, up to the first character that is not part of the list (the GPU lists the
+/// family switch writes)
 inline std::vector<int32_t> parse_ids(const char* s) {
     std::vector<int32_t> v;
     while (*s) {

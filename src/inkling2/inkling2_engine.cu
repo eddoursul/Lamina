@@ -8687,13 +8687,16 @@ int run_engine(int argc, char** argv, bool check_only) {
         E.profile_write(true);
         return rc;
     }
-    std::vector<int32_t> prompt = lamina::program::parse_ids(tokens.c_str());
-    const std::vector<int32_t> forced = lamina::program::parse_ids(force.c_str());
-    if (prompt.empty()) {
+    if (tokens.empty()) {
         std::fprintf(stderr, "lamina: --tokens is required\n");
         return 2;
     }
-    if (!forced.empty()) n_gen = (int) forced.size() + 1;
+    std::vector<int32_t> prompt, forced;
+    if (const std::string e = lamina::program::gen_inputs(tokens, force, m.g.n_vocab, E.ctx, prompt, forced, n_gen);
+        !e.empty()) {
+        std::fprintf(stderr, "lamina: %s\n", e.c_str());
+        return 2;
+    }
     ImgReq ir;
     if (!emb_file.empty()) {
         if (const std::string ve = lamina::program::image_cells(emb_file, prompt, {m.image_pad}, m.g.n_embd, {}, ir);
@@ -8702,18 +8705,6 @@ int run_engine(int argc, char** argv, bool check_only) {
             return 2;
         }
         E.img = &ir;
-    }
-    for (const std::vector<int32_t>* v : {(const std::vector<int32_t>*) &prompt, &forced})
-        for (const int32_t t : *v)
-            if ((t < 0 && (v != &prompt || ir.cell_row.empty())) || t >= m.g.n_vocab) {
-                std::fprintf(stderr, "lamina: the token %d is outside the vocabulary (%lld)\n", (int) t,
-                             (long long) m.g.n_vocab);
-                return 2;
-            }
-    if ((int64_t) prompt.size() + n_gen > E.ctx) {
-        std::fprintf(stderr, "lamina: the prompt (%zu tokens) and %d generated exceed the context (%lld)\n",
-                     prompt.size(), n_gen, (long long) E.ctx);
-        return 2;
     }
     FILE* ff = dump_full.empty() ? nullptr : std::fopen(dump_full.c_str(), "wb");
     if (E.sat || E.main_locked) E.clocks.hold();   // (the run is one request)
@@ -8766,9 +8757,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     const double tg_ms = ms_since(t1);
     E.prof_print("generation");
     if (ff) std::fclose(ff);
-    serve_print("gen:");
-    for (int t : gen) serve_print(" %d", t);
-    serve_print("\n");
+    lamina::program::print_gen(gen);
     std::fprintf(stderr,
                  "lamina: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.2f tok/s)%s%s; MiB of "
                  "VRAM free: %s\n",

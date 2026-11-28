@@ -5860,23 +5860,15 @@ int run_engine(int argc, char** argv, bool check_only) {
         E.save_profile(true);
         return rc;
     }
-    std::vector<int32_t> prompt = lamina::program::parse_ids(tokens.c_str());
-    const std::vector<int32_t> forced = lamina::program::parse_ids(force.c_str());
-    if (prompt.empty()) {
+    if (tokens.empty()) {
         std::fprintf(stderr, "lamina: --tokens is required\n");
         return 2;
     }
-    if (!forced.empty()) n_gen = (int) forced.size() + 1;
-    for (const std::vector<int32_t>* v : {(const std::vector<int32_t>*) &prompt, &forced})
-        for (const int32_t t : *v)
-            if (t < 0 || t >= m.g.n_vocab) {
-                std::fprintf(stderr, "lamina: the token %d is outside the vocabulary (%lld)\n", (int) t,
-                             (long long) m.g.n_vocab);
-                return 2;
-            }
-    if ((int64_t) prompt.size() + n_gen + kMaxT > E.ctx) {
-        std::fprintf(stderr, "lamina: the prompt (%zu tokens) and %d generated exceed the context (%lld)\n",
-                     prompt.size(), n_gen, (long long) E.ctx);
+    std::vector<int32_t> prompt, forced;
+    if (const std::string e =
+            lamina::program::gen_inputs(tokens, force, m.g.n_vocab, E.ctx - kMaxT, prompt, forced, n_gen);
+        !e.empty()) {
+        std::fprintf(stderr, "lamina: %s\n", e.c_str());
         return 2;
     }
     ImgReq ir;
@@ -5958,9 +5950,7 @@ int run_engine(int argc, char** argv, bool check_only) {
     const double tg_ms = ms_since(t1);
     E.trace_print("generation");
     if (ff) std::fclose(ff);
-    serve_print("gen:");
-    for (int t : gen) serve_print(" %d", t);
-    serve_print("\n");
+    lamina::program::print_gen(gen);
     std::fprintf(stderr,
                  "lamina: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.2f tok/s); "
                  "the CPU's experts %.1f ms, the table %.1f ms while generating; VRAM hits %.1f%%\n",

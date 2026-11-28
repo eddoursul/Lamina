@@ -282,6 +282,30 @@ std::string gen_fits(const GenRequest& r, int64_t n_vocab, int64_t room) {
     return "";
 }
 
+std::string gen_inputs(const std::string& tokens, const std::string& force, int64_t n_vocab, int64_t room,
+                       std::vector<int32_t>& prompt, std::vector<int32_t>& forced, int& n_gen) {
+    std::string err;
+    if (!parse_id_list(tokens.c_str(), prompt, err)) return "--tokens: " + err;
+    forced.clear();
+    if (!force.empty() && !parse_id_list(force.c_str(), forced, err)) return "--force: " + err;
+    if (!forced.empty()) n_gen = (int) forced.size() + 1;
+    for (const std::vector<int32_t>* v : {&prompt, &forced})
+        for (const int32_t t : *v)
+            if (t >= n_vocab)
+                return "the token " + std::to_string(t) + " is outside the vocabulary (" + std::to_string(n_vocab) +
+                       ")";
+    if (n_gen < 0 || (int64_t) prompt.size() + n_gen > room)
+        return "the prompt (" + std::to_string(prompt.size()) + " tokens) and " + std::to_string(n_gen) +
+               " generated exceed the context (" + std::to_string(room) + ")";
+    return "";
+}
+
+void print_gen(const std::vector<int32_t>& gen) {
+    std::string line = "gen:";
+    for (const int32_t t : gen) line += " " + std::to_string(t);
+    serve_print("%s\n", line.c_str());
+}
+
 void print_done(const DoneLine& d) {
     serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld 0 0 0.0 %lld 0\n", d.produced, d.prompt,
                 d.prompt_ms, d.decode_ms, d.finish, d.accepted, d.offered, d.reused, d.hits, d.lookups, d.read);
