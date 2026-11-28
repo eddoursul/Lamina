@@ -518,7 +518,7 @@ endif()
 #     worse opt-out.
 # The x86 kernels exist on x86-64 only (LAMINA_CPU_X86); the pool and the probes build everywhere.
 add_library(lamina_kernels_cpu STATIC src/kernels/cpu/pool.cpp src/kernels/cpu/expert_layout.cpp
-            src/kernels/cpu/hadamard.cpp)
+            src/kernels/cpu/hadamard.cpp src/kernels/cpu/q8_0_rows.cpp)
 target_include_directories(lamina_kernels_cpu PUBLIC include)
 if(LAMINA_CPU_X86)
   target_sources(lamina_kernels_cpu PRIVATE src/kernels/cpu/expert.cpp src/kernels/cpu/q2_avx2.cpp)
@@ -672,6 +672,14 @@ if(LAMINA_NATIVE_EXPERTS)
     add_executable(q8k_quant_parity src/kernels/cpu/q8k_quant_parity.cpp)
     target_link_libraries(q8k_quant_parity PRIVATE lamina_kernels_cpu)
     add_test(NAME q8k_quant_parity COMMAND q8k_quant_parity)
+    # the weights' Q8_0 quantizer (kernels/cpu/q8_0_rows) against ggml_quantize_chunk, byte for byte
+    add_executable(q8_0_rows_test src/kernels/cpu/q8_0_rows_test.cpp)
+    target_link_libraries(q8_0_rows_test PRIVATE lamina_kernels_cpu)
+    add_test(NAME q8_0_rows_test COMMAND q8_0_rows_test)
+    # f16_bits.hpp's conversions against the CPU's F16C over every fp16 and every f32 pattern, and dequant.hpp's
+    add_executable(f16_bits_test src/kernels/f16_bits_test.cpp)
+    target_include_directories(f16_bits_test PRIVATE include)
+    add_test(NAME f16_bits_test COMMAND f16_bits_test)
   endif()
   if(LAMINA_ENABLE_CUDA)
     # llama.cpp's MMQ kernels (ggml-cuda, MIT) for the prompt path's experts, from the same checkout as ggml: mmq.cuh's
@@ -1054,7 +1062,7 @@ if(LAMINA_BUILD_TESTS)
              deterministic_adapt_help platform_memory_test
              platform_spill_test pretokenize_parity tokenizer_test sha256_base64_test
              ple_reader_selftest model_config_test params_test bench_test remote_model_test media_path_test
-             cpu_floor_test)
+             cpu_floor_test q8_0_rows_test f16_bits_test)
     if(TEST ${_t})
       set_tests_properties(${_t} PROPERTIES LABELS cpu)
     endif()

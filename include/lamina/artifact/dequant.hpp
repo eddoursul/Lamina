@@ -26,37 +26,14 @@
 
 #define LAMINA_GGUF_MAIN_DISABLED 1
 #include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 
 namespace lamina {
 
-// ---- fp16/bf16 -> fp32. Both handle subnormals and infinities; naive shifts do not.
-inline float fp16_to_fp32(uint16_t h) {
-    const uint32_t sign = (uint32_t) (h >> 15) & 1u;
-    uint32_t exp = (h >> 10) & 0x1Fu, man = h & 0x3FFu, f;
-    if (exp == 0) {
-        if (man == 0) f = sign << 31;
-        else {
-            exp = 127 - 15 + 1;
-            while (!(man & 0x400u)) {
-                man <<= 1;
-                --exp;
-            }
-            man &= 0x3FFu;
-            f = (sign << 31) | (exp << 23) | (man << 13);
-        }
-    } else if (exp == 31) f = (sign << 31) | 0x7F800000u | (man << 13);
-    else f = (sign << 31) | ((exp - 15 + 127) << 23) | (man << 13);
-    float out;
-    std::memcpy(&out, &f, 4);
-    return out;
-}
-
-inline float bf16_to_fp32(uint16_t h) {
-    const uint32_t f = (uint32_t) h << 16;
-    float out;
-    std::memcpy(&out, &f, 4);
-    return out;
-}
+// ---- fp16/bf16 -> fp32: the kernels' exact conversions (subnormals, infinities and NaNs as they are)
+inline float fp16_to_fp32(uint16_t h) { return lamina::kernels::f32_from_f16(h); }
+inline float bf16_to_fp32(uint16_t h) { return lamina::kernels::f32_from_bf16(h); }
 
 inline uint16_t read_u16(const uint8_t* p) { return (uint16_t) (p[0] | (p[1] << 8)); }
 

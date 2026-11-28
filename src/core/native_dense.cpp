@@ -1,6 +1,9 @@
 #include "lamina/core/native_dense.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/weights.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/cpu/q8_0_rows.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 
@@ -296,44 +299,6 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         return false;
     }
 }
-namespace {
-#if LAMINA_X86
-// GCC/Clang only take the F16C intrinsics below in a function compiled for F16C (MSVC takes them anywhere); every
-// CPU with the engine's AVX2 floor has F16C.
-#if defined(__GNUC__) && !defined(__F16C__)
-#define LAMINA_F16C_FN __attribute__((target("f16c")))
-#else
-#define LAMINA_F16C_FN
-#endif
-LAMINA_F16C_FN uint16_t f32_to_f16(float f) {
-    return (uint16_t) _mm_extract_epi16(_mm_cvtps_ph(_mm_set_ss(f), _MM_FROUND_TO_NEAREST_INT), 0);
-}
-LAMINA_F16C_FN float f16_to_f32(uint16_t h) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h))); }
-#else
-// arm64's conversion instructions through __fp16, rounding to nearest even as F16C's above
-uint16_t f32_to_f16(float f) {
-    const __fp16 h = (__fp16) f;
-    uint16_t b;
-    std::memcpy(&b, &h, 2);
-    return b;
-}
-float f16_to_f32(uint16_t b) {
-    __fp16 h;
-    std::memcpy(&h, &b, 2);
-    return (float) h;
-}
-#endif
-// one row's values as ggml's quantize_row_q8_0_ref: per 32, d = amax / 127 stored as f16, codes round(x / d)
-void q8_0_row(const float* x, int64_t n, int8_t* q, uint16_t* s) {
-    for (int64_t b = 0; b < n / 32; ++b) {
-        float amax = 0.0f;
-        for (int j = 0; j < 32; ++j) amax = std::max(amax, std::fabs(x[b * 32 + j]));
-        const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
-        s[b] = f32_to_f16(d);
-        for (int j = 0; j < 32; ++j) q[b * 32 + j] = (int8_t) std::roundf(x[b * 32 + j] * id);
-    }
-}
-}   // namespace
 
 bool HcQ8::names(const std::vector<std::string>& shards, std::set<std::string>& out, std::string& err) {
     try {
@@ -431,14 +396,13 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
                                 uint16_t h;
                                 std::memcpy(&h, src + i * 2, 2);
                                 if (j.kind == 1) {
-                                    row[(size_t) c] = f16_to_f32(h);
+                                    row[(size_t) c] = lamina::kernels::f32_from_f16(h);
                                 } else {
-                                    const uint32_t u = (uint32_t) h << 16;
-                                    std::memcpy(&row[(size_t) c], &u, 4);
+                                    row[(size_t) c] = lamina::kernels::f32_from_bf16(h);
                                 }
                             }
                         }
-                        q8_0_row(row.data(), cols, qr, sr);
+                        lamina::kernels::cpu::quantize_q8_0_row_split(row.data(), cols, qr, sr);
                     }
                     if (cudaMemcpy(j.dq, q.data(), q.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
                         cudaMemcpy(j.ds, s.data(), s.size() * 2, cudaMemcpyHostToDevice) != cudaSuccess) {

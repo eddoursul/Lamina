@@ -27,9 +27,11 @@
 #include "lamina/core/vmm.hpp"
 #include "lamina/hy4/engine.hpp"
 #include "lamina/hy4/geometry.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/cpu/q8_0_rows.hpp"
 #include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
@@ -202,7 +204,8 @@ struct Model {
     int32_t turn_start = -1, turn_middle = -1, turn_end = -1;
 };
 
-/// Rows of floats as a Q8_0 matrix on the device (ggml's quantizer; kWeightPad zero bytes after it)
+/// Rows of floats as a Q8_0 matrix on the device (ggml's quantizer's bytes, the rows over 8 threads; kWeightPad zero
+/// bytes after it)
 Mat q8_mat(const float* w, int64_t rows, int64_t cols) {
     Mat m;
     m.type = 8;
@@ -210,7 +213,7 @@ Mat q8_mat(const float* w, int64_t rows, int64_t cols) {
     m.n_out = (int) rows;
     const size_t bytes = (size_t) rows * (size_t) (cols / 32) * 34;
     std::vector<uint8_t> q(bytes);
-    ggml_quantize_chunk(GGML_TYPE_Q8_0, w, q.data(), 0, rows, cols, nullptr);
+    lamina::kernels::cpu::quantize_q8_0_rows(w, rows, cols, q.data(), 8);
     uint8_t* d = dalloc<uint8_t>(bytes + kWeightPad);
     CK(cudaMemcpy(d, q.data(), bytes, cudaMemcpyHostToDevice));
     CK(cudaMemset(d + bytes, 0, kWeightPad));
@@ -316,10 +319,7 @@ struct Loader {
         std::vector<float> h(n);
         if (t->type == 0) std::memcpy(h.data(), src, n * 4);
         else if (t->type == 30)
-            for (size_t i = 0; i < n; ++i) {
-                const uint32_t u = (uint32_t) (src[2 * i] | (src[2 * i + 1] << 8)) << 16;
-                std::memcpy(&h[i], &u, 4);
-            }
+            for (size_t i = 0; i < n; ++i) h[i] = K::f32_from_bf16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
         else {
             std::fprintf(stderr, "lamina: %s is %s, expected F32 or BF16\n", name.c_str(), t->type_name());
             throw Fatal{1};
@@ -328,11 +328,11 @@ struct Loader {
     }
 };
 
-/// A BF16 matrix's rows into Q8_0 rows (ggml's quantizer)
+/// A BF16 matrix's rows into Q8_0 rows (ggml's quantizer's bytes)
 void bf16_rows_q8_0(const uint8_t* bf16, uint8_t* dst, int64_t rows, int64_t cols) {
     std::vector<float> x((size_t) (rows * cols));
     ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t*>(bf16), x.data(), rows * cols);
-    ggml_quantize_chunk(GGML_TYPE_Q8_0, x.data(), dst, 0, rows, cols, nullptr);
+    lamina::kernels::cpu::quantize_q8_0_rows(x.data(), rows, cols, dst);
 }
 
 /// The start profile's order of each MoE layer's experts (the learned one first, as load_profile takes them): the most

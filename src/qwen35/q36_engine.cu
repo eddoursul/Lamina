@@ -18,6 +18,7 @@
 //
 // Modes: --serve (lamina's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS or --tokens-file F
 // [--n N] [--force IDS] [--dump-full-logits F] (tools/qwen35/kl.py's reference interface), --bench-pp N / --bench-tg N.
+#include "lamina/artifact/dequant.hpp"
 #include "lamina/artifact/drafter.hpp"
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
@@ -1118,11 +1119,7 @@ bool tensor_floats(const lamina::TensorInfo& t, const uint8_t* src, std::vector<
         for (size_t i = 0; i < h.size(); ++i) h[i] = K::f32_from_f16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
     else if (t.type == 8 && h.size() % 32 == 0) {
         // Q8_0 (the Q8_0 file stores ssm_alpha / ssm_beta so): blocks of an fp16 scale and 32 int8, widened here
-        for (size_t b = 0; b < h.size() / 32; ++b) {
-            const uint8_t* q = src + b * 34;
-            const float d = K::f32_from_f16((uint16_t) (q[0] | (q[1] << 8)));
-            for (int j = 0; j < 32; ++j) h[b * 32 + j] = d * (float) (int8_t) q[2 + j];
-        }
+        for (size_t b = 0; b < h.size() / 32; ++b) lamina::dequantize_q8_0(src + b * 34, h.data() + b * 32);
     } else {
         return false;
     }

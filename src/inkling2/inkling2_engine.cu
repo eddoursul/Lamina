@@ -30,6 +30,7 @@
 #include "lamina/kernels/bf16_gemv.hpp"
 #include "lamina/kernels/cpu/native_expert.hpp"
 #include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/cpu/q8_0_rows.hpp"
 #include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mma.hpp"
@@ -1083,16 +1084,8 @@ struct SparkFile {
         const size_t n = ggml_row_size(GGML_TYPE_Q8_0, m.n_in) * (size_t) m.n_out;
         std::vector<uint8_t> q(n);
         // (the rows over a few threads: ~260M values for the three layers)
-        const int parts = (int) std::max<int64_t>(1, std::min<int64_t>(8, m.n_out / 256));
-        std::vector<std::thread> pool;
-        for (int i = 0; i < parts; ++i)
-            pool.emplace_back([&, i] {
-                const int64_t r0 = (int64_t) m.n_out * i / parts, r1 = (int64_t) m.n_out * (i + 1) / parts;
-                ggml_quantize_chunk(GGML_TYPE_Q8_0, w.data() + r0 * m.n_in,
-                                    q.data() + ggml_row_size(GGML_TYPE_Q8_0, m.n_in) * (size_t) r0, 0, r1 - r0, m.n_in,
-                                    nullptr);
-            });
-        for (std::thread& t : pool) t.join();
+        lamina::kernels::cpu::quantize_q8_0_rows(w.data(), m.n_out, m.n_in, q.data(),
+                                                 (int) std::max<int64_t>(1, std::min<int64_t>(8, m.n_out / 256)));
         uint8_t* d = dalloc<uint8_t>(n + kWeightPad);
         CK(cudaMemcpy(d, q.data(), n, cudaMemcpyHostToDevice));
         CK(cudaMemset(d + n, 0, kWeightPad));

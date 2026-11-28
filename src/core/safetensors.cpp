@@ -1,5 +1,6 @@
 // src/core/safetensors.cpp - a safetensors file's header and tensors
 #include "lamina/core/safetensors.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -77,10 +78,8 @@ bool SafeTensors::read(const std::string& name, std::vector<float>& out, std::ve
     if (width == 4) {
         std::memcpy(out.data(), raw.data(), raw.size());
     } else {
-        for (size_t i = 0; i < out.size(); ++i) {
-            const uint32_t u = (uint32_t) (raw[2 * i] | (raw[2 * i + 1] << 8)) << 16;
-            std::memcpy(&out[i], &u, 4);
-        }
+        for (size_t i = 0; i < out.size(); ++i)
+            out[i] = lamina::kernels::f32_from_bf16((uint16_t) (raw[2 * i] | (raw[2 * i + 1] << 8)));
     }
     shape = e->shape;
     return true;
