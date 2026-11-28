@@ -8656,6 +8656,7 @@ int run_engine(int argc, char** argv, bool check_only) {
             }
             char buf[1 << 16];
             size_t n;
+            tokens.clear();   // (the last of --tokens and --tokens-file is the prompt)
             while ((n = std::fread(buf, 1, sizeof buf, fp)) > 0) tokens.append(buf, n);
             std::fclose(fp);
         } else if (a == "--n") n_gen = std::atoi(next());
