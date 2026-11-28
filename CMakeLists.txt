@@ -230,7 +230,7 @@ target_link_libraries(lamina-plan PRIVATE lamina_plan)
 if(LAMINA_ENABLE_CUDA)
   add_library(lamina_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
                                  src/platform/console_quit.cpp src/platform/slice_read.cpp src/platform/spill.cpp
-                                 src/core/disk_tier.cpp src/core/cuda_fault.cpp)
+                                 src/core/disk_tier.cpp src/core/cuda_fault.cpp src/core/gguf_loader.cpp)
   target_include_directories(lamina_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   # CUDA::cudart_static is PUBLIC because host translation units call the runtime: the .cu sources get cudart through
   # the CUDA language rules, a .cpp does not.

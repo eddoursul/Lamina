@@ -21,6 +21,7 @@
 #include "lamina/core/conversation_cache.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/disk_tier.hpp"
+#include "lamina/core/gguf_loader.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/model_check.hpp"
 #include "lamina/core/run_owned.hpp"
@@ -98,7 +99,7 @@ constexpr int kMaxT = 8;                       // rows a forward takes at most (
 constexpr int kTail = 16;                      // the indexer's per-cell value / gate rows kept (four groups of 4)
 constexpr int kScoreBlocks = 128;              // the indexer scores' grid (a grid-stride loop over the groups)
 constexpr float kEngramEps = 1.1920929e-07f;   // the reference's unset RMSNorm eps: FLT_EPSILON
-constexpr size_t kWeightPad = 4096;            // zero bytes after each dense weight
+using lamina::core::kWeightPad;                // zero bytes after each dense weight
 
 // ------------------------------------------------------------------------------------------------ the model
 struct Mat {
@@ -220,69 +221,10 @@ Mat q8_mat(const float* w, int64_t rows, int64_t cols) {
     m.d = d;
     return m;
 }
-const float* f32_dev(const std::vector<float>& h) {
-    float* d = dalloc<float>(h.size());
-    CK(cudaMemcpy(d, h.data(), h.size() * 4, cudaMemcpyHostToDevice));
-    return d;
-}
+using lamina::core::floats_on_device;
 
-struct Loader {
-    const lamina::GgufModel& gm;
-    std::string err;
-    std::map<const lamina::TensorInfo*, const uint8_t*> pre;   // tensors read ahead (read_ahead), else the mapping's
-    std::unique_ptr<uint8_t[]> pre_buf;
-    /// Every tensor `want` takes, read in large pieces into host memory: a copy out of the mapping faults its pages in
-    /// a few at a time
-    bool read_ahead(const std::function<bool(const std::string&)>& want, int threads, bool uncached, std::string& e) {
-        std::vector<lamina::platform::SliceRun> runs;
-        std::vector<std::pair<const lamina::TensorInfo*, uint64_t>> at;
-        uint64_t total = 0;
-        for (size_t s = 0; s < gm.size(); ++s)
-            for (const lamina::TensorInfo& t : gm.shard(s).tensors()) {
-                const uint64_t n = lamina::tensor_payload_bytes(t);
-                if (n == 0 || !gm.in_bounds(t, s) || !want(t.name)) continue;
-                runs.push_back({gm.shard(s).path(), gm.shard(s).data_start() + t.offset, n, total, n, 1, 0});
-                at.emplace_back(&t, total);
-                total += (n + 63) / 64 * 64;
-            }
-        pre_buf.reset(new (std::nothrow) uint8_t[std::max<uint64_t>(total, 64)]);
-        if (!pre_buf) return true;   // the mapping's, then
-        uint8_t* b = pre_buf.get();
-        if (!lamina::platform::read_slices(runs, threads, uncached, (uint64_t) 32 << 20, [b](int) { return b; }, e))
-            return false;
-        for (const auto& [t, o] : at) pre[t] = b + o;
-        return true;
-    }
-    void drop_ahead() {
-        pre.clear();
-        pre_buf.reset();
-    }
-    const lamina::TensorInfo* find(const std::string& name, size_t* s) {
-        const lamina::TensorInfo* t = gm.find(name, s);
-        if (!t) {
-            std::fprintf(stderr, "lamina: missing %s\n", name.c_str());
-            throw Fatal{1};
-        }
-        return t;
-    }
-    const uint8_t* host(const std::string& name, const lamina::TensorInfo** ti = nullptr) {
-        size_t s = 0;
-        const lamina::TensorInfo* t = find(name, &s);
-        if (ti) *ti = t;
-        if (const auto it = pre.find(t); it != pre.end()) return it->second;
-        return gm.shard(s).tensor_data(*t);
-    }
-    /// the tensor's GGUF bytes on the device
-    const uint8_t* raw(const std::string& name, const lamina::TensorInfo** ti = nullptr) {
-        const lamina::TensorInfo* t = nullptr;
-        const uint8_t* src = host(name, &t);
-        if (ti) *ti = t;
-        const uint64_t n = lamina::tensor_payload_bytes(*t);
-        uint8_t* d = dalloc<uint8_t>(n + kWeightPad);   // MMQ's k loop reads past a short last row (zero activations)
-        CK(cudaMemcpy(d, src, n, cudaMemcpyHostToDevice));
-        CK(cudaMemset(d + n, 0, kWeightPad));
-        return d;
-    }
+struct Loader : lamina::core::GgufLoader {   // (the shared loader; this path's matrices made Q8_0)
+    using GgufLoader::GgufLoader;
     /// a matrix [n_in, n_out...] as Q8_0 rows on the device: Q8_0 as it is, BF16 or F32 quantized here (ggml's Q8_0;
     /// the MTP block's matrices are BF16)
     Mat mat(const std::string& name) {
@@ -295,7 +237,7 @@ struct Loader {
         for (size_t i = 1; i < t->shape.size(); ++i) rows *= t->shape[i];
         m.n_out = (int) rows;
         if (t->type == 8) {
-            m.d = raw(name);
+            m.d = device_bytes(name);
             return m;
         }
         if ((t->type != 30 && t->type != 0) || m.n_in % 32 != 0) {
@@ -310,21 +252,6 @@ struct Loader {
         if (t->type == 0) std::memcpy(f.data(), src, n * 4);
         else ggml_bf16_to_fp32_row(reinterpret_cast<const ggml_bf16_t*>(src), f.data(), (int64_t) n);
         return q8_mat(f.data(), (int64_t) rows, m.n_in);
-    }
-    /// an F32 tensor on the device (BF16 / F16 widened)
-    const float* f32(const std::string& name) {
-        const lamina::TensorInfo* t = nullptr;
-        const uint8_t* src = host(name, &t);
-        const size_t n = (size_t) t->elements();
-        std::vector<float> h(n);
-        if (t->type == 0) std::memcpy(h.data(), src, n * 4);
-        else if (t->type == 30)
-            for (size_t i = 0; i < n; ++i) h[i] = K::f32_from_bf16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
-        else {
-            std::fprintf(stderr, "lamina: %s is %s, expected F32 or BF16\n", name.c_str(), t->type_name());
-            throw Fatal{1};
-        }
-        return f32_dev(h);
     }
 };
 
@@ -386,7 +313,7 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     m.turn_middle = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_middle");
     m.turn_end = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<\xEF\xBD\x9Chy_end");
     const auto& g = m.g;
-    Loader L{gm, {}, {}, {}};
+    Loader L(gm);
     {   // the dense tensors: all but the routed experts, the Engram table and the MTP block when it is not loaded
         const std::string mtp = "blk." + std::to_string(g.n_layers) + ".";
         const bool keep_mtp = want_mtp && g.n_mtp > 0;
@@ -407,14 +334,14 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         m.table_off = gm.shard(s).data_start() + t->offset;
     }
     const lamina::TensorInfo* te = nullptr;
-    m.embd = L.raw("token_embd.weight", &te);
+    m.embd = L.device_bytes("token_embd.weight", &te);
     m.embd_type = (int) te->type;
     m.embd_row = (size_t) (lamina::tensor_payload_bytes(*te) / te->shape[1]);
     m.out_norm = L.f32("output_norm.weight");
     m.ohc_fn = L.f32("output_hc_fn.weight");
     m.ohc_base = L.f32("output_hc_base.weight");
     m.ohc_scale = L.f32("output_hc_scale.weight");
-    m.head = reinterpret_cast<const uint16_t*>(L.raw("output.weight"));
+    m.head = reinterpret_cast<const uint16_t*>(L.device_bytes("output.weight"));
     m.layers.resize((size_t) g.n_layers);
     m.has_mtp = want_mtp && g.n_mtp > 0;
     for (int64_t l = 0; l < g.n_layers + (m.has_mtp ? 1 : 0); ++l) {
@@ -754,7 +681,7 @@ bool load_dfly(const std::string& path, Model& m, std::string& err) {
     };
     auto vec = [&](const std::string& name) -> const float* {
         read(name, 1);
-        return f32_dev(v);
+        return floats_on_device(v);
     };
     auto mat = [&](const std::string& name) -> Mat {
         read(name, 2);

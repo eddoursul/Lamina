@@ -1,5 +1,7 @@
 #include "lamina/core/native_dense.hpp"
+
 #include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/gguf_loader.hpp"
 #include "lamina/core/weights.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/cpu/q8_0_rows.hpp"
@@ -104,82 +106,6 @@ struct Pending {
     uint64_t bytes;
     DevicePtr data;
 };
-struct Upload {
-    void* dev;
-    const uint8_t* src;
-    uint64_t bytes;
-};
-// The matrices' bytes into VRAM from up to 8 threads in 8 MiB pieces through pinned staging (upstream PR #2673): a
-// thread copies a piece from the shard's mapping (taking its page faults) into one half of its staging buffer and sends
-// it on its own stream while it fills the other half.  One synchronous cudaMemcpy a matrix took the faults one at a
-// time (UD-Q4_K_XL's 2,975 MiB in ~1.5-2 s with the file cached).
-bool upload_parallel(const std::vector<Upload>& jobs, std::string& err) {
-    constexpr uint64_t PIECE = 8ull << 20;
-    std::vector<std::pair<size_t, uint64_t>> pieces;   // (job, offset)
-    for (size_t j = 0; j < jobs.size(); ++j)
-        for (uint64_t o = 0; o < jobs[j].bytes; o += PIECE) pieces.emplace_back(j, o);
-    if (pieces.empty()) return true;
-    int device = 0;
-    if (cudaGetDevice(&device) != cudaSuccess) {
-        err = "native dense upload: no device";
-        return false;
-    }
-    std::atomic<size_t> next{0};
-    std::atomic<bool> bad{false};
-    std::atomic<int> first_err{(int) cudaSuccess};   // a worker's error (the runtime's last error is per thread)
-    auto fail = [&](cudaError_t e) {
-        int none = (int) cudaSuccess;
-        first_err.compare_exchange_strong(none, (int) e);
-        bad = true;
-    };
-    auto worker = [&] {
-        cudaStream_t s = nullptr;
-        uint8_t* stage = nullptr;
-        cudaEvent_t done[2] = {nullptr, nullptr};
-        bool live[2] = {false, false};
-        cudaError_t e = cudaSetDevice(device);
-        if (e == cudaSuccess) e = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
-        if (e == cudaSuccess) e = cudaHostAlloc((void**) &stage, 2 * PIECE, cudaHostAllocDefault);
-        if (e == cudaSuccess) e = cudaEventCreateWithFlags(&done[0], cudaEventDisableTiming);
-        if (e == cudaSuccess) e = cudaEventCreateWithFlags(&done[1], cudaEventDisableTiming);
-        if (e != cudaSuccess) fail(e);
-        for (int h = 0; !bad; h ^= 1) {
-            const size_t i = next.fetch_add(1);
-            if (i >= pieces.size()) break;
-            const auto [j, o] = pieces[i];
-            const uint64_t n = std::min(PIECE, jobs[j].bytes - o);
-            if (live[h] && (e = cudaEventSynchronize(done[h])) != cudaSuccess) {
-                fail(e);
-                break;
-            }
-            std::memcpy(stage + h * PIECE, jobs[j].src + o, (size_t) n);
-            e = cudaMemcpyAsync((uint8_t*) jobs[j].dev + o, stage + h * PIECE, (size_t) n, cudaMemcpyHostToDevice, s);
-            if (e == cudaSuccess) e = cudaEventRecord(done[h], s);
-            if (e != cudaSuccess) {
-                fail(e);
-                break;
-            }
-            live[h] = true;
-        }
-        if (s != nullptr && (e = cudaStreamSynchronize(s)) != cudaSuccess) fail(e);
-        for (cudaEvent_t ev : done)
-            if (ev) cudaEventDestroy(ev);
-        if (stage) cudaFreeHost(stage);
-        if (s) cudaStreamDestroy(s);
-    };
-    const size_t threads = std::min<size_t>(8, pieces.size());
-    std::vector<std::thread> pool;
-    for (size_t k = 1; k < threads; ++k) pool.emplace_back(worker);
-    worker();
-    for (auto& th : pool) th.join();
-    // the tails' memsets, on the legacy stream beside the workers' non-blocking ones, landed too
-    if (const cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) fail(e);
-    if (bad) {
-        err = std::string("native dense upload: ") + cudaGetErrorString((cudaError_t) first_err.load());
-        return false;
-    }
-    return true;
-}
 }   // namespace
 
 bool NativeDense::served_names(const std::vector<std::string>& shards, bool include_ple_key, std::set<std::string>& out,

@@ -23,6 +23,7 @@
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/core/cuda_host.hpp"
 #include "lamina/core/family_layout.hpp"
+#include "lamina/core/gguf_loader.hpp"
 #include "lamina/core/gpu_select.hpp"
 #include "lamina/core/model_check.hpp"
 #include "lamina/core/prompt_cache.hpp"
@@ -1109,35 +1110,7 @@ size_t row_bytes(int type, int64_t n) {
     return (size_t) (n / be) * (size_t) bb;
 }
 
-/// A tensor's values as f32 on the host (F32 as it is, BF16 / F16 widened, Q8_0 scaled); false for another type.
-bool tensor_floats(const lamina::TensorInfo& t, const uint8_t* src, std::vector<float>& h) {
-    h.resize((size_t) t.elements());
-    if (t.type == 0) std::memcpy(h.data(), src, h.size() * 4);
-    else if (t.type == 30)
-        for (size_t i = 0; i < h.size(); ++i) h[i] = K::f32_from_bf16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
-    else if (t.type == 1)   // F16
-        for (size_t i = 0; i < h.size(); ++i) h[i] = K::f32_from_f16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
-    else if (t.type == 8 && h.size() % 32 == 0) {
-        // Q8_0 (the Q8_0 file stores ssm_alpha / ssm_beta so): blocks of an fp16 scale and 32 int8, widened here
-        for (size_t b = 0; b < h.size() / 32; ++b) lamina::dequantize_q8_0(src + b * 34, h.data() + b * 32);
-    } else {
-        return false;
-    }
-    return true;
-}
-
-/// A tensor as f32 on the device (F32 as it is, BF16 / F16 widened).
-float* upload_f32(const lamina::TensorInfo& t, const uint8_t* src) {
-    std::vector<float> h;
-    if (!tensor_floats(t, src, h)) {
-        std::fprintf(stderr, "lamina: %s is %s, expected F32, BF16, F16 or Q8_0\n", t.name.c_str(), t.type_name());
-        throw Fatal{1};
-    }
-    float* d = nullptr;
-    CK(dmalloc(&d, h.size() * 4));
-    CK(cudaMemcpy(d, h.data(), h.size() * 4, cudaMemcpyHostToDevice));
-    return d;
-}
+using lamina::core::tensor_floats;   // a tensor's values as f32 on the host (F32, BF16 / F16 widened, Q8_0 scaled)
 
 /// About the bytes Engine::init's buffers take per row of a prompt chunk.
 uint64_t buffer_bytes_per_row(const Model& m) {
@@ -1536,23 +1509,14 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     if (!lora_scan(lora_specs, m.g.n_layers, lora_cost, err)) return false;
     if (!plan_stages(m, gm, devs, split, ctx, chunk, lora_cost, err)) return false;
     uint64_t bytes = 0;
-    auto find = [&](const std::string& name, size_t& s) -> const lamina::TensorInfo* {
-        const lamina::TensorInfo* t = gm.find(name, &s);
-        if (!t) {
-            std::fprintf(stderr, "lamina: missing %s\n", name.c_str());
-            throw Fatal{1};
-        }
-        return t;
-    };
+    const lamina::core::GgufLoader GL(gm);
+    auto find = [&](const std::string& name, size_t& s) { return GL.find(name, &s); };
     auto f32 = [&](const std::string& name) -> const float* {
-        size_t s = 0;
-        const lamina::TensorInfo* t = find(name, s);
-        bytes += t->elements() * 4;
-        return upload_f32(*t, gm.shard(s).tensor_data(*t));
+        bytes += GL.find(name)->elements() * 4;
+        return GL.f32(name);
     };
     auto mat = [&](const std::string& name) -> Mat {
-        size_t s = 0;
-        const lamina::TensorInfo* t = find(name, s);
+        const lamina::TensorInfo* t = GL.find(name);
         Mat w;
         w.type = (int) t->type;
         w.n_in = (int) t->shape[0];
@@ -1562,12 +1526,8 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
                          t->type_name());
             throw Fatal{1};
         }
-        const uint64_t nb = lamina::tensor_payload_bytes(*t);
-        uint8_t* d = nullptr;
-        CK(dmalloc(&d, nb));
-        CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
-        bytes += nb;
-        w.d = d;
+        w.d = GL.device_bytes(name);   // (with the zeroed tail: the prompt chunks run MMQ over them)
+        bytes += lamina::tensor_payload_bytes(*t);
         return w;
     };
     auto L = [](int64_t l, const char* s) { return "blk." + std::to_string(l) + "." + s; };
