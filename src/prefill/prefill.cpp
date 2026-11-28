@@ -738,7 +738,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             pa[1] = tok;
         }
         ple_read.ok = true;
-        ple_read.th = std::thread([&m, &ss, &ple_read, rows, Tc, out = m.ple_host[buf]] {
+        ple_read.th = std::thread([&ss, &ple_read, rows, Tc, out = m.ple_host[buf]] {
             ple_read.ok = ss.ple.table->gather_batch(rows, (size_t) Tc, out, ple_read.err);
         });
     };

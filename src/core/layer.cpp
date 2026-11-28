@@ -546,24 +546,6 @@ uint64_t qsa_state_prompt_init(const ModelGeometry& g, int64_t max_cells, int64_
     return c.used;
 }
 
-// ================================ PER-STAGE TIMING, DEBUG ONLY ================================
-//
-// **THE ENGINE SPENDS 1.047 ms PER LAYER WITH THE EXPERTS OFF, AND EVERY COST MODEL IN `bench/` PREDICTS LESS
-// THAN HALF OF THAT.**  `dense_pass.exe` puts all 302 dense GEMVs at 11.64 ms/token and the 1.377 GiB of
-// BF16/F32 weights they exclude at another ~5.9, so ~17.5 ms of the 50.25 ms captured no-pool floor is
-// accounted for and ~33 ms is not.  Arithmetic has already discounted the obvious candidates - the GDN
-// recurrence moves 6.2 MB of state per token, the QSA attention at 1,024 tokens is 75M MACs over twelve
-// layers, and `gr_norm_kernel`'s 4-block launch moves 40 KB - so the attribution has to come from the engine.
-//
-// Event pairs are recorded per (layer, stage) and read once at the end, so **NOTHING IS SYNCHRONISED DURING
-// THE RUN** and the measurement does not perturb what it measures.  That matters here more than usual: a
-// per-stage `cudaEventSynchronize` would serialise the pipeline and report the serialised time.
-//
-// **IT CANNOT BE USED WITH CAPTURED GRAPHS.**  An event record inside a stream capture is silently dropped
-// (round 199: 2 nodes for two kernels plus an event record, and the event never completed across a 41 ms
-// graph), so this is gated on the `--no-capture` path where the layers are ordinary launches.
-constexpr int STAGE_SLOTS = 20;
-
 // ================================ THE TWO ENDS OF A TOKEN ================================
 namespace {
 // The pack's S2/S4/S8 embedding table, checked against its planes; null with `err` when it cannot be read.

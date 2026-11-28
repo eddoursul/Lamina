@@ -256,7 +256,7 @@ public:
     bool mapped() const { return !layer_base_.empty(); }
     int64_t blobs() const { return blobs_; }
     const uint8_t* blob(int64_t layer, int64_t expert) override;
-    int64_t reads() const { return reads_.load(std::memory_order_relaxed); }
+    int64_t reads() const override { return reads_.load(std::memory_order_relaxed); }
     bool pinned(int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
     bool layer_mapped(int64_t layer) const override {
