@@ -1673,42 +1673,35 @@ struct Engine {
         if (!adapt) drain();
         return n;
     }
-    /// The main GPU's slots back toward s_max from the spare chunks and the free VRAM above kReserve (after the prompt
-    /// path's lent buffers went); they come back empty, the mover's next plan fills them.
-    void slots_back() {
-        const int top = s_max + (base_lent ? lend_slots : 0);
-        if (!elastic || gpus.empty() || gpus[0].S >= top) return;
+    /// The chunks the main GPU's slots of every layer lack for n slots a layer
+    int64_t slot_chunks_lacking(int n) const {
         const uint64_t G = lamina::core::vmm_granularity();
-        size_t fr = 0, tot = 0;
-        CK(cudaMemGetInfo(&fr, &tot));
-        const int64_t avail = (int64_t) spare.size() + (fr > kReserve ? (int64_t) ((fr - kReserve) / G) : 0);
-        auto needs = [&](int n) {
-            int64_t k = 0;
-            for (const Layer& l : m->layers)
-                if (l.slot_vm) {
-                    const int64_t hi = (int64_t) (((uint64_t) n * l.stride + G - 1) / G);
-                    for (int64_t c = 0; c < std::min(hi, l.slot_vm->chunks()); ++c) k += l.slot_vm->mapped(c) ? 0 : 1;
-                }
-            return k;
-        };
+        int64_t k = 0;
+        for (const Layer& l : m->layers)
+            if (l.slot_vm) {
+                const int64_t hi = (int64_t) (((uint64_t) n * l.stride + G - 1) / G);
+                for (int64_t c = 0; c < std::min(hi, l.slot_vm->chunks()); ++c) k += l.slot_vm->mapped(c) ? 0 : 1;
+            }
+        return k;
+    }
+    /// The main GPU's slots up to s2 a layer, their chunks the spare ones first, else new: they come back empty, the
+    /// mover's next plan fills them.  A map that fails leaves every layer at the count it had (what it mapped stays,
+    /// for a later growth).
+    void grow_slots(int s2) {
         const int S = gpus[0].S;
-        int s2 = S;
-        while (s2 < top && needs(s2 + 1) <= avail) ++s2;
-        if (s2 <= S) return;
+        const uint64_t G = lamina::core::vmm_granularity();
         auto take = [&]() -> lamina::core::VmmChunk {
             if (spare.empty()) return 0;
             const lamina::core::VmmChunk h = spare.back();
             spare.pop_back();
             return h;
         };
-        int got = S;
         for (Layer& l : m->layers) {
             if (!l.slot_vm) continue;
             const int64_t hi = (int64_t) (((uint64_t) s2 * l.stride + G - 1) / G);
             if (!l.slot_vm->map_range(0, hi, take)) {
-                std::fprintf(stderr, "lamina: the main GPU's slots could not grow back past %d\n", got);
-                s2 = got;
-                break;
+                std::fprintf(stderr, "lamina: the main GPU's slots could not grow back past %d\n", S);
+                return;
             }
         }
         for (Layer& l : m->layers) {
@@ -1718,6 +1711,20 @@ struct Engine {
         }
         gpus[0].S = s2;
         std::fprintf(stderr, "lamina: the main GPU's expert slots back %d -> %d a layer\n", S, s2);
+    }
+    /// The main GPU's slots back toward s_max from the spare chunks and the free VRAM above kReserve (after the prompt
+    /// path's lent buffers went)
+    void slots_back() {
+        const int top = s_max + (base_lent ? lend_slots : 0);
+        if (!elastic || gpus.empty() || gpus[0].S >= top) return;
+        const uint64_t G = lamina::core::vmm_granularity();
+        size_t fr = 0, tot = 0;
+        CK(cudaMemGetInfo(&fr, &tot));
+        const int64_t avail = (int64_t) spare.size() + (fr > kReserve ? (int64_t) ((fr - kReserve) / G) : 0);
+        const int S = gpus[0].S;
+        int s2 = S;
+        while (s2 < top && slot_chunks_lacking(s2 + 1) <= avail) ++s2;
+        if (s2 > S) grow_slots(s2);
     }
     /// After a request: the K/V's chunks past what the state needs (two steps of room) go back to the main GPU's slots,
     /// which come back empty (the rebalance fills them); chunks no slot takes are freed.
@@ -1741,33 +1748,8 @@ struct Engine {
         // the slots back while the spare chunks cover a whole slot more in every layer
         const int S = gpus[0].S;
         int s2 = S;
-        auto needs = [&](int n) {
-            int64_t k = 0;
-            for (const Layer& l : m->layers)
-                if (l.slot_vm) {
-                    const int64_t hi = (int64_t) (((uint64_t) n * l.stride + G - 1) / G);
-                    for (int64_t c = 0; c < std::min(hi, l.slot_vm->chunks()); ++c) k += l.slot_vm->mapped(c) ? 0 : 1;
-                }
-            return k;
-        };
-        while (s2 < s_max && needs(s2 + 1) <= (int64_t) spare.size()) ++s2;
-        auto take = [&]() -> lamina::core::VmmChunk {
-            if (spare.empty()) return 0;
-            const lamina::core::VmmChunk h = spare.back();
-            spare.pop_back();
-            return h;
-        };
-        if (s2 > S) {
-            for (Layer& l : m->layers) {
-                if (!l.slot_vm) continue;
-                const int64_t hi = (int64_t) (((uint64_t) s2 * l.stride + G - 1) / G);
-                if (!l.slot_vm->map_range(0, hi, take)) break;
-                l.held[0].n = s2;
-                l.held[0].slot_expert.resize((size_t) s2, -1);
-            }
-            gpus[0].S = s2;
-            std::fprintf(stderr, "lamina: the main GPU's expert slots back %d -> %d a layer\n", S, s2);
-        }
+        while (s2 < s_max && slot_chunks_lacking(s2 + 1) <= (int64_t) spare.size()) ++s2;
+        if (s2 > S) grow_slots(s2);
         for (const lamina::core::VmmChunk h : spare) lamina::core::vmm_chunk_free(h);
         spare.clear();
     }
