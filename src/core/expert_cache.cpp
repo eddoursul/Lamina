@@ -704,6 +704,15 @@ bool copy_blobs(void* const* dst, const void* const* src, const size_t* bytes, s
     return cudaMemcpyBatchAsync(dst, src, bytes, n, &attr, &first, 1, (cudaStream_t) stream) == cudaSuccess;
 }
 
+bool copy_runs(void* const* dst, const void* const* src, const size_t* bytes, size_t n, bool pinned, void* stream) {
+    if (pinned && copy_blobs(dst, src, bytes, n, stream)) return true;
+    (void) cudaGetLastError();   // a batch the runtime refused, or pageable sources
+    for (size_t i = 0; i < n; ++i)
+        if (cudaMemcpyAsync(dst[i], src[i], bytes[i], cudaMemcpyHostToDevice, (cudaStream_t) stream) != cudaSuccess)
+            return false;
+    return true;
+}
+
 bool ExpertCache::fill_slot_blocking(int32_t slot, const uint8_t* host_blob, std::string& err, int64_t bytes) {
     const size_t n = (size_t) (bytes > 0 && bytes <= blob_ ? bytes : blob_);
     uint8_t* dst = device_slot(slot);

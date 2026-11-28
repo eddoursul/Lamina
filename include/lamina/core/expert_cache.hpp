@@ -271,5 +271,9 @@ private:
 /// order, the batch in the stream's).  Under WDDM a copy submitted alone raises an interrupt when it completes, on the
 /// CPU its GPU's interrupts go to (~10 us there, in the ISR and a DPC); a batch raises one.
 bool copy_blobs(void* const* dst, const void* const* src, const size_t* bytes, size_t n, void* stream);
+/// The same `n` copies as one submission where every source is `pinned` (copy_blobs), else - and where the runtime
+/// refuses the batch - one cudaMemcpyAsync each (a pageable source is staged by the driver).  False when a copy fails
+/// (its error the thread's last).
+bool copy_runs(void* const* dst, const void* const* src, const size_t* bytes, size_t n, bool pinned, void* stream);
 
 }   // namespace lamina::core

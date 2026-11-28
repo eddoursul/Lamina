@@ -450,11 +450,7 @@ bool ExpertRunner::prefetch_next(std::string& err) {
         ++experts_prefetched;
         ++experts_streamed;
     }
-    if (!(pinned && core::copy_blobs(dst.data(), srcs.data(), bytes.data(), dst.size(), m.copy))) {
-        (void) cudaGetLastError();                // a batch the runtime refused goes one copy at a time
-        for (size_t i = 0; i < dst.size(); ++i)   // pageable blobs: staged by the driver
-            cudaMemcpyAsync(dst[i], srcs[i], bytes[i], cudaMemcpyHostToDevice, m.copy);
-    }
+    (void) core::copy_runs(dst.data(), srcs.data(), bytes.data(), dst.size(), pinned, m.copy);
     cudaEventRecord(m.pre_ev[(size_t) m.pre_pieces++], m.copy);
     (void) cudaStreamQuery(m.copy);   // submitted now, not at the next driver call
     const cudaError_t e = cudaGetLastError();
@@ -671,11 +667,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         }
         if (st_dst.empty()) return false;
         if (m.live[sl]) cudaStreamWaitEvent(m.copy, m.used[sl], 0);   // its previous batch is read
-        if (!(pinned && core::copy_blobs(st_dst.data(), st_src.data(), st_bytes.data(), st_dst.size(), m.copy))) {
-            (void) cudaGetLastError();   // a batch the runtime refused, or pageable blobs (staged by the driver)
-            for (size_t i = 0; i < st_dst.size(); ++i)
-                cudaMemcpyAsync(st_dst[i], st_src[i], st_bytes[i], cudaMemcpyHostToDevice, m.copy);
-        }
+        (void) core::copy_runs(st_dst.data(), st_src.data(), st_bytes.data(), st_dst.size(), pinned, m.copy);
         cudaEventRecord(m.copied[sl], m.copy);
         m.live[sl] = true;
         if (due) {   // the experts this batch copied into the area: a piece of their own, for the second pass
