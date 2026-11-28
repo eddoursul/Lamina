@@ -127,11 +127,23 @@ struct ImageCells {
     /// column) of its grid, the text after it from p + max(nx, ny); `next`: the first cell after the prompt's
     std::vector<int32_t> mrope;
     int64_t next = 0;
+    /// each record's run: its first cell, its cells and its key (`keys`' or the rows' hash: vision_image_key)
+    struct Picture {
+        int64_t cell = 0, n = 0;
+        uint64_t key = 0;
+    };
+    std::vector<Picture> pictures;
     int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
 };
 /// Reads the image encoder's file (read_vision_records) and lays the pictures over the prompt's runs of a pad (`pads`:
-/// a picture's, a video group's), a record a run, a row a cell; each such cell's id becomes negative, from the
-/// record's key (`keys`: the server's, img_keys=, else the rows' hash) and its row.  "" or the error.
+/// a picture's, a video group's), a record a run, a row a cell, the ids as they are; `keys`: the server's for each
+/// record (img_keys=), else the rows' hash.  "" or the error.  Ids outside int32 (a 64-bit list) are no pad.
+std::string picture_cells(const std::string& path, const std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
+                          int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r);
+std::string picture_cells(const std::string& path, const std::vector<int64_t>& ids, const std::vector<int32_t>& pads,
+                          int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r);
+/// picture_cells, and then each picture cell's id made negative, from its record's key and its row (the paths whose
+/// prompt cache tells pictures apart by their cells' ids).  "" or the error.
 std::string image_cells(const std::string& path, std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
                         int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r);
 

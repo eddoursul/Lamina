@@ -4746,7 +4746,6 @@ protected:
 // ------------------------------------------------------------------------------------------------ pictures
 constexpr int32_t kImagePad = 248056;   // <|image_pad|>
 constexpr int32_t kVideoPad = 248057;   // <|video_pad|>: a video's group of frames, as a picture
-inline bool media_pad(int32_t t) { return t == kImagePad || t == kVideoPad; }
 
 /// A request's pictures: the encoder's rows in prompt order, each picture's cell run, and the positions.
 struct ImgReq {
@@ -4764,45 +4763,15 @@ struct ImgReq {
 /// error.  `keys`: the server's key for each picture (img_keys=), else the embeddings' hash.
 std::string build_images(const std::string& path, const std::vector<int32_t>& ids, int64_t n_embd,
                          const std::vector<uint64_t>& keys, ImgReq& r) {
-    std::vector<lamina::program::VisionImage> imgs;
-    if (std::string ve = lamina::program::read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
-    const int64_t n = (int64_t) ids.size();
-    r.cell_row.assign((size_t) n, -1);
-    r.mrope.assign((size_t) n * 3, 0);
-    auto put = [&](int64_t c, int64_t t, int64_t h, int64_t w) {
-        r.mrope[(size_t) c * 3] = (int32_t) t;
-        r.mrope[(size_t) c * 3 + 1] = (int32_t) h;
-        r.mrope[(size_t) c * 3 + 2] = (int32_t) w;
-    };
-    int64_t p = 0, i = 0;
-    size_t k = 0;
-    while (i < n) {
-        if (!media_pad(ids[(size_t) i])) {
-            put(i, p, p, p);
-            ++p;
-            ++i;
-            continue;
-        }
-        if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
-        const lamina::program::VisionImage& im = imgs[k++];
-        const uint64_t h = lamina::program::vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr,
-                                                             r.rows.data(), n_embd);
-        r.imgs.push_back({i, im.n, h});
-        for (int64_t j = 0; j < im.n; ++j)
-            if (i + j >= n || ids[(size_t) (i + j)] != ids[(size_t) i])
-                return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                       " rows but fewer pad tokens";
-        for (int64_t j = 0; j < im.n; ++j) {
-            const int64_t y = j / im.nx, x = j % im.nx;
-            put(i + j, p, p + y, p + x);
-            r.cell_row[(size_t) (i + j)] = (int32_t) ((im.off / (size_t) n_embd) + (size_t) j);
-        }
-        i += im.n;
-        p += std::max(im.nx, im.ny);
-    }
-    if (k != imgs.size()) return "the embeddings file has more images than the prompt";
-    if (n > 0 && media_pad(ids[(size_t) (n - 1)])) return "the prompt cannot end in an image";
-    r.delta = (int32_t) (p - n);
+    lamina::program::ImageCells c;
+    if (std::string ve = lamina::program::picture_cells(path, ids, {kImagePad, kVideoPad}, n_embd, keys, c);
+        !ve.empty())
+        return ve;
+    r.rows = std::move(c.rows);
+    r.cell_row = std::move(c.cell_row);
+    r.mrope = std::move(c.mrope);
+    for (const auto& pic : c.pictures) r.imgs.push_back({pic.cell, pic.n, pic.key});
+    r.delta = (int32_t) (c.next - (int64_t) ids.size());
     return "";
 }
 

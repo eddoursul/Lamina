@@ -4829,43 +4829,22 @@ int lamina::program::run(int argc, char** argv) {
                 if (!geni) {
                     for (int64_t c = 0; c < cells; ++c) put(c, c, c, c);
                 } else {
-                    std::vector<lamina::program::VisionImage> imgs;
-                    img_rows.clear();
-                    ve = lamina::program::read_vision_records(emb_path, g.n_embd, img_rows, imgs);
-                    int64_t p = 0, i = 0;
-                    size_t k = 0;
-                    while (ve.empty() && i < n) {
-                        if (!media_pad(ids[(size_t) i])) {
-                            put(i, p, p, p);
-                            ++p;
-                            ++i;
-                            continue;
+                    lamina::program::ImageCells ic;
+                    ve = lamina::program::picture_cells(emb_path, ids, {(int32_t) kImagePad, (int32_t) kVideoPad},
+                                                        g.n_embd, req_img_keys, ic);
+                    if (ve.empty()) {
+                        img_rows = std::move(ic.rows);
+                        for (const auto& pic : ic.pictures) req_imgs.push_back({pic.cell, pic.key});
+                        for (int64_t c = 0; c < n; ++c) {
+                            put(c, ic.mrope[(size_t) c * 3], ic.mrope[(size_t) c * 3 + 1],
+                                ic.mrope[(size_t) c * 3 + 2]);
+                            if (ic.cell_row[(size_t) c] >= 0)
+                                row_ptr[(size_t) c] =
+                                    img_rows.data() + (size_t) ic.cell_row[(size_t) c] * (size_t) g.n_embd;
                         }
-                        if (k >= imgs.size()) {
-                            ve = "the prompt has more images than the embeddings file";
-                            break;
-                        }
-                        const lamina::program::VisionImage& im = imgs[k++];
-                        req_imgs.push_back(
-                            {i, lamina::program::vision_image_key(
-                                    im, req_img_keys.size() == imgs.size() ? &req_img_keys[k - 1] : nullptr,
-                                    img_rows.data(), g.n_embd)});
-                        for (int64_t j = 0; j < im.n && ve.empty(); ++j)
-                            if (i + j >= n || ids[(size_t) (i + j)] != ids[(size_t) i])
-                                ve = "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
-                                     " rows but fewer pad tokens";
-                        for (int64_t j = 0; j < im.n && ve.empty(); ++j) {
-                            const int64_t y = j / im.nx, x = j % im.nx;
-                            put(i + j, p, p + y, p + x);
-                            row_ptr[(size_t) (i + j)] = img_rows.data() + im.off + (size_t) j * (size_t) g.n_embd;
-                        }
-                        i += im.n;
-                        p += std::max(im.nx, im.ny);
+                        for (int64_t c = n; c < cells; ++c)
+                            put(c, ic.next + (c - n), ic.next + (c - n), ic.next + (c - n));
                     }
-                    if (ve.empty() && k != imgs.size()) ve = "the embeddings file has more images than the prompt";
-                    if (ve.empty() && n > 0 && media_pad(ids[(size_t) (n - 1)]))
-                        ve = "the prompt cannot end in an image";
-                    for (int64_t c = n; ve.empty() && c < cells; ++c) put(c, p + (c - n), p + (c - n), p + (c - n));
                 }
                 tr("positions built", (long long) img_rows.size());
                 cudaDeviceSynchronize();

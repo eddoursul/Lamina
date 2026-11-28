@@ -1,6 +1,7 @@
 #include "lamina/program/serve_io.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -221,9 +222,10 @@ uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const floa
                           : fnv1a(rows + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
 }
 
-std::string image_cells(const std::string& path, std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
-                        int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r) {
+std::string picture_cells(const std::string& path, const std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
+                          int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r) {
     std::vector<VisionImage> imgs;
+    r.pictures.clear();
     if (std::string ve = read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
     const int64_t n = (int64_t) ids.size();
     r.cell_row.assign((size_t) n, -1);
@@ -245,16 +247,13 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, cons
         }
         if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
         const VisionImage& im = imgs[k++];
-        const uint64_t key =
-            vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr, r.rows.data(), n_embd);
+        r.pictures.push_back(
+            {i, im.n,
+             vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr, r.rows.data(), n_embd)});
         for (int64_t j = 0; j < im.n; ++j) {
             if (i + j >= n || ids[(size_t) (i + j)] != pad)
                 return "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
                        " rows but fewer pad tokens";
-            uint64_t h = key + (uint64_t) j * 0x9E3779B97F4A7C15ull;   // splitmix64 of the key and the row
-            h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
-            h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
-            ids[(size_t) (i + j)] = -1 - (int32_t) ((h ^ (h >> 31)) & 0x3fffffff);
             r.cell_row[(size_t) (i + j)] = (int32_t) (im.off / (size_t) n_embd + (size_t) j);
             put(i + j, p, p + j / im.nx, p + j % im.nx);
         }
@@ -264,6 +263,27 @@ std::string image_cells(const std::string& path, std::vector<int32_t>& ids, cons
     r.next = p;
     if (k != imgs.size()) return "the embeddings file has more images than the prompt";
     if (n > 0 && r.cell_row.back() >= 0) return "the prompt cannot end in an image";
+    return "";
+}
+
+std::string picture_cells(const std::string& path, const std::vector<int64_t>& ids, const std::vector<int32_t>& pads,
+                          int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r) {
+    std::vector<int32_t> ids32(ids.size());
+    for (size_t i = 0; i < ids.size(); ++i)
+        ids32[i] = ids[i] < INT32_MIN || ids[i] > INT32_MAX ? -1 : (int32_t) ids[i];   // (no pad)
+    return picture_cells(path, ids32, pads, n_embd, keys, r);
+}
+
+std::string image_cells(const std::string& path, std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
+                        int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r) {
+    if (std::string ve = picture_cells(path, ids, pads, n_embd, keys, r); !ve.empty()) return ve;
+    for (const ImageCells::Picture& pic : r.pictures)
+        for (int64_t j = 0; j < pic.n; ++j) {
+            uint64_t h = pic.key + (uint64_t) j * 0x9E3779B97F4A7C15ull;   // splitmix64 of the key and the row
+            h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
+            h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
+            ids[(size_t) (pic.cell + j)] = -1 - (int32_t) ((h ^ (h >> 31)) & 0x3fffffff);
+        }
     return "";
 }
 
