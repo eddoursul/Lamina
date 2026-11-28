@@ -1900,8 +1900,8 @@ struct Engine {
     std::unique_ptr<lamina::kernels::cpu::HostPin> host_pin;   // the host loop on the core the pool's workers leave
     lamina::kernels::cpu::MissJobs miss;                       // the CPU pool's jobs a layer
 #endif
-    float *h_h = nullptr, *cpu_out = nullptr, *ecpu = nullptr;
-    int32_t *h_ids = nullptr, *h_miss = nullptr, *d_miss = nullptr, *h_cnt = nullptr;
+    float *h_h = nullptr, *cpu_out = nullptr, *cpu_out_d = nullptr;   // (the CPU's rows, mapped: their device view)
+    int32_t *h_ids = nullptr, *h_miss = nullptr, *h_miss_d = nullptr, *h_cnt = nullptr;
     uint8_t* acts = nullptr;   // per token: its quantized activation (kNativeActBytes)
     cudaEvent_t ev_route = nullptr;
     uint8_t* stage[2] = {};   // a streamed prompt's staging buffers: one block (stage_bytes), the second half way in
@@ -3406,9 +3406,8 @@ struct Engine {
         if (n_miss == 0) return;
         pool->run_split_multi_native(H.fmt, miss.jobs.data(), (int) miss.jobs.size());
         hy_cpu_ms += ms_since(t0);
-        CK(cudaMemcpyAsync(ecpu, cpu_out, (size_t) n_ent * N * 4, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(d_miss, h_miss, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
-        k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, ecpu, d_miss, N);
+        // (the CPU's rows and the flags read through the mapping: only the rows the CPU computed cross the bus)
+        k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, cpu_out_d, h_miss_d, N);
 #else
         (void) li;
         (void) T;
@@ -4571,12 +4570,10 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     }
     const size_t T = (size_t) E.tmax, N = (size_t) g.n_embd, Kp = (size_t) m.top_k;
     CK(hmalloc((void**) &E.h_h, T * N * 4, cudaHostAllocDefault));
-    CK(hmalloc((void**) &E.cpu_out, T * Kp * N * 4, cudaHostAllocDefault));
+    E.cpu_out = lamina::core::hmapped<float>(T * Kp * N, &E.cpu_out_d);
     CK(hmalloc((void**) &E.h_ids, T * Kp * 4, cudaHostAllocDefault));
-    CK(hmalloc((void**) &E.h_miss, T * Kp * 4, cudaHostAllocDefault));
+    E.h_miss = lamina::core::hmapped<int32_t>(T * Kp, &E.h_miss_d);
     CK(hmalloc((void**) &E.h_cnt, all.size() * (size_t) ne * 4, cudaHostAllocDefault));
-    CK(dmalloc(&E.ecpu, T * Kp * N * 4));
-    CK(dmalloc(&E.d_miss, T * Kp * 4));
     E.acts = (uint8_t*) heap_new(T * C::kNativeActBytes + 64);
     E.ev_route = event_new();
     if (staging) {
