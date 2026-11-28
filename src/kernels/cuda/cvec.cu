@@ -17,19 +17,7 @@ constexpr int N = 2560, THREADS = 256, PER = N / THREADS;
 __device__ __forceinline__ float sigm(float x) { return 1.0f / (1.0f + __expf(-x)); }
 
 // the prompt path's block_sum (prefill/kernels.cu): its norm's rs is bitwise gr_write_norm_rs's on the same rows
-__device__ float block_sum(float v, float* sh) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    __syncthreads();
-    if (lane == 0) sh[w] = v;
-    __syncthreads();
-    const int nw = (blockDim.x + 31) >> 5;
-    float t = (threadIdx.x < nw) ? sh[threadIdx.x] : 0.0f;
-    if (w == 0) t = warp_sum(t);
-    if (threadIdx.x == 0) sh[0] = t;
-    __syncthreads();
-    return sh[0];
-}
+__device__ __forceinline__ float block_sum(float v, float* sh) { return block_sum_wide(v, sh); }
 
 // one block per (token, stream) row, its values in registers between the write, the dot, the update and the norm
 __global__ void __launch_bounds__(THREADS) cvec_kernel(CvecRows r, const float* __restrict__ cv) {

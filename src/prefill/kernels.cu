@@ -40,19 +40,7 @@ __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__floa
 // after the down projection (decode's q8_1 has room to ~8e6). A NaN stays NaN; finite values round as before.
 __device__ __forceinline__ uint16_t hf_sat(float f) { return hf(isnan(f) ? f : fminf(fmaxf(f, -65504.0f), 65504.0f)); }
 // block-wide sum for blockDim.x <= 1024, result broadcast
-__device__ float block_sum(float v, float* sh) {
-    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    v = warp_sum(v);
-    __syncthreads();
-    if (lane == 0) sh[w] = v;
-    __syncthreads();
-    const int nw = (blockDim.x + 31) >> 5;
-    float t = (threadIdx.x < nw) ? sh[threadIdx.x] : 0.0f;
-    if (w == 0) t = warp_sum(t);
-    if (threadIdx.x == 0) sh[0] = t;
-    __syncthreads();
-    return sh[0];
-}
+__device__ __forceinline__ float block_sum(float v, float* sh) { return lamina::kernels::block_sum_wide(v, sh); }
 void check(const char* what) {
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

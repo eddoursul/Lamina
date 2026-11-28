@@ -39,6 +39,22 @@ __device__ __forceinline__ void warp_argmax(float& v, int& i) {
     }
 }
 
+/// The sum over a block of up to 1,024 threads, every thread's: each warp's sum, then the first warp's sum of those
+/// (`sh` 32 floats of shared memory; the barriers before and after it)
+__device__ __forceinline__ float block_sum_wide(float v, float* sh) {
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+    v = warp_sum(v);
+    __syncthreads();
+    if (lane == 0) sh[w] = v;
+    __syncthreads();
+    const int nw = (blockDim.x + 31) >> 5;
+    float t = (threadIdx.x < nw) ? sh[threadIdx.x] : 0.0f;
+    if (w == 0) t = warp_sum(t);
+    if (threadIdx.x == 0) sh[0] = t;
+    __syncthreads();
+    return sh[0];
+}
+
 /// The sum over a block of 128 threads: `part` 4 floats of shared memory, read after one barrier (a caller that writes
 /// them again first waits for every thread's read).
 __device__ __forceinline__ float block128_sum(float v, float* part) {
