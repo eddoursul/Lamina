@@ -164,20 +164,8 @@ native_gus_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t*
             }
         }
         __syncthreads();
-        for (int e = b0 + warp; e < b1; e += GUS_WARPS) {   // an entry's block of h, as quantize_q8_1_kernel
-            const float xi = sh[e - b0][lane];
-            float amax = fabsf(xi), sum = xi;
-#pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-                sum += __shfl_xor_sync(0xffffffffu, sum, o);
-            }
-            const float d = q8_1_finite(amax / 127.0f);   // #606: q8_1_finite.hpp
-            const int8_t q = q8_1_quant(xi, d, amax);
-            block_q8_1* y = hq + (size_t) e * hb + c;
-            y->qs[lane] = q;
-            if (lane == 0) y->ds = q8_1_ds(d, sum);
-        }
+        for (int e = b0 + warp; e < b1; e += GUS_WARPS)   // an entry's block of h, as quantize_q8_1_kernel
+            q8_1_warp_block(sh[e - b0][lane], [&] { return hq + (size_t) e * hb + c; }, lane, lane == 0);
         __syncthreads();
     }
 }
@@ -332,20 +320,8 @@ native_gus80_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_
             else gus80_pass<TG, 2>(wg, wu, xq, ent_tok + e, t, lut, sh + (e - b0), col, L.swiglu_limit);
         }
         __syncthreads();
-        for (int e = b0 + warp; e < b1; e += GUS_WARPS) {   // as native_gus_kernel
-            const float xi = sh[e - b0][lane];
-            float amax = fabsf(xi), sum = xi;
-#pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-                sum += __shfl_xor_sync(0xffffffffu, sum, o);
-            }
-            const float d = q8_1_finite(amax / 127.0f);
-            const int8_t q = q8_1_quant(xi, d, amax);
-            block_q8_1* y = hq + (size_t) e * hb + c;
-            y->qs[lane] = q;
-            if (lane == 0) y->ds = q8_1_ds(d, sum);
-        }
+        for (int e = b0 + warp; e < b1; e += GUS_WARPS)   // as native_gus_kernel
+            q8_1_warp_block(sh[e - b0][lane], [&] { return hq + (size_t) e * hb + c; }, lane, lane == 0);
         __syncthreads();
     }
 }
@@ -458,20 +434,8 @@ native_gus_il_kernel(const unsigned long long* __restrict__ grp_ptr, const int32
             }
         }
         __syncthreads();
-        for (int e = b0 + warp; e < b1; e += G) {   // an entry's block of h, as native_gus_kernel, interleaved
-            const float xi = sh[e - b0][lane];
-            float amax = fabsf(xi), sum = xi;
-#pragma unroll
-            for (int o = 16; o > 0; o >>= 1) {
-                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-                sum += __shfl_xor_sync(0xffffffffu, sum, o);
-            }
-            const float d = q8_1_finite(amax / 127.0f);
-            const int8_t q = q8_1_quant(xi, d, amax);
-            block_q8_1* y = hq + (size_t) e * hb + c;
-            y->qs[q8_1_il16(lane)] = q;
-            if (lane == 0) y->ds = q8_1_ds(d, sum);
-        }
+        for (int e = b0 + warp; e < b1; e += G)   // an entry's block of h, as native_gus_kernel, interleaved
+            q8_1_warp_block(sh[e - b0][lane], [&] { return hq + (size_t) e * hb + c; }, q8_1_il16(lane), lane == 0);
         __syncthreads();
     }
 }
@@ -599,17 +563,7 @@ __global__ void __launch_bounds__(256) h_rotate_q8_1_kernel(const float* __restr
     fwht128_warp(v, lane, scale);
     block_q8_1* y = hq + (size_t) e * (n_ff / 32) + b * 4;
 #pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        float amax = fabsf(v[j]), sum = v[j];
-#pragma unroll
-        for (int o = 16; o > 0; o >>= 1) {
-            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-            sum += __shfl_xor_sync(0xffffffffu, sum, o);
-        }
-        const float d = q8_1_finite(amax / 127.0f);
-        y[j].qs[lane] = q8_1_quant(v[j], d, amax);
-        if (lane == 0) y[j].ds = q8_1_ds(d, sum);
-    }
+    for (int j = 0; j < 4; ++j) q8_1_warp_block(v[j], [&] { return &y[j]; }, lane, lane == 0);
 }
 
 // hadamard_rows: a warp a row's 128 values
@@ -870,18 +824,8 @@ native_down_contract_kernel(const unsigned long long* __restrict__ grp_ptr, cons
 __global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __restrict__ y, long long n) {
     const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    const float xi = x[i];
-    float amax = fabsf(xi), sum = xi;
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-        sum += __shfl_xor_sync(0xffffffffu, sum, o);
-    }
-    const float d = q8_1_finite(amax / 127.0f);   // #606: q8_1_finite.hpp
-    const int8_t q = q8_1_quant(xi, d, amax);
     const long long ib = i / 32, iqs = i % 32;
-    y[ib].qs[iqs] = q;
-    if (iqs == 0) y[ib].ds = q8_1_ds(d, sum);
+    q8_1_warp_block(x[i], [&] { return &y[ib]; }, (int) iqs, iqs == 0);   // #606: q8_1_finite.hpp
 }
 
 // ---------------------------------------------------------------- dequant (dequantize.cuh)

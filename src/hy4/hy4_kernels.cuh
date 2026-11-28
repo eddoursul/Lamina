@@ -58,15 +58,7 @@ struct Q81 {
 /// Value `xi` of a warp's 32 consecutive values into their q8_1 block `b` (quantize_q8_1_kernel's arithmetic and order:
 /// the same bytes); every lane of the warp calls it
 __device__ __forceinline__ void q81_warp(float xi, Q81* b, int lane) {
-    float amax = fabsf(xi), sum = xi;
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) {
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
-        sum += __shfl_xor_sync(0xffffffffu, sum, o);
-    }
-    const float d = lamina::kernels::q8_1_finite(amax / 127.0f);
-    b->qs[lane] = lamina::kernels::q8_1_quant(xi, d, amax);
-    if (lane == 0) b->ds = lamina::kernels::q8_1_ds(d, sum);
+    lamina::kernels::q8_1_warp_block(xi, [&] { return b; }, lane, lane == 0);
 }
 
 /// y[r] = x[r] / sqrt(mean(x[r]^2) + eps) (* w when non-null), a block per row of n; rows `ld` floats apart.
