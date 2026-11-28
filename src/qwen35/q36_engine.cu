@@ -5422,7 +5422,6 @@ struct Serve {
             if (E.bmtp)   // (the hidden state a later first proposal starts from)
                 CK(cudaMemcpyAsync(ss.hlast, E.hmain + r * (size_t) E.m->g.n_embd, Nb, cudaMemcpyDeviceToDevice, E.st));
             sl.draft_ready = false;
-            fed(sl.sess, sl.x);
             int y;
             if (sl.smp.needs_logits()) {
                 E.host_logits_row((int) r, lg);
@@ -5430,6 +5429,14 @@ struct Serve {
             } else {
                 y = E.rows_pick[r];
             }
+            if (y < 0) {   // no finite logit: the slot ends, and its state is not continued
+                serve_print("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms_since(sl.t0));
+                std::fprintf(stderr, "lamina batch: slot %d: non-finite logits: the request ends\n", b);
+                sl.active = false;
+                slot_ended(sl.sess, true);
+                continue;
+            }
+            fed(sl.sess, sl.x);
             serve_print("BT %d %d\n", b, y);
             ++sl.produced;
             sl.hist.push_back(y);
