@@ -5,8 +5,32 @@
 #include <string>
 #include <vector>
 
+namespace lamina {
+class GgufFile;
+}
+
 namespace lamina::core {
 class WeightTable;
+
+/// The dense matrices NativeDense serves in their GGUF form: a layer's projections and its shared expert
+/// (blk.N.attn_qkv / attn_gate / ssm_out / attn_q / attn_k / attn_v / attn_output / ffn_{gate,up,down}_shexp), and
+/// with `include_ple_key` blk.1.ple_key.weight
+bool native_dense_name(const std::string& name, bool include_ple_key);
+/// The hyper-connection matrices HcQ8 keeps in 8 bits: hc_attn_down / hc_attn_up / hc_ffn_down / hc_ffn_up of each
+/// layer, output_hc_down and output_hc_up
+bool hc_q8_name(const std::string& name);
+/// NativeDense::load's checks of the shards' directories, a shard at a time in their order: the split metadata of a
+/// later shard against the first's (its architecture checked by the caller), each tensor's block geometry, extent and
+/// span inside the payload, no two spans overlapping.  "" or what fails ("native dense: ...").
+struct ShardDirectory {
+    std::string check(const lamina::GgufFile& gguf);
+
+private:
+    std::set<uint64_t> numbers_;
+    uint64_t split_count_ = 0, split_tensors_ = 0;
+    bool have_architecture_ = false;
+    std::string first_arch_;
+};
 
 // Experimental GDN/QSA/shared-expert projection overrides. Upload unchanged native GGUF
 // blocks once, then attach them to the matching canonical WeightRef. Unsupported

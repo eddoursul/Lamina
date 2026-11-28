@@ -7,6 +7,7 @@
 #include "lamina/artifact/model_family.hpp"
 #include "lamina/core/family_layout.hpp"
 #include "lamina/core/geometry.hpp"
+#include "lamina/core/native_dense.hpp"
 #include "lamina/core/pack_image.hpp"
 #include "lamina/hy4/geometry.hpp"
 #include "lamina/inkling2/geometry.hpp"
@@ -46,83 +47,16 @@ bool ggml_reads(uint32_t t) {
     return tr != nullptr && tr->to_float != nullptr;
 }
 
-/// NativeDense::load's directory checks of a shard (native_dense.cpp), and its split metadata against the first's
+/// NativeDense::load's directory checks of every shard (native_dense.hpp's ShardDirectory)
 std::string dense_directory(const GgufModel& m) {
-    std::set<uint64_t> numbers;
-    uint64_t split_count = 0, split_tensors = 0;
-    bool have_architecture = false;
-    std::string first_arch;
-    for (size_t s = 0; s < m.size(); ++s) {
-        const GgufFile& gguf = m.shard(s);
-        const MetaValue* count = gguf.get("split.count");
-        const MetaValue* number = gguf.get("split.no");
-        const MetaValue* tensors = gguf.get("split.tensors.count");
-        const MetaValue* architecture = gguf.get("general.architecture");
-        if (number && !numbers.insert(number->u).second) return "native dense: duplicate split shard number";
-        if (architecture && (!number || number->u == 0)) {
-            have_architecture = true;
-            first_arch = architecture->s;
-            if (count && number && tensors && number->u == 0 && count->u > 1) {
-                split_count = count->u;
-                split_tensors = tensors->u;
-            }
-        } else if (!have_architecture || !split_count || !count || !number || !tensors || count->u != split_count ||
-                   number->u == 0 || number->u >= split_count || tensors->u != split_tensors ||
-                   (architecture && architecture->s != first_arch)) {
-            return "native dense: additional shard must match the architecture-validated first shard's split metadata";
-        }
-        std::vector<uint64_t> offsets;
-        for (const TensorInfo& t : gguf.tensors()) offsets.push_back(t.offset);
-        std::sort(offsets.begin(), offsets.end());
-        if (std::adjacent_find(offsets.begin(), offsets.end()) != offsets.end())
-            return "native dense: tensor payload offsets overlap";
-        const uint64_t payload = gguf.file_size() - gguf.data_start();
-        for (const TensorInfo& t : gguf.tensors()) {
-            int be = 0, bb = 0;
-            uint64_t elements = 1;
-            if (t.shape.empty() || !block_geometry(t.type, be, bb) || t.shape[0] % (uint64_t) be != 0)
-                return "native dense: invalid block geometry " + t.name;
-            for (const uint64_t d : t.shape) {
-                if (!d || elements > (std::numeric_limits<uint64_t>::max)() / d)
-                    return "native dense: invalid tensor extent " + t.name;
-                elements *= d;
-            }
-            const uint64_t blocks = elements / (uint64_t) be;
-            if (blocks > (std::numeric_limits<uint64_t>::max)() / (uint64_t) bb)
-                return "native dense: tensor byte count overflow " + t.name;
-            const uint64_t bytes = blocks * (uint64_t) bb;
-            if (t.offset > payload || bytes > payload - t.offset) return "native dense: truncated payload " + t.name;
-            const auto next = std::upper_bound(offsets.begin(), offsets.end(), t.offset);
-            if (next != offsets.end() && bytes > *next - t.offset) return "native dense: overlapping payload " + t.name;
-        }
-    }
+    ShardDirectory dir;
+    for (size_t s = 0; s < m.size(); ++s)
+        if (std::string e = dir.check(m.shard(s)); !e.empty()) return e;
     return {};
 }
 
-/// The dense matrices NativeDense serves (native_dense.cpp's eligible) and the verify window must find served
-const char* const kServed[] = {".attn_qkv.weight",      ".attn_gate.weight",      ".ssm_out.weight",
-                               ".attn_q.weight",        ".attn_k.weight",         ".attn_v.weight",
-                               ".attn_output.weight",   ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight",
-                               ".ffn_down_shexp.weight"};
-bool served_name(const std::string& n) {
-    if (n.rfind("blk.", 0) != 0) return false;
-    if (n == "blk.1.ple_key.weight") return true;
-    for (const char* s : kServed)
-        if (n.size() > std::char_traits<char>::length(s) &&
-            n.compare(n.size() - std::char_traits<char>::length(s), std::string::npos, s) == 0)
-            return true;
-    return false;
-}
-/// the hyper-connection matrices HcQ8 keeps in 8 bits (native_dense.cpp's hc_matrix)
-bool hc_matrix(const std::string& n) {
-    auto ends = [&](const char* s) {
-        const size_t k = std::char_traits<char>::length(s);
-        return n.size() > k && n.compare(n.size() - k, std::string::npos, s) == 0;
-    };
-    if (n.rfind("blk.", 0) != 0) return n == "output_hc_down.weight" || n == "output_hc_up.weight";
-    return ends(".hc_attn_down.weight") || ends(".hc_attn_up.weight") || ends(".hc_ffn_down.weight") ||
-           ends(".hc_ffn_up.weight");
-}
+/// The dense matrices NativeDense serves, which the verify window must find served
+bool served_name(const std::string& n) { return native_dense_name(n, true); }
 
 }   // namespace
 
@@ -216,7 +150,7 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
         if (o.hc_q8)
             for (size_t s = 0; s < m.size(); ++s)
                 for (const TensorInfo& t : m.shard(s).tensors()) {
-                    if (!hc_matrix(t.name)) continue;
+                    if (!hc_q8_name(t.name)) continue;
                     const std::string tn = t.type_name();
                     if (t.shape.size() != 2 || t.shape[0] % 32 != 0 ||
                         (tn != "Q8_0" && tn != "BF16" && tn != "F16" && tn != "F32"))

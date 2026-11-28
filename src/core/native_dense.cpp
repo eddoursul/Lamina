@@ -18,8 +18,7 @@
 #include <thread>
 
 namespace lamina::core {
-namespace {
-bool eligible(const std::string& name, bool include_ple_key) {
+bool native_dense_name(const std::string& name, bool include_ple_key) {
     if (name.rfind("blk.", 0) != 0) return false;
     if (include_ple_key && name == "blk.1.ple_key.weight") return true;
     static const char* suffixes[] = {".attn_qkv.weight",      ".attn_gate.weight",      ".ssm_out.weight",
@@ -30,6 +29,66 @@ bool eligible(const std::string& name, bool include_ple_key) {
         if (name.ends_with(suffix)) return true;
     return false;
 }
+
+bool hc_q8_name(const std::string& name) {
+    if (name.rfind("blk.", 0) != 0) return name == "output_hc_down.weight" || name == "output_hc_up.weight";
+    return name.ends_with(".hc_attn_down.weight") || name.ends_with(".hc_attn_up.weight") ||
+           name.ends_with(".hc_ffn_down.weight") || name.ends_with(".hc_ffn_up.weight");
+}
+
+std::string ShardDirectory::check(const lamina::GgufFile& gguf) {
+    const auto* count = gguf.get("split.count");
+    const auto* number = gguf.get("split.no");
+    const auto* tensors = gguf.get("split.tensors.count");
+    const auto* architecture = gguf.get("general.architecture");
+    if (number && !numbers_.insert(number->u).second) return "native dense: duplicate split shard number";
+    // A re-split GGUF (Huihui's Q8_0) repeats general.architecture on every shard but keeps the architecture's numeric
+    // keys (block_count ...) on the first one only: the full guard is the first shard's (or a single file's); a later
+    // shard that names an architecture must name the same one
+    if (architecture && (!number || number->u == 0)) {
+        have_architecture_ = true;
+        first_arch_ = architecture->s;
+        if (count && number && tensors && number->u == 0 && count->u > 1) {
+            split_count_ = count->u;
+            split_tensors_ = tensors->u;
+        }
+    } else if (!have_architecture_ || !split_count_ || !count || !number || !tensors || count->u != split_count_ ||
+               number->u == 0 || number->u >= split_count_ || tensors->u != split_tensors_ ||
+               (architecture && architecture->s != first_arch_)) {
+        return "native dense: additional shard must match the architecture-validated first shard's split metadata";
+    }
+    std::vector<uint64_t> offsets;
+    for (const auto& tensor : gguf.tensors()) offsets.push_back(tensor.offset);
+    std::sort(offsets.begin(), offsets.end());
+    if (std::adjacent_find(offsets.begin(), offsets.end()) != offsets.end())
+        return "native dense: tensor payload offsets overlap";
+    // every directory span, the tensors not uploaded too: an ignored tensor must not overlap the matrix after it
+    const uint64_t payload = gguf.file_size() - gguf.data_start();
+    for (const auto& tensor : gguf.tensors()) {
+        int block_elements = 0, block_bytes = 0;
+        uint64_t elements = 1;
+        if (tensor.shape.empty() || !lamina::block_geometry(tensor.type, block_elements, block_bytes) ||
+            tensor.shape[0] % (uint64_t) block_elements != 0)
+            return "native dense: invalid block geometry " + tensor.name;
+        for (uint64_t dimension : tensor.shape) {
+            if (!dimension || elements > (std::numeric_limits<uint64_t>::max)() / dimension)
+                return "native dense: invalid tensor extent " + tensor.name;
+            elements *= dimension;
+        }
+        const uint64_t blocks = elements / (uint64_t) block_elements;
+        if (blocks > (std::numeric_limits<uint64_t>::max)() / (uint64_t) block_bytes)
+            return "native dense: tensor byte count overflow " + tensor.name;
+        const uint64_t bytes = blocks * (uint64_t) block_bytes;
+        if (tensor.offset > payload || bytes > payload - tensor.offset)
+            return "native dense: truncated payload " + tensor.name;
+        const auto next = std::upper_bound(offsets.begin(), offsets.end(), tensor.offset);
+        if (next != offsets.end() && bytes > *next - tensor.offset)
+            return "native dense: overlapping payload " + tensor.name;
+    }
+    return {};
+}
+
+namespace {
 struct DeviceFree {
     void operator()(void* p) const {
         if (p) cudaFree(p);
@@ -126,8 +185,8 @@ bool NativeDense::served_names(const std::vector<std::string>& shards, bool incl
         for (const auto& path : shards) {
             lamina::GgufFile gguf(path);
             for (const auto& tensor : gguf.tensors())
-                if (eligible(tensor.name, include_ple_key) && lamina::kernels::native_mmvq_supported(tensor.type) &&
-                    tensor.shape.size() == 2)
+                if (native_dense_name(tensor.name, include_ple_key) &&
+                    lamina::kernels::native_mmvq_supported(tensor.type) && tensor.shape.size() == 2)
                     out.insert(tensor.name);
         }
         return true;
@@ -157,83 +216,19 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         std::set<std::string> seen;
         int max_in = 0;
         uint64_t total = 0;
-        uint64_t split_count = 0, split_tensors = 0;
-        std::set<uint64_t> split_numbers;
-        bool have_architecture = false;
-        std::string first_arch;
+        ShardDirectory dir;
         for (const auto& path : shards) {
             lamina::GgufFile gguf(path);
-            const auto* count = gguf.get("split.count");
             const auto* number = gguf.get("split.no");
-            const auto* tensors = gguf.get("split.tensors.count");
-            const auto* architecture = gguf.get("general.architecture");
-            if (number && !split_numbers.insert(number->u).second) {
-                err = "native dense: duplicate split shard number";
-                return false;
-            }
-            // A re-split GGUF (Huihui's Q8_0) repeats general.architecture on every shard but keeps the
-            // architecture's numeric keys (block_count ...) on the first one only: the full guard is the first
-            // shard's (or a single file's); a later shard that names an architecture must name the same one
-            if (architecture && (!number || number->u == 0)) {
+            if (gguf.get("general.architecture") && (!number || number->u == 0)) {   // (the first shard's guard)
                 err = lamina::check_architecture(gguf);
                 if (!err.empty()) return false;
-                have_architecture = true;
-                first_arch = architecture->s;
-                if (count && number && tensors && number->u == 0 && count->u > 1) {
-                    split_count = count->u;
-                    split_tensors = tensors->u;
-                }
-            } else if (!have_architecture || !split_count || !count || !number || !tensors || count->u != split_count ||
-                       number->u == 0 || number->u >= split_count || tensors->u != split_tensors ||
-                       (architecture && architecture->s != first_arch)) {
-                err =
-                    "native dense: additional shard must match the architecture-validated first shard's split metadata";
-                return false;
             }
-            std::vector<uint64_t> offsets;
-            for (const auto& tensor : gguf.tensors()) offsets.push_back(tensor.offset);
-            std::sort(offsets.begin(), offsets.end());
-            if (std::adjacent_find(offsets.begin(), offsets.end()) != offsets.end()) {
-                err = "native dense: tensor payload offsets overlap";
-                return false;
-            }
-            // Validate every directory span, including tensors we do not upload:
-            // an ignored tensor must not overlap the native matrix that follows it.
-            const uint64_t payload = gguf.file_size() - gguf.data_start();
-            for (const auto& tensor : gguf.tensors()) {
-                int block_elements = 0, block_bytes = 0;
-                uint64_t elements = 1;
-                if (tensor.shape.empty() || !lamina::block_geometry(tensor.type, block_elements, block_bytes) ||
-                    tensor.shape[0] % (uint64_t) block_elements != 0) {
-                    err = "native dense: invalid block geometry " + tensor.name;
-                    return false;
-                }
-                for (uint64_t dimension : tensor.shape) {
-                    if (!dimension || elements > (std::numeric_limits<uint64_t>::max)() / dimension) {
-                        err = "native dense: invalid tensor extent " + tensor.name;
-                        return false;
-                    }
-                    elements *= dimension;
-                }
-                const uint64_t blocks = elements / (uint64_t) block_elements;
-                if (blocks > (std::numeric_limits<uint64_t>::max)() / (uint64_t) block_bytes) {
-                    err = "native dense: tensor byte count overflow " + tensor.name;
-                    return false;
-                }
-                const uint64_t bytes = blocks * (uint64_t) block_bytes;
-                if (tensor.offset > payload || bytes > payload - tensor.offset) {
-                    err = "native dense: truncated payload " + tensor.name;
-                    return false;
-                }
-                const auto next = std::upper_bound(offsets.begin(), offsets.end(), tensor.offset);
-                if (next != offsets.end() && bytes > *next - tensor.offset) {
-                    err = "native dense: overlapping payload " + tensor.name;
-                    return false;
-                }
-            }
+            err = dir.check(gguf);
+            if (!err.empty()) return false;
             std::vector<Upload> jobs;
             for (const auto& tensor : gguf.tensors()) {
-                if (!eligible(tensor.name, include_ple_key)) continue;
+                if (!native_dense_name(tensor.name, include_ple_key)) continue;
                 if (!seen.insert(tensor.name).second) {
                     err = "native dense: duplicate tensor " + tensor.name;
                     return false;
@@ -328,11 +323,6 @@ float f16_to_f32(uint16_t b) {
     return (float) h;
 }
 #endif
-bool hc_matrix(const std::string& name) {
-    if (name.rfind("blk.", 0) != 0) return name == "output_hc_down.weight" || name == "output_hc_up.weight";
-    return name.ends_with(".hc_attn_down.weight") || name.ends_with(".hc_attn_up.weight") ||
-           name.ends_with(".hc_ffn_down.weight") || name.ends_with(".hc_ffn_up.weight");
-}
 // one row's values as ggml's quantize_row_q8_0_ref: per 32, d = amax / 127 stored as f16, codes round(x / d)
 void q8_0_row(const float* x, int64_t n, int8_t* q, uint16_t* s) {
     for (int64_t b = 0; b < n / 32; ++b) {
@@ -350,7 +340,7 @@ bool HcQ8::names(const std::vector<std::string>& shards, std::set<std::string>& 
         for (const auto& path : shards) {
             lamina::GgufFile gguf(path);
             for (const auto& t : gguf.tensors())
-                if (hc_matrix(t.name)) out.insert(t.name);
+                if (hc_q8_name(t.name)) out.insert(t.name);
         }
         return true;
     } catch (const std::exception& error) {
@@ -382,7 +372,7 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
             lamina::GgufFile gguf(path);
             std::vector<Job> jobs;
             for (const auto& t : gguf.tensors()) {
-                if (!hc_matrix(t.name)) continue;
+                if (!hc_q8_name(t.name)) continue;
                 auto found = table.table_.find(t.name);
                 if (found == table.table_.end()) {
                     err = "hc q8: tensor absent from the canonical table: " + t.name;
