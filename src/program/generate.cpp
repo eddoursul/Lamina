@@ -1723,8 +1723,8 @@ int qwen35_switch(int argc, char** argv) {
 }
 
 /// The cards after the first as CUDA ordinals, in their order (`auto`: every other usable GPU); one that is not found,
-/// is the main GPU or cannot run the engine is left out with a line.  `which`: each kept card's place in the list
-/// (-1: one of `auto`'s).
+/// is the main GPU, is named twice or cannot run the engine is left out with a line.  `which`: each kept card's place
+/// in the list (-1: one of `auto`'s).
 std::vector<int> other_cards(const Qwen35Line& q, const std::vector<lamina::core::GpuInfo>& gpus, int dev,
                              std::vector<int>* which = nullptr) {
     std::vector<int> out;
@@ -1744,9 +1744,12 @@ std::vector<int> other_cards(const Qwen35Line& q, const std::vector<lamina::core
             continue;
         }
         const int d = lamina::core::find_gpu(gpus, name, why);
-        if (d < 0 || d == dev) {
+        const bool twice = d >= 0 && std::find(out.begin(), out.end(), d) != out.end();
+        if (d < 0 || d == dev || twice) {
             std::fprintf(stderr, "lamina: --second-gpu %s left out: %s\n", name.c_str(),
-                         d < 0 ? why.c_str() : "it is the main GPU");
+                         d < 0      ? why.c_str()
+                         : d == dev ? "it is the main GPU"
+                                    : "it is named twice");
             continue;
         }
         if (const std::string no = lamina::core::gpu_unusable(d); !no.empty()) {
