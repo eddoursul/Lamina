@@ -413,9 +413,8 @@ __global__ void k_kv_store(const float* kva, const float* norm, void* cache, con
         uint8_t* q = reinterpret_cast<uint8_t*>(cache) + cell * kKvQ8Row;
         const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
         for (int b = warp; b < kKvRow / 32; b += blockDim.x >> 5) {
-            const float v = vals[32 * b + lane];
-            const float d = warp_max(fabsf(v)) / 127.f, id = d != 0.f ? 1.f / d : 0.f;
-            q[32 * b + lane] = (uint8_t) (int8_t) roundf(v * id);
+            float d;
+            q[32 * b + lane] = (uint8_t) lamina::kernels::q8_0_code(vals[32 * b + lane], d);
             if (lane == 0) reinterpret_cast<__half*>(q + kKvRow)[b] = __float2half(d);
         }
     }

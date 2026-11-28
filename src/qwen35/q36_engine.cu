@@ -35,6 +35,7 @@
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/native_moe.hpp"
 #include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/q8_halves.cuh"
 #include "lamina/kernels/warp.cuh"
 #include "lamina/platform/memory.hpp"
 #include "lamina/prefill/gemm.hpp"
@@ -276,9 +277,8 @@ constexpr int kKvQ8Row = 256 + 8 * 2;
 static_assert(kKvQ8Row == q36a::kQ8Row, "the prompt attention reads the same rows");
 /// Value i of a q8_0 row, from the lanes of i's warp (each warp a 32-value block)
 __device__ __forceinline__ void q8_put(uint8_t* row, int i, float v) {
-    const float amax = warp_max(fabsf(v));
-    const float d = amax / 127.f, id = d != 0.f ? 1.f / d : 0.f;
-    row[i] = (uint8_t) (int8_t) roundf(v * id);
+    float d;
+    row[i] = (uint8_t) lamina::kernels::q8_0_code(v, d);
     if ((i & 31) == 0) reinterpret_cast<__half*>(row + 256)[i >> 5] = __float2half(d);
 }
 /// The attention layer's per-token preparation for T rows at positions *pos0 + t: q (from the [q | gate] pairs) and k

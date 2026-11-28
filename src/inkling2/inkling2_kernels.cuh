@@ -708,10 +708,10 @@ __device__ __forceinline__ size_t cell_bytes(const Cells& c, int HK, int D) {
 /// q8_0 (d = amax / 127, round(x / d))
 __device__ __forceinline__ void cell_put32(const Cells& c, uint8_t* dst, int g, int b, int lane, float x, int D) {
     if (c.q8) {
-        const float amax = warp_max(fabsf(x));
-        const float d = amax / 127.0f, id = d != 0.f ? 1.0f / d : 0.f;
+        float d;
+        const int8_t q = lamina::kernels::q8_0_code(x, d);
         uint8_t* blk = dst + ((size_t) g * (D / 32) + b) * 34;
-        blk[2 + lane] = (uint8_t) (int8_t) roundf(x * id);
+        blk[2 + lane] = (uint8_t) q;
         if (lane == 0) *(__half*) blk = __float2half(d);
     } else {
         ((__half*) dst)[(size_t) g * D + b * 32 + lane] = __float2half(x);
