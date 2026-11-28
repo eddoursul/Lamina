@@ -40,6 +40,77 @@ void set_serve_io(ServeIo io) {
 
 const ServeIo& serve_io() { return current(); }
 
+ServeInput::ServeInput(bool console_quit) : q_(std::make_shared<Queue>()), stop(q_->stop) {
+    const ServeIo& io = serve_io();
+    reader_ = std::thread([q = q_, &io] {
+        std::string l;
+        while (io.read_line(l)) {
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            if (l == "STOP") {
+                q->stop.store(true);
+                continue;
+            }
+            std::lock_guard<std::mutex> lk(q->mu);
+            q->lines.push_back(l);
+            q->cv.notify_one();
+        }
+        std::lock_guard<std::mutex> lk(q->mu);
+        q->eof = true;
+        q->cv.notify_one();
+    });
+    if (console_quit && !io.in_process)
+        console_quit_.emplace([q = q_] {
+            q->stop.store(true);
+            std::lock_guard<std::mutex> lk(q->mu);
+            q->lines.push_front("QUIT");
+            q->cv.notify_one();
+        });
+}
+
+ServeInput::~ServeInput() {
+    console_quit_.reset();   // (Ctrl+C ends the process again before the reader goes)
+    const ServeIo& io = serve_io();
+    if (!io.in_process) {
+        reader_.detach();
+        return;
+    }
+    if (io.end_input) io.end_input();
+    reader_.join();
+}
+
+bool ServeInput::next(std::string& line) {
+    std::unique_lock<std::mutex> lk(q_->mu);
+    q_->cv.wait(lk, [&] { return q_->eof || !q_->lines.empty(); });
+    if (q_->lines.empty()) return false;
+    line = std::move(q_->lines.front());
+    q_->lines.pop_front();
+    return true;
+}
+
+bool ServeInput::poll(std::string& line) {
+    std::lock_guard<std::mutex> lk(q_->mu);
+    if (q_->lines.empty()) return false;
+    line = std::move(q_->lines.front());
+    q_->lines.pop_front();
+    return true;
+}
+
+bool ServeInput::ready() {
+    std::lock_guard<std::mutex> lk(q_->mu);
+    return q_->eof || !q_->lines.empty();
+}
+
+bool ServeInput::wait_until(std::chrono::steady_clock::time_point until) {
+    std::unique_lock<std::mutex> lk(q_->mu);
+    return q_->cv.wait_until(lk, until, [&] { return q_->eof || !q_->lines.empty(); });
+}
+
+void ServeInput::quit() {
+    std::lock_guard<std::mutex> lk(q_->mu);
+    q_->eof = true;
+    q_->lines.clear();
+}
+
 void serve_vprint(const char* fmt, va_list ap) {
     va_list ap2;
     va_copy(ap2, ap);

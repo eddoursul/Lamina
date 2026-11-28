@@ -34,7 +34,6 @@
 #include "lamina/kernels/iq_kernels.hpp"
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/ngram/ple_reader.hpp"
-#include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/memory.hpp"
 #include "lamina/platform/slice_read.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
@@ -65,7 +64,6 @@
 #include <mutex>
 #include <new>
 #include <numeric>
-#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -5310,11 +5308,7 @@ struct Prompt {
 struct Serve {
     Engine& E;
     int32_t eos = -1;
-    std::mutex mu;
-    std::condition_variable cv;
-    std::deque<std::string> lines;
-    bool eof = false;
-    std::atomic<bool> stop{false};
+    lamina::program::ServeInput* in = nullptr;   // run()'s input lines, while it runs
 
     Serve(Engine& e, int32_t eos_id, int drafts_) : E(e), eos(eos_id), drafts(drafts_) {}
     int drafts = 0;                     // the drafts a window (E.drafts_on)
@@ -5467,7 +5461,7 @@ struct Serve {
                         (long long) (E.ctx - kMaxT));
             return;
         }
-        stop.store(false);
+        in->stop.store(false);
         // what the state holds of this prompt: its common start, less one token when that is all of it (the last
         // prompt token's logits are the first pick)
         auto common_of = [&](const std::vector<int32_t>& s) {
@@ -5573,7 +5567,7 @@ struct Serve {
                             (double) done / std::max(1e-9, ms_since(t0) / 1000.0));
                 last_pp = Clock::now();
             }
-            return !stop.load();
+            return !in->stop.load();
         });
         E.img = nullptr;
         E.wanted.clear();
@@ -5616,7 +5610,7 @@ struct Serve {
                 finish = "stop";
                 return false;
             }
-            if (stop.load()) {
+            if (in->stop.load()) {
                 finish = "cancel";
                 return false;
             }
@@ -5690,42 +5684,13 @@ struct Serve {
     int run() {
         serve_print("READY %lld stop\n", (long long) (E.ctx - kMaxT));
         const lamina::program::ServeIo& io = lamina::program::serve_io();
-        std::thread reader([&] {
-            std::string l;
-            while (io.read_line(l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") {
-                    stop.store(true);
-                    continue;
-                }
-                std::lock_guard<std::mutex> lk(mu);
-                lines.push_back(l);
-                cv.notify_one();
-            }
-            std::lock_guard<std::mutex> lk(mu);
-            eof = true;
-            cv.notify_one();
-        });
-        lamina::program::ReaderEnd reader_end{reader, io};
         // Ctrl+C in the console ends the engine as QUIT does, before any request queued (the running one stops at its
         // next token), then the exit work runs (the learned profile).  In-process the host handles it.
-        std::optional<lamina::platform::ConsoleQuit> console_quit;
-        if (!io.in_process)
-            console_quit.emplace([&] {
-                stop.store(true);
-                std::lock_guard<std::mutex> lk(mu);
-                lines.push_front("QUIT");
-                cv.notify_one();
-            });
+        lamina::program::ServeInput input(true);
+        in = &input;
         for (;;) {
             std::string line;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                cv.wait(lk, [&] { return eof || !lines.empty(); });
-                if (lines.empty()) return 0;
-                line = lines.front();
-                lines.pop_front();
-            }
+            if (!in->next(line)) return 0;
             if (line.empty()) continue;
             if (line.rfind("GEN ", 0) == 0 || line.rfind("GENI ", 0) == 0) {
                 request(line);
@@ -5735,9 +5700,7 @@ struct Serve {
                 enc_back();
                 serve_print("UNLENT\n");
             } else if (line == "QUIT") {
-                std::lock_guard<std::mutex> lk(mu);
-                eof = true;
-                lines.clear();
+                in->quit();
             } else {
                 serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...> or GENI <max_new> [keys] <file> "
                             "<id,id,...>\n");

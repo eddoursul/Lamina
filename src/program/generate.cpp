@@ -50,7 +50,6 @@
 #include "lamina/kernels/sampler.hpp"
 #include "lamina/kernels/shared_expert.hpp"
 #include "lamina/kernels/verify_kernels.hpp"
-#include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 #include "lamina/platform/memory.hpp"
 #include "lamina/prefill/experts.hpp"
@@ -71,11 +70,9 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -4403,40 +4400,11 @@ int lamina::program::run(int argc, char** argv) {
                         (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
         };
         // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
-        // away, or pressed Esc): the flag is checked between prompt chunks and between verify windows.
-        std::atomic<bool> stop_req{false};
-        std::mutex in_mu;
-        std::condition_variable in_cv;
-        std::deque<std::string> in_lines;
-        bool in_eof = false;
+        // away, or pressed Esc): the flag is checked between prompt chunks and between verify windows.  Ctrl+C in the
+        // console ends the engine as QUIT does, before any request queued: the running one stops at its next chunk or
+        // window, then the exit work runs (the learned profile).  In-process the host handles it.
         const lamina::program::ServeIo& io = lamina::program::serve_io();
-        std::thread in_reader([&] {
-            std::string l;
-            while (io.read_line(l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") {
-                    stop_req.store(true);
-                    continue;
-                }
-                std::lock_guard<std::mutex> lk(in_mu);
-                in_lines.push_back(l);
-                in_cv.notify_one();
-            }
-            std::lock_guard<std::mutex> lk(in_mu);
-            in_eof = true;
-            in_cv.notify_one();
-        });
-        lamina::program::ReaderEnd reader_end{in_reader, io};
-        // Ctrl+C in the console ends the engine as QUIT does, before any request queued: the running one stops at its
-        // next chunk or window, then the exit work runs (the learned profile).  In-process the host handles it.
-        std::optional<lamina::platform::ConsoleQuit> console_quit;
-        if (!io.in_process)
-            console_quit.emplace([&] {
-                stop_req.store(true);
-                std::lock_guard<std::mutex> lk(in_mu);
-                in_lines.push_front("QUIT");
-                in_cv.notify_one();
-            });
+        lamina::program::ServeInput in(true);
         // --arena-place: after a request, the arena's swaps for the residency the tiers left, a slice at a time while
         // no request waits (the GPUs' copies from the arena are done first: nothing reads it meanwhile)
         const char* replace_env = std::getenv("LAMINA_ARENA_REPLACE");   // =0: the A/B arm without it
@@ -4466,15 +4434,12 @@ int lamina::program::run(int argc, char** argv) {
             replace_t0 = Clock::now();
         };
         auto next_line = [&](std::string& out) -> bool {
-            std::unique_lock<std::mutex> lk(in_mu);
-            while (replace_left > 0 && in_lines.empty() && !in_eof) {
-                lk.unlock();
+            while (replace_left > 0 && !in.ready()) {
                 replace_left = arena_src.replace_some(16);
                 if (replace_left == 0)
                     std::fprintf(stderr, "lamina serve: --arena-place: %zu swaps between requests in %.0f ms\n",
                                  replace_planned,
                                  std::chrono::duration<double, std::milli>(Clock::now() - replace_t0).count());
-                lk.lock();
             }
             if (replace_left > 0)
                 std::fprintf(stderr, "lamina serve: --arena-place: %zu of %zu swaps made before the request\n",
@@ -4483,23 +4448,11 @@ int lamina::program::run(int argc, char** argv) {
             const bool periodic = !prompt_heat.empty() && o.expert_profile_save_min > 0;
             const auto every = std::chrono::duration_cast<Clock::duration>(
                 std::chrono::duration<double>(o.expert_profile_save_min * 60.0));
-            while (in_lines.empty() && !in_eof) {
-                if (!periodic || !profile_dirty) {
-                    in_cv.wait(lk, [&] { return !in_lines.empty() || in_eof; });
-                    break;
-                }
-                if (Clock::now() >= profile_saved_at + every) {
-                    lk.unlock();
-                    save_profile("between requests");
-                    lk.lock();
-                } else {
-                    in_cv.wait_until(lk, profile_saved_at + every, [&] { return !in_lines.empty() || in_eof; });
-                }
+            while (periodic && profile_dirty && !in.ready()) {
+                if (Clock::now() >= profile_saved_at + every) save_profile("between requests");
+                else in.wait_until(profile_saved_at + every);
             }
-            if (in_lines.empty()) return false;
-            out = std::move(in_lines.front());
-            in_lines.pop_front();
-            return true;
+            return in.next(out);
         };
         // A throw-away part of one chunk through the prompt path before READY: a fresh engine's first prompt loads
         // each kernel it launches on each GPU (CUDA's lazy loading: a first 2K-token part 0.5 s slower than the next
@@ -4573,7 +4526,7 @@ int lamina::program::run(int argc, char** argv) {
         prefill.should_stop = [&] {
             pp_line(pp_at + prefill.processed());
             if (pp_at + pp_chunks++ * pp_chunk >= hold_from) clocks.hold();
-            return stop_req.load();
+            return in.stop.load();
         };
         {
             // every verify window's graph and the draft layer's, captured now rather than by the first request that
@@ -4778,8 +4731,8 @@ int lamina::program::run(int argc, char** argv) {
                     return 1;
                 }
             }
-            stop_req.store(false);   // a STOP that arrived between requests is stale
-            err.clear();             // and so is a stopped request's "cancelled"
+            in.stop.store(false);   // a STOP that arrived between requests is stale
+            err.clear();            // and so is a stopped request's "cancelled"
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
                 serve_print("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
@@ -5354,7 +5307,7 @@ int lamina::program::run(int argc, char** argv) {
             };
             int64_t merge_from = n - 1;   // the first decode window's first position: [merge_from, n) are prompt tokens
             clocks.hold();
-            if (!stop_req.load()) {
+            if (!in.stop.load()) {
                 struct NoHeadSampling {   // every token is committed and the picks are discarded
                     lamina::core::Verifier& v;
                     explicit NoHeadSampling(lamina::core::Verifier& x) : v(x) { v.set_head_sampling(false); }
@@ -5428,7 +5381,7 @@ int lamina::program::run(int argc, char** argv) {
             ver.set_logits_wanted(!req_score.empty() || ddump.on());   // score=: a split head's first row whole
             std::vector<float> dd_logits(ddump.on() ? (size_t) W * (size_t) n_vocab : 0);
             while (poison_at < 0 && produced_n < max_new) {
-                if (stop_req.load()) {
+                if (in.stop.load()) {
                     finish = "cancel";
                     break;
                 }   // the client went away

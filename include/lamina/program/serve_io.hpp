@@ -4,10 +4,19 @@
 // runs the same loop on a thread of its own process, with in-process channels set here before lamina::program::run.
 #pragma once
 
+#include "lamina/platform/console_quit.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -40,19 +49,59 @@ void serve_vprint(const char* fmt, va_list ap);
 /// lamina shows in its window
 void serve_warn(bool serving, const std::string& text);
 
-/// The serve loop's input reader at the loop's end: in-process the reader holds the loop's state, so its input ends
-/// and it is joined before that state goes; stdin's reader ends with the process.
-struct ReaderEnd {
-    std::thread& t;
-    const ServeIo& io;
-    ~ReaderEnd() {
-        if (!io.in_process) {
-            t.detach();
-            return;
-        }
-        if (io.end_input) io.end_input();
-        t.join();
+/// The serve loop's input.  A thread of its own reads the lines (serve_io()'s, a line's CR dropped), so a STOP line
+/// reaches a request that is still running: it sets `stop` at once (a request clears it as it starts and looks at it
+/// between its steps), and every other line is queued for the loop.  Out of the process and with `console_quit` (a
+/// loop with exit work), Ctrl+C in the console stands for a QUIT ahead of every line queued, `stop` set too; in-process
+/// the host handles it.  At its end the input is ended and the reader joined in-process; stdin's reader ends with the
+/// process.
+class ServeInput {
+    struct Queue {
+        std::mutex mu;
+        std::condition_variable cv;
+        std::deque<std::string> lines;
+        bool eof = false;
+        std::atomic<bool> stop{false};
+    };
+    std::shared_ptr<Queue> q_;   // the reader's too: a reader left to the process's end reads no freed memory
+
+public:
+    explicit ServeInput(bool console_quit);
+    ~ServeInput();
+    ServeInput(const ServeInput&) = delete;
+    ServeInput& operator=(const ServeInput&) = delete;
+
+    std::atomic<bool>& stop;   ///< set by a STOP line (and a Ctrl+C)
+
+    /// The next line, waited for; false once the input has ended with no line queued
+    bool next(std::string& line);
+    /// The next line where one is queued, else false at once
+    bool poll(std::string& line);
+    /// Whether a line is queued or the input has ended
+    bool ready();
+    /// Waits until ready() or `until`, and says which
+    bool wait_until(std::chrono::steady_clock::time_point until);
+    /// A QUIT line's work: the input ends there, the lines queued behind it dropped
+    void quit();
+
+    /// The queue under its lock (`eof`: the input has ended), for a loop that takes lines out of turn; `wait_for` waits
+    /// there up to `d` for the reader's next line, the lock let go meanwhile
+    struct Held {
+        std::deque<std::string>& lines;
+        const bool& eof;
+        std::unique_lock<std::mutex>& lk;
+        std::condition_variable& cv;
+        void wait_for(std::chrono::milliseconds d) { cv.wait_for(lk, d); }
+    };
+    template <class F> decltype(auto) locked(F&& f) {
+        std::unique_lock<std::mutex> lk(q_->mu);
+        Held held{q_->lines, q_->eof, lk, q_->cv};
+        return f(held);
     }
+
+private:
+    std::thread reader_;
+    std::optional<platform::ConsoleQuit> console_quit_;
 };
 
 /// A picture of a GENI request's embeddings file: its rows (n = nx x ny) and where they start in the rows read.

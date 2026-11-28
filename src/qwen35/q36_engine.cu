@@ -55,7 +55,6 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -65,10 +64,8 @@
 #include <iostream>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <random>
 #include <string>
-#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -4936,11 +4933,7 @@ struct Slot {
 /// (--prompt-cache 0) slot b decodes in session b.
 struct Serve {
     Engine& E;
-    std::mutex mu;
-    std::condition_variable cv;
-    std::deque<std::string> lines;
-    bool eof = false;
-    std::atomic<bool> stop{false};
+    lamina::program::ServeInput* in = nullptr;   // run()'s input lines, while it runs
     std::vector<Slot> slots;
     int n_active = 0;
     std::vector<float> lg;
@@ -5161,18 +5154,19 @@ struct Serve {
 
     /// BSTOP / BYIELD lines among the queued ones: applied now (a window is a moment away at most).
     void poll_control() {
-        std::lock_guard<std::mutex> lk(mu);
-        for (auto it = lines.begin(); it != lines.end();) {
-            if (it->rfind("BSTOP ", 0) == 0) {
-                const int b = std::atoi(it->c_str() + 6);
-                if (b >= 0 && b < (int) slots.size()) slots[(size_t) b].stop = true;
-                it = lines.erase(it);
-            } else if (it->rfind("BYIELD", 0) == 0) {   // (a read here does not give way: the server then goes on)
-                it = lines.erase(it);
-            } else {
-                ++it;
+        in->locked([&](auto& q) {
+            for (auto it = q.lines.begin(); it != q.lines.end();) {
+                if (it->rfind("BSTOP ", 0) == 0) {
+                    const int b = std::atoi(it->c_str() + 6);
+                    if (b >= 0 && b < (int) slots.size()) slots[(size_t) b].stop = true;
+                    it = q.lines.erase(it);
+                } else if (it->rfind("BYIELD", 0) == 0) {   // (a read here does not give way: the server then goes on)
+                    it = q.lines.erase(it);
+                } else {
+                    ++it;
+                }
             }
-        }
+        });
     }
 
     /// One decode window with MTP proposals (--batch-mtp): every active slot's next token, and for up to kVerify - S of
@@ -5534,14 +5528,15 @@ struct Serve {
     void poll_loan() {
         for (;;) {
             std::string l;
-            {
-                std::lock_guard<std::mutex> lk(mu);
-                auto it = lines.begin();
-                while (it != lines.end() && (it->rfind("BSTOP ", 0) == 0 || it->rfind("BYIELD", 0) == 0)) ++it;
-                if (it == lines.end() || !(*it == "UNLEND" || it->rfind("LEND ", 0) == 0)) return;
+            const bool got = in->locked([&](auto& q) {
+                auto it = q.lines.begin();
+                while (it != q.lines.end() && (it->rfind("BSTOP ", 0) == 0 || it->rfind("BYIELD", 0) == 0)) ++it;
+                if (it == q.lines.end() || !(*it == "UNLEND" || it->rfind("LEND ", 0) == 0)) return false;
                 l = std::move(*it);
-                lines.erase(it);
-            }
+                q.lines.erase(it);
+                return true;
+            });
+            if (!got) return;
             loan_line(l);
         }
     }
@@ -5553,18 +5548,17 @@ struct Serve {
         bool taken = false;
         while (enc_at != nullptr) {
             bool got = false, give_up = false;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                const auto it = std::find(lines.begin(), lines.end(), std::string("UNLEND"));
-                if (it != lines.end()) {
-                    lines.erase(it);
+            in->locked([&](auto& q) {
+                const auto it = std::find(q.lines.begin(), q.lines.end(), std::string("UNLEND"));
+                if (it != q.lines.end()) {
+                    q.lines.erase(it);
                     got = true;
-                } else if (eof || ms_since(t0) > kLoanWaitMs) {
+                } else if (q.eof || ms_since(t0) > kLoanWaitMs) {
                     give_up = true;
                 } else if (n_active == 0) {
-                    cv.wait_for(lk, std::chrono::milliseconds(20));
+                    q.wait_for(std::chrono::milliseconds(20));
                 }
-            }
+            });
             if (got) {
                 loan_line("UNLEND");
             } else if (give_up) {
@@ -5579,8 +5573,8 @@ struct Serve {
     }
 
     void request(const std::string& line) {
-        stop.store(false);   // a STOP that came between requests is stale; one from here on is this request's
-        await_unlend();      // (a loan that is out: the prompt is read once the staging buffers are back)
+        in->stop.store(false);   // a STOP that came between requests is stale; one from here on is this request's
+        await_unlend();          // (a loan that is out: the prompt is read once the staging buffers are back)
         const bool adm = line[0] == 'B';
         const bool geni = line.rfind(adm ? "BGENI " : "GENI ", 0) == 0;
         if (!adm && !geni && line.rfind("GEN ", 0) != 0) {
@@ -5859,7 +5853,7 @@ struct Serve {
                                  } else {
                                      poll_control();
                                  }
-                                 if (stop.load() && done < fresh) {
+                                 if (in->stop.load() && done < fresh) {
                                      cancelled = true;
                                      return false;
                                  }
@@ -5938,7 +5932,7 @@ struct Serve {
             ++produced;
             hist.push_back(nx);
             const char* fin = is_eos(nx)          ? "stop"
-                              : stop.load()       ? "cancel"
+                              : in->stop.load()   ? "cancel"
                               : max_new <= 1      ? "length"
                               : E.pos + 1 > E.ctx ? "length"
                                                   : nullptr;
@@ -5990,7 +5984,7 @@ struct Serve {
                     return false;
                 }
                 if (produced >= max_new) return false;
-                if (stop.load()) {
+                if (in->stop.load()) {
                     finish = "cancel";
                     return false;
                 }
@@ -5999,7 +5993,7 @@ struct Serve {
             if (!emit(nx)) break;
             if (n_active > 0) window();
             if (spec && n_active == 0 && E.pos + E.mtp_d + 1 <= E.ctx) {
-                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &stop);
+                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &in->stop);
                 offered += (long long) drafts.size();   // the drafts made (--spec-min-p can end them early)
                 accepted += a;
                 // the state now holds x and every accepted draft, whether or not the answer ends inside them (an end of
@@ -6065,40 +6059,13 @@ struct Serve {
         }
         print_cache();
         serve_print("READY %d stop\n", E.ctx);
-        const lamina::program::ServeIo& io = lamina::program::serve_io();
-        in_process = io.in_process;
-        std::thread reader([&] {
-            std::string l;
-            while (io.read_line(l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") {
-                    stop.store(true);
-                    continue;
-                }
-                std::lock_guard<std::mutex> lk(mu);
-                lines.push_back(l);
-                cv.notify_one();
-            }
-            std::lock_guard<std::mutex> lk(mu);
-            eof = true;
-            cv.notify_one();
-        });
-        lamina::program::ReaderEnd reader_end{reader, io};
+        in_process = lamina::program::serve_io().in_process;
+        lamina::program::ServeInput input(false);   // (no exit work: Ctrl+C ends the process)
+        in = &input;
         for (;;) {
             std::string line;
-            bool have = false;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                if (n_active == 0) cv.wait(lk, [&] { return eof || !lines.empty(); });
-                if (!lines.empty()) {
-                    line = lines.front();
-                    lines.pop_front();
-                    have = true;
-                } else if (n_active == 0) {
-                    return 0;
-                }
-            }
-            if (!have) {
+            if (!(n_active == 0 ? in->next(line) : in->poll(line))) {   // (slots decoding: a window, not a wait)
+                if (n_active == 0) return 0;
                 window();
                 continue;
             }
@@ -6113,9 +6080,7 @@ struct Serve {
             } else if (line.rfind("LEND ", 0) == 0 || line == "UNLEND") {
                 loan_line(line);
             } else if (line == "QUIT") {   // as the input's end: the running requests finish (STOP ends them first)
-                std::lock_guard<std::mutex> lk(mu);
-                eof = true;
-                lines.clear();
+                in->quit();
             } else {
                 serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...>\n");
             }

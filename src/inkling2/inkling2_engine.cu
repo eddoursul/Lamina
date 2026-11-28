@@ -36,7 +36,6 @@
 #include "lamina/kernels/native_mmvq.hpp"
 #include "lamina/kernels/nvfp4_gemm.hpp"
 #include "lamina/kernels/sampler.hpp"
-#include "lamina/platform/console_quit.hpp"
 #include "lamina/platform/cpu_arch.hpp"
 #include "lamina/platform/memory.hpp"
 #include "lamina/platform/slice_read.hpp"
@@ -61,7 +60,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -7982,11 +7980,7 @@ protected:
 struct Serve {
     Engine& E;
     int32_t eos = -1;
-    std::mutex mu;
-    std::condition_variable cv;
-    std::deque<std::string> lines;
-    bool eof = false;
-    std::atomic<bool> stop{false};
+    lamina::program::ServeInput* in = nullptr;   // run()'s input lines, while it runs
     CacheOpts copt;
     std::unique_ptr<Cache> cache;       // null: off
     std::vector<int32_t> live;          // the tokens the state holds
@@ -8233,7 +8227,7 @@ struct Serve {
                         (long long) E.ctx);
             return;
         }
-        stop.store(false);
+        in->stop.store(false);
         // (cells on cards, a split's card, the first card's own lock: their clocks, where locked for a request, until
         // it ends - a cell card that holds none sleeps meanwhile: card_lock)
         if (E.lo > 0 || E.sat || E.main_locked) E.clocks.hold();
@@ -8367,7 +8361,7 @@ struct Serve {
                                 (double) done / std::max(1e-9, ms_since(t0) / 1000.0));
                     last_pp = Clock::now();
                 }
-                return !stop.load();
+                return !in->stop.load();
             },
             &part_marks, cache ? &take : nullptr, &settles);
         E.prof_print("the prompt");
@@ -8406,7 +8400,7 @@ struct Serve {
                 serve_print("T %d\n", t);
                 ++produced;
                 if (t == eos) finish = "stop";
-                else if (stop.load()) finish = "cancel";
+                else if (in->stop.load()) finish = "cancel";
                 else return produced < max_new;
                 return false;
             },
@@ -8451,42 +8445,13 @@ struct Serve {
         print_cache();
         serve_print("READY %lld stop\n", (long long) E.ctx);
         const lamina::program::ServeIo& io = lamina::program::serve_io();
-        std::thread reader([&] {
-            std::string l;
-            while (io.read_line(l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") {
-                    stop.store(true);
-                    continue;
-                }
-                std::lock_guard<std::mutex> lk(mu);
-                lines.push_back(l);
-                cv.notify_one();
-            }
-            std::lock_guard<std::mutex> lk(mu);
-            eof = true;
-            cv.notify_one();
-        });
-        lamina::program::ReaderEnd reader_end{reader, io};
         // Ctrl+C in the console ends the engine as QUIT does, before any request queued (the running one stops at its
         // next token).  In-process the host handles it.
-        std::optional<lamina::platform::ConsoleQuit> console_quit;
-        if (!io.in_process)
-            console_quit.emplace([&] {
-                stop.store(true);
-                std::lock_guard<std::mutex> lk(mu);
-                lines.push_front("QUIT");
-                cv.notify_one();
-            });
+        lamina::program::ServeInput input(true);
+        in = &input;
         for (;;) {
             std::string line;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                cv.wait(lk, [&] { return eof || !lines.empty(); });
-                if (lines.empty()) return 0;
-                line = lines.front();
-                lines.pop_front();
-            }
+            if (!in->next(line)) return 0;
             if (line.empty()) continue;
             if (line.rfind("GEN ", 0) == 0) {
                 request(line, false);
@@ -8498,9 +8463,7 @@ struct Serve {
                 enc_back();
                 serve_print("UNLENT\n");
             } else if (line == "QUIT") {
-                std::lock_guard<std::mutex> lk(mu);
-                eof = true;
-                lines.clear();
+                in->quit();
             } else {
                 serve_print(
                     "ERR expected: GEN <max_new> [key=value ...] <id,id,...>, or GENI <max_new> [key=value ...] "

@@ -327,6 +327,7 @@ if(LAMINA_ENABLE_CUDA)
   # which speaks the --serve protocol through in-process channels (serve_io.hpp)
   add_library(lamina_serve_io STATIC src/program/serve_io.cpp)
   target_include_directories(lamina_serve_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(lamina_serve_io PRIVATE lamina_core)   # Ctrl+C as a QUIT (platform/console_quit.cpp)
   add_library(lamina_program STATIC src/program/generate.cpp)
   target_include_directories(lamina_program PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(lamina_program PUBLIC lamina_engine lamina_prefill lamina_spec lamina_serve_io lamina_cards
