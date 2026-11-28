@@ -57,6 +57,9 @@ public:
     const uint8_t* host(const std::string& name, const lamina::TensorInfo** ti = nullptr) const;
     /// Its bytes on the current device with kWeightPad zero bytes after them (the run's memory)
     uint8_t* device_bytes(const std::string& name, const lamina::TensorInfo** ti = nullptr) const;
+    /// The same buffer with its zeroed tail, the bytes' copy queued in `jobs` for upload_parallel (on this device)
+    uint8_t* device_room(const std::string& name, std::vector<Upload>& jobs,
+                         const lamina::TensorInfo** ti = nullptr) const;
     /// Its values as floats (tensor_floats; another type is said and ends the run)
     std::vector<float> floats(const std::string& name) const;
     /// ... on the current device

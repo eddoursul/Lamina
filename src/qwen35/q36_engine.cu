@@ -1510,6 +1510,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     if (!plan_stages(m, gm, devs, split, ctx, chunk, lora_cost, err)) return false;
     uint64_t bytes = 0;
     const lamina::core::GgufLoader GL(gm);
+    std::map<int, std::vector<lamina::core::Upload>> uploads;   // each GPU's matrices, sent at the load's end
     auto find = [&](const std::string& name, size_t& s) { return GL.find(name, &s); };
     auto f32 = [&](const std::string& name) -> const float* {
         bytes += GL.find(name)->elements() * 4;
@@ -1526,7 +1527,9 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
                          t->type_name());
             throw Fatal{1};
         }
-        w.d = GL.device_bytes(name);   // (with the zeroed tail: the prompt chunks run MMQ over them)
+        int dev = 0;
+        CK(cudaGetDevice(&dev));
+        w.d = GL.device_room(name, uploads[dev]);   // (with the zeroed tail: the prompt chunks run MMQ over them)
         bytes += lamina::tensor_payload_bytes(*t);
         return w;
     };
@@ -1619,19 +1622,23 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
         const uint64_t nb = lamina::tensor_payload_bytes(*t);
         uint8_t* d = nullptr;
         CK(dmalloc(&d, nb));
-        CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
+        uploads[m.stage_dev.front()].push_back({d, gm.shard(s).tensor_data(*t), nb});
         m.embd = m.embd_mtp = d;
         bytes += nb;
         if (m.has_mtp && m.stage_dev.size() > 1) {   // the MTP block embeds its tokens on
                                                      // the last stage's GPU: a copy there
             CK(cudaSetDevice(m.stage_dev.back()));
             CK(dmalloc(&d, nb));
-            CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
+            uploads[m.stage_dev.back()].push_back({d, gm.shard(s).tensor_data(*t), nb});
             m.embd_mtp = d;
             bytes += nb;
-            CK(cudaSetDevice(m.stage_dev.front()));
         }
     }
+    for (const auto& [dev, jobs] : uploads) {   // the matrices' bytes: 8 threads a GPU, through pinned staging
+        CK(cudaSetDevice(dev));
+        if (!lamina::core::upload_parallel(jobs, err)) return false;
+    }
+    CK(cudaSetDevice(m.stage_dev.front()));
     std::fprintf(stderr,
                  "lamina: %s: %zu tensors (layout checked), %.2f GiB on the GPU in %.1f s (the routed "
                  "experts are placed after the engine's buffers)\n",
@@ -4431,17 +4438,22 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         }
     }
     if (slots <= 0 && total <= budget2 && total + ((size_t) 256 << 20) <= fr) {
-        std::vector<uint8_t> blob;
+        // each expert's three parts straight from the mapping to their places in its blob (expert_blob's layout), 8
+        // threads through pinned staging
+        std::vector<lamina::core::Upload> jobs;
         for (Layer* L : all) {
             CK(dmalloc(&L->blobs, L->stride * (size_t) ne + kMmqTail));
             CK(cudaMemset(L->blobs, 0, L->stride * (size_t) ne + kMmqTail));
-            blob.assign(L->L.bytes, 0);
             for (int64_t e = 0; e < ne; ++e) {
-                expert_blob(*L, e, blob.data());
-                CK(cudaMemcpy(L->blobs + (size_t) e * L->stride, blob.data(), L->L.bytes, cudaMemcpyHostToDevice));
+                uint8_t* b = L->blobs + (size_t) e * L->stride;
+                jobs.push_back({b, L->src_g + (size_t) e * L->src_gsz, L->src_gsz});
+                jobs.push_back({b + L->L.up_off, L->src_u + (size_t) e * L->src_gsz, L->src_gsz});
+                jobs.push_back({b + L->L.down_off, L->src_d + (size_t) e * L->src_dsz, L->src_dsz});
             }
             L->n_slots = (int) ne;
         }
+        CK(cudaDeviceSynchronize());   // (the zeroing first: the copies go on streams of their own)
+        if (!lamina::core::upload_parallel(jobs, err)) return false;
         std::fprintf(stderr, "lamina: every routed expert in VRAM (%.2f GiB) in %.1f s\n", (double) total / (1 << 30),
                      ms_since(t0) / 1000.0);
         return true;

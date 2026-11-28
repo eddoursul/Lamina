@@ -165,6 +165,18 @@ uint8_t* GgufLoader::device_bytes(const std::string& name, const lamina::TensorI
     return d;
 }
 
+uint8_t* GgufLoader::device_room(const std::string& name, std::vector<Upload>& jobs,
+                                 const lamina::TensorInfo** ti) const {
+    const lamina::TensorInfo* t = nullptr;
+    const uint8_t* src = host(name, &t);
+    if (ti) *ti = t;
+    const uint64_t n = lamina::tensor_payload_bytes(*t);
+    uint8_t* d = dalloc<uint8_t>(n + kWeightPad);
+    LAMINA_CK(cudaMemset(d + n, 0, kWeightPad));   // (the tail apart from the copy: upload_parallel waits for it)
+    jobs.push_back({d, src, n});
+    return d;
+}
+
 std::vector<float> GgufLoader::floats(const std::string& name) const {
     const lamina::TensorInfo* t = nullptr;
     const uint8_t* src = host(name, &t);
