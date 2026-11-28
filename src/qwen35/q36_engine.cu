@@ -3628,55 +3628,65 @@ struct Engine {
 #endif
     }
 
-    /// The slots to the experts the routing used most (the counts halved each time): at most max_swaps replacements
-    /// over all layers, between forwards (the copies are on the engine's stream).
+    /// The slots to the experts the routing used most: at most max_swaps replacements over all layers, the ones that
+    /// gain the most first (a replacement's gain: its expert's count less the count of the one it replaces), then
+    /// every layer's counts halved; between forwards (the copies are on the engine's stream).
     void rebalance(int max_swaps) {
         static const bool off = std::getenv("LAMINA_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
         if (!m->hybrid || off || warming) return;
         const int64_t ne = m->g.n_expert;
-        int left = max_swaps;
-        for (size_t li = 0; li < hy.size() && left > 0; ++li) {
-            Hy& H = hy[li];
-            const Layer& L = layer_at((int) li);
-            const int n_slots = L.n_slots;
+        struct Swap {
+            double gain;
+            int li, ex, slot;
+        };
+        std::vector<Swap> swaps;
+        for (size_t li = 0; li < hy.size(); ++li) {
+            const Hy& H = hy[li];
+            const int n_slots = layer_at((int) li).n_slots;
             if (n_slots <= 0 || n_slots >= ne) continue;
             std::vector<int> order((size_t) ne);
             for (int ex = 0; ex < ne; ++ex) order[(size_t) ex] = ex;
             std::sort(order.begin(), order.end(),
                       [&](int a, int b) { return H.score[(size_t) a] > H.score[(size_t) b]; });
-            // residents outside the top n_slots, lowest score first: the slots to give away
+            // the residents lowest score first: the slots to give away
             std::vector<int> victims;
             for (int s = 0; s < n_slots; ++s) victims.push_back(s);
             std::sort(victims.begin(), victims.end(), [&](int a, int b) {
                 return H.score[(size_t) H.exp_in_slot[(size_t) a]] < H.score[(size_t) H.exp_in_slot[(size_t) b]];
             });
+            // the top n_slots' experts outside the slots, highest first, each for the next victim while it scores
+            // more (the victims are then outside the top n_slots themselves)
             size_t vi = 0;
-            bool changed = false;
-            for (int i = 0; i < n_slots && left > 0; ++i) {
+            for (int i = 0; i < n_slots && vi < victims.size() && (int) vi < max_swaps; ++i) {
                 const int ex = order[(size_t) i];
                 if (H.slot_of[(size_t) ex] >= 0) continue;
-                while (vi < victims.size()) {
-                    const int s = victims[vi];
-                    const int ey = H.exp_in_slot[(size_t) s];
-                    if (H.score[(size_t) ey] >= H.score[(size_t) ex]) {
-                        vi = victims.size();
-                        break;
-                    }
-                    // ey must not be in the top n_slots itself
-                    ++vi;
-                    H.slot_of[(size_t) ey] = -1;
-                    H.slot_of[(size_t) ex] = s;
-                    H.exp_in_slot[(size_t) s] = ex;
-                    CK(cudaMemcpyAsync(L.blobs + (size_t) s * L.stride, L.hblobs + (size_t) ex * L.stride, L.L.bytes,
-                                       cudaMemcpyHostToDevice, st));
-                    --left;
-                    ++hy_swaps;
-                    changed = true;
-                    break;
-                }
-                if (vi >= victims.size()) break;
+                const int s = victims[vi];
+                const double gain = H.score[(size_t) ex] - H.score[(size_t) H.exp_in_slot[(size_t) s]];
+                if (gain <= 0) break;
+                swaps.push_back({gain, (int) li, ex, s});
+                ++vi;
             }
-            if (changed)
+        }
+        if ((int) swaps.size() > max_swaps) {
+            std::partial_sort(swaps.begin(), swaps.begin() + max_swaps, swaps.end(),
+                              [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
+            swaps.resize((size_t) max_swaps);
+        }
+        std::vector<char> changed(hy.size(), 0);
+        for (const Swap& w : swaps) {
+            Hy& H = hy[(size_t) w.li];
+            const Layer& L = layer_at(w.li);
+            H.slot_of[(size_t) H.exp_in_slot[(size_t) w.slot]] = -1;
+            H.slot_of[(size_t) w.ex] = w.slot;
+            H.exp_in_slot[(size_t) w.slot] = w.ex;
+            CK(cudaMemcpyAsync(L.blobs + (size_t) w.slot * L.stride, L.hblobs + (size_t) w.ex * L.stride, L.L.bytes,
+                               cudaMemcpyHostToDevice, st));
+            ++hy_swaps;
+            changed[(size_t) w.li] = 1;
+        }
+        for (size_t li = 0; li < hy.size(); ++li) {
+            Hy& H = hy[li];
+            if (changed[li])
                 CK(cudaMemcpyAsync(H.slot_of_d, H.slot_of.data(), (size_t) ne * 4, cudaMemcpyHostToDevice, st));
             for (double& v : H.score) v *= 0.5;
         }
