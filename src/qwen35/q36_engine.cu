@@ -26,6 +26,8 @@
 #include "lamina/core/model_check.hpp"
 #include "lamina/core/prompt_cache.hpp"
 #include "lamina/core/run_owned.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/fused_gdn.hpp"
 #include "lamina/kernels/gemm.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
@@ -64,6 +66,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <string>
 #include <tuple>
@@ -1093,8 +1096,6 @@ struct Model {
 };
 
 constexpr size_t kMmqTail = 4096;
-size_t gcd_sz(size_t a, size_t b) { return b ? gcd_sz(b, a % b) : a; }
-size_t lcm_sz(size_t a, size_t b) { return a / gcd_sz(a, b) * b; }
 size_t block_bytes(int type) {
     int be = 0, bb = 0;
     return lamina::block_geometry((uint32_t) type, be, bb) ? (size_t) bb : 1;
@@ -1106,55 +1107,19 @@ size_t row_bytes(int type, int64_t n) {
     return (size_t) (n / be) * (size_t) bb;
 }
 
-float bf16_to_f32(uint16_t b) {
-    const uint32_t u = (uint32_t) b << 16;
-    float f;
-    std::memcpy(&f, &u, 4);
-    return f;
-}
-
-// IEEE binary16 -> f32 by hand. __ushort_as_half is a __device__ intrinsic and
-// upload_f32 runs on the host, so a CUDA toolkit older than 12.5 refuses the
-// call; widen the bits here instead, the way bf16_to_f32 does.
-float f16_to_f32(uint16_t h) {
-    const uint32_t sign = (uint32_t) (h & 0x8000) << 16;
-    const uint32_t exponent = (h >> 10) & 0x1f;
-    const uint32_t mantissa = h & 0x3ff;
-    uint32_t u;
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            u = sign;   // +-0
-        } else {
-            uint32_t m = mantissa, shift = 0;   // subnormal: normalize it
-            while ((m & 0x400) == 0) {
-                m <<= 1;
-                ++shift;
-            }
-            u = sign | ((uint32_t) (127 - 14 - shift) << 23) | ((m & 0x3ff) << 13);
-        }
-    } else if (exponent == 0x1f) {
-        u = sign | 0x7f800000u | (mantissa << 13);   // inf / nan
-    } else {
-        u = sign | ((exponent + (127 - 15)) << 23) | (mantissa << 13);
-    }
-    float f;
-    std::memcpy(&f, &u, 4);
-    return f;
-}
-
 /// A tensor's values as f32 on the host (F32 as it is, BF16 / F16 widened, Q8_0 scaled); false for another type.
 bool tensor_floats(const lamina::TensorInfo& t, const uint8_t* src, std::vector<float>& h) {
     h.resize((size_t) t.elements());
     if (t.type == 0) std::memcpy(h.data(), src, h.size() * 4);
     else if (t.type == 30)
-        for (size_t i = 0; i < h.size(); ++i) h[i] = bf16_to_f32((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
+        for (size_t i = 0; i < h.size(); ++i) h[i] = K::f32_from_bf16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
     else if (t.type == 1)   // F16
-        for (size_t i = 0; i < h.size(); ++i) h[i] = f16_to_f32((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
+        for (size_t i = 0; i < h.size(); ++i) h[i] = K::f32_from_f16((uint16_t) (src[2 * i] | (src[2 * i + 1] << 8)));
     else if (t.type == 8 && h.size() % 32 == 0) {
         // Q8_0 (the Q8_0 file stores ssm_alpha / ssm_beta so): blocks of an fp16 scale and 32 int8, widened here
         for (size_t b = 0; b < h.size() / 32; ++b) {
             const uint8_t* q = src + b * 34;
-            const float d = f16_to_f32((uint16_t) (q[0] | (q[1] << 8)));
+            const float d = K::f32_from_f16((uint16_t) (q[0] | (q[1] << 8)));
             for (int j = 0; j < 32; ++j) h[b * 32 + j] = d * (float) (int8_t) q[2 + j];
         }
     } else {
@@ -1726,7 +1691,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
         y.L = K::native_expert_layout((int) tg->type, (int) td->type, g.n_embd, g.n_ff);
         const size_t gsz = (size_t) g.n_ff * y.L.gu_row, dsz = (size_t) g.n_embd * y.L.d_row;
         // a stride in whole blocks of both parts' types (MMQ steps over the experts by blocks), 16-byte aligned
-        const size_t al = lcm_sz(lcm_sz(block_bytes(y.L.gu_type), block_bytes(y.L.d_type)), 16);
+        const size_t al = std::lcm(std::lcm(block_bytes(y.L.gu_type), block_bytes(y.L.d_type)), (size_t) 16);
         y.stride = (y.L.bytes + al - 1) / al * al;
         y.src_g = gm.shard(sg).tensor_data(*tg);
         y.src_u = gm.shard(su).tensor_data(*tu);

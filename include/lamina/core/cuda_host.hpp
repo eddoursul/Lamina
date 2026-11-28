@@ -25,6 +25,24 @@ struct DeviceScope {
     DeviceScope& operator=(const DeviceScope&) = delete;
 };
 
+/// `dev` current for one scope (-1: the current one stays) and the one current before it again afterwards; with `on`
+/// false nothing at all (`fallback`: the one restored where the current one cannot be read)
+struct OnDevice {
+    int prev = -1;
+    explicit OnDevice(int dev, bool on = true, int fallback = 0) {
+        if (!on) return;
+        prev = fallback;
+        int cur = 0;
+        if (cudaGetDevice(&cur) == cudaSuccess) prev = cur;
+        if (dev >= 0 && dev != prev) cudaSetDevice(dev);
+    }
+    ~OnDevice() {
+        if (prev >= 0) cudaSetDevice(prev);
+    }
+    OnDevice(const OnDevice&) = delete;
+    OnDevice& operator=(const OnDevice&) = delete;
+};
+
 /// A CUDA call that may fail without ending the run (a checkpoint's copy): false then, the error cleared
 inline bool soft(cudaError_t e) {
     if (e == cudaSuccess) return true;

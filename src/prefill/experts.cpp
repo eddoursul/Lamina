@@ -16,6 +16,10 @@
 namespace lamina::prefill {
 namespace {
 
+// a remote runner's GPU current for one call (`m.remote`), the caller's again afterwards (`m.main` where it cannot be
+// read): the main GPU's for the prompt path's thread, a later stage's own on its thread (prefill/split.hpp)
+using lamina::core::OnDevice;
+
 constexpr int64_t N = 2560, FF2 = 1280, FF = 640, K = 10;
 // Batches of consecutive ids, at most G experts and ROWS rows (an expert with more rows is a batch of its own, in
 // pieces of ROWS).  Per-expert launches made the host, not the GPU, the limit (~10 calls for each of ~500 experts a
@@ -36,25 +40,6 @@ constexpr int NPTR = 7;                                     // per-expert device
 constexpr uint64_t PIECE_REMOTE = 32ull << 20, PIECE_LOCAL = 4ull << 20;   // its x16 link, the first GPU's x4
 constexpr size_t MMQ_TAIL = 4096;                                          // zeroed after a batch's gathered
                                                                            // experts: MMQ reads past the last one
-
-// A remote runner's GPU current for one call, the caller's again afterwards: the main GPU's for the prompt path's
-// thread, a later stage's own on its thread, which drives its runner on the second GPU (prefill/split.hpp; `fallback`:
-// when the caller's is unknown).
-struct OnDevice {
-    int prev;
-    bool set;
-    OnDevice(int dev, int fallback, bool remote) : prev(fallback), set(remote) {
-        if (!set) return;
-        int cur = 0;
-        if (cudaGetDevice(&cur) == cudaSuccess) prev = cur;
-        cudaSetDevice(dev);
-    }
-    ~OnDevice() {
-        if (set) cudaSetDevice(prev);
-    }
-    OnDevice(const OnDevice&) = delete;
-    OnDevice& operator=(const OnDevice&) = delete;
-};
 
 // Bump allocation from a region; without one it only counts (bytes_needed).
 struct Alloc {
@@ -202,7 +187,7 @@ ExpertRunner::ExpertRunner() : impl_(new Impl) {}
 ExpertRunner::~ExpertRunner() {
     Impl& m = *impl_;
     if (m.dev < 0) return;
-    OnDevice on(m.dev, m.main, m.remote);
+    OnDevice on(m.dev, m.remote, m.main);
     if (m.s) cudaStreamSynchronize(m.s);
     if (m.copy) cudaStreamSynchronize(m.copy);
     for (int i = 0; i < SLOTS; ++i) {
@@ -250,7 +235,7 @@ bool ExpertRunner::init(int device, int main_device, void* stream, core::ExpertS
     m.mark.assign((size_t) max_chunk, -1);
     m.first.resize((size_t) max_chunk);
     m.count.resize((size_t) max_chunk);
-    OnDevice on(device, main_device, m.remote);
+    OnDevice on(device, m.remote, main_device);
     bool ok = cudaEventCreate(&m.t0) == cudaSuccess && cudaEventCreate(&m.t1) == cudaSuccess;
     for (int i = 0; ok && i < 2; ++i)
         ok = cudaEventCreateWithFlags(&m.up_done[i], cudaEventDisableTiming) == cudaSuccess &&
@@ -293,7 +278,7 @@ bool ExpertRunner::init(int device, int main_device, void* stream, core::ExpertS
 bool ExpertRunner::bind(void* region, uint64_t bytes, int64_t chunk, std::string& err, void* area,
                         uint64_t area_bytes) {
     Impl& m = *impl_;
-    OnDevice on(m.dev, m.main, m.remote);
+    OnDevice on(m.dev, m.remote, m.main);
     m.pre_layer = -1;
     if (region == nullptr) {   // its own buffers, allocated once for the longest chunk, carved for this one
         if (m.owned == nullptr) {
@@ -423,7 +408,7 @@ int ExpertRunner::prefetch_pending() const {
 bool ExpertRunner::prefetch_next(std::string& err) {
     Impl& m = *impl_;
     if (!prefetch_left()) return true;
-    OnDevice on(m.dev, m.main, m.remote);
+    OnDevice on(m.dev, m.remote, m.main);
     const int64_t layer = m.pre_layer;
     const size_t bb = (size_t) lamina::kernels::cpu::expert_layout().blob_bytes(layer);
     const size_t stride = (size_t) area_stride(layer);
@@ -500,7 +485,7 @@ cudaEvent_t ExpertRunner::piece_done(int64_t k) const { return impl_->piece_ev[(
 
 void ExpertRunner::stage_input(int64_t t0, int64_t rows, cudaEvent_t ready) {
     Impl& m = *impl_;
-    OnDevice on(m.dev, m.main, m.remote);
+    OnDevice on(m.dev, m.remote, m.main);
     cudaStreamWaitEvent(m.s, ready, 0);   // behind the previous layer's sums, which pass through `input`
     cudaMemcpyAsync(m.input + t0 * N, m.h_input + t0 * N, (size_t) rows * N * 2, cudaMemcpyHostToDevice, m.s);
 }
@@ -518,7 +503,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         err = "prompt experts: a layer's share is out of range";
         return false;
     }
-    OnDevice on(m.dev, m.main, m.remote);
+    OnDevice on(m.dev, m.remote, m.main);
     const auto h0 = std::chrono::steady_clock::now();
     if (t_begin == 0) {
         if (m.timed && cudaEventQuery(m.t1) == cudaSuccess) {   // the previous layer (the main GPU waited for it)

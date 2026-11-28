@@ -3327,13 +3327,7 @@ struct Engine {
         g0.dev = main_dev;
         g0.st = st;
         g0.ev = ev;
-        {
-            char bus[32] = {};
-            bool known = false;
-            if (cudaDeviceGetPCIBusId(bus, sizeof bus, main_dev) == cudaSuccess &&
-                !lamina::core::gpu_in_desktop_use(bus, known) && known)
-                kReserve = (size_t) 700 << 20;
-        }
+        kReserve = (size_t) lamina::core::gpu_default_reserve(main_dev);
         g0.S = slots_for(main_gib, kReserve);
         cudaDeviceProp pr{};
         CK(cudaGetDeviceProperties(&pr, main_dev));

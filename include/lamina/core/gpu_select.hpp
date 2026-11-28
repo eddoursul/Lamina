@@ -40,6 +40,9 @@ std::string gpu_unusable(int device);
 /// flag alone reads off while the monitor sleeps).  False where NVML cannot say (`known` false then).
 bool gpu_in_desktop_use(const std::string& bus_id);
 bool gpu_in_desktop_use(const std::string& bus_id, bool& known);
+/// The VRAM a card leaves free where nothing sets it, in bytes: 700 MiB, or 1.5 GiB on one the desktop or another
+/// graphics program draws on (gpu_in_desktop_use; also where NVML cannot say)
+uint64_t gpu_default_reserve(int device);
 
 /// The ordinal `spec` names: an ordinal ("2"), a UUID or a prefix of it that only one card has ("GPU-f26e9ba6"), a PCI
 /// bus id ("10:00.0", "0000:10:00.0", nvidia-smi's "00000000:10:00.0"), or a name or a part of one that only one card

@@ -144,6 +144,12 @@ bool gpu_in_desktop_use(const std::string& bus_id, bool& known) {
     return desktop(Nvml::get().handle(bus_id), known);
 }
 
+uint64_t gpu_default_reserve(int device) {
+    bool known = false;
+    const bool in_use = gpu_in_desktop_use(info_of(device).bus_id, known);
+    return (uint64_t) (known && !in_use ? 700 : 1536) << 20;
+}
+
 namespace {
 std::atomic<int> g_engine_gpus{-1};
 }   // namespace
