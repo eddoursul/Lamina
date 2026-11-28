@@ -218,6 +218,18 @@ inline std::string read_geometry(const GgufFile& f, Geometry& g) {
 
 using lamina::TensorWant;   // (optional: a tensor some files leave out, an expert matrix's per-expert scale)
 
+/// The token the chat template writes for a picture's rows (the one after "<|content_image|>"), or -1
+inline int64_t image_pad_token(const lamina::GgufFile& meta) {
+    const lamina::MetaValue* v = meta.get("tokenizer.chat_template");
+    if (v == nullptr) return -1;
+    const std::string open = "<|content_image|><|";
+    const size_t at = v->s.find(open);
+    if (at == std::string::npos) return -1;
+    const size_t from = at + open.size() - 2, to = v->s.find("|>", from);
+    if (to == std::string::npos || to - from >= 64) return -1;
+    return meta.find_string("tokenizer.ggml.tokens", v->s.substr(from, to + 2 - from));
+}
+
 /// A looped layer's controller matrix for message `c`: "down" [2 n_embd, rank], "gain" and "forget" [rank, n_embd]
 inline std::string ctrl_name(const Geometry& g, int64_t l, int c, const char* part) {
     static const char* const ours[] = {"attn", "k", "v", "mlp"};   // unsloth's

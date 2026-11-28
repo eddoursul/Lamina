@@ -7,6 +7,8 @@
 // as the pack converts it), what the options or this PC's memory and GPUs decide.
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -16,6 +18,7 @@ class GgufModel;
 }   // namespace lamina
 
 namespace lamina::core {
+struct ModelGeometry;
 
 /// The engine's options that change which files it takes
 struct FileCheckOptions {
@@ -36,8 +39,10 @@ std::string model_file_problem(const std::string& path, const FileCheckOptions& 
 
 /// Each path's own part (its load calls it first): Qwen3.8-Flash-Next's from its shards (the PLE table's file too)
 std::string flash_file_problem(const std::vector<std::string>& shards, const FileCheckOptions& o);
-/// Qwen3.6-35B-A3B's and Qwen3.8-27B's (qwen35moe, qwen35)
-std::string qwen35_file_problem(const GgufModel& m);
+/// Qwen3.6-35B-A3B's and Qwen3.8-27B's (qwen35moe, qwen35); where it takes the file, its geometry, the experts a
+/// token and the layout's tensors in *g, *top_k and *checked (each optional)
+std::string qwen35_file_problem(const GgufModel& m, ModelGeometry* g = nullptr, int64_t* top_k = nullptr,
+                                size_t* checked = nullptr);
 /// Hy4-flash's (hy_v4_flash)
 std::string hy4_file_problem(const GgufModel& m, const FileCheckOptions& o);
 /// Inkling 2's (inkling2, inkling2_loop)

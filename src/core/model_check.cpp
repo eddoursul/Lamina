@@ -7,6 +7,7 @@
 #include "lamina/artifact/model_family.hpp"
 #include "lamina/core/family_layout.hpp"
 #include "lamina/core/geometry.hpp"
+#include "lamina/core/lora_limits.hpp"
 #include "lamina/core/native_dense.hpp"
 #include "lamina/core/pack_image.hpp"
 #include "lamina/hy4/geometry.hpp"
@@ -216,7 +217,7 @@ std::string flash_file_problem(const std::vector<std::string>& shards, const Fil
     return {};
 }
 
-std::string qwen35_file_problem(const GgufModel& m) {
+std::string qwen35_file_problem(const GgufModel& m, ModelGeometry* g_out, int64_t* top_k_out, size_t* checked) {
     ModelGeometry g;
     int64_t top_k = 0;
     std::string err;
@@ -224,7 +225,8 @@ std::string qwen35_file_problem(const GgufModel& m) {
     if (g.family != ModelFamily::Qwen35Moe && g.family != ModelFamily::Qwen35)
         return "this path runs Qwen3.6-35B-A3B (qwen35moe) and Qwen3.8-27B (qwen35) files";
     const bool moe = g.family == ModelFamily::Qwen35Moe;
-    if (!check_gguf_layout(m, g, err)) return err;
+    size_t n_checked = 0;
+    if (!check_gguf_layout(m, g, err, &n_checked)) return err;
     if (g.head_dim != 256 || g.ssm_state_size != 128 || g.ssm_d_conv != 4 ||
         (moe && (g.n_expert > 512 || top_k > 15)) || g.n_head_kv < 1 || g.n_head % g.n_head_kv != 0 ||
         g.n_head / g.n_head_kv > 8)
@@ -296,6 +298,9 @@ std::string qwen35_file_problem(const GgufModel& m) {
     if (t == nullptr) return "missing token_embd.weight";
     if (!K::iq_supported((int) t->type) || t->shape[0] % 256 != 0)
         return std::string("token_embd.weight is ") + t->type_name() + ", which the GPU embedding does not take";
+    if (g_out) *g_out = g;
+    if (top_k_out) *top_k_out = top_k;
+    if (checked) *checked = n_checked;
     return {};
 }
 
@@ -477,19 +482,8 @@ std::string inkling2_file_problem(const GgufModel& m, const FileCheckOptions& o)
     }
     if (!bad.empty()) return bad;
     // pictures: the token the chat template names for a picture's rows (run_engine)
-    if (o.vision) {
-        int64_t pad = -1;
-        if (const MetaValue* v = m.meta().get("tokenizer.chat_template"); v != nullptr) {
-            const std::string open = "<|content_image|><|";
-            if (const size_t at = v->s.find(open); at != std::string::npos) {
-                const size_t from = at + open.size() - 2, to = v->s.find("|>", from);
-                if (to != std::string::npos && to - from < 64)
-                    pad = m.meta().find_string("tokenizer.ggml.tokens", v->s.substr(from, to + 2 - from));
-            }
-        }
-        if (pad < 0)
-            return "the model's chat template names no token for a picture's rows, so --vision has no cells to fill";
-    }
+    if (o.vision && inkling2::image_pad_token(m.meta()) < 0)
+        return "the model's chat template names no token for a picture's rows, so --vision has no cells to fill";
     return {};
 }
 
@@ -576,14 +570,14 @@ std::string lora_file_problem(const GgufFile& f, const GgufModel* m) {
             why = "this path takes no pair for the router or the shared expert's gate";
         else why = "the model has no such tensor";
         if (!why.empty()) return name + ": " + why;
-        const int64_t rank = (int64_t) p.a->shape[1], padded = (rank + 7) / 8 * 8;
+        const int64_t rank = (int64_t) p.a->shape[1], padded = (rank + kLoraGroup - 1) / kLoraGroup * kLoraGroup;
         if ((int64_t) p.a->shape[0] != n_in || (int64_t) p.b->shape[1] != n_out)
             return name + " is " + std::to_string(n_in) + " x " + std::to_string(n_out) + " in the model, its pair " +
                    std::to_string(p.a->shape[0]) + " x " + std::to_string(p.b->shape[1]) +
                    " (an adapter of another model?)";
-        if (n_in % 8 != 0 || padded > 512)
-            return name + ": rank " + std::to_string(rank) + " over " + std::to_string(n_in) +
-                   " inputs (ranks up to 512, inputs a multiple of 8)";
+        if (n_in % kLoraInputMultiple != 0 || padded > kLoraMaxRank)
+            return name + ": rank " + std::to_string(rank) + " over " + std::to_string(n_in) + " inputs (ranks up to " +
+                   std::to_string(kLoraMaxRank) + ", inputs a multiple of " + std::to_string(kLoraInputMultiple) + ")";
     }
     return {};
 }

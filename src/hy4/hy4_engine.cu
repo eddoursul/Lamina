@@ -398,13 +398,11 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
                 threads, !file_cache, err))
             return false;
     }
+    // (the types below as hy4_file_problem took them: the table F8_E4M3, the embedding one iq_embed_rows reads, the
+    // head BF16; every layer sliding-window or indexed)
     {
         size_t s = 0;
         const lamina::TensorInfo* t = gm.find("per_layer_token_embd.weight", &s);
-        if (t->type != 43) {
-            err = "per_layer_token_embd.weight is " + std::string(t->type_name()) + ", expected F8_E4M3";
-            return false;
-        }
         m.table_path = gm.shard(s).path();
         m.table_off = gm.shard(s).data_start() + t->offset;
     }
@@ -412,22 +410,11 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
     m.embd = L.raw("token_embd.weight", &te);
     m.embd_type = (int) te->type;
     m.embd_row = (size_t) (lamina::tensor_payload_bytes(*te) / te->shape[1]);
-    if (!K::iq_supported(m.embd_type)) {
-        err = std::string("token_embd.weight is ") + te->type_name() + ", which iq_embed_rows does not read";
-        return false;
-    }
     m.out_norm = L.f32("output_norm.weight");
     m.ohc_fn = L.f32("output_hc_fn.weight");
     m.ohc_base = L.f32("output_hc_base.weight");
     m.ohc_scale = L.f32("output_hc_scale.weight");
-    {
-        const lamina::TensorInfo* th = nullptr;
-        m.head = reinterpret_cast<const uint16_t*>(L.raw("output.weight", &th));
-        if (th->type != 30) {
-            err = std::string("output.weight is ") + th->type_name() + ", expected BF16";
-            return false;
-        }
-    }
+    m.head = reinterpret_cast<const uint16_t*>(L.raw("output.weight"));
     m.layers.resize((size_t) g.n_layers);
     m.has_mtp = want_mtp && g.n_mtp > 0;
     for (int64_t l = 0; l < g.n_layers + (m.has_mtp ? 1 : 0); ++l) {
@@ -437,10 +424,6 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         y.il = (int) l;
         y.swa = g.swa[(size_t) l];
         y.has_idx = g.has_indexer(l);
-        if (!y.swa && !y.has_idx) {
-            err = p + ": a sparse layer without an indexer, which this path does not run";
-            return false;
-        }
         y.mtp = mtp;
         y.dense = !mtp && l < g.n_dense;
         y.eng = mtp ? -1 : g.engram_index(l);
@@ -546,11 +529,8 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         s.go = file_at(p + "ffn_gate_exps.weight", s.gp);
         s.uo = file_at(p + "ffn_up_exps.weight", s.up);
         s.dof = file_at(p + "ffn_down_exps.weight", s.dp);
-        if (tg->type != tu->type) {
-            err = p + "ffn_gate_exps and ffn_up_exps differ in type";
-            return false;
-        }
-        s.bf16 = tg->type == 30 && td->type == 30;   // quantized here, to Q8_0
+        s.bf16 = tg->type == 30 && td->type == 30;   // quantized here, to Q8_0 (gate and up of one type:
+                                                     // hy4_file_problem)
         const int gt = s.bf16 ? 8 : (int) tg->type, dt = s.bf16 ? 8 : (int) td->type;
         if (!C::native_fmt(gt, dt, g.n_latent, g.n_ff_exp, y.fmt, err)) {
             err = p + "routed experts: " + err;
@@ -559,10 +539,6 @@ bool load(const std::string& path, Model& m, int threads, double pin_gib, bool w
         y.fmt.swiglu_limit = g.swiglu_limit[(size_t) y.il];
         s.gsz = lamina::tensor_payload_bytes(*tg) / (size_t) g.n_expert;
         s.dsz = lamina::tensor_payload_bytes(*td) / (size_t) g.n_expert;
-        if (!s.bf16 && (s.gsz != y.fmt.up_off || 2 * s.gsz + s.dsz != y.fmt.bytes)) {
-            err = p + "routed experts: unexpected blob layout";
-            return false;
-        }
         {   // whole blocks of both types (MMQ reads expert e at e * stride), 64-byte aligned
             int be = 0, bg = 0, bd = 0;
             lamina::block_geometry((uint32_t) gt, be, bg);

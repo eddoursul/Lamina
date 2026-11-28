@@ -433,16 +433,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
             m.msg_start[i] = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", starts[i]);
         m.end_message = (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", "<|end_message|>");
     }
-    if (const lamina::MetaValue* v = gm.meta().get("tokenizer.chat_template"); v != nullptr) {
-        // (the template's picture block: <|content_image|>, then the token that stands for the rows)
-        const std::string open = "<|content_image|><|";
-        if (const size_t at = v->s.find(open); at != std::string::npos) {
-            const size_t from = at + open.size() - 2, to = v->s.find("|>", from);
-            if (to != std::string::npos && to - from < 64)
-                m.image_pad =
-                    (int32_t) gm.meta().find_string("tokenizer.ggml.tokens", v->s.substr(from, to + 2 - from));
-        }
-    }
+    m.image_pad = (int32_t) lamina::inkling2::image_pad_token(gm.meta());
     const int64_t N = g.n_embd, E = g.n_expert;
 
     // the experts' layouts, and whether the model fits the GPU: the dense weights, every expert, the window visits'
@@ -458,18 +449,8 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
         const std::string p = "blk." + std::to_string(l) + ".";
         const lamina::TensorInfo* tg = gm.find(p + "ffn_gate_up_exps.weight");
         const lamina::TensorInfo* td = gm.find(p + "ffn_down_exps.weight");
-        if (!K::native_expert_supported((int) tg->type, (int) td->type, N, g.n_ff, true)) {
-            err = p + ": experts of " + tg->type_name() + " gate/up and " + td->type_name() +
-                  " down rows, which the "
-                  "expert kernels do not read at this geometry";
-            return false;
-        }
+        // (a format the expert kernels read at this geometry, E blobs of the layout's rows: inkling2_file_problem)
         y.gl = K::native_expert_layout((int) tg->type, (int) td->type, N, g.n_ff);
-        if (lamina::tensor_payload_bytes(*tg) != (uint64_t) E * y.gl.down_off ||
-            lamina::tensor_payload_bytes(*td) != (uint64_t) E * (y.gl.bytes - y.gl.down_off)) {
-            err = p + ": the experts' tensors are not " + std::to_string(E) + " blobs of the layout's rows";
-            return false;
-        }
         y.gl.act = 1;
         y.gl.act_beta = g.situ_beta;
         y.gl.act_lbeta = g.situ_lbeta;
@@ -789,12 +770,7 @@ bool load(const std::string& path, Model& m, const LoadOpts& o, std::string& err
     {   // the embedding table: host memory, its rows dequantized as tokens come
         size_t s = 0;
         const lamina::TensorInfo* te = L.find("token_embd.weight", &s);
-        const uint64_t n = lamina::tensor_payload_bytes(*te);
-        const ggml_type_traits* tr = te->type < GGML_TYPE_COUNT ? ggml_get_type_traits((ggml_type) te->type) : nullptr;
-        if (te->type != 0 && (tr == nullptr || tr->to_float == nullptr)) {
-            err = std::string("token_embd.weight is ") + te->type_name() + ", which has no dequantizer here";
-            return false;
-        }
+        const uint64_t n = lamina::tensor_payload_bytes(*te);   // (a type ggml dequantizes: inkling2_file_problem)
         m.embd_type = (int) te->type;
         m.embd_row = (size_t) (n / (uint64_t) g.n_vocab_padded);
         m.embd.reset(new (std::nothrow) uint8_t[n]);

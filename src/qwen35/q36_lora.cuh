@@ -13,17 +13,20 @@
 // The scales live in device memory, so one captured graph serves every choice of adapters and scales.
 #pragma once
 
+#include "lamina/core/lora_limits.hpp"
+
 #include <cuda_fp16.h>
 
 #include <cstdint>
 
 namespace q36lora {
 
-constexpr int kRows = 8;          // the decode rows a launch takes (the engine's kVerify)
-constexpr int kMaxSeg = 24;       // segments a launch takes (a site with more runs in several)
-constexpr int kMaxR = 512;        // their ranks summed, at most
-constexpr int kGroup = 8;         // rank rows a block of the A stage computes (a warp each)
-constexpr int kChunk = 256;       // input elements a warp covers at once (8 a lane)
+constexpr int kRows = 8;                            // the decode rows a launch takes (the engine's kVerify)
+constexpr int kMaxSeg = 24;                         // segments a launch takes (a site with more runs in several)
+constexpr int kMaxR = lamina::core::kLoraMaxRank;   // their ranks summed, at most
+constexpr int kGroup = lamina::core::kLoraGroup;    // rank rows a block of the A stage computes (a warp each)
+constexpr int kChunk = 256;                         // input elements a warp covers at once (8 a lane)
+static_assert(kChunk / 32 == lamina::core::kLoraInputMultiple, "a lane's inputs: the file check's multiple");
 constexpr int kSliceMax = 1024;   // a K split's input elements at most (the A stage's staging buffer)
 constexpr int kPre = 4;           // 16-byte words of B a thread loads ahead (a rank-32 F16 row)
 

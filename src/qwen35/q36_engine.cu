@@ -1295,32 +1295,13 @@ struct LoraPair {
     const lamina::TensorInfo* b = nullptr;
 };
 
-/// An adapter file read as llama.cpp reads one: general.type "adapter", adapter.type "lora" (an activated LoRA, with
-/// invocation tokens, refused), the architecture `arch` (empty: not checked); its alpha, task name and prompt prefix,
+/// An adapter file lora_file_problem has taken, read as llama.cpp reads one: its alpha, task name and prompt prefix,
 /// and its pairs (each .lora_a with its .lora_b; the norms' vectors left out, as llama.cpp leaves them).
-bool lora_read(const lamina::GgufFile& f, const std::string& arch, LoraAdapter& ad, std::vector<LoraPair>& pairs,
-               std::string& err) {
+void lora_read(const lamina::GgufFile& f, LoraAdapter& ad, std::vector<LoraPair>& pairs) {
     auto str = [&](const char* k) -> std::string {
         const lamina::MetaValue* v = f.get(k);
         return v != nullptr && v->type == lamina::MetaType::STRING ? v->s : "";
     };
-    const std::string at = f.path() + ": ";
-    if (str("general.type") != "adapter") {
-        err = at + "general.type is '" + str("general.type") + "', not 'adapter' (a LoRA adapter's GGUF)";
-        return false;
-    }
-    if (str("adapter.type") != "lora") {
-        err = at + "adapter.type is '" + str("adapter.type") + "', not 'lora'";
-        return false;
-    }
-    if (!arch.empty() && str("general.architecture") != arch) {
-        err = at + "an adapter of " + str("general.architecture") + ", the model is " + arch;
-        return false;
-    }
-    if (f.get("adapter.alora.invocation_tokens") != nullptr) {
-        err = at + "an activated LoRA (aLoRA), which this path does not run";
-        return false;
-    }
     if (const lamina::MetaValue* v = f.get("adapter.lora.alpha"); v != nullptr && v->is_num())
         ad.alpha = (float) v->num();
     ad.task_name = str("adapter.lora.task_name");
@@ -1336,33 +1317,10 @@ bool lora_read(const lamina::GgufFile& f, const std::string& arch, LoraAdapter& 
             LoraPair& p = by[n.substr(0, n.size() - 7)];
             p.name = n.substr(0, n.size() - 7);
             (ends(".lora_a") ? p.a : p.b) = &t;
-        } else if (!ends("_norm.weight")) {   // (norms' vectors: left out)
-            err = at + "the tensor " + n + " has an unexpected suffix";
-            return false;
         }
     }
     pairs.clear();
-    for (auto& [name, p] : by) {
-        if (p.a == nullptr || p.b == nullptr) {
-            err = at + "the pair of " + name + " lacks its " + (p.a ? "lora_b" : "lora_a");
-            return false;
-        }
-        if (p.a->shape.size() != 2 || p.b->shape.size() != 2 || p.a->shape[1] != p.b->shape[0] || p.a->shape[1] == 0) {
-            err = at + name + ": lora_a and lora_b do not pair (an adapter of llama.cpp's old finetune example?)";
-            return false;
-        }
-        for (const lamina::TensorInfo* t : {p.a, p.b})
-            if (t->type != 0 && t->type != 1 && t->type != 8 && t->type != 30) {
-                err = at + t->name + " is " + t->type_name() + ": F32, F16, BF16 or Q8_0 pairs only";
-                return false;
-            }
-        pairs.push_back(p);
-    }
-    if (pairs.empty()) {
-        err = at + "no LoRA pairs";
-        return false;
-    }
-    return true;
+    for (auto& [name, p] : by) pairs.push_back(p);
 }
 
 int lora_rank_pad(int r) { return (r + q36lora::kGroup - 1) / q36lora::kGroup * q36lora::kGroup; }
@@ -1384,7 +1342,7 @@ bool lora_scan(const std::vector<LoraSpec>& specs, int64_t n_layers, std::vector
             const lamina::GgufFile f(sp.path);
             LoraAdapter ad;
             std::vector<LoraPair> pairs;
-            if (!lora_read(f, "", ad, pairs, err)) return false;
+            lora_read(f, ad, pairs);   // (lora_file_problem took it before: the load's first step)
             for (const LoraPair& p : pairs) {
                 const int64_t l = p.name == "output.weight" ? n_layers + 1 : lora_block(p.name);
                 if (l >= 0 && l <= n_layers + 1) cost[(size_t) l] += lora_pair_bytes(p);
@@ -1474,7 +1432,6 @@ void* lora_upload(const std::vector<float>& v, bool f32) {
 /// --lora's files onto the loaded model: each pair checked against its product (llama.cpp's checks) and placed on the
 /// product's GPU, its rank padded to whole groups.
 bool load_loras(Model& m, const std::vector<LoraSpec>& specs, std::string& err) {
-    const std::string arch = lamina::model_family_arch(m.g.family);
     std::map<const LoraMat**, LoraMat*> made;   // a product's pairs, the files adding to them in their order
     std::vector<float> fa, fb;
     for (size_t ai = 0; ai < specs.size(); ++ai) {
@@ -1484,7 +1441,7 @@ bool load_loras(Model& m, const std::vector<LoraSpec>& specs, std::string& err) 
             LoraAdapter ad;
             ad.path = specs[ai].path;
             std::vector<LoraPair> pairs;
-            if (!lora_read(f, arch, ad, pairs, err)) return false;
+            lora_read(f, ad, pairs);   // (lora_file_problem took it against the model: load())
             for (const LoraPair& p : pairs) {
                 const LoraMat** slot = nullptr;
                 int dev = 0, n_in = 0, n_out = 0;
@@ -1555,24 +1512,12 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     const auto t0 = Clock::now();
     m.file = std::make_shared<lamina::GgufModel>(lamina::GgufModel::open(path));
     const lamina::GgufModel& gm = *m.file;
-    // what the file must hold for this path, before anything is placed (lamina check says the same of it)
-    if (err = lamina::core::qwen35_file_problem(gm); !err.empty()) return false;
-    if (!lamina::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
-    if (m.g.family != lamina::ModelFamily::Qwen35Moe && m.g.family != lamina::ModelFamily::Qwen35) {
-        err = "this path runs Qwen3.6-35B-A3B (qwen35moe) and Qwen3.8-27B (qwen35) files";
-        return false;
-    }
-    m.moe = m.g.family == lamina::ModelFamily::Qwen35Moe;
+    // what the file must hold for this path, before anything is placed (lamina check says the same of it): its
+    // geometry, layout, kernels' limits and tensors' types; the geometry and the tensors counted come back
     size_t checked = 0;
-    if (!lamina::core::check_gguf_layout(gm, m.g, err, &checked)) return false;
+    if (err = lamina::core::qwen35_file_problem(gm, &m.g, &m.top_k, &checked); !err.empty()) return false;
+    m.moe = m.g.family == lamina::ModelFamily::Qwen35Moe;
     const auto& g = m.g;
-    if (g.head_dim != 256 || g.ssm_state_size != 128 || g.ssm_d_conv != 4 ||
-        (m.moe && (g.n_expert > 512 || m.top_k > 15)) || g.n_head_kv < 1 || g.n_head % g.n_head_kv != 0 ||
-        g.n_head / g.n_head_kv > 8) {
-        err = "a geometry this driver's kernels do not take (head 256, state 128, conv 4, <= 512 experts, top-k <= 15, "
-              "<= 8 query heads a KV head)";
-        return false;
-    }
     const std::string p = std::string(lamina::model_family_arch(m.g.family)) + ".";
     if (const lamina::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
     if (const lamina::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
@@ -1680,15 +1625,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
         const lamina::TensorInfo* tg = find(L(l, "ffn_gate_exps.weight"), sg);
         const lamina::TensorInfo* tu = find(L(l, "ffn_up_exps.weight"), su);
         const lamina::TensorInfo* td = find(L(l, "ffn_down_exps.weight"), sd);
-        if (tg->type != tu->type) {
-            err = L(l, "ffn_gate_exps / ffn_up_exps differ in type");
-            return false;
-        }
-        if (!K::native_expert_supported((int) tg->type, (int) td->type, g.n_embd, g.n_ff)) {
-            err = L(l, "experts are ") + tg->type_name() + "/" + td->type_name() +
-                  ", which the native expert kernels do not take";
-            return false;
-        }
+        // (gate and up of one type, a format the expert kernels take: qwen35_file_problem)
         y.L = K::native_expert_layout((int) tg->type, (int) td->type, g.n_embd, g.n_ff);
         const size_t gsz = (size_t) g.n_ff * y.L.gu_row, dsz = (size_t) g.n_embd * y.L.d_row;
         // a stride in whole blocks of both parts' types (MMQ steps over the experts by blocks), 16-byte aligned
@@ -6264,13 +6201,10 @@ static int run_engine(int argc, char** argv, bool check_only) {
         return 2;
     }
     for (const LoraSpec& sp : lora_specs) {   // the adapters' headers now (no GPU yet): a wrong file fails a check too
-        std::string e;
         try {
             const lamina::GgufFile f(sp.path);
-            LoraAdapter ad;
-            std::vector<LoraPair> pairs;
-            if (!lora_read(f, "", ad, pairs, e)) {
-                std::fprintf(stderr, "lamina: --lora %s\n", e.c_str());
+            if (const std::string pe = lamina::core::lora_file_problem(f); !pe.empty()) {
+                std::fprintf(stderr, "lamina: --lora %s: %s\n", sp.path.c_str(), pe.c_str());
                 return 2;
             }
         } catch (const std::exception& ex) {
