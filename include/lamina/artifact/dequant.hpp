@@ -28,6 +28,7 @@
 #include "lamina/artifact/gguf_reader.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/k_scales.hpp"
 
 namespace lamina {
 
@@ -145,13 +146,7 @@ inline void dequantize_q6_K(const uint8_t* block, float* out) {
 // get_scale_min_k4 is the part that is impossible to recall reliably: the low 4 bits of the second
 // half come from q[j+4], and the high 2 bits from the low halves' top bits (q[j-4] and q[j]).
 static inline void get_scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
-    if (j < 4) {
-        d = q[j] & 63;
-        m = q[j + 4] & 63;
-    } else {
-        d = (q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4);
-        m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
-    }
+    lamina::kernels::scale_min_k4(j, q, d, m);
 }
 
 inline void dequantize_q4_K(const uint8_t* block, float* out) {

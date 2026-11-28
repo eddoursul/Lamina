@@ -4,6 +4,7 @@
 // The ggml authors): dequantize_row_q2_0/q4_0/q5_0/q8_0/q3_K/q4_K/q5_K/q6_K/iq4_nl/iq4_xs.
 #include "lamina/kernels/dequant_bf16.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/k_scales.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -34,16 +35,6 @@ __device__ __forceinline__ void put(H16* o, int i, float v) { o[i].v = __half_as
 __device__ __forceinline__ void put(float* o, int i, float v) { o[i] = v; }
 
 __constant__ int8_t kv_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
-
-__device__ __forceinline__ void scale_min_k4(int j, const uint8_t* q, int& d, int& m) {
-    if (j < 4) {
-        d = q[j] & 63;
-        m = q[j + 4] & 63;
-    } else {
-        d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
-        m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
-    }
-}
 
 // One 32-element group `g` (row-major over the whole slice); `out` points at that group's 32 outputs.
 template <int TYPE, typename T>

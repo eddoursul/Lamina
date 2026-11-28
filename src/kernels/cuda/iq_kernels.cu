@@ -8,6 +8,7 @@
 #include "lamina/kernels/expf_contract.hpp"
 #include "lamina/kernels/f16_bits.hpp"
 #include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/k_scales.hpp"
 #include "lamina/kernels/q8_1_finite.hpp"
 #include "lamina/kernels/q8_1_il16.hpp"
 #include "q8_1_il.cuh"
@@ -1021,15 +1022,6 @@ template <typename dst_t> __device__ void dq_q2_0(const void* vx, int64_t ibs, d
         const int i = part * 8 + j;
         const int code = (x[b].qs[i / 4] >> ((i % 4) * 2)) & 3;
         yy[b * 64 + i] = cvt<dst_t>(d * (float) (code - 1));
-    }
-}
-__device__ __forceinline__ void scale_min_k4(int j, const uint8_t* q, uint8_t& d, uint8_t& m) {
-    if (j < 4) {
-        d = q[j] & 63;
-        m = q[j + 4] & 63;
-    } else {
-        d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
-        m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
     }
 }
 template <typename dst_t> __device__ void dq_q4_k(const void* vx, int64_t ibs, dst_t* yy, int tid) {
