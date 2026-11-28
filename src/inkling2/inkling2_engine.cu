@@ -8763,19 +8763,27 @@ int run_engine(int argc, char** argv, bool check_only) {
             std::fprintf(stderr, "lamina: %s\n", e.c_str());
             return 2;
         }
-    int split_dev = -1, split_a = 0, split_b = -1, n_dev = 0;   // --layer-split DEV:A-B
-    if (cudaGetDeviceCount(&n_dev) != cudaSuccess) n_dev = 0;
+    int split_dev = -1, split_a = 0, split_b = -1;   // --layer-split DEV:A-B
     if (!layer_split.empty() && layer_split != "0" &&
-        (std::sscanf(layer_split.c_str(), "%d:%d-%d", &split_dev, &split_a, &split_b) != 3 || split_dev < 0 ||
-         split_dev >= n_dev)) {
+        (std::sscanf(layer_split.c_str(), "%d:%d-%d", &split_dev, &split_a, &split_b) != 3 || split_dev < 0)) {
         std::fprintf(stderr, "lamina: --layer-split takes DEV:A-B, a card's CUDA ordinal and its layers\n");
+        return 2;
+    }
+    // (the cards' count is the run's: check_args makes no CUDA call, which would fix CUDA's cards before lamina
+    // narrows them)
+    if (check_only) return 0;
+    int n_dev = 0;
+    if (cudaGetDeviceCount(&n_dev) != cudaSuccess) n_dev = 0;
+    if (split_dev >= n_dev) {
+        std::fprintf(stderr,
+                     "lamina: --layer-split takes DEV:A-B, a card's CUDA ordinal (this PC has %d) and its layers\n",
+                     n_dev);
         return 2;
     }
     if (expert_gpu >= n_dev) {
         std::fprintf(stderr, "lamina: --expert-gpu takes a card's CUDA ordinal (this PC has %d)\n", n_dev);
         return 2;
     }
-    if (check_only) return 0;
     int main_dev = 0;
     CK(cudaGetDevice(&main_dev));
     if (!reserve) reserve = card_keep(main_dev);   // (a card the desktop draws on keeps more free)
