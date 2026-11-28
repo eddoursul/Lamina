@@ -323,15 +323,7 @@ __launch_bounds__(256, 1) __global__ void route_topk(const float* __restrict__ l
                 expert = lane + i * 32;
             }
         }
-#pragma unroll
-        for (int mask = 16; mask; mask >>= 1) {
-            const float other = __shfl_xor_sync(0xffffffffu, best, mask, 32);
-            const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
-            if (other > best || (other == best && other_id < expert)) {
-                best = other;
-                expert = other_id;
-            }
-        }
+        warp_argmax(best, expert);
         if ((expert & 31) == lane) {
             values[expert / 32] = -INFINITY;
             ids[rank] = expert;

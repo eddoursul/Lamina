@@ -21,6 +21,7 @@
 // The two new ones share `sampled_tail_warp` (top_p / min_p / temperature / draw on one warp).
 #include "lamina/core/emulate.hpp"
 #include "lamina/kernels/sampler.hpp"
+#include "lamina/kernels/warp.cuh"
 
 #include <cuda_runtime.h>
 
@@ -459,14 +460,7 @@ __device__ __forceinline__ void take_first(float& bv, int& bi, float ov, int oi)
 // The first of the warp's 32 candidates, left in EVERY lane.  An XOR butterfly is exact here: "the first of two" is
 // associative and commutative in a strict total order (two lanes never hold different candidates that compare
 // equal - an id is in one lane at most, and two sentinels are the same pair), so every lane ends with the same pair.
-__device__ __forceinline__ void warp_first(float& bv, int& bi) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-        const float ov = __shfl_xor_sync(kFullMask, bv, off);
-        const int oi = __shfl_xor_sync(kFullMask, bi, off);
-        take_first(bv, bi, ov, oi);
-    }
-}
+__device__ __forceinline__ void warp_first(float& bv, int& bi) { warp_argmax(bv, bi); }
 
 /// **THE TAIL ON ONE WARP, WITH `sampler_kernel`'S ARITHMETIC.**  `sel_ids` / `sel_logit` (shared, `k` entries) are
 /// the top_k list in selection order; the 32 lanes of one warp call this and lane 0 writes `out[t]`.  The old tail
