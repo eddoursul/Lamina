@@ -5433,6 +5433,9 @@ int lamina::program::run(int argc, char** argv) {
                 x = outv[(size_t) a];
                 p += a + 1;
             }
+            // max_new reached where the client stopped too: "cancel", as finish_of has it on the other paths (a
+            // stop is looked at a window's start)
+            if (std::strcmp(finish, "length") == 0 && in.stop.load()) finish = "cancel";
             mtp.on_draft = nullptr;
             ver.set_logits_wanted(false);
             if (ddump.on()) {

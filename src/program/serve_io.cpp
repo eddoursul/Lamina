@@ -222,6 +222,11 @@ uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const floa
                           : fnv1a(rows + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
 }
 
+void print_done(const DoneLine& d) {
+    serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld 0 0 0.0 %lld 0\n", d.produced, d.prompt,
+                d.prompt_ms, d.decode_ms, d.finish, d.accepted, d.offered, d.reused, d.hits, d.lookups, d.read);
+}
+
 std::string picture_cells(const std::string& path, const std::vector<int32_t>& ids, const std::vector<int32_t>& pads,
                           int64_t n_embd, const std::vector<uint64_t>& keys, ImageCells& r) {
     std::vector<VisionImage> imgs;

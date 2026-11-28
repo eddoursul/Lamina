@@ -5569,8 +5569,7 @@ struct Serve {
         const bool cancelled = last < 0;
         const double prompt_ms = ms_since(t0);
         if (cancelled) {
-            serve_print("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms, reuse,
-                        (long long) done);
+            lamina::program::print_done({0, ids.size(), prompt_ms, 0.0, "cancel", 0, 0, reuse, 0, 0, (long long) done});
             return;
         }
         if (fresh > 0) {
@@ -5604,16 +5603,9 @@ struct Serve {
             serve_print("T %d\n", t);
             ++produced;
             hist.push_back(t);
-            if (t == eos) {
-                finish = "stop";
-                return false;
-            }
-            if (in->stop.load()) {
-                finish = "cancel";
-                return false;
-            }
-            if (produced >= max_new || E.pos() + kMaxT + 1 >= E.ctx - kMaxT) {
-                finish = "length";
+            if (const char* f = lamina::program::finish_of(
+                    t == eos, in->stop.load(), produced >= max_new || E.pos() + kMaxT + 1 >= E.ctx - kMaxT)) {
+                finish = f;
                 return false;
             }
             return true;
@@ -5657,8 +5649,8 @@ struct Serve {
         const double decode_ms = ms_since(d0);
         E.trace_print("generation");
         const long long hits = E.hits - hits0, lookups = E.lookups - lookups0;
-        serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld 0 0 0.0 %lld 0\n", produced, ids.size(),
-                    prompt_ms, decode_ms, finish, kept, offered, reuse, hits, lookups, (long long) fresh);
+        lamina::program::print_done({produced, ids.size(), prompt_ms, decode_ms, finish, kept, offered, reuse, hits,
+                                     lookups, (long long) fresh});
         E.settle(false);
         const long long landed = (long long) (E.moves_landed - landed0);
         E.relax();

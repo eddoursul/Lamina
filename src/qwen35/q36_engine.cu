@@ -5130,11 +5130,8 @@ struct Serve {
                 serve_print("BT %d %d\n", b, y);
                 ++sl.produced;
                 sl.hist.push_back(y);
-                const char* fin = is_eos(y)                   ? "stop"
-                                  : sl.stop                   ? "cancel"
-                                  : sl.produced >= sl.max_new ? "length"
-                                  : ss.pos + j + 2 > E.ctx    ? "length"
-                                                              : nullptr;
+                const char* fin =
+                    lamina::program::finish_of(is_eos(y), sl.stop, sl.produced >= sl.max_new || ss.pos + j + 2 > E.ctx);
                 if (fin) {
                     serve_print("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                     if (sl.offered > 0)
@@ -5249,11 +5246,8 @@ struct Serve {
             serve_print("BT %d %d\n", b, y);
             ++sl.produced;
             sl.hist.push_back(y);
-            const char* fin = is_eos(y)                   ? "stop"
-                              : sl.stop                   ? "cancel"
-                              : sl.produced >= sl.max_new ? "length"
-                              : ss.pos + 1 > E.ctx        ? "length"
-                                                          : nullptr;
+            const char* fin =
+                lamina::program::finish_of(is_eos(y), sl.stop, sl.produced >= sl.max_new || ss.pos + 1 > E.ctx);
             if (fin) {
                 serve_print("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                 sl.active = false;
@@ -5753,8 +5747,7 @@ struct Serve {
                 cache->shed();
             }
             print_cache();
-            serve_print("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms, reuse,
-                        (long long) got);
+            lamina::program::print_done({0, ids.size(), prompt_ms, 0.0, "cancel", 0, 0, reuse, 0, 0, (long long) got});
             if (adm) serve_print("BADM %d 0\n", slot);
             cache_idle();
             return;
@@ -5794,23 +5787,20 @@ struct Serve {
                 }
                 std::fprintf(stderr, "lamina batch: slot %d: non-finite logits after the prompt: the request ends\n",
                              slot);
-                serve_print("DONE 0 %zu %.1f %.1f nonfinite 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms,
-                            ms_since(d0), reuse, (long long) fresh);
+                lamina::program::print_done(
+                    {0, ids.size(), prompt_ms, ms_since(d0), "nonfinite", 0, 0, reuse, 0, 0, (long long) fresh});
                 serve_print("BADM %d 0\n", slot);
                 return;
             }
             serve_print("T %d\n", nx);
             ++produced;
             hist.push_back(nx);
-            const char* fin = is_eos(nx)          ? "stop"
-                              : in->stop.load()   ? "cancel"
-                              : max_new <= 1      ? "length"
-                              : E.pos + 1 > E.ctx ? "length"
-                                                  : nullptr;
+            const char* fin =
+                lamina::program::finish_of(is_eos(nx), in->stop.load(), max_new <= 1 || E.pos + 1 > E.ctx);
             const bool cont = fin == nullptr;
             print_cache();
-            serve_print("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
-                        ms_since(d0), cont ? "length" : fin, reuse, (long long) fresh);
+            lamina::program::print_done({produced, ids.size(), prompt_ms, ms_since(d0), cont ? "length" : fin, 0, 0,
+                                         reuse, 0, 0, (long long) fresh});
             if (cont) {
                 Slot& sl = slots[(size_t) slot];
                 sl = Slot{};
@@ -5845,13 +5835,8 @@ struct Serve {
                 serve_print("T %d\n", t);
                 ++produced;
                 hist.push_back(t);
-                if (is_eos(t)) {
-                    finish = "stop";
-                    return false;
-                }
-                if (produced >= max_new) return false;
-                if (in->stop.load()) {
-                    finish = "cancel";
+                if (const char* f = lamina::program::finish_of(is_eos(t), in->stop.load(), produced >= max_new)) {
+                    finish = f;
                     return false;
                 }
                 return true;
@@ -5902,8 +5887,8 @@ struct Serve {
             cache->shed();
         }
         print_cache();
-        serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
-                    decode_ms, finish, accepted, offered, reuse, (long long) fresh);
+        lamina::program::print_done(
+            {produced, ids.size(), prompt_ms, decode_ms, finish, accepted, offered, reuse, 0, 0, (long long) fresh});
         std::fprintf(stderr,
                      "lamina serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
                      "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld (%s)\n",

@@ -8270,8 +8270,8 @@ struct Serve {
                 cache->shed();
             }
             print_cache();
-            serve_print("DONE 0 %zu %.1f 0.0 %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms,
-                        fed == -1 ? "cancel" : "length", reuse, (long long) done);
+            lamina::program::print_done(
+                {0, ids.size(), prompt_ms, 0.0, fed == -1 ? "cancel" : "length", 0, 0, reuse, 0, 0, (long long) done});
             if (cache) cache->spare();
             E.relax();
             return;
@@ -8293,10 +8293,11 @@ struct Serve {
             [&](int32_t t) {
                 serve_print("T %d\n", t);
                 ++produced;
-                if (t == eos) finish = "stop";
-                else if (in->stop.load()) finish = "cancel";
-                else return produced < max_new;
-                return false;
+                if (const char* f = lamina::program::finish_of(t == eos, in->stop.load(), produced >= max_new)) {
+                    finish = f;
+                    return false;
+                }
+                return true;
             },
             [&](int32_t t) {
                 if (cache) cache->append(0, t);
@@ -8320,8 +8321,8 @@ struct Serve {
             cache->shed();
         }
         print_cache();
-        serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
-                    decode_ms, finish, dr.kept, dr.offered, reuse, (long long) fresh);
+        lamina::program::print_done(
+            {produced, ids.size(), prompt_ms, decode_ms, finish, dr.kept, dr.offered, reuse, 0, 0, (long long) fresh});
         std::fprintf(stderr,
                      "lamina serve: %zu prompt tokens (%zu reused) in %.1f ms (%.1f tok/s), %lld generated in %.1f "
                      "ms (%.2f tok/s), %s%s%s; MiB of VRAM free: %s\n",

@@ -135,6 +135,27 @@ struct ImageCells {
     std::vector<Picture> pictures;
     int32_t row(int64_t p) const { return p >= 0 && p < (int64_t) cell_row.size() ? cell_row[(size_t) p] : -1; }
 };
+/// Why an answer ends after the token just out, every path's rule: the end-of-text token ("stop"), a stop the client
+/// asked for ("cancel", where the length is reached too), the request's max_new or the context ("length"); null: it
+/// goes on.
+inline const char* finish_of(bool eos, bool stopped, bool at_length) {
+    return eos ? "stop" : stopped ? "cancel" : at_length ? "length" : nullptr;
+}
+
+/// A request's DONE line, the server's fields in their order (parse_done): the tokens generated, the prompt's tokens,
+/// its and the answer's milliseconds, the finish word, the drafts accepted and offered, the prompt's tokens reused, the
+/// expert caches' hits and lookups, three of upstream's (0), the prompt's tokens read, one more (0).
+struct DoneLine {
+    long long produced = 0;
+    size_t prompt = 0;
+    double prompt_ms = 0.0, decode_ms = 0.0;
+    const char* finish = "length";
+    long long accepted = 0, offered = 0;
+    size_t reused = 0;
+    long long hits = 0, lookups = 0, read = 0;
+};
+void print_done(const DoneLine& d);
+
 /// Reads the image encoder's file (read_vision_records) and lays the pictures over the prompt's runs of a pad (`pads`:
 /// a picture's, a video group's), a record a run, a row a cell, the ids as they are; `keys`: the server's for each
 /// record (img_keys=), else the rows' hash.  "" or the error.  Ids outside int32 (a 64-bit list) are no pad.
