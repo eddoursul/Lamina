@@ -1993,8 +1993,23 @@ struct Engine {
     struct Mark {
         int row = 0;               // the state after the chunk's first `row` rows ...
         uint8_t* host = nullptr;   // ... into this pinned buffer of state_bytes() (`marks`: this stage's part of it)
+        uint8_t* buf = nullptr;    // (`marks`: the buffer, the first stage's part)
     };
-    std::vector<Mark> marks;   // the chunk being queued's
+    std::vector<Mark> marks;                  // the chunk being queued's
+    std::vector<const uint8_t*> marks_lost;   // the buffers of those a copy of whose parts could not be queued
+    /// The checkpoint inside a chunk into `buf` lacks a part (a copy of one could not be queued): the caller keeps
+    /// none
+    bool mark_lost(const void* buf) {
+        bool lost = false;
+        for (Engine* e = this; e != nullptr; e = e->nxt) {
+            const size_t n = e->marks_lost.size();
+            e->marks_lost.erase(
+                std::remove(e->marks_lost.begin(), e->marks_lost.end(), static_cast<const uint8_t*>(buf)),
+                e->marks_lost.end());
+            lost = lost || e->marks_lost.size() != n;
+        }
+        return lost;
+    }
     uint8_t* ring = nullptr;
     uint8_t* tail = nullptr;   // kMaxMarks of tail_slot bytes: hlast's part, then the word
     size_t ring_slot = 0, tail_slot = 0;
@@ -3159,7 +3174,7 @@ struct Engine {
                     k_conv_hist<<<C / 128, 128, 0, st>>>(conv[li], qkv_b, part, C, r);
                     scan(from, r);
                     CK(cudaMemcpyAsync(part + cb, S[li], sb * 4, cudaMemcpyDeviceToDevice, st));
-                    ring_out(slot, marks[k].host + snap_at[li], (cb + sb) * 4);
+                    ring_out(slot, marks[k].host + snap_at[li], (cb + sb) * 4, marks[k].buf);
                     from = r;
                 }
                 scan(from, T);
@@ -3863,7 +3878,7 @@ struct Engine {
                 CK(cudaMemcpyAsync(L.hlast, L.hmain + (size_t) (T - 1) * N, (size_t) N * 4, cudaMemcpyDeviceToDevice,
                                    L.st));
                 on();
-                if (ck.snap > 0) snap_send(ck.host, ck.snap, ck.pinned);
+                if (ck.snap > 0 && !snap_send(ck.host, ck.snap, ck.pinned)) marks_lost.push_back(ck.host);
                 if (!ck.marks.empty()) mark_tails();
                 advance(T);
                 i += T;
@@ -3896,7 +3911,7 @@ struct Engine {
             CK(cudaMemcpyAsync(L.hlast, L.hmain + (size_t) (T - 1) * N, (size_t) N * 4, cudaMemcpyDeviceToDevice,
                                L.st));
             on();
-            if (ck.snap > 0) snap_send(ck.host, ck.snap, ck.pinned);
+            if (ck.snap > 0 && !snap_send(ck.host, ck.snap, ck.pinned)) marks_lost.push_back(ck.host);
             if (!ck.marks.empty()) mark_tails();
             advance(T);
             sync_all();
@@ -4205,11 +4220,13 @@ struct Engine {
         return s;
     }
     float* ring_part(int s) const { return reinterpret_cast<float*>(ring + (size_t) s * ring_slot); }
-    /// The ring's device buffer `s`, its first `bytes`, to `host` on the snapshot stream behind the stream's work.
-    void ring_out(int s, uint8_t* host, size_t bytes) {
+    /// The ring's device buffer `s`, its first `bytes`, to `host` (a part of the checkpoint `buf`'s) on the snapshot
+    /// stream behind the stream's work.
+    void ring_out(int s, uint8_t* host, size_t bytes, const uint8_t* buf) {
         CK(cudaEventRecord(ev_ring_in, st));
         CK(cudaStreamWaitEvent(st_snap, ev_ring_in, 0));
-        (void) soft(cudaMemcpyAsync(host, ring + (size_t) s * ring_slot, bytes, cudaMemcpyDeviceToHost, st_snap));
+        if (!soft(cudaMemcpyAsync(host, ring + (size_t) s * ring_slot, bytes, cudaMemcpyDeviceToHost, st_snap)))
+            marks_lost.push_back(buf);
         CK(cudaEventRecord(ev_ring_free[s], st_snap));
         ring_used[s] = true;
     }
@@ -4232,7 +4249,7 @@ struct Engine {
         uint64_t at = 0;   // (a stage's part of the buffer)
         for (Engine* e = this; e != nullptr; e = e->nxt) {
             e->marks.clear();
-            for (const Mark& k : ms) e->marks.push_back({k.row, k.host + at});
+            for (const Mark& k : ms) e->marks.push_back({k.row, k.host + at, k.host});
             at += e->state_bytes_own();
         }
     }
@@ -4254,9 +4271,11 @@ struct Engine {
             for (size_t k = 0; k < e->marks.size(); ++k) {
                 uint8_t* const host = e->marks[k].host;
                 const uint8_t* const t = e->tail + k * e->tail_slot;
-                (void) soft(cudaMemcpyAsync(host + out - N4, t, N4, cudaMemcpyDeviceToHost, e->st_snap));
+                bool ok = soft(cudaMemcpyAsync(host + out - N4, t, N4, cudaMemcpyDeviceToHost, e->st_snap));
                 if (e->out_bytes() > 0)
-                    (void) soft(cudaMemcpyAsync(host + out + V4 + 4, t + N4, 4, cudaMemcpyDeviceToHost, e->st_snap));
+                    ok =
+                        soft(cudaMemcpyAsync(host + out + V4 + 4, t + N4, 4, cudaMemcpyDeviceToHost, e->st_snap)) && ok;
+                if (!ok) e->marks_lost.push_back(e->marks[k].buf);
             }
             CK(cudaEventRecord(e->ev_tail_free, e->st_snap));
             e->tail_used = true;
@@ -5848,6 +5867,18 @@ struct Serve {
             if (h == nullptr) cache->checkpoint(here);
             else if (E.snap_state(static_cast<uint8_t*>(h), pinned)) cache->checkpoint(here, h);
         };
+        // the checkpoints inside the chunks: the cache's once their chunk is queued with their copies, each one a copy
+        // of which could not be queued left out (its buffer goes back with prepare()'s)
+        std::vector<std::pair<int64_t, void*>> inside;
+        auto settle_inside = [&](int64_t upto) {
+            while (!inside.empty() && inside.front().first <= upto) {
+                const auto [at, h] = inside.front();
+                inside.erase(inside.begin());
+                if (E.mark_lost(h)) continue;
+                note(at);
+                cache->checkpoint(at, h);
+            }
+        };
         const std::function<Engine::Chunk(int64_t)> plan = [&](int64_t i) -> Engine::Chunk {
             const int64_t c0 = (int64_t) reuse + i;
             Engine::Chunk c;
@@ -5862,8 +5893,7 @@ struct Serve {
                                 : ckpt_via || c.marks.size() == (size_t) Engine::kMaxMarks ? nullptr
                                                                                            : cache->prepare_more();
                 if (h != nullptr) {
-                    note(*mark);   // the checkpoint is the cache's from here: its buffer fills as the chunk runs
-                    cache->checkpoint(*mark, h);
+                    inside.emplace_back(*mark, h);   // (its buffer fills as the chunk runs)
                     saved = *mark;
                     if (c.snap == 0) {
                         c.snap = (int) (*mark - c0);
@@ -5889,6 +5919,7 @@ struct Serve {
                        : E.process(
                              ids.data() + reuse, fresh,
                              [&](int64_t done) -> bool {
+                                 if (cache) settle_inside((int64_t) reuse + done);
                                  if (cache && done < fresh) {
                                      const int64_t here = (int64_t) reuse + done;
                                      const auto next = std::lower_bound(marks.begin(), marks.end(), here);
@@ -5918,6 +5949,8 @@ struct Serve {
                                  return true;
                              },
                              cache ? &plan : nullptr);
+        if (cache) settle_inside((int64_t) reuse + got);
+        inside.clear();
         note((int64_t) reuse + got);
         if (cache && cache->whole_prompt && fresh > 1 && got == fresh && !cancelled) {
             // the prompt's end: its state and the logits the read left, before the first decode step moves them (not
