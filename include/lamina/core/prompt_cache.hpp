@@ -54,6 +54,22 @@
 
 namespace lamina::core {
 
+/// The prompt cache's options under --serve, every path's flags and defaults
+struct CacheOptions {
+    int chain = 16;                   ///< --prompt-cache: checkpoints a conversation keeps (0: off)
+    int64_t every = 16384;            ///< --prompt-cache-every: a long prompt's checkpoints, in cells
+    int64_t park_mib = 16384;         ///< --conversation-cache-mib: the parked conversations' RAM
+    int64_t park_slots = 0;           ///< --conversation-cache-slots: their number at most (0: no limit)
+    int64_t min_tokens = 1024;        ///< --conversation-cache-min-tokens: shorter ones are not parked
+    int64_t ram_reserve_mib = 6144;   ///< --ram-reserve-mib: they take no RAM below this much available to the system
+    int64_t tail_role = -1;           ///< --tail-role-token: a trailing turn of this role stays after the turn's
+                                      ///< checkpoint (-1: off)
+    std::string spill_dir;            ///< --conversation-spill-dir: the disk tier's folder (empty: none)
+    int64_t spill_mib = -1;           ///< --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
+    /// `a` with its value from next(), where it is one of these flags (--tail-role-token only with `tail`): true
+    bool parse(const std::string& a, const std::function<std::string()>& next, bool tail = true);
+};
+
 class SequenceCache {
 public:
     /// `chain_cap`: checkpoints a conversation keeps (0: the cache is off); `ckpt_bytes`: one checkpoint's buffer;
@@ -150,6 +166,12 @@ public:
 
     /// The cache's state: the live conversation, the park's contents, its budgets and its evictions (the CACHE line,
     /// which the Monitor shows).
+    /// ram_spare from the system's available RAM above `reserve_mib` (0 or the RAM unknown: no reserve); whether the
+    /// RAM is known, and the RAM available now in *avail
+    bool reserve_ram(int64_t reserve_mib, uint64_t* avail = nullptr);
+    /// The CACHE line's text without its newline (the server's conversation cache card): the state, `sessions` the
+    /// engine's
+    std::string cache_line(int sessions) const;
     struct State {
         int64_t live_cells = 0;                         ///< in every session
         size_t checkpoints = 0;                         ///< of the sessions' conversations

@@ -7823,16 +7823,7 @@ const char* run_windows(Engine& E, Drafts& dr, std::vector<int32_t>& seq, std::v
 /// --serve's prompt cache (lamina/core/prompt_cache.hpp, the other paths' options): a request continues from the
 /// longest start of its prompt the engine holds - the conversation's end, one of its checkpoints, or a conversation
 /// another request replaced, parked in RAM with the full visits' cells.
-struct CacheOpts {
-    int chain = 16;                   // --prompt-cache: checkpoints a conversation keeps (0: off)
-    int64_t every = 16384;            // --prompt-cache-every: a long prompt's checkpoints, in cells
-    int64_t park_mib = 16384;         // --conversation-cache-mib: the parked conversations' RAM
-    int64_t park_slots = 0;           // --conversation-cache-slots: their number at most (0: no limit)
-    int64_t min_tokens = 1024;        // --conversation-cache-min-tokens: shorter ones are not parked
-    int64_t ram_reserve_mib = 6144;   // --ram-reserve-mib: they take no RAM below this much available to the system
-    std::string spill_dir;            // --conversation-spill-dir: the disk tier's folder (empty: none)
-    int64_t spill_mib = -1;           // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
-};
+using CacheOpts = lamina::core::CacheOptions;   // (its tail_role unused: no turn checkpoint here)
 
 /// The engine's state behind the cache's policy
 struct Cache final : lamina::core::SequenceCache {
@@ -7917,13 +7908,7 @@ struct Serve {
         // is written - mapped here it would be the lot's the live sequence is in before the return)
         cache->ensure_kv = [this](int64_t cells) { return cells <= E.ctx; };
         uint64_t ram_now = 0;
-        const bool ram_known = copt.ram_reserve_mib > 0 && lamina::platform::available_ram(ram_now);
-        if (ram_known)
-            cache->ram_spare = [reserve = copt.ram_reserve_mib << 20]() -> int64_t {
-                uint64_t avail = 0;
-                if (!lamina::platform::available_ram(avail)) return lamina::core::ConversationCache::kNoRamLimit;
-                return (int64_t) avail - reserve;
-            };
+        const bool ram_known = cache->reserve_ram(copt.ram_reserve_mib, &ram_now);
         std::fprintf(stderr,
                      "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation, %lld MiB "
                      "for the conversations requests replace (%.1f KiB a token)%s%s\n",
@@ -7997,12 +7982,7 @@ struct Serve {
     /// The CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE.
     void print_cache() {
         if (!cache) return;
-        const auto cs = cache->state();
-        serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                    "evictions=%zu held=%zu sessions=1 disk=%zu disk_bytes=%llu disk_budget=%llu\n",
-                    (long long) cs.live_cells, cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
-                    (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.held, cs.disk,
-                    (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
+        serve_print("%s\n", cache->cache_line(1).c_str());
     }
 
     /// Where a prompt's read takes a checkpoint besides a long prompt's periodic ones and its end (which stays in the
@@ -8514,15 +8494,8 @@ int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--top-k") gen_smp.top_k = std::atoi(next());
         else if (a == "--min-p") gen_smp.min_p = (float) std::atof(next());
         else if (a == "--seed") gen_smp.seed = std::strtoull(next(), nullptr, 10);
-        else if (a == "--prompt-cache") copt.chain = std::max(0, std::atoi(next()));
-        else if (a == "--prompt-cache-every") copt.every = std::max<int64_t>(1, std::atoll(next()));
-        else if (a == "--conversation-cache-mib") copt.park_mib = std::max<int64_t>(0, std::atoll(next()));
-        else if (a == "--conversation-cache-slots") copt.park_slots = std::max<int64_t>(0, std::atoll(next()));
-        else if (a == "--conversation-cache-min-tokens") copt.min_tokens = std::max<int64_t>(0, std::atoll(next()));
-        else if (a == "--ram-reserve-mib") copt.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next()));
-        else if (a == "--conversation-spill-dir") copt.spill_dir = next();
-        else if (a == "--conversation-spill-mib") copt.spill_mib = std::max<int64_t>(0, std::atoll(next()));
-        else {
+        else if (copt.parse(a, [&] { return std::string(next()); }, false)) {   // the prompt cache's flags
+        } else {
             std::fprintf(stderr, "lamina: Inkling 2's path does not take %s\n", a.c_str());
             return 2;
         }

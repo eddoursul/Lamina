@@ -4671,18 +4671,7 @@ constexpr int32_t kImStart = 248045, kImEnd = 248046;   // <|im_start|>, <|im_en
 /// start of its prompt the engine holds - a session's conversation, one of its checkpoints, or a conversation another
 /// request replaced, parked in RAM with its K / V cells.  With batch slots every session holds a conversation, each
 /// with checkpoints of its own, and the park takes the ones the sessions do not hold.
-struct CacheOpts {
-    int chain = 16;                   // --prompt-cache: checkpoints a conversation keeps (0: off)
-    int64_t every = 16384;            // --prompt-cache-every: a long prompt's checkpoints, in cells
-    int64_t park_mib = 16384;         // --conversation-cache-mib: the parked conversations' RAM
-    int64_t park_slots = 0;           // --conversation-cache-slots: their number at most (0: no limit)
-    int64_t min_tokens = 1024;        // --conversation-cache-min-tokens: shorter ones are not parked
-    int64_t ram_reserve_mib = 6144;   // --ram-reserve-mib: they take no RAM below this much available to the system
-    int64_t tail_role = -1;           // --tail-role-token: a trailing turn of this
-                                      // role stays after the turn's checkpoint
-    std::string spill_dir;            // --conversation-spill-dir: the disk tier's folder (empty: none)
-    int64_t spill_mib = -1;           // --conversation-spill-mib: its files' MiB at most (-1: its default; 0: none)
-};
+using CacheOpts = lamina::core::CacheOptions;
 
 /// The engine's state behind the cache's policy: the current session's (Engine::state_copy, kv_copy), which the
 /// policy selects for each request (session_select).
@@ -4868,14 +4857,8 @@ struct Serve {
         for (int i = 0; i < 2 && E.snap != nullptr; ++i)
             CK(hmalloc(&E.snap_via[i], (size_t) E.state_bytes(), cudaHostAllocDefault));
         cache->whole_prompt = E.snap != nullptr && !ckpt_cut;   // (a prompt's end is a checkpoint with its output)
-        uint64_t ram_now = 0;
-        const bool ram_known = copt.ram_reserve_mib > 0 && lamina::platform::available_ram(ram_now);
-        if (ram_known)   // the experts a hybrid placement pins cannot be swapped: the park is what gives way
-            cache->ram_spare = [reserve = copt.ram_reserve_mib << 20]() -> int64_t {
-                uint64_t avail = 0;
-                if (!lamina::platform::available_ram(avail)) return lamina::core::ConversationCache::kNoRamLimit;
-                return (int64_t) avail - reserve;
-            };
+        uint64_t ram_now = 0;   // (the experts a hybrid placement pins cannot be swapped: the park is what gives way)
+        const bool ram_known = cache->reserve_ram(copt.ram_reserve_mib, &ram_now);
         std::fprintf(stderr,
                      "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation%s, %lld MiB "
                      "for the conversations requests replace%s%s\n",
@@ -4893,12 +4876,7 @@ struct Serve {
     /// The CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE.
     void print_cache() {
         if (!cache) return;
-        const auto cs = cache->state();
-        serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                    "evictions=%zu held=%zu sessions=%d disk=%zu disk_bytes=%llu disk_budget=%llu\n",
-                    (long long) cs.live_cells, cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
-                    (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.held, E.n_sess, cs.disk,
-                    (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
+        serve_print("%s\n", cache->cache_line(E.n_sess).c_str());
     }
     /// Session `s` took token `t` (a decode step): its tokens, and the cache's record of them.
     void fed(int s, int32_t t) {
@@ -6115,23 +6093,9 @@ static int run_engine(int argc, char** argv, bool check_only) {
                 lora_specs.push_back(sp);
             }
         } else if (a == "--lora-init-without-apply")
-            lora_no_apply = true;   // loaded at scale 0: a request names its own
-        // --serve's prompt cache (Flash-Next's options)
-        else if (a == "--prompt-cache") cache_opts.chain = std::max(0, std::atoi(next().c_str()));
-        else if (a == "--prompt-cache-every") cache_opts.every = std::max<int64_t>(1, std::atoll(next().c_str()));
-        else if (a == "--conversation-cache-mib")
-            cache_opts.park_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
-        else if (a == "--conversation-cache-slots")
-            cache_opts.park_slots = std::max<int64_t>(0, std::atoll(next().c_str()));
-        else if (a == "--conversation-cache-min-tokens")
-            cache_opts.min_tokens = std::max<int64_t>(0, std::atoll(next().c_str()));
-        else if (a == "--ram-reserve-mib")
-            cache_opts.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
-        else if (a == "--conversation-spill-dir") cache_opts.spill_dir = next();
-        else if (a == "--conversation-spill-mib")
-            cache_opts.spill_mib = std::max<int64_t>(0, std::atoll(next().c_str()));
-        else if (a == "--tail-role-token") cache_opts.tail_role = std::atoll(next().c_str());
-        else if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // not a skip: it steers
+            lora_no_apply = true;               // loaded at scale 0: a request names its own
+        else if (cache_opts.parse(a, next)) {   // --serve's prompt cache (every path's flags)
+        } else if (a.rfind("--control-vector", 0) == 0 || a.rfind("--cvec-", 0) == 0) {   // not a skip: it steers
             std::fprintf(stderr, "lamina: %s: control vectors run on Qwen3.8-Flash-Next's engine only\n", a.c_str());
             return 2;
         } else if (serve_mode && !check_only && a.rfind("--", 0) == 0) {

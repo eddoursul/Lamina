@@ -317,39 +317,22 @@ struct Options {
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
-    /// --serve prompt cache: checkpoints of the sequence state each conversation keeps in host memory (0 = every
-    /// request starts from an empty sequence).  A request continues from the longest prefix the session, one of
-    /// the live conversation's checkpoints or a parked conversation holds.
-    int prompt_cache = 16;
-    /// --conversation-cache-mib: host memory for parked conversations (their K/V cells and their checkpoints), in
-    /// MiB (0 = none parked).  A parked conversation leaves only whole, the least recently used first.
-    int64_t conversation_cache_mib = 16384;
-    /// --conversation-cache-slots: at most this many parked conversations (0 = as many as the memory holds).
-    int conversation_cache_slots = 0;
-    /// --conversation-cache-min-tokens: park only conversations of at least this many tokens.
-    int64_t conversation_cache_min_tokens = 1024;
-    /// --ram-reserve-mib: the parked conversations take no RAM below this much available to the system, and give it
-    /// back between requests when it runs below (0 = only --conversation-cache-mib limits them).
-    int64_t ram_reserve_mib = 6144;
-    /// --conversation-spill-dir: the disk tier (SequenceCache::open_disk): the parked conversations the RAM does not
-    /// hold, and those that leave it, in files of a folder of this process's own there (empty: none).
-    std::string conversation_spill_dir;
-    /// --conversation-spill-mib: the disk tier's files at most, in MiB (-1: min(32 GiB, a quarter of the disk's
-    /// free space); 0: no tier), never into the disk's last 4 GiB free.
-    int64_t conversation_spill_mib = -1;
-    /// Checkpoint interval inside long prompts, in whole prompt chunks (counted from the request's first new cell).
-    int64_t prompt_cache_every = 16384;
+    /// --serve's prompt cache (prompt_cache.hpp's CacheOptions, every path's flags): checkpoints of the sequence state
+    /// each conversation keeps in host memory (0 = every request starts from an empty sequence; a request continues
+    /// from the longest prefix the session, one of the live conversation's checkpoints or a parked conversation
+    /// holds), the parked conversations' RAM, count and shortest length, the RAM reserve they give way to, the disk
+    /// tier below them (SequenceCache::open_disk), the checkpoints inside long prompts, and the role token of a short
+    /// turn the server puts right before the new assistant turn (upstream #458: the "system" of a trailing
+    /// reasoning-effort turn, with the config's "effort_position": "end"; when the turn before the last
+    /// <|im_start|> opens with it, the turn checkpoint goes in front of that turn, so it holds the conversation and
+    /// not the effort).
+    lamina::core::CacheOptions cache;
     /// Prompt parts of up to this many tokens go through verify windows instead of the batched prompt path: a new
     /// part that short, and a last prompt chunk that short.  A batched call has a fixed cost (it lends and refills
     /// expert-cache slots and reads every expert its tokens use): ~0.55 s with a second GPU, ~1.6 s with IQ3_XXS on
     /// the 3090 alone; verify windows of 8 tokens (--spec-lookup) cost 5-8 ms per token.  They break even at ~73
     /// (UD-Q4_K_XL) and ~113 (IQ3_XXS) tokens with a second GPU, ~400 without.
     int64_t feed_max = 46;
-    /// --serve (upstream #458): the role token of a short turn the server puts right before the new assistant turn
-    /// (the "system" of a trailing reasoning-effort turn, with the config's "effort_position": "end").  When the turn
-    /// before the last <|im_start|> opens with it, the turn checkpoint goes in front of that turn, so it holds the
-    /// conversation and not the effort.  -1: off.
-    int64_t tail_role_token = -1;
     int adapt_swaps = 96;
     float adapt_decay = 0.7f;   ///< --adapt-decay: the routing counts kept after each update (upstream's option)
 };
@@ -1461,23 +1444,8 @@ int parse_options(int argc, char** argv, Options& o, bool& help, bool usage_on_e
             else if (a == "--window-hashes") o.window_hashes = next("--window-hashes");
             else if (a == "--window-logits") o.window_logits = next("--window-logits");
             else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
-            else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
-            else if (a == "--prompt-cache-every")
-                o.prompt_cache_every = std::max<int64_t>(1, std::atoll(next("--prompt-cache-every")));
-            else if (a == "--conversation-cache-mib")
-                o.conversation_cache_mib = std::max<int64_t>(0, std::atoll(next("--conversation-cache-mib")));
-            else if (a == "--conversation-cache-slots")
-                o.conversation_cache_slots = std::max(0, std::atoi(next("--conversation-cache-slots")));
-            else if (a == "--conversation-cache-min-tokens")
-                o.conversation_cache_min_tokens =
-                    std::max<int64_t>(0, std::atoll(next("--conversation-cache-min-tokens")));
-            else if (a == "--ram-reserve-mib")
-                o.ram_reserve_mib = std::max<int64_t>(0, std::atoll(next("--ram-reserve-mib")));
-            else if (a == "--conversation-spill-dir") o.conversation_spill_dir = next("--conversation-spill-dir");
-            else if (a == "--conversation-spill-mib")
-                o.conversation_spill_mib = std::max<int64_t>(0, std::atoll(next("--conversation-spill-mib")));
-            else if (a == "--feed-max") o.feed_max = std::max<int64_t>(0, std::atoll(next("--feed-max")));
-            else if (a == "--tail-role-token") o.tail_role_token = std::atoll(next("--tail-role-token"));
+            else if (o.cache.parse(a, [&] { return std::string(next(a.c_str())); })) {   // the prompt cache's flags
+            } else if (a == "--feed-max") o.feed_max = std::max<int64_t>(0, std::atoll(next("--feed-max")));
             else if (a == "--eos-ids") {
                 std::string e;
                 if (!parse_i64_list(next("--eos-ids"), o.eos_ids, e)) {
@@ -1987,7 +1955,7 @@ const char* lamina::program::option_default(const char* flag) {
             {"--head-split", num(o.head_split)},
             {"--prompt-shift", num(o.prompt_shift)},
             {"--prompt-tiers", num(o.prompt_tiers)},
-            {"--prompt-cache", std::to_string(o.prompt_cache)},
+            {"--prompt-cache", std::to_string(o.cache.chain)},
             {"--mtp-window", std::to_string(o.mtp_window)},
             {"--vram-reserve-mib", std::to_string(o.vram_reserve_mib)},
             {"--kv-grow", on(o.kv_grow)},
@@ -4361,43 +4329,30 @@ int lamina::program::run(int argc, char** argv) {
         std::vector<lamina::core::QsaState*> kv_states;
         for (int64_t i = 0; i < g.n_qsa_layers(); ++i) kv_states.push_back(&ss.qsa_states[i]);
         if (use_mtp) kv_states.push_back(&mtp.kv_state());
-        lamina::core::PromptCache pcache(g, ss, kv_states, main_cs, o.prompt_cache,
-                                         (uint64_t) o.conversation_cache_mib << 20, (size_t) o.conversation_cache_slots,
-                                         o.conversation_cache_min_tokens);
+        lamina::core::PromptCache pcache(g, ss, kv_states, main_cs, o.cache.chain, (uint64_t) o.cache.park_mib << 20,
+                                         (size_t) o.cache.park_slots, o.cache.min_tokens);
         // the elastic K/V: a parked conversation's restore (or the live one's park) copies all its cells
         if (kvg.on) pcache.ensure_kv = [&](int64_t cells) { return kvg_ensure(cells + 256); };
         // --ram-reserve-mib: the expert arena is pinned, so the parked conversations are what the RAM gives way to.
         // A 16 GiB park beside a 101 GiB arena on a 125 GiB PC swapped the rest of the system to a halt for hours.
         uint64_t ram_now = 0;
-        const bool ram_known = o.ram_reserve_mib > 0 && lamina::platform::available_ram(ram_now);
-        if (ram_known)
-            pcache.ram_spare = [reserve = o.ram_reserve_mib << 20]() -> int64_t {
-                uint64_t avail = 0;
-                if (!lamina::platform::available_ram(avail)) return lamina::core::ConversationCache::kNoRamLimit;
-                return (int64_t) avail - reserve;
-            };
+        const bool ram_known = pcache.reserve_ram(o.cache.ram_reserve_mib, &ram_now);
         if (pcache.enabled())
-            std::fprintf(stderr,
-                         "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation, "
-                         "%lld MiB for the conversations requests replace%s%s\n",
-                         o.prompt_cache, (double) pcache.ckpt_bytes() / 1048576.0, (long long) o.conversation_cache_mib,
-                         o.conversation_cache_slots > 0
-                             ? (", at most " + std::to_string(o.conversation_cache_slots) + " of them").c_str()
-                             : "",
-                         ram_known ? (", above a RAM reserve of " + std::to_string(o.ram_reserve_mib) + " MiB (" +
-                                      std::to_string(ram_now >> 20) + " MiB available now)")
-                                         .c_str()
-                                   : "");
-        pcache.open_disk(o.conversation_spill_dir, o.conversation_spill_mib);   // the disk tier below the park
+            std::fprintf(
+                stderr,
+                "lamina serve: prompt cache on: up to %d checkpoints of %.1f MiB per conversation, "
+                "%lld MiB for the conversations requests replace%s%s\n",
+                o.cache.chain, (double) pcache.ckpt_bytes() / 1048576.0, (long long) o.cache.park_mib,
+                o.cache.park_slots > 0 ? (", at most " + std::to_string(o.cache.park_slots) + " of them").c_str() : "",
+                ram_known ? (", above a RAM reserve of " + std::to_string(o.cache.ram_reserve_mib) + " MiB (" +
+                             std::to_string(ram_now >> 20) + " MiB available now)")
+                                .c_str()
+                          : "");
+        pcache.open_disk(o.cache.spill_dir, o.cache.spill_mib);   // the disk tier below the park
         // the CACHE line (the server's Conversation cache card): at READY, then after each request before its DONE
         auto print_cache = [&] {
             if (!pcache.enabled()) return;
-            const auto cs = pcache.state();
-            serve_print("CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
-                        "evictions=%zu disk=%zu disk_bytes=%llu disk_budget=%llu\n",
-                        (long long) cs.live_cells, cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
-                        (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.disk,
-                        (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
+            serve_print("%s\n", pcache.cache_line(1).c_str());
         };
         // stdin is read on its own thread, so a STOP line reaches a request that is still running (the client went
         // away, or pressed Esc): the flag is checked between prompt chunks and between verify windows.  Ctrl+C in the
@@ -4582,7 +4537,7 @@ int lamina::program::run(int argc, char** argv) {
                         (long long) o.max_context, o.kv.c_str(), (long long) vram_slots, (long long) (vram_bytes >> 20),
                         o.spec, o.spec, o.spec_lookup, (long long) (free_b >> 20),
                         (long long) (lamina::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
-                        o.spec_min_p, o.second_gpu, (long long) o.tail_role_token);
+                        o.spec_min_p, o.second_gpu, (long long) o.cache.tail_role);
         }
         print_cache();
         // --ple-io ram: READY only once the table is in RAM.  While it loads, its 28.8 GB of reads compete with the
@@ -4944,10 +4899,10 @@ int lamina::program::run(int argc, char** argv) {
                         q = i;
                         break;
                     }
-            if (q > 0 && o.tail_role_token >= 0)   // a trailing effort turn stays out of the checkpoint
+            if (q > 0 && o.cache.tail_role >= 0)   // a trailing effort turn stays out of the checkpoint
                 for (int64_t i = q - 1; i > reuse; --i)
                     if (opens(i)) {
-                        if (ids[(size_t) i + 1] == o.tail_role_token) q = i;
+                        if (ids[(size_t) i + 1] == o.cache.tail_role) q = i;
                         break;
                     }
             // An agent sends one long prefix again and again with a different tail (a classifier's, a coder's, a
@@ -5044,7 +4999,7 @@ int lamina::program::run(int argc, char** argv) {
                 }
                 // (a part in two halves keeps its one checkpoint, at its end)
                 const int64_t step =
-                    halves && split_on ? part : std::max<int64_t>(1, o.prompt_cache_every / o.prefill_chunk) * chunk;
+                    halves && split_on ? part : std::max<int64_t>(1, o.cache.every / o.prefill_chunk) * chunk;
                 pp_chunk = chunk;
                 tr("prompt slots lent", chunk);
                 // (a later tier that computes its experts in the prompt, or runs a stage of it, works from its first

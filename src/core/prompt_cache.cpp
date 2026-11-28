@@ -2,6 +2,7 @@
 #include "lamina/core/prompt_cache.hpp"
 
 #include "lamina/kernels/qsa.hpp"
+#include "lamina/platform/memory.hpp"
 #include "lamina/platform/spill.hpp"
 
 #include <cuda_runtime.h>
@@ -888,6 +889,46 @@ SequenceCache::State SequenceCache::state() const {
     s.disk_bytes = parked_.disk_bytes() + live_files();
     s.disk_budget = disk_ ? disk_->budget() : 0;
     return s;
+}
+
+bool CacheOptions::parse(const std::string& a, const std::function<std::string()>& next, bool tail) {
+    auto i64 = [&](int64_t lo) { return std::max<int64_t>(lo, std::atoll(next().c_str())); };
+    if (a == "--prompt-cache") chain = std::max(0, std::atoi(next().c_str()));
+    else if (a == "--prompt-cache-every") every = i64(1);
+    else if (a == "--conversation-cache-mib") park_mib = i64(0);
+    else if (a == "--conversation-cache-slots") park_slots = i64(0);
+    else if (a == "--conversation-cache-min-tokens") min_tokens = i64(0);
+    else if (a == "--ram-reserve-mib") ram_reserve_mib = i64(0);
+    else if (a == "--conversation-spill-dir") spill_dir = next();
+    else if (a == "--conversation-spill-mib") spill_mib = i64(0);
+    else if (tail && a == "--tail-role-token") tail_role = std::atoll(next().c_str());
+    else return false;
+    return true;
+}
+
+bool SequenceCache::reserve_ram(int64_t reserve_mib, uint64_t* avail) {
+    uint64_t now = 0;
+    const bool known = reserve_mib > 0 && lamina::platform::available_ram(now);
+    if (avail) *avail = now;
+    if (known)
+        ram_spare = [reserve = reserve_mib << 20]() -> int64_t {
+            uint64_t a = 0;
+            if (!lamina::platform::available_ram(a)) return ConversationCache::kNoRamLimit;
+            return (int64_t) a - reserve;
+        };
+    return known;
+}
+
+std::string SequenceCache::cache_line(int sessions) const {
+    const State cs = state();
+    char b[512];
+    std::snprintf(b, sizeof b,
+                  "CACHE live=%lld checkpoints=%zu parked=%zu parked_bytes=%llu parked_budget=%llu slots=%zu "
+                  "evictions=%zu held=%zu sessions=%d disk=%zu disk_bytes=%llu disk_budget=%llu",
+                  (long long) cs.live_cells, cs.checkpoints, cs.parked, (unsigned long long) cs.parked_bytes,
+                  (unsigned long long) cs.parked_budget, cs.slots, cs.evictions, cs.held, sessions, cs.disk,
+                  (unsigned long long) cs.disk_bytes, (unsigned long long) cs.disk_budget);
+    return b;
 }
 
 std::string SequenceCache::summary() const {
