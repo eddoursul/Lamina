@@ -1927,7 +1927,7 @@ struct Engine {
     }
     /// a picture's rows replace embeddings: the main model's on the first stage, the MTP block's on the last
     bool takes_rows() const { return l0 == 0 || (lst == this && m->has_mtp); }
-    int mtp_d = 0;   // MTP drafts per speculative step (0: none; greedy requests only)
+    int mtp_d = 0;   // MTP drafts per speculative step (0: none)
 
     // ---- sessions: the conversation states.  One for a single-request engine; --batch N keeps N, each with its own
     // recurrent state and KV cache, so N requests run at once: their rows share one decode window (forward_rows).  The

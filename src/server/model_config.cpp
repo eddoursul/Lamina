@@ -874,7 +874,7 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                         say("  drafts: the file's MTP block, up to " + per_step +
                             " a window (no DFly2 beside the model: "
                             "its shard and config.json there, or in a folder inside the model's, draft in its place)");
-                } else {   // Qwen3.6 / Qwen3.8-27B: the file's MTP block drafts for greedy requests, where it holds one
+                } else {   // Qwen3.6 / Qwen3.8-27B: the file's MTP block drafts, where it holds one
                     const std::vector<std::string> pa = engine_args(c);
                     std::string per_step;
                     for (size_t i = 0; i + 1 < pa.size(); ++i)
@@ -884,7 +884,7 @@ ModelCheck check_model(const json& c, const std::vector<GpuInfo>& gpus) {
                             "step)");
                     else if (per_step.empty() || per_step == "0")
                         say("  drafts: none (--drafts-per-step N: up to N a window from the file's MTP block)");
-                    else say("  drafts: the file's MTP block, up to " + per_step + " a window (greedy requests)");
+                    else say("  drafts: the file's MTP block, up to " + per_step + " a window");
                 }
             }
             // pictures
