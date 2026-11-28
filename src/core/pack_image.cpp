@@ -10,6 +10,7 @@
 #include "lamina/artifact/gguf_split.hpp"
 #include "lamina/kernels/bf16_bits.hpp"
 #include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
 
 #if defined(LAMINA_NATIVE_EXPERTS)
 #include "ggml.h"
@@ -225,17 +226,16 @@ int form_of(const std::string& name) {
 /// key the engine serves from the GGUF (the prefill dequantizes each of them, dequant_f16)
 const uint32_t kMmvqTypes[] = {2, 6, 8, 11, 12, 13, 14, 20, 23, 42, 16, 17, 18, 21, 22, 29};
 
-/// native_problem: why the engine cannot serve the quantized tensor `name` from the GGUF, or "".  EMBED_TYPES are
-/// NativeEmbed's (iq_supported).
+/// native_problem: why the engine cannot serve the quantized tensor `name` from the GGUF, or "".  The embedding's
+/// types are NativeEmbed's (iq_supported, as model_check's).
 std::string native_problem(const std::string& name, uint32_t type) {
-    static const uint32_t embed[] = {16, 17, 18, 20, 21, 22, 23, 19, 29, 42, 11, 12, 13, 14, 7, 8};
     static const char* const dense[] = {".attn_qkv.weight",      ".attn_gate.weight",      ".ssm_out.weight",
                                         ".attn_q.weight",        ".attn_k.weight",         ".attn_v.weight",
                                         ".attn_output.weight",   ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight",
                                         ".ffn_down_shexp.weight"};
     bool served = false;
     if (name == "token_embd.weight") {
-        if (one_of(type, embed)) return {};
+        if (lamina::kernels::iq_supported((int) type)) return {};
         served = true;
     } else if (name == "output.weight" || name == "blk.1.ple_key.weight" ||
                (starts_with(name, "blk.") &&

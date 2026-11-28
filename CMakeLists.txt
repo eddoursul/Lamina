@@ -359,6 +359,9 @@ if(LAMINA_ENABLE_CUDA)
   # the model families: the guards, the geometry from metadata, the layout tables (synthetic GGUFs, CPU only)
   add_executable(model_family_test tests/core/model_family_test.cpp)
   target_link_libraries(model_family_test PRIVATE lamina_artifact)
+  # the native pack's token embedding: every type the engine's embedding reads taken (synthetic GGUFs, CPU only)
+  add_executable(pack_embed_test tests/core/pack_embed_test.cpp)
+  target_link_libraries(pack_embed_test PRIVATE lamina_engine)
 
   add_executable(disk_tier_test tests/core/disk_tier_test.cpp)
   target_link_libraries(disk_tier_test PRIVATE lamina_core)
@@ -381,6 +384,7 @@ if(LAMINA_ENABLE_CUDA)
     add_test(NAME disk_tier_test COMMAND disk_tier_test)
     add_test(NAME vision_records_test COMMAND vision_records_test)
     add_test(NAME model_family_test COMMAND model_family_test)
+    add_test(NAME pack_embed_test COMMAND pack_embed_test)
     add_test(NAME control_vector_test COMMAND control_vector_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
     add_test(NAME deterministic_adapt_help COMMAND lamina-engine --deterministic-adapt --help-all)
@@ -1043,7 +1047,8 @@ endif()
 if(LAMINA_BUILD_TESTS)
   foreach(_t suffix_drafter_test gpu_cards_test bf16_bits_test tool_args_test block_form_test pool_stress expert_multi_test iq_avx2_parity
              q8k_quant_parity draft_pass_test adaptive_policy_test expert_profile_save_test prompt_cache_spread_test
-             conversation_cache_test disk_tier_test control_vector_test model_family_test deterministic_adapt_help platform_memory_test
+             conversation_cache_test disk_tier_test control_vector_test model_family_test pack_embed_test
+             deterministic_adapt_help platform_memory_test
              platform_spill_test pretokenize_parity tokenizer_test sha256_base64_test
              ple_reader_selftest model_config_test params_test bench_test remote_model_test media_path_test
              cpu_floor_test)
