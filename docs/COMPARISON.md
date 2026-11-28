@@ -295,7 +295,7 @@ thinking: the server's two engine requests, the thinking cut at its budget of 2,
 |---|---|---|---|---|
 | Generation: code, 28-token prompt (t/s) | 179.3 | 214.4 | 134.7 | 233.8 |
 | Generation: thinking (3,000 tokens) | 181.5 | 196.8 | 128.0 | 211.8 |
-| Edit: prompt / generation (t/s) | 3,268 / 227.8 | 3,700 / 238.6 | 1,364 / 139.2 | 4,564 / 240.2 |
+| Edit: prompt / generation (t/s) | 3,268 / 227.8 | 3,700 / 238.6 | 1,364 / 139.2 | 4,564 / 398.7* |
 | 16K-token prompt / generation after it (t/s) | 3,847 / 165.4 | 4,431 / 183.8 | 2,064 / 114.7 | 4,354 / 185.9 |
 | 32K-token prompt / generation after it (t/s) | 3,520 / 146.5 | 4,055 / 154.3 | 1,953 / 100.2 | 3,737 / 156.0 |
 
@@ -309,6 +309,10 @@ Sampled with the config's settings (temperature 0.7, top_p 0.95, top_k 20; the s
 measured on 2026-11-28), Lamina with both GPUs thinks at 218.5 t/s (greedy 216.7), writes code at 245.9 (246.6) and
 edits at 245.6 (245.5): a sampled request drafts as a greedy one does, a draft passing only as the token drawn. Before
 2026-11-28 the path drafted for greedy requests alone, and sampled at 115.7 / 127.3 / 114.1 t/s.
+
+\* With prompt lookup (since 2026-11-28, measured that day: 398.8 and 398.6 t/s; 246.8 and 244.6 without it, where the
+table had 240.2): where the answer's last 16 tokens occurred before, a window verifies up to 7 of the tokens that
+followed there in place of the MTP block's 2 drafts, 7.35 tokens a pass against 3.00. The other rows draft as before.
 
 Agreement with llama.cpp (every expert in VRAM, 8,192 cells): along llama.cpp's own greedy
 text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 5.8e-4 / 2.0e-3 / 7.5e-7 (a 27-token
@@ -331,7 +335,7 @@ the prompt cache off.
 |---|---|---|
 | Generation: code, 28-token prompt (t/s) | 73.3 | 94.7 |
 | Generation: thinking (3,000 tokens) | 40.4 | 59.9 |
-| Edit: prompt / generation (t/s) | 1,360 / 119.5 | 1,412 / 146.8 |
+| Edit: prompt / generation (t/s) | 1,360 / 119.5 | 1,412 / 193.7* |
 | 16K-token prompt / generation after it (t/s) | 1,451 / 58.4 | 1,634 / 71.1 |
 | 32K-token prompt / generation after it (t/s) | 1,352 / 50.7 | 1,514 / 59.0 |
 | 64K-token prompt / generation after it (t/s) | 1,175 / 40.9 | 1,277 / 44.2 |
@@ -341,6 +345,8 @@ as at one, so a step verifies up to 8 tokens (7.4 on the edit, which quotes its 
 Sampled with the config's settings (three seeds, medians, measured on 2026-11-28) Lamina thinks at 58.0 t/s (greedy
 62.2), writes code at 113.6 (98.3; the sampled answers are other texts, 87.8-114.3 over the seeds) and edits at 154.0
 (154.4); before 2026-11-28, when the path drafted for greedy requests alone, at 31.6 / 32.5 / 31.4.
+\* With prompt lookup (since 2026-11-28, measured that day: 193.7 t/s in both rounds; 154.5 without it): a window of
+the lookup's 7 tokens in place of the MTP block's chain of 7, which it skips (7.81 tokens a pass against 7.40).
 Llama.cpp reads a chunk's micro-batches on both GPUs at once too. With the 3090 first instead of the 5070 Ti (2,048-token
 chunks), Lamina's prompts read ~12% slower (the 5070 Ti, the faster at their products, takes fewer layers) and its
 generation is ~3% faster. VRAM: 13.9 GiB on the 5070 Ti (1.3 left free, the desktop taking 0.6), 21.9 on the 3090.

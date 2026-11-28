@@ -167,8 +167,8 @@ const std::vector<OptionHelp>& engine_options() {
          "Qwen3.8-27B and Hy4-flash: 0, every draft); Flash-Next and Inkling 2 weigh a sampled request's drafts by "
          "their chance to pass at their positions' draws"},
         {"--spec-lookup", "N", S,
-         "Flash-Next, Hy4-flash and Inkling 2: where the text's last N tokens or more occurred before, up to 7 of the "
-         "tokens that followed there are the window's drafts (prompt lookup; default 16; 0: off)"},
+         "where the text's last N tokens or more occurred before, up to 7 of the tokens that followed there are the "
+         "window's drafts (prompt lookup; default 16; 0: off)"},
         {"--mtp-window", "N", S,
          "Flash-Next: the context cells the draft layer attends to (default 32768; 0: every cell)"},
         {"--drafts-per-step", "N", S,

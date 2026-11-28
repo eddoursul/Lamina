@@ -849,7 +849,7 @@ if(LAMINA_NATIVE_EXPERTS)
     target_include_directories(lamina_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(lamina_qwen35 PRIVATE lamina_prefill lamina_kernels lamina_kernels_cpu lamina_warnings
-                          lamina_serve_io CUDA::cudart_static)
+                          lamina_serve_io lamina_spec CUDA::cudart_static)
     target_compile_definitions(lamina_qwen35 PRIVATE LAMINA_Q36_CPU_POOL=1)
     add_executable(lamina-q36 src/qwen35/q36_main.cpp)
     target_link_libraries(lamina-q36 PRIVATE lamina_qwen35 CUDA::cudart_static)

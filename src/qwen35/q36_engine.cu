@@ -46,6 +46,7 @@
 #include "lamina/program/sampling.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/qwen35/engine.hpp"
+#include "lamina/spec/suffix_drafter.hpp"
 #include "q36_attn.cuh"
 #include "q36_kernels.cuh"
 #include "q36_lora.cuh"
@@ -1758,6 +1759,29 @@ struct Engine {
     /// a picture's rows replace embeddings: the main model's on the first stage, the MTP block's on the last
     bool takes_rows() const { return l0 == 0 || (lst == this && m->has_mtp); }
     int mtp_d = 0;   // MTP drafts per speculative step (0: none)
+    /// Prompt lookup (--spec-lookup N: a match of N tokens or more; null: off): where the text's last tokens occurred
+    /// before, the tokens that followed there are a window's drafts when they outnumber the MTP block's
+    std::unique_ptr<lamina::spec::SuffixDrafter> sfx;
+    size_t sfx_ok = 0;    // the text's tokens the lookup's history holds
+    int64_t looked = 0;   // windows of the lookup's drafts
+    /// A request's text as the lookup's history from here on (what it shares with the last one's stays indexed)
+    void look_start(const std::vector<int32_t>& text) {
+        if (!sfx) return;
+        sfx->assign(text.data(), text.size());
+        sfx_ok = text.size();
+    }
+    /// The text's continuation after x_tok (the first n tokens of `text` the ones before it), when the lookup has at
+    /// least as much of it as the MTP block's D drafts (as many: the window skips the block's chain); else none
+    std::vector<int32_t> look_up(const std::vector<int32_t>& text, size_t n, int32_t x_tok, int D) {
+        std::vector<int32_t> out;
+        if (!sfx) return out;
+        sfx->sync(text.data(), n, sfx_ok);
+        sfx->append(x_tok);   // not in the state yet: the next sync takes it out
+        out.resize(kVerify - 1);
+        const int k = sfx->propose(kVerify - 1, out.data());
+        out.resize(k > 0 && k >= D ? (size_t) k : 0);
+        return out;
+    }
 
     // ---- sessions: the conversation states.  One for a single-request engine; --batch N keeps N, each with its own
     // recurrent state and KV cache, so N requests run at once: their rows share one decode window (forward_rows).  The
@@ -4141,28 +4165,37 @@ struct Engine {
     /// `cancel`: a stop asked for before the state moves keeps only x (the caller then emits no draft), so that a
     /// request stopped mid-answer leaves the state at the tokens it has shown: a conversation that continues from them
     /// (the server's hand-over of a stopped request to a batch slot) reuses it instead of reading them again.
+    /// `look` (non-empty): prompt lookup's drafts, in the MTP chain's place (the block's first call still fills its
+    /// cache, without its head); without the MTP block (mtp_d 0) the window of x and those drafts alone.
     int spec_step(int x_tok, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts, int32_t* picks,
                   const std::atomic<bool>* cancel = nullptr, const lamina::kernels::SamplerParams* sp = nullptr,
-                  const std::vector<int32_t>* hist = nullptr) {
+                  const std::vector<int32_t>* hist = nullptr, const std::vector<int32_t>* look = nullptr) {
         const int N = (int) m->g.n_embd;
         Engine& L = *lst;   // the MTP block, the picks and hlast are the last stage's
         lora_rows(nullptr, 0);
+        const bool lk = look != nullptr && !look->empty();
+        const bool mtp = m->has_mtp && mtp_d > 0;
+        if (lk) D = (int) look->size();
         if (main_hybrid) D = std::min<int>(D, (int) (kRebalanceEvery - pos % kRebalanceEvery) - 1);
         const int T0 = (int) fix.size() + 1;   // the redo rows and the row of x
         sync_all();
         L.on();
-        // rows of the first MTP call: (hmain row i, fix[i]) at positions pos - fix.size() + i, then (hlast, x) at pos
-        for (int i = 0; i < (int) fix.size(); ++i) L.hpin[16 + i] = fix[(size_t) i];
-        L.hpin[16 + fix.size()] = x_tok;
-        L.hpin[1] = (int32_t) (pos - (int64_t) fix.size());
-        CK(cudaMemcpyAsync(L.tok_m, L.hpin + 16, (size_t) T0 * 4, cudaMemcpyHostToDevice, L.st));
-        CK(cudaMemcpyAsync(L.pos0_m, L.hpin + 1, 4, cudaMemcpyHostToDevice, L.st));
-        // seeds: hmain rows 0 .. fix - 1 are the h of the positions before the fixed rows; hlast is that before x
         float* seeds = L.mtp_seed();
-        if (!fix.empty())
-            CK(cudaMemcpyAsync(seeds, L.hmain, fix.size() * (size_t) N * 4, cudaMemcpyDeviceToDevice, L.st));
-        CK(cudaMemcpyAsync(seeds + fix.size() * (size_t) N, L.hlast, (size_t) N * 4, cudaMemcpyDeviceToDevice, L.st));
-        L.forward_mtp(T0, pos - (int64_t) fix.size(), seeds, D > 0, false);
+        if (mtp) {
+            // rows of the first MTP call: (hmain row i, fix[i]) at positions pos - fix.size() + i, then (hlast, x) at
+            // pos
+            for (int i = 0; i < (int) fix.size(); ++i) L.hpin[16 + i] = fix[(size_t) i];
+            L.hpin[16 + fix.size()] = x_tok;
+            L.hpin[1] = (int32_t) (pos - (int64_t) fix.size());
+            CK(cudaMemcpyAsync(L.tok_m, L.hpin + 16, (size_t) T0 * 4, cudaMemcpyHostToDevice, L.st));
+            CK(cudaMemcpyAsync(L.pos0_m, L.hpin + 1, 4, cudaMemcpyHostToDevice, L.st));
+            // seeds: hmain rows 0 .. fix - 1 are the h of the positions before the fixed rows; hlast is that before x
+            if (!fix.empty())
+                CK(cudaMemcpyAsync(seeds, L.hmain, fix.size() * (size_t) N * 4, cudaMemcpyDeviceToDevice, L.st));
+            CK(cudaMemcpyAsync(seeds + fix.size() * (size_t) N, L.hlast, (size_t) N * 4, cudaMemcpyDeviceToDevice,
+                               L.st));
+            L.forward_mtp(T0, pos - (int64_t) fix.size(), seeds, D > 0 && !lk, false);   // (lk: its cache alone)
+        }
         drafts.assign((size_t) D, 0);
         // a draft's pick, and with --spec-min-p whether the drafts so far are together sure enough (the product of
         // their probabilities under the draft head) to keep it, else the drafts end before it
@@ -4178,9 +4211,14 @@ struct Engine {
             joint *= p;
             if (joint < draft_min_p) D = d;
         };
-        if (D > 0) take(0);
-        int last_row = T0 - 1;          // the row of the previous MTP call whose output seeds the next draft
-        for (int d = 1; d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
+        if (lk) {   // the lookup's drafts: the chain skipped
+            std::copy(look->begin(), look->begin() + D, drafts.begin());
+            ++looked;
+        } else if (D > 0) {
+            take(0);
+        }
+        int last_row = T0 - 1;                 // the row of the previous MTP call whose output seeds the next draft
+        for (int d = 1; d < D && !lk; ++d) {   // chained: (the block's own output, the last draft) at the next position
             L.hpin[0] = drafts[(size_t) d - 1];
             L.hpin[1] = (int32_t) (pos + d);
             CK(cudaMemcpyAsync(L.tok_m, L.hpin, 4, cudaMemcpyHostToDevice, L.st));
@@ -4216,9 +4254,11 @@ struct Engine {
         for (int i = 0; i <= a; ++i) picks[i] = L.hpin[2 + i];
         on();
         commit(a + 1);
-        L.on();
-        CK(cudaMemcpyAsync(L.hlast, L.hmain + (size_t) a * N, (size_t) N * 4, cudaMemcpyDeviceToDevice, L.st));
-        on();
+        if (mtp) {   // (the seed of the block's next call)
+            L.on();
+            CK(cudaMemcpyAsync(L.hlast, L.hmain + (size_t) a * N, (size_t) N * 4, cudaMemcpyDeviceToDevice, L.st));
+            on();
+        }
         advance(a + 1);
         after_rows(a + 1);
         return a;
@@ -5610,8 +5650,10 @@ struct Serve {
         // the greedy text, a sampled one's the text its draws give: a draft passes only as the token drawn); requests
         // beside others, one token at a time
         const bool spec = E.mtp_d > 0 && !adm;
-        std::vector<int32_t> fix, drafts;
+        std::vector<int32_t> fix, drafts, look;
         int32_t picks[16];
+        const int64_t looked0 = E.looked;
+        if (!adm) E.look_start(hist);
         int nx = drawn ? E.sampled(sp, hist) : E.greedy();
         if (adm) {
             if (nx < 0) {   // no finite logit: the slot is not taken, and its state is not continued
@@ -5679,8 +5721,16 @@ struct Serve {
             };
             if (!emit(nx)) break;
             if (n_active > 0) window();
-            if (spec && n_active == 0 && E.pos + E.mtp_d + 1 <= E.ctx) {
-                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &in->stop, drawn ? &sp : nullptr, &hist);
+            look.clear();
+            if (!adm && n_active == 0) {   // prompt lookup: the text before x is hist's but its last token
+                look = E.look_up(hist, hist.size() - 1, nx, E.mtp_d);
+                if ((int64_t) look.size() > E.ctx - E.pos - 1)
+                    look.resize((size_t) std::max<int64_t>(0, E.ctx - E.pos - 1));
+            }
+            if ((spec || !look.empty()) && n_active == 0 &&
+                E.pos + std::max<int>(E.mtp_d, (int) look.size()) + 1 <= E.ctx) {
+                const int a =
+                    E.spec_step(nx, fix, E.mtp_d, drafts, picks, &in->stop, drawn ? &sp : nullptr, &hist, &look);
                 offered += (long long) drafts.size();   // the drafts made (--spec-min-p can end them early)
                 accepted += a;
                 // the state now holds x and every accepted draft, whether or not the answer ends inside them (an end of
@@ -5727,10 +5777,12 @@ struct Serve {
             {produced, ids.size(), prompt_ms, decode_ms, finish, accepted, offered, reuse, 0, 0, (long long) fresh});
         std::fprintf(stderr,
                      "lamina serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
-                     "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld (%s)\n",
+                     "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld, %lld windows looked up "
+                     "(%s)\n",
                      s, ids.size(), reuse, (long long) fresh, prompt_ms,
                      prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced, decode_ms,
-                     decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, accepted, offered, finish);
+                     decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, accepted, offered,
+                     (long long) (E.looked - looked0), finish);
         if (cache) std::fprintf(stderr, "lamina serve: prompt cache: %s\n", cache->summary().c_str());
         cache_idle();
     }
@@ -5791,6 +5843,7 @@ static int run_engine(int argc, char** argv, bool check_only) {
     bool warm = true;
     int expert_slots = 0, batch = 0, draft_vocab = -1;
     float spec_min_p = 0.f;
+    int spec_lookup = 16;                       // --spec-lookup: prompt lookup's match (0: none)
     std::vector<int> stage_gpus, layer_split;   // the layer split: the GPUs (the first
                                                 // the main one) and their layer counts
     std::vector<LoraSpec> lora_specs;           // --lora / --lora-scaled, in their order
@@ -5874,6 +5927,8 @@ static int run_engine(int argc, char** argv, bool check_only) {
         else if (a == "--kv") kv = next();             // the K / V cache's format: fp16 or q8_0
         else if (a == "--spec-min-p")
             spec_min_p = (float) std::atof(next().c_str());   // drafts while this sure (0: all of them)
+        else if (a == "--spec-lookup")
+            spec_lookup = std::max(0, std::atoi(next().c_str()));   // prompt lookup's match (0: none)
         else if (a == "--vision")
             vision = true;                                                              // pictures (GENI): the
                                                                                         // encoder is lamina-vision's
@@ -6127,6 +6182,8 @@ static int run_engine(int argc, char** argv, bool check_only) {
         S->draft_n = std::max(0, draft_vocab);
         S->draft_min_p = spec_min_p;
     }
+    if (spec_lookup > 0)   // (the first stage's: its requests' loop drafts)
+        E.sfx = std::make_unique<lamina::spec::SuffixDrafter>(spec_lookup, 32, (size_t) std::max(4096, ctx));
     E.bmtp = (batch_mtp ||
               (std::getenv("LAMINA_BATCH_MTP") != nullptr && std::string(std::getenv("LAMINA_BATCH_MTP")) != "0")) &&
              E.n_sess > 1 && E.mtp_d > 0;
@@ -6198,26 +6255,34 @@ static int run_engine(int argc, char** argv, bool check_only) {
     const auto t1 = Clock::now();
     if (E.mtp_d > 0 && forced.empty() && !ff) {
         long long offered = 0, accepted = 0;
-        std::vector<int32_t> fix, drafts;
+        std::vector<int32_t> fix, drafts, text(prompt);   // (text: the prompt, then each token decided)
         int32_t picks[16];
+        E.look_start(text);
         int nx = E.greedy();
         while ((int) gen.size() < n_gen) {
             gen.push_back(nx);
+            text.push_back(nx);
             if ((int) gen.size() >= n_gen) break;
-            const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks);
+            std::vector<int32_t> look = E.look_up(text, text.size() - 1, nx, E.mtp_d);
+            if ((int64_t) look.size() > E.ctx - E.pos - 1)
+                look.resize((size_t) std::max<int64_t>(0, E.ctx - E.pos - 1));
+            const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, nullptr, nullptr, nullptr, &look);
             offered += (long long) drafts.size();
             accepted += a;
             fix.assign(drafts.begin(), drafts.begin() + a);
-            for (int i = 0; i < a && (int) gen.size() < n_gen; ++i) gen.push_back(drafts[(size_t) i]);
+            for (int i = 0; i < a && (int) gen.size() < n_gen; ++i) {
+                gen.push_back(drafts[(size_t) i]);
+                text.push_back(drafts[(size_t) i]);
+            }
             nx = picks[a];
         }
         gen.resize((size_t) n_gen);
         lamina::program::print_gen(gen);
         std::fprintf(stderr,
                      "lamina: prompt %zu tokens in %.1f ms, %zu generated in %.1f ms (%.1f tok/s), MTP %d drafts: "
-                     "%lld of %lld accepted (%.0f%%)\n",
+                     "%lld of %lld accepted (%.0f%%), %lld windows looked up\n",
                      prompt.size(), pp_ms, gen.size(), ms_since(t1), gen.size() / (ms_since(t1) / 1000.0), E.mtp_d,
-                     accepted, offered, offered ? 100.0 * accepted / offered : 0.0);
+                     accepted, offered, offered ? 100.0 * accepted / offered : 0.0, (long long) E.looked);
         return 0;
     }
     for (int i = 0; i < n_gen; ++i) {
