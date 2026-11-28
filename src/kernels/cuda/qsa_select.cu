@@ -279,7 +279,7 @@ batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ 
             const int a = e / (IDX_HEADS * 16), off = (e / 16) % IDX_HEADS * IDX_DIM + 4 * (2 * (e % 16) + half);
             if (q0 + a < nq) cp_async16(qs + a * QD + off, q_idx + (int64_t) (q0 + a) * QD + off);
         }
-        asm volatile("cp.async.commit_group;\n" ::);
+        lamina::kernels::cp_commit();
     };
     int have = -1;   // the first query of the slot's rows
     for (int u = (int) ((int64_t) blockIdx.x * units / gridDim.x); u < u1;) {
@@ -289,8 +289,8 @@ batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ 
             const int r = e >> 5, c = e & 31;
             cp_async16(ks + key_at(r, c), pooled + (int64_t) min(b0 + r, top) * IDX_DIM + 4 * c);
         }
-        asm volatile("cp.async.commit_group;\n" ::);
-        asm volatile("cp.async.wait_group 0;\n" ::);
+        lamina::kernels::cp_commit();
+        lamina::kernels::cp_wait<0>();
         __syncthreads();
         for (; u < ue; ++u) {
             const int q0 = u % n_chunks * BATCH_QC + warp * BATCH_QT;
@@ -305,7 +305,7 @@ batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ 
             if (wlast < b0) continue;   // the warp's queries end before the tile
             if (have != q0) {
                 // a skipped unit's prefetch may still be landing in the slot: copies to one address are unordered
-                asm volatile("cp.async.wait_group 0;\n" ::);
+                lamina::kernels::cp_wait<0>();
                 __syncwarp();
                 stage(q0, 0);
                 stage(q0, 1);
@@ -313,7 +313,7 @@ batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ 
             }
             const int q0n = u + 1 < u1 ? (u + 1) % n_chunks * BATCH_QC + warp * BATCH_QT : -1;
             const bool ahead = q0n >= 0 && q0n != q0;
-            asm volatile("cp.async.wait_group 1;\n" ::);   // the even leaves
+            lamina::kernels::cp_wait<1>();   // the even leaves
             __syncwarp();
             float stk[BATCH_QT][IDX_HEADS][BATCH_BT][6];
             auto leaves = [&](auto first) {
@@ -349,9 +349,9 @@ batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ 
             __syncwarp();
             if (ahead) {
                 stage(q0n, 0);
-                asm volatile("cp.async.wait_group 1;\n" ::);   // this unit's odd leaves
+                lamina::kernels::cp_wait<1>();   // this unit's odd leaves
             } else {
-                asm volatile("cp.async.wait_group 0;\n" ::);
+                lamina::kernels::cp_wait<0>();
             }
             __syncwarp();
             leaves(std::integral_constant<int, 16>());
@@ -393,11 +393,7 @@ batch_scores_kernel(const float* __restrict__ pooled, const float* __restrict__ 
     }
 }
 
-__device__ __forceinline__ int warp_sum(int v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(FULL, v, o);
-    return v;
-}
+/// (warp_sum: warp.cuh's)
 
 // The exclusive prefixes of a and b over the block's threads in thread order, and their totals.
 __device__ __forceinline__ void block_exclusive2(int a, int b, int& ea, int& eb, int& ta, int& tb, int* s_w) {

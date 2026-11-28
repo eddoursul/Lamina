@@ -63,27 +63,16 @@ __device__ __forceinline__ void tile_of(int i, int nI, int nO, int ci, int& inne
 
 template <bool BF>
 __device__ __forceinline__ void tc_mma(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    if constexpr (BF)
-        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                     "{%0,%1,%2,%3};\n"
-                     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-    else
-        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                     "{%0,%1,%2,%3};\n"
-                     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+    if constexpr (BF) lamina::kernels::mma16816_bf16(d, a, b0, b1);
+    else lamina::kernels::mma16816(d, a, b0, b1);
 }
 /// 16 bytes to shared memory in the background, `bytes` of them from g and zeros after
 __device__ __forceinline__ void tc_cp16(void* s, const void* g, unsigned bytes) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)),
-                 "l"(g), "r"(bytes));
+    lamina::kernels::cp_async16_fill(s, g, bytes);
 }
 
 /// 16 bytes to shared memory in the background
-__device__ __forceinline__ void tc_cp16f(void* s, const void* g) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
-}
+__device__ __forceinline__ void tc_cp16f(void* s, const void* g) { lamina::kernels::cp_async16(s, g); }
 
 /// A buffer holds a slab's rows without padding, a row's granules (16 bytes) in swizzled places: granule q of row r at
 /// q ^ tc_swz(r), so that the eight rows an ldmatrix reads at one q lie in eight different bank groups.

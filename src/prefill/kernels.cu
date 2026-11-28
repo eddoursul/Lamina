@@ -18,6 +18,16 @@
 namespace lamina::prefill {
 namespace {
 
+using lamina::kernels::cp_async16;
+using lamina::kernels::cp_async16_fill;
+using lamina::kernels::cp_async4;
+using lamina::kernels::cp_commit;
+using lamina::kernels::cp_wait;
+using lamina::kernels::h2;
+using lamina::kernels::ldsm4;
+using lamina::kernels::ldsm4t;
+using lamina::kernels::mma16816;
+using lamina::kernels::mma16816_bf16;
 using lamina::kernels::warp_max;
 using lamina::kernels::warp_sum;
 constexpr int N = 2560, HC = 4, D = N * HC, LR = 320;
@@ -109,21 +119,6 @@ __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __rest
 // blocks in flight (the 5070 Ti's 48 MB: 1.71x the pair at 2048 tokens against 1.41x without; on the 3090's 6 MB it
 // costs 8%).  The last tile's missing rows are zeros (a cp.async of 0 bytes): read from one row, they ran 2-3x slower.
 constexpr int UM_BM = 128, UM_BD = 32, UM_KC = 32, UM_LD = UM_KC + 8;   // tokens, columns a stream, k a slice, a row
-__device__ __forceinline__ void um_cp16(void* s, const void* g, unsigned bytes = 16) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)),
-                 "l"(g), "r"(bytes));
-}
-__device__ __forceinline__ void um_ldm4(unsigned (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(p)));
-}
-__device__ __forceinline__ void um_mma(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};\n"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
 template <bool PF>
 __global__ void __launch_bounds__(256, 2)
 gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ wu, const float* __restrict__ R,
@@ -144,13 +139,14 @@ gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ 
         for (int i = tid; i < UM_BM * (UM_KC / 8); i += 256) {
             const int r = i / (UM_KC / 8), q = i % (UM_KC / 8);
             const bool in = t0 + r < T;
-            um_cp16(&sA[buf][r][q * 8], lo16 + (in ? t0 + r : 0) * LR + kc * UM_KC + q * 8, in ? 16 : 0);
+            cp_async16_fill(&sA[buf][r][q * 8], lo16 + (in ? t0 + r : 0) * LR + kc * UM_KC + q * 8, in ? 16 : 0);
         }
         for (int i = tid; i < HC * UM_BD * (UM_KC / 8); i += 256) {
             const int r = i / (UM_KC / 8), q = i % (UM_KC / 8);
-            um_cp16(&sB[buf][r][q * 8], wu + ((int64_t) (r / UM_BD) * N + d0 + r % UM_BD) * LR + kc * UM_KC + q * 8);
+            cp_async16_fill(&sB[buf][r][q * 8],
+                            wu + ((int64_t) (r / UM_BD) * N + d0 + r % UM_BD) * LR + kc * UM_KC + q * 8, 16);
         }
-        asm volatile("cp.async.commit_group;\n" ::);
+        cp_commit();
     };
     float acc[2][HC][2][4];
 #pragma unroll
@@ -167,9 +163,9 @@ gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ 
         const int buf = kc & 1;
         if (kc + 1 < NK) {
             stage(kc + 1, buf ^ 1);
-            asm volatile("cp.async.wait_group 1;\n" ::);
+            cp_wait<1>();
         } else {
-            asm volatile("cp.async.wait_group 0;\n" ::);
+            cp_wait<0>();
         }
         __syncthreads();
 #pragma unroll
@@ -177,17 +173,16 @@ gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ 
             unsigned a[2][4];
 #pragma unroll
             for (int mt = 0; mt < 2; ++mt)
-                um_ldm4(a[mt], &sA[buf][wm * 32 + mt * 16 + (lane & 15)][ks * 16 + (lane >> 4) * 8]);
+                ldsm4(a[mt], &sA[buf][wm * 32 + mt * 16 + (lane & 15)][ks * 16 + (lane >> 4) * 8]);
 #pragma unroll
             for (int c = 0; c < HC; ++c) {
                 unsigned b[4];   // b[0..1]: columns 0-7 of the warp's 16, b[2..3]: 8-15 (k 0-7, 8-15 each)
-                um_ldm4(
-                    b,
-                    &sB[buf][c * UM_BD + wn * 16 + (lane & 7) + ((lane >> 4) << 3)][ks * 16 + ((lane >> 3) & 1) * 8]);
+                ldsm4(b,
+                      &sB[buf][c * UM_BD + wn * 16 + (lane & 7) + ((lane >> 4) << 3)][ks * 16 + ((lane >> 3) & 1) * 8]);
 #pragma unroll
                 for (int mt = 0; mt < 2; ++mt) {
-                    um_mma(acc[mt][c][0], a[mt], b[0], b[1]);
-                    um_mma(acc[mt][c][1], a[mt], b[2], b[3]);
+                    mma16816_bf16(acc[mt][c][0], a[mt], b[0], b[1]);
+                    mma16816_bf16(acc[mt][c][1], a[mt], b[2], b[3]);
                 }
             }
         }
@@ -603,10 +598,6 @@ struct alignas(16) GdnScratch {   // the prep's working set
     float gm[VPK][GCL];
 };
 constexpr int GDN_SMEM = 2 * sizeof(GdnIn) + 2 * sizeof(GdnV) + 3 * sizeof(GdnOut) + sizeof(GdnScratch);
-__device__ __forceinline__ uint32_t gh2(float lo, float hi) {
-    const __half2 v = __floats2half2_rn(lo, hi);
-    return *reinterpret_cast<const uint32_t*>(&v);
-}
 __device__ __forceinline__ void gsplit(float x, float y, uint32_t& hi, uint32_t& lo) {   // x ~ hi + lo / 2^11
     const __half2 h = __floats2half2_rn(x, y);
     const float2 f = __half22float2(h);
@@ -615,12 +606,6 @@ __device__ __forceinline__ void gsplit(float x, float y, uint32_t& hi, uint32_t&
     lo = *reinterpret_cast<const uint32_t*>(&l);
 }
 __device__ __forceinline__ uint32_t gld32(const __half* p) { return *reinterpret_cast<const uint32_t*>(p); }
-__device__ __forceinline__ void gmma(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};"
-                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
 __device__ __forceinline__ void gmmah(uint32_t (&d)[2], const uint32_t (&a)[4], uint32_t b0,
                                       uint32_t b1) {   // FP16 sums
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};"
@@ -628,28 +613,10 @@ __device__ __forceinline__ void gmmah(uint32_t (&d)[2], const uint32_t (&a)[4], 
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 __device__ __forceinline__ void ga_of(const float (&x)[4], const float (&y)[4], uint32_t (&a)[4]) {
-    a[0] = gh2(x[0], x[1]);
-    a[1] = gh2(x[2], x[3]);
-    a[2] = gh2(y[0], y[1]);
-    a[3] = gh2(y[2], y[3]);
-}
-__device__ __forceinline__ void gldsm(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(p)));
-}
-__device__ __forceinline__ void gldsm_t(uint32_t (&r)[4], const void* p) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(p)));
-}
-__device__ __forceinline__ void gcp16(void* dst, const void* src) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(dst)),
-                 "l"(src));
-}
-__device__ __forceinline__ void gcp4(void* dst, const void* src) {
-    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"((unsigned) __cvta_generic_to_shared(dst)),
-                 "l"(src));
+    a[0] = h2(x[0], x[1]);
+    a[1] = h2(x[2], x[3]);
+    a[2] = h2(y[0], y[1]);
+    a[3] = h2(y[2], y[3]);
 }
 __device__ __forceinline__ float gex2(float x) {   // 2^x, subnormal results flushed
     float y;
@@ -688,7 +655,7 @@ template <bool QK> __device__ __forceinline__ void gdn_dots(const GdnIn& in, Gdn
             uint32_t b0, b1, l0, l1;
             gsplit(k0.x, k0.y, b0, l0);
             gsplit(k1.x, k1.y, b1, l1);
-            gmma(acc[nt][kt & 1], a, b0, b1);
+            mma16816(acc[nt][kt & 1], a, b0, b1);
             if (QK) {
                 gmmah(cor[nt][kt & 1], al, b0, b1);
                 gmmah(cor[nt][kt & 1], a, l0, l1);
@@ -746,7 +713,7 @@ __device__ __forceinline__ void gdn_prep(const GdnIn& in, GdnOut& out, GdnScratc
         for (int i = 0; i < GCL; i += 2) {
             x.a[jj][tt][i] = i < tt ? bt * e[i] * kr[i] : 0.0f;
             x.a[jj][tt][i + 1] = i + 1 < tt ? bt * e[i + 1] * kr[i + 1] : 0.0f;
-            pr[i / 2] = gh2(i <= tt ? e[i] * qr[i] : 0.0f, i + 1 <= tt ? e[i + 1] * qr[i + 1] : 0.0f);
+            pr[i / 2] = h2(i <= tt ? e[i] * qr[i] : 0.0f, i + 1 <= tt ? e[i + 1] * qr[i + 1] : 0.0f);
         }
         float* s = out.tp[jj].s;
         s[tt] = gex2(gt * LOG2E);
@@ -794,13 +761,13 @@ gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const f
                     const int i = lt + k * GLOAD, w = i / (GCL * (S / 4)), t = (i / (S / 4)) % GCL,
                               r4 = (i % (S / 4)) * 4;
                     float* d = w ? &b.k[t][r4] : &b.q[t][r4];
-                    if (t < n) gcp16(d, hc + t * C + (w ? HK * S : 0) + kh * S + r4);
+                    if (t < n) cp_async16(d, hc + t * C + (w ? HK * S : 0) + kh * S + r4);
                     else *reinterpret_cast<float4*>(d) = make_float4(0.f, 0.f, 0.f, 0.f);
                 }
                 for (int i = lt; i < 2 * VPK * GCL; i += GLOAD) {
                     const int w = i / (VPK * GCL), jj = (i / GCL) % VPK, t = i % GCL;
                     float* d = w ? &b.beta[jj][t] : &b.gate[jj][t];
-                    if (t < n) gcp4(d, (w ? beta : gate) + (size_t) (t0 + t) * HV + kh + jj * HK);
+                    if (t < n) cp_async4(d, (w ? beta : gate) + (size_t) (t0 + t) * HV + kh + jj * HK);
                     else *d = 0.0f;
                 }
             }
@@ -813,18 +780,18 @@ gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const f
                     const int i = lt + k * GLOAD, jj = i / (GCL * (GCW / 4)), t = (i / (GCW / 4)) % GCL;
                     const int c4 = (i % (GCW / 4)) * 4;
                     float* d = &v.v[jj][t][c4];
-                    if (t < n) gcp16(d, hc + t * C + 2 * HK * S + (kh + jj * HK) * S + cs * GCW + c4);
+                    if (t < n) cp_async16(d, hc + t * C + 2 * HK * S + (kh + jj * HK) * S + cs * GCW + c4);
                     else *reinterpret_cast<float4*>(d) = make_float4(0.f, 0.f, 0.f, 0.f);
                 }
             }
-            asm volatile("cp.async.commit_group;\n" ::);
+            cp_commit();
         };
         copy(0, 0);
         copy(1, -1);
-        asm volatile("cp.async.wait_group 1;\n" ::);
+        cp_wait<1>();
         __syncthreads();
         for (int ch = 0; ch < nch; ++ch) {
-            asm volatile("cp.async.wait_group 0;\n" ::);
+            cp_wait<0>();
             __syncthreads();
             copy(ch + 2, ch + 1);
         }
@@ -866,12 +833,12 @@ gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const f
         for (int kt = 0; kt < S / 16; ++kt) {
             uint32_t a[4], kb[4], qb[4];
             ga_of(s[2 * kt], s[2 * kt + 1], a);
-            gldsm(kb, &b.k[wr][16 * kt + wc]);
-            gldsm(qb, &b.q[wr][16 * kt + wc]);
-            gmma(w[0], a, kb[0], kb[1]);
-            gmma(w[1], a, kb[2], kb[3]);
-            gmma(qs[0], a, qb[0], qb[1]);
-            gmma(qs[1], a, qb[2], qb[3]);
+            ldsm4(kb, &b.k[wr][16 * kt + wc]);
+            ldsm4(qb, &b.q[wr][16 * kt + wc]);
+            mma16816(w[0], a, kb[0], kb[1]);
+            mma16816(w[1], a, kb[2], kb[3]);
+            mma16816(qs[0], a, qb[0], qb[1]);
+            mma16816(qs[1], a, qb[2], qb[3]);
         }
         // B^T = beta (V^T - exp(gamma) W^T); element e of tile nt: column g + 8 (e >> 1), token 8 nt + 2 q + (e & 1)
         float bt[GCL / 8][4];
@@ -889,7 +856,7 @@ gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const f
 #pragma unroll
         for (int nt = 0; nt < GCL / 8; ++nt) {
             const __half* tr = &b.tp[j].t[8 * nt + g][2 * q];
-            gmma(d[nt], ab, gld32(tr), gld32(tr + 8));
+            mma16816(d[nt], ab, gld32(tr), gld32(tr + 8));
         }
         ga_of(d[0], d[1], ad);
         float* oc = out + (size_t) t0 * HV * S + head * S + cb + g;   // the chunk's first token, the lane's column
@@ -898,7 +865,7 @@ gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const f
 #pragma unroll
             for (int e = 0; e < 4; ++e) o[nt][e] = scj[8 * nt + 2 * q + (e & 1)] * qs[nt][e];
             const __half* pr = &b.tp[j].p[8 * nt + g][2 * q];
-            gmma(o[nt], ad, gld32(pr), gld32(pr + 8));
+            mma16816(o[nt], ad, gld32(pr), gld32(pr + 8));
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
                 const int t = 8 * nt + 2 * q + (e & 1);
@@ -915,14 +882,14 @@ gdn_chunk_kernel(float* __restrict__ state, const float* __restrict__ h, const f
 #pragma unroll
         for (int nt = 0; nt < S / 8; nt += 2) {
             uint32_t kb[4];
-            gldsm_t(kb, &b.k[ur][8 * nt + uc]);
+            ldsm4t(kb, &b.k[ur][8 * nt + uc]);
 #pragma unroll
             for (int e = 0; e < 4; ++e) {
                 s[nt][e] *= eL;
                 s[nt + 1][e] *= eL;
             }
-            gmma(s[nt], ad, kb[0], kb[1]);
-            gmma(s[nt + 1], ad, kb[2], kb[3]);
+            mma16816(s[nt], ad, kb[0], kb[1]);
+            mma16816(s[nt + 1], ad, kb[2], kb[3]);
         }
     }
 #pragma unroll

@@ -278,10 +278,7 @@ __device__ __forceinline__ void mma_u8s8(int (&d)[4], const unsigned (&a)[4], un
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 __device__ __forceinline__ void mma_s8s8(int (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
-    asm volatile(
-        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-        : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
-        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+    lamina::kernels::mma16832_s8(d, a, b0, b1);
 }
 __device__ __forceinline__ int exp_of(float x) { return (__float_as_int(x) >> 23) & 255; }   // x < 2^(E - 126)
 __device__ __forceinline__ float pow2f(int e) { return __int_as_float((e + 127) << 23); }    // -126 <= e <= 127
@@ -455,9 +452,9 @@ attn_mma_kernel(const float* __restrict__ q, QsaAttnPools p, const int32_t* __re
                                       : nullptr,
                           cl < n_here);
             }
-            asm volatile("cp.async.commit_group;\n" ::);
+            lamina::kernels::cp_commit();
             if (i >= 1) {
-                asm volatile("cp.async.wait_group 1;\n" ::);
+                lamina::kernels::cp_wait<1>();
                 bar_arrive(FULL_K + (i - 1) % KS, NKB);
                 bar_arrive(FULL_V + (i - 1) % VS, NVB);
             }
@@ -466,7 +463,7 @@ attn_mma_kernel(const float* __restrict__ q, QsaAttnPools p, const int32_t* __re
             pg1 = c0 + 2 * PT + cl < n_ids ? p.page_table[id2 / page_size] : 0;
             id2 = c0 + 3 * PT + cl < n_ids ? ids[c0 + 3 * PT + cl] : 0;
         }
-        asm volatile("cp.async.wait_group 0;\n" ::);
+        lamina::kernels::cp_wait<0>();
         bar_arrive(FULL_K + (n_tiles - 1) % KS, NKB);
         bar_arrive(FULL_V + (n_tiles - 1) % VS, NVB);
     } else if (warp < 4) {

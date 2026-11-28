@@ -29,10 +29,8 @@ __device__ __forceinline__ void mma16(int (&c)[4], int a0, int a1, int b0) {
                  : "r"(a0), "r"(a1), "r"(b0));
 }
 __device__ __forceinline__ void mma32(int (&c)[4], int a0, int a1, int a2, int a3, int b0, int b1) {
-    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
-                 "{%0,%1,%2,%3};"
-                 : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
-                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+    const unsigned a[4] = {(unsigned) a0, (unsigned) a1, (unsigned) a2, (unsigned) a3};
+    mma16832_s8(c, a, (unsigned) b0, (unsigned) b1);
 }
 __device__ __forceinline__ void cp16(unsigned dst, const void* src) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(dst), "l"(src));
