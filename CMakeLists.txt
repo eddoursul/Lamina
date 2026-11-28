@@ -182,7 +182,9 @@ target_compile_definitions(lamina_warnings INTERFACE $<$<PLATFORM_ID:Windows>:_C
 if(LAMINA_WERROR)
   target_compile_options(lamina_warnings INTERFACE
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<BOOL:${MSVC}>>:/WX>
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<BOOL:${MSVC}>>>:-Werror>)
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<BOOL:${MSVC}>>>:-Werror>
+    # the CUDA sources' host code too (their /W4 above): a warning there printed and passed before
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<PLATFORM_ID:Windows>>:-Xcompiler=/WX>)
 endif()
 
 # Files built into a program (cmake/embed_files.cmake, include/lamina/embedded.hpp): `out`, a source of the build tree,
