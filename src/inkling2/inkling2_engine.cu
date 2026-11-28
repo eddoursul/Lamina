@@ -41,7 +41,8 @@
 #include "lamina/platform/slice_read.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
 #include "lamina/program/gpu_cards.hpp"
-#include "lamina/program/host_sampling.hpp"
+#include "lamina/program/head_sampler.hpp"
+#include "lamina/program/sampling.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/spec/suffix_drafter.hpp"
 
@@ -1375,11 +1376,11 @@ struct Rows {
             *ent_tok = nullptr;
     unsigned long long* grp_ptr = nullptr;
     void* scratch = nullptr;
-    // the head rows' tokens by the request's sampler, and 1 where a row's logits hold a non-finite one
-    int32_t *pick = nullptr, *bad = nullptr;
+    // 1 where a head row's logits hold a non-finite one
+    int32_t* bad = nullptr;
     // pinned host rows
     float* emb_h = nullptr;
-    int32_t *step_h = nullptr, *pick_h = nullptr;
+    int32_t* step_h = nullptr;
     // a chunk's: the inputs' and the attention output's MMQ images a layout, the routed entries by expert (their
     // token rows, their experts, each expert's bounds), their gate/up rows and hidden rows, a window visit's cells
     uint8_t *xq[3][3] = {}, *aq[3] = {}, *tq = nullptr, *hq = nullptr, *wk = nullptr, *wv = nullptr;
@@ -2042,9 +2043,7 @@ struct Engine {
         R.probs = dzero<float>(T * E);
         R.ctl_h = dzero<float>(3 * T * (size_t) std::max<int64_t>(g.gate_rank, 1));
         R.logits = dzero<float>(Th * (size_t) g.n_vocab);
-        R.pick = dzero<int32_t>(2 * Th);
-        R.bad = R.pick + Th;
-        R.pick_h = hzero<int32_t>(2 * Th);
+        R.bad = dzero<int32_t>(Th);
         if (sp != nullptr) {
             const size_t L = (size_t) sp->n_layer, KVs = (size_t) sp->HK * (size_t) sp->D;
             R.f_fused = dzero<float>((L + 1) * T * N);
@@ -7235,52 +7234,17 @@ struct Engine {
         lg.assign(logits_h, logits_h + V);
     }
 
-    // ---- the request's sampler: Flash-Next's chain on the device (lamina/kernels/sampler.hpp), a token from each
-    // head row.  A row's draw is Philox(seed, the position its token takes), so a window's rows draw what a row at a
-    // time would.
+    // ---- the request's sampler: the device's chain (lamina/program/head_sampler.hpp), a token from each head row.  A
+    // row's draw is Philox(seed, the position its token takes), so a window's rows draw what a row at a time would.
     lamina::kernels::SamplerParams smp;
-    static constexpr int kHistCap = 4096;   // the penalties' window at most
-    int hist_n = 0;                         // its tokens (0: no penalties)
-    int32_t* hist_d = nullptr;              // [kMaxT][kHistCap], made by the first request with penalties
-    std::vector<int32_t> hist_stage;
-    void sampling(const lamina::program::Sampling& q) {
-        smp = {};
-        smp.top_k = q.top_k;
-        smp.top_p = q.top_p;
-        smp.min_p = q.min_p;
-        smp.temperature = q.temperature;
-        smp.greedy = q.temperature <= 0.f;
-        smp.penalty_repeat = q.repeat;
-        smp.penalty_freq = q.freq;
-        smp.penalty_present = q.present;
-        const bool pen = q.repeat != 1.f || q.freq != 0.f || q.present != 0.f;
-        hist_n = !pen || q.last_n == 0 ? 0 : q.last_n < 0 ? kHistCap : std::min(q.last_n, kHistCap);
-        smp.penalty_last_n = hist_n;
-        smp.seed = lamina::program::draw_seed(q.seed);
-        if (hist_n > 0 && hist_d == nullptr) {
-            hist_d = dzero<int32_t>((size_t) kMaxT * kHistCap);
-            hist_stage.assign((size_t) kMaxT * kHistCap, -1);
-        }
-    }
+    lamina::program::HeadSampler sampler{kMaxT};
+    void sampling(const lamina::program::Sampling& q) { smp = lamina::program::sampler_params(q); }
     /// A token from each of the last head's first `rows` rows, into out: row t's is the one at position `at + t` (its
     /// draw's number) and follows tail[0..n_tail), then win[0..t] (the penalties' history; `win` null: the tail alone,
     /// one row).  -1 where a row's logits hold a non-finite one.
     void pick(int rows, int64_t at, const int32_t* tail, int64_t n_tail, const int32_t* win, int32_t* out) {
         Rows& R = *lg_rows;
-        const int32_t* hist = nullptr;
-        if (hist_n > 0) {
-            if (win != nullptr) lamina::kernels::penalty_rows(tail, n_tail, win, rows, hist_n, hist_stage.data());
-            else lamina::kernels::penalty_rows(tail, n_tail - 1, tail + n_tail - 1, 1, hist_n, hist_stage.data());
-            CK(cudaMemcpyAsync(hist_d, hist_stage.data(), (size_t) rows * (size_t) hist_n * 4, cudaMemcpyHostToDevice,
-                               st));
-            hist = hist_d;
-        }
-        smp.counter = (uint64_t) at;
-        lamina::kernels::sample_tokens(R.logits, rows, (int) m->g.n_vocab, hist, hist_n, smp, R.pick, st);
-        const int Th = R.head_rows();
-        CK(cudaMemcpyAsync(R.pick_h, R.pick, (size_t) 2 * Th * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaStreamSynchronize(st));
-        for (int t = 0; t < rows; ++t) out[t] = R.pick_h[Th + t] != 0 ? -1 : R.pick_h[t];
+        sampler.pick(smp, R.logits, rows, (int) m->g.n_vocab, at, tail, n_tail, win, st, out, R.bad);
     }
 
     // ---- the sequence's start, and the state to and from the prompt cache's buffers

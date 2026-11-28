@@ -37,7 +37,8 @@
 #include "lamina/platform/memory.hpp"
 #include "lamina/platform/slice_read.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
-#include "lamina/program/host_sampling.hpp"
+#include "lamina/program/head_sampler.hpp"
+#include "lamina/program/sampling.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/spec/suffix_drafter.hpp"
 
@@ -3148,9 +3149,9 @@ struct Engine {
     /// last): up to n drafts (the MTP block's or DFly's), the window [x, drafts] through the trunk, row k's target
     /// token from `pick` (its logits; the history of the tokens kept so far) while it matches draft k; the state then
     /// ends after the kept drafts.
-    /// `rows` becomes the window's kept tokens (x and the drafts kept), `next` the first target token not a draft (or
-    /// -1: sample it from `lg`, the window's last row's logits), and `kept` the drafts kept, each passed to `keep`
-    /// first (false: stop there, the state up to it).
+    /// `rows` becomes the window's kept tokens (x and the drafts kept), `next` the token after them (the first row's
+    /// pick that is no draft, or the last row's; -1 where that row's logits hold a non-finite one), and `kept` the
+    /// drafts kept, each passed to `keep` with its row first (false: stop there, the state up to it; next -2).
     struct Window {
         std::vector<int32_t> drafts;
         int kept = 0;
@@ -3179,8 +3180,29 @@ struct Engine {
         out.resize(k > n ? (size_t) k : 0);
         return out;
     }
-    template <class Pick, class Keep>
-    Window drafted(std::vector<int32_t>& rows, int n, std::vector<float>& lg, Pick pick, Keep keep) {
+    /// The rows' tokens by a request's chain (lamina/program/head_sampler.hpp): row k's at position at + k, after
+    /// tail[0..n_tail) and win[0..k] (win null: one row, the tail's last token its win[0]); -1 for a non-finite row
+    lamina::program::HeadSampler sampler{kMaxT};
+    void pick_rows(const lamina::kernels::SamplerParams& sp, int row0, int rows, int64_t at, const int32_t* tail,
+                   int64_t n_tail, const int32_t* win, int32_t* out) {
+        sampler.pick(sp, logits + (size_t) row0 * m->g.n_vocab, rows, (int) m->g.n_vocab, at, tail, n_tail, win, st,
+                     out);
+    }
+    /// The token after the state's last one from the last forward's logits row `row`: at position pos(), after `hist`
+    /// (the text before it, its last token last)
+    int32_t pick_next(const lamina::kernels::SamplerParams& sp, int row, const std::vector<int32_t>& hist) {
+        int32_t t = -1;
+        pick_rows(sp, row, 1, pos(), hist.data(), (int64_t) hist.size(), nullptr, &t);
+        return t;
+    }
+    /// A row of logits the host holds (a snapshot's) back into the logits' row 0, for pick_next
+    void logits_in(const std::vector<float>& lg) {
+        CK(cudaMemcpyAsync(logits, lg.data(), lg.size() * 4, cudaMemcpyHostToDevice, st));
+    }
+    /// `sp`: the request's chain; tail[0..n_tail): the text before x (the penalties' history, x not in it)
+    template <class Keep>
+    Window drafted(std::vector<int32_t>& rows, int n, const lamina::kernels::SamplerParams& sp, const int32_t* tail,
+                   int64_t n_tail, Keep keep) {
         Window w;
         const int64_t P = pos();
         const auto td = Clock::now();
@@ -3197,17 +3219,19 @@ struct Engine {
         std::vector<int32_t> win{rows.back()};
         win.insert(win.end(), w.drafts.begin(), w.drafts.end());
         forward(win.data(), (int) win.size());
+        // row k's token at position P + 1 + k, after the text and the window's tokens before it: a draft passes only as
+        // the token the request's chain picks there, so the text is the one a token at a time gives
+        int32_t picks[kMaxT];
+        pick_rows(sp, 0, (int) win.size(), P + 1, tail, n_tail, win.data(), picks);
         bool stopped = false;
         for (size_t k = 0; k <= w.drafts.size(); ++k) {
-            host_logits((int) k, lg);
-            if (k == w.drafts.size()) break;   // every draft kept: lg is the window's last row
-            const int32_t t = pick(lg);
-            if (t != w.drafts[k]) {
+            const int32_t t = picks[k];
+            if (k == w.drafts.size() || t != w.drafts[k]) {
                 w.next = t;
                 break;
             }
             ++w.kept;
-            if (!keep(t)) {
+            if (!keep(t, (int) k)) {
                 stopped = true;
                 break;
             }
@@ -5576,6 +5600,8 @@ struct Serve {
         if (fresh > 0) {
             E.host_logits(last, lg);
             E.snapshot(lg);
+        } else {   // (the snapshot's logits: the first pick's, back on the device)
+            E.logits_in(lg);
         }
         E.settle(false);
         const int64_t landed0 = E.moves_landed;
@@ -5583,7 +5609,7 @@ struct Serve {
                                                                                                      // the prompt's
                                                                                                      // routing, beside
                                                                                                      // the answer
-        std::mt19937_64 rng(lamina::program::draw_seed(smp.seed));
+        const lamina::kernels::SamplerParams sp = lamina::program::sampler_params(smp);
         std::vector<int32_t> hist;   // the penalties' history: the prompt's text (as llama.cpp's sampler, no picture)
         for (const int32_t t : ids)
             if (t >= 0) hist.push_back(t);
@@ -5594,7 +5620,9 @@ struct Serve {
         const char* finish = "length";
         long long offered = 0, kept = 0;
         std::vector<int32_t> rows;   // drafted: the tokens the MTP block has not caught up with
-        int32_t pre = -1;            // a target token sampled already (a window's first one that was no draft)
+        // the next token: the prompt's last row's pick (the read's logits row, or row 0 for a snapshot's), then each
+        // window's next
+        int32_t nx = E.pick_next(sp, fresh > 0 ? last : 0, hist);
         // a token out: false when the answer ends there (finish set)
         auto emit = [&](int32_t t) {
             serve_print("T %d\n", t);
@@ -5616,8 +5644,6 @@ struct Serve {
         };
         while (true) {
             E.step_moves();
-            const int nx = pre >= 0 ? pre : lamina::program::sample(lg, smp, hist, rng);
-            pre = -1;
             if (nx < 0) {
                 finish = "nonfinite";
                 break;
@@ -5628,17 +5654,17 @@ struct Serve {
                 rows.push_back(nx);
                 const int n = (int) std::min<long long>(drafts, max_new - produced);
                 bool going = true;
-                const Engine::Window w = E.drafted(
-                    rows, n, lg, [&](std::vector<float>& l) { return lamina::program::sample(l, smp, hist, rng); },
-                    [&](int32_t t) { return going = emit(t); });
+                // (the window's history: the text before x, its first row's token)
+                const Engine::Window w = E.drafted(rows, n, sp, hist.data(), (int64_t) hist.size() - 1,
+                                                   [&](int32_t t, int) { return going = emit(t); });
                 offered += (long long) w.drafts.size();
                 kept += w.kept;
                 if (!going) break;
-                pre = w.next;
+                nx = w.next;
             } else {
                 const int32_t one = nx;
                 E.forward(&one, 1);
-                E.host_logits(0, lg);
+                nx = E.pick_next(sp, 0, hist);
             }
             if (produced / 128 != before / 128) E.plan_moves(E.move_budget, true);
             E.maybe_lend(produced);
@@ -5958,28 +5984,35 @@ int run_engine(int argc, char** argv, bool check_only) {
     std::vector<int32_t> gen;
     int64_t offered = 0, kept = 0, windows = 0;
     if (E.drafts_on && forced.empty()) {   // drafted: windows of the token and the drafter's drafts, greedy
+        const lamina::kernels::SamplerParams greedy = lamina::program::sampler_params({});
         std::vector<int32_t> rows;
         int32_t x = argmax(lg);
         while (true) {
             E.step_moves();
+            if (x < 0) {
+                std::fprintf(stderr, "lamina: non-finite logits after %zu tokens: generation ends\n", gen.size());
+                break;
+            }
             gen.push_back(x);
             if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
             if ((int) gen.size() >= n_gen) break;
             rows.push_back(x);
             const int n = std::min(drafts, n_gen - (int) gen.size());
             const size_t before = gen.size();
-            const Engine::Window w = E.drafted(
-                rows, n, lg, [](const std::vector<float>& l) { return argmax(l); },
-                [&](int32_t t) {
-                    gen.push_back(t);
-                    if (ff) std::fwrite(lg.data(), 4, lg.size(), ff);
-                    return (int) gen.size() < n_gen;
-                });
+            const Engine::Window w = E.drafted(rows, n, greedy, nullptr, 0, [&](int32_t t, int k) {
+                gen.push_back(t);
+                if (ff) {
+                    E.host_logits(k, lg);
+                    std::fwrite(lg.data(), 4, lg.size(), ff);
+                }
+                return (int) gen.size() < n_gen;
+            });
             ++windows;
             offered += (int64_t) w.drafts.size();
             kept += w.kept;
             if ((int) gen.size() >= n_gen) break;
-            x = w.next >= 0 ? w.next : argmax(lg);
+            x = w.next;
+            if (ff) E.host_logits(w.kept, lg);   // (the row x came from)
             if (gen.size() / 128 != before / 128) E.plan_moves(E.move_budget, true);
             E.maybe_lend((int64_t) gen.size());
         }

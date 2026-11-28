@@ -138,7 +138,7 @@ not thinking: 0.7, 0.8, 20, presence_penalty 1.5). The presets sample at tempera
 
 | Option | Key | Default | What it does |
 | --- | --- | --- | --- |
-| `--temperature T` (`--temp`) | `sampling.temperature` | | 0: greedy. Sampled, fewer drafts pass than greedy: Flash-Next thinks 9-10% slower and writes code 5-9% slower. |
+| `--temperature T` (`--temp`) | `sampling.temperature` | | 0: greedy. Sampled, fewer drafts pass than greedy: Flash-Next thinks 9-10% slower and writes code 5-9% slower; Qwen3.6 as fast as greedy, Qwen3.8-27B thinks 7% slower and edits as fast. |
 | `--top-p P` | `sampling.top_p` | | |
 | `--top-k K` | `sampling.top_k` | | 1-64. |
 | `--min-p P` | `sampling.min_p` | | |

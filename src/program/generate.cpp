@@ -57,8 +57,8 @@
 #include "lamina/prefill/split.hpp"
 #include "lamina/program/engine.hpp"
 #include "lamina/program/gpu_cards.hpp"
-#include "lamina/program/host_sampling.hpp"
 #include "lamina/program/options.hpp"
+#include "lamina/program/sampling.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/spec/suffix_drafter.hpp"
 
@@ -4559,8 +4559,7 @@ int lamina::program::run(int argc, char** argv) {
                              : "");
         }
         // the penalty-history buffer: one row per window row (`penalty_rows`), allocated once for the widest window
-        constexpr int kPenaltyWindowCap = 4096;
-        constexpr size_t kHistSlots = (size_t) kPenaltyWindowCap * (size_t) lamina::kernels::kVerifyMaxT;
+        constexpr size_t kHistSlots = (size_t) lamina::program::kPenaltyWindow * (size_t) lamina::kernels::kVerifyMaxT;
         int32_t* d_hist = nullptr;
         std::vector<int32_t> hist_stage(kHistSlots, -1);
         if (cudaMalloc(&d_hist, kHistSlots * sizeof(int32_t)) != cudaSuccess) {
@@ -4744,11 +4743,7 @@ int lamina::program::run(int argc, char** argv) {
             // penalty_repeat=F, penalty_freq=F, penalty_present=F, seed=N, spec_min_p=F (this request's draft floor),
             // score=ID:ID:... (an `LP` line with those ids' log-probabilities after the prompt, before the first `T`);
             // unknown keys are skipped.  Absent keys: greedy, no penalties.
-            float req_temperature = 0.0f, req_top_p = 1.0f, req_min_p = 0.0f;
-            int req_top_k = 20;   // the sampled path keeps 1..64 candidates
-            unsigned long long req_seed = 0;
-            float req_penalty_repeat = 1.0f, req_penalty_freq = 0.0f, req_penalty_present = 0.0f;
-            int req_penalty_last_n = 0;
+            lamina::program::Sampling req_smp;   // the sampler's keys
             double req_spec_min_p = o.spec_min_p;
             std::vector<int32_t> req_score;   // score=ID:ID:...: see the first window
             // img_keys=<hex>,<hex>,...: each picture's key from the server (its normalized bytes' hash), in prompt
@@ -4768,17 +4763,8 @@ int lamina::program::run(int argc, char** argv) {
                     }
                     const std::string key = kv.substr(0, eq);
                     const char* v = kv.c_str() + eq + 1;
-                    const float fv = std::strtof(v, nullptr);
-                    if (key == "temperature") req_temperature = fv;
-                    else if (key == "top_p") req_top_p = fv;
-                    else if (key == "top_k") req_top_k = std::atoi(v);
-                    else if (key == "min_p") req_min_p = fv;
-                    else if (key == "penalty_last_n") req_penalty_last_n = std::atoi(v);
-                    else if (key == "penalty_repeat") req_penalty_repeat = fv;
-                    else if (key == "penalty_freq") req_penalty_freq = fv;
-                    else if (key == "penalty_present") req_penalty_present = fv;
-                    else if (key == "seed") req_seed = std::strtoull(v, nullptr, 10);
-                    else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
+                    if (req_smp.set(key, v)) continue;
+                    if (key == "spec_min_p") req_spec_min_p = std::clamp((double) std::strtof(v, nullptr), 0.0, 1.0);
                     else if (key == "img_keys") {
                         req_img_keys.clear();
                         for (const char* q = v; *q != '\0';) {
@@ -4924,20 +4910,10 @@ int lamina::program::run(int argc, char** argv) {
                     kv_short = 0;
                 }
             }
-            lamina::kernels::SamplerParams req_sp;
-            req_sp.greedy = req_temperature <= 0.0f;
-            req_sp.temperature = req_temperature;
-            req_sp.top_p = req_top_p;
-            req_sp.top_k = req_top_k;
-            req_sp.seed = lamina::program::draw_seed(req_seed);
-            req_sp.min_p = std::clamp(req_min_p, 0.0f, 1.0f);
-            req_sp.penalty_last_n = std::max(req_penalty_last_n, 0);
-            req_sp.penalty_repeat = req_penalty_repeat;
-            req_sp.penalty_freq = req_penalty_freq;
-            req_sp.penalty_present = req_penalty_present;
+            const lamina::kernels::SamplerParams req_sp = lamina::program::sampler_params(req_smp);
             ver.set_sampling(req_sp);
-            mtp.set_sampling(req_sp);   // a sampled request's drafts are kept by their chance to pass
-            const int hist_n = std::min(req_sp.penalty_last_n, kPenaltyWindowCap);
+            mtp.set_sampling(req_sp);                   // a sampled request's drafts are kept by their chance to pass
+            const int hist_n = req_sp.penalty_last_n;   // (kPenaltyWindow at most)
             ver.set_history(hist_n > 0 ? d_hist : nullptr, hist_n);
             req_tiers = tier_counters();
             const Clock::time_point r0 = Clock::now();
@@ -5794,13 +5770,13 @@ int lamina::program::run(int argc, char** argv) {
             return 1;
         }
         if (o.temperature > 0.0) {   // a sampled run: its windows draw as a request with these settings does
-            lamina::kernels::SamplerParams sp;
-            sp.greedy = false;
-            sp.temperature = (float) o.temperature;
-            sp.top_p = (float) o.top_p;
-            sp.top_k = o.top_k;
-            sp.min_p = std::clamp((float) o.min_p, 0.0f, 1.0f);
-            sp.seed = lamina::program::draw_seed(o.seed);
+            lamina::program::Sampling run_smp;
+            run_smp.temperature = (float) o.temperature;
+            run_smp.top_p = (float) o.top_p;
+            run_smp.top_k = o.top_k;
+            run_smp.min_p = (float) o.min_p;
+            run_smp.seed = o.seed;
+            const lamina::kernels::SamplerParams sp = lamina::program::sampler_params(run_smp);
             ver.set_sampling(sp);
             mtp.set_sampling(sp);
         }

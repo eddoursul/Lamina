@@ -31,8 +31,9 @@ predate: an RTX 5060 Ti in the Gyro-L section's runs, now a second RTX 3090, the
   path: on fixed text at one build it generates 10-20% slower than IQ3_S and 9-31% faster than UD-Q4_K_XL, reads long prompts
   within 3% of both, and takes IQ3_S's RAM. On human text, in Lamina, it stands closer to UD-Q4_K_XL than IQ3_S does.
 - [Qwen3.6-35B-A3B](#qwen36-35b-a3b), its layers split over both GPUs: generation 1-9% faster than llama.cpp's with
-  both GPUs, long prompts 2-8% slower. [Qwen3.8-27B](#qwen38-27b) (UD-Q6_K_M, the full context on both GPUs): Lamina writes code 29%
-  faster than llama.cpp, thinks 48% faster, edits 23% faster and reads prompts 4-13% faster.
+  both GPUs, long prompts 2-8% slower; sampled at its config's settings as fast as greedy. [Qwen3.8-27B](#qwen38-27b)
+  (UD-Q6_K_M, the full context on both GPUs): Lamina writes code 29% faster than llama.cpp, thinks 48% faster, edits
+  23% faster and reads prompts 4-13% faster.
 - [Hy4-flash](#hy4-flash) (Tencent's model, its Q4_K_M with 83 GiB of experts over the three GPUs and the RAM):
   Lamina writes 4.7-6.1x as fast as llama.cpp's PR #32517 and reads prompts 17-31x as fast (its 64K prompt in 35 s
   against 18 minutes).
@@ -304,6 +305,11 @@ Lamina generates 67% of its speed after a short one, llama.cpp 72%. A follow-up 
 conversation's last checkpoint where its history differs from what the engine holds (0.1-0.3 s at 16-18K tokens), and
 a conversation another request replaced comes back from RAM.
 
+Sampled with the config's settings (temperature 0.7, top_p 0.95, top_k 20; the same requests, three seeds, medians,
+measured on 2026-11-28), Lamina with both GPUs thinks at 218.5 t/s (greedy 216.7), writes code at 245.9 (246.6) and
+edits at 245.6 (245.5): a sampled request drafts as a greedy one does, a draft passing only as the token drawn. Before
+2026-11-28 the path drafted for greedy requests alone, and sampled at 115.7 / 127.3 / 114.1 t/s.
+
 Agreement with llama.cpp (every expert in VRAM, 8,192 cells): along llama.cpp's own greedy
 text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 5.8e-4 / 2.0e-3 / 7.5e-7 (a 27-token
 coding request, the thinking task, the edit; 138 / 400 / 400 positions), where llama.cpp's CPU backend is 5.1e-4 /
@@ -332,6 +338,9 @@ the prompt cache off.
 
 The verify windows' products are tensor-core kernels for the K-quant matrices, which cost about the same at 2-8 tokens
 as at one, so a step verifies up to 8 tokens (7.4 on the edit, which quotes its prompt; 4.3 on the code request).
+Sampled with the config's settings (three seeds, medians, measured on 2026-11-28) Lamina thinks at 58.0 t/s (greedy
+62.2), writes code at 113.6 (98.3; the sampled answers are other texts, 87.8-114.3 over the seeds) and edits at 154.0
+(154.4); before 2026-11-28, when the path drafted for greedy requests alone, at 31.6 / 32.5 / 31.4.
 Llama.cpp reads a chunk's micro-batches on both GPUs at once too. With the 3090 first instead of the 5070 Ti (2,048-token
 chunks), Lamina's prompts read ~12% slower (the 5070 Ti, the faster at their products, takes fewer layers) and its
 generation is ~3% faster. VRAM: 13.9 GiB on the 5070 Ti (1.3 left free, the desktop taking 0.6), 21.9 on the 3090.

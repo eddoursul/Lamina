@@ -38,7 +38,8 @@
 #include "lamina/platform/memory.hpp"
 #include "lamina/prefill/gemm.hpp"
 #include "lamina/prefill/moe_mmq.hpp"
-#include "lamina/program/host_sampling.hpp"
+#include "lamina/program/head_sampler.hpp"
+#include "lamina/program/sampling.hpp"
 #include "lamina/program/serve_io.hpp"
 #include "lamina/qwen35/engine.hpp"
 #include "q36_attn.cuh"
@@ -1793,6 +1794,8 @@ struct Engine {
     // verify windows (T <= kVerify): the GDN inputs of every row per layer, kept for the commit
     static constexpr int kVerify = 8;
     std::vector<float*> v_qkv, v_hc, v_alpha, v_beta;
+    lamina::program::HeadSampler sampler{kVerify};   // a sampled request's picks from the head's rows (the last
+                                                     // stage's)
     // the MTP block (when loaded)
     float *mtp_cat = nullptr, *hmtp = nullptr, *logits_m = nullptr;
     int32_t *tok_m = nullptr, *pos0_m = nullptr, *pick_m = nullptr;
@@ -3987,12 +3990,6 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         for (int r = 0; r < T; ++r) mtp_pick[r] = hrow[32 + r];
     }
-    /// Row r's logits of the last step_rows, on the host.
-    void host_logits_row(int r, std::vector<float>& out) {
-        out.resize((size_t) m->g.n_vocab);
-        CK(cudaMemcpyAsync(out.data(), logits + (size_t) r * m->g.n_vocab, out.size() * 4, cudaMemcpyDeviceToHost, st));
-        CK(cudaStreamSynchronize(st));
-    }
 
     /// Session dst takes session src's state: the recurrent state, the cache's first src.pos cells, the position, the
     /// pictures' offset (for a conversation read in one session that continues in another).
@@ -4321,15 +4318,19 @@ struct Engine {
     /// the MTP seed rows of a prompt chunk: a buffer the block's own forward does not use (`moe_out`, [tmax][N])
     float* mtp_seed() { return moe_out; }
 
-    /// One speculative step with D MTP drafts (greedy): `x` is the next token (decided, not processed); `fix` the
-    /// tokens of the rows the block must redo first (the drafts the last window accepted, seeded by hmain rows
-    /// 0 .. fix.size() - 1 of that window).  Drafts d1 .. dD, then the window [x, d1 .. dD] through the main model;
-    /// returns the accepted count a and writes the picks of rows 0 .. a (row a's pick is the token after them).
+    /// One speculative step with D MTP drafts (the draft head's greedy picks): `x` is the next token (decided, not
+    /// processed); `fix` the tokens of the rows the block must redo first (the drafts the last window accepted, seeded
+    /// by hmain rows 0 .. fix.size() - 1 of that window).  Drafts d1 .. dD, then the window [x, d1 .. dD] through the
+    /// main model; returns the accepted count a and writes the picks of rows 0 .. a (row a's pick is the token after
+    /// them).  The picks are the rows' greedy ones, or with `sp` a sampled request's: row t's token by its chain at
+    /// the position it takes (pos + 1 + t), after `hist` (the text the state holds, x last) and the drafts before it,
+    /// so a draft passes only as the token drawn and the text is the one a token at a time draws.
     /// `cancel`: a stop asked for before the state moves keeps only x (the caller then emits no draft), so that a
     /// request stopped mid-answer leaves the state at the tokens it has shown: a conversation that continues from them
     /// (the server's hand-over of a stopped request to a batch slot) reuses it instead of reading them again.
     int spec_step(int x_tok, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts, int32_t* picks,
-                  const std::atomic<bool>* cancel = nullptr) {
+                  const std::atomic<bool>* cancel = nullptr, const lamina::kernels::SamplerParams* sp = nullptr,
+                  const std::vector<int32_t>* hist = nullptr) {
         const int N = (int) m->g.n_embd;
         Engine& L = *lst;   // the MTP block, the picks and hlast are the last stage's
         lora_rows(nullptr, 0);
@@ -4389,8 +4390,13 @@ struct Engine {
         pass([T](Engine& e) -> cudaGraphExec_t& { return e.gs().gv[T]; }, true, T, pos, T, true);
         rows_deferred = false;
         L.on();
-        CK(cudaMemcpyAsync(L.hpin + 2, L.pick, (size_t) T * 4, cudaMemcpyDeviceToHost, L.st));
-        CK(cudaStreamSynchronize(L.st));
+        if (sp == nullptr) {
+            CK(cudaMemcpyAsync(L.hpin + 2, L.pick, (size_t) T * 4, cudaMemcpyDeviceToHost, L.st));
+            CK(cudaStreamSynchronize(L.st));
+        } else {   // (the tail: the text before x; hpin + 16 holds the window's tokens)
+            L.sampler.pick(*sp, L.logits, T, (int) m->g.n_vocab, pos + 1, hist->data(), (int64_t) hist->size() - 1,
+                           hpin + 16, L.st, L.hpin + 2);
+        }
         int a = 0;
         while (a < D && L.hpin[2 + a] == drafts[(size_t) a]) ++a;
         if (cancel != nullptr && cancel->load()) a = 0;
@@ -4455,6 +4461,16 @@ struct Engine {
         CK(cudaStreamSynchronize(L.st));
         on();
         return L.hpin[2];
+    }
+    /// The token after the state's last one by a request's chain `sp`, from the last stage's logits row 0: drawn at the
+    /// position it takes, after `hist` (the text the state holds, its last token last); -1 for a non-finite row
+    int sampled(const lamina::kernels::SamplerParams& sp, const std::vector<int32_t>& hist) {
+        Engine& L = *lst;
+        L.on();
+        int32_t t = -1;
+        L.sampler.pick(sp, L.logits, 1, (int) m->g.n_vocab, pos, hist.data(), (int64_t) hist.size(), nullptr, L.st, &t);
+        on();
+        return t;
     }
     void host_logits(std::vector<float>& out) {
         Engine& L = *lst;
@@ -4708,7 +4724,8 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
 
 // ------------------------------------------------------------------------------------------------ sampling
 using lamina::program::parse_ids;
-using lamina::program::sample;
+using lamina::program::plain_argmax;
+using lamina::program::sampler_params;
 using lamina::program::Sampling;
 
 bool is_eos(int t) { return t == 248044 || t == 248046; }
@@ -4880,9 +4897,8 @@ struct Slot {
     int sess = 0;   // the session it decodes in (the prompt cache's choice; without the cache its own number)
     int32_t x = 0;
     int64_t produced = 0, max_new = 0;
-    Sampling smp;
-    std::mt19937_64 rng;
-    std::vector<int32_t> hist;
+    lamina::kernels::SamplerParams sp;   // the request's chain (plain_argmax: the window's greedy pick)
+    std::vector<int32_t> hist;           // the penalties' history: the prompt's text, then each token emitted
     Clock::time_point t0;
     int32_t draft = 0;   // --batch-mtp: the MTP block's proposal for the token after `x`
     bool draft_ready = false;
@@ -4901,7 +4917,6 @@ struct Serve {
     lamina::program::ServeInput* in = nullptr;   // run()'s input lines, while it runs
     std::vector<Slot> slots;
     int n_active = 0;
-    std::vector<float> lg;
     // decode windows of the other slots between two chunks of a prompt read: LAMINA_Q36_READ_WINDOWS (default 1; a
     // chunk takes ~0.15 s at 512 tokens, a window ~0.012 s: more
     // windows give the decoding slots more of the time a read takes)
@@ -5135,10 +5150,10 @@ struct Serve {
     }
 
     /// One decode window with MTP proposals (--batch-mtp): every active slot's next token, and for up to kVerify - S of
-    /// the slots (the greedy ones, in turn) also the proposal its MTP block made: the window verifies both at once.  A
-    /// slot whose proposal the main model confirms moves two tokens in the window.  The proposals for the next window
-    /// come right after it, from the hidden states the window just
-    /// produced (the first one of a slot from the state its prompt left).
+    /// the slots (in turn) also the proposal its MTP block made: the window verifies both at once.  A slot whose
+    /// proposal the main model confirms (a sampled slot's: the token drawn) moves two tokens in the window.  The
+    /// proposals for the next window come right after it, from the hidden states the window just produced (the first
+    /// one of a slot from the state its prompt left).
     int mtp_turn = 0;
     void window_mtp() {
         poll_control();
@@ -5148,17 +5163,10 @@ struct Serve {
             if (slots[(size_t) b].active) act.push_back(b);
         const int S = (int) act.size();
         if (S == 0) return;
-        // who verifies a proposal this window: the greedy slots in turn, as many as fit beside one row per slot
+        // who verifies a proposal this window: the slots in turn, as many as fit beside one row per slot
         const int room = Engine::kVerify - S;
         std::vector<char> cand((size_t) S, 0);
-        int nc = 0;
-        for (int k = 0; k < S && nc < room; ++k) {
-            const int i = (mtp_turn + k) % S;
-            if (!slots[(size_t) act[(size_t) i]].smp.needs_logits()) {
-                cand[(size_t) i] = 1;
-                ++nc;
-            }
-        }
+        for (int k = 0; k < S && k < room; ++k) cand[(size_t) ((mtp_turn + k) % S)] = 1;
         ++mtp_turn;
         // a candidate without a proposal gets its first one from the state its last row left
         std::vector<Engine::MtpRow> first;
@@ -5189,6 +5197,21 @@ struct Serve {
             T += gr[(size_t) i].n;
         }
         E.run_rows(gr.data(), S, true);
+        // a sampled slot's rows by its chain on the GPU: row j's token at the position it takes (ss.pos + 1 + j), after
+        // the slot's text and the window's tokens before it; a greedy slot's are the window's picks
+        std::vector<int32_t> drawn((size_t) T, 0);
+        bool any_drawn = false;
+        const int V = (int) E.m->g.n_vocab;
+        for (int i = 0; i < S; ++i) {
+            const Slot& sl = slots[(size_t) act[(size_t) i]];
+            if (plain_argmax(sl.sp)) continue;
+            const int32_t win[2] = {sl.x, sl.draft};
+            E.sampler.queue(sl.sp, E.logits + (size_t) row0[(size_t) i] * (size_t) V, gr[(size_t) i].n, V,
+                            E.sess[(size_t) sl.sess].pos + 1, sl.hist.data(), (int64_t) sl.hist.size() - 1, win, E.st,
+                            row0[(size_t) i]);
+            any_drawn = true;
+        }
+        if (any_drawn) E.sampler.take(T, drawn.data(), E.st);
         // the picks: emit, decide how many rows each slot keeps
         std::vector<int> keep((size_t) S, 1);
         std::vector<int32_t> last((size_t) S, 0);
@@ -5198,11 +5221,8 @@ struct Serve {
             Slot& sl = slots[(size_t) b];
             Engine::Sess& ss = E.sess[(size_t) sl.sess];
             const int n = gr[(size_t) i].n, r0 = row0[(size_t) i];
-            int y0 = E.rows_pick[r0];
-            if (sl.smp.needs_logits()) {
-                E.host_logits_row(r0, lg);
-                y0 = sample(lg, sl.smp, sl.hist, sl.rng);
-            }
+            const int32_t* row_picks = plain_argmax(sl.sp) ? E.rows_pick : drawn.data();
+            const int y0 = row_picks[r0];
             bool two = n == 2 && y0 == sl.draft && !is_eos(y0) && !sl.stop && sl.produced + 2 <= sl.max_new &&
                        ss.pos + 3 <= E.ctx;   // (ss.pos: the position of the slot's
                                               // next token: the window did not move it)
@@ -5216,7 +5236,7 @@ struct Serve {
             bool done = false;
             int y = y0;
             for (int j = 0; j < rows_kept; ++j) {
-                if (j == 1) y = E.rows_pick[r0 + 1];
+                if (j == 1) y = row_picks[r0 + 1];
                 if (y < 0) {   // no finite logit: the slot ends, and its state is not continued
                     serve_print("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms_since(sl.t0));
                     std::fprintf(stderr, "lamina batch: slot %d: non-finite logits: the request ends\n", b);
@@ -5293,14 +5313,10 @@ struct Serve {
     /// One decode window over every active slot: one token each.
     void window() {
         poll_control();
-        if (E.bmtp && E.mtp_d > 0) {   // proposals need a row to spare and a slot that decodes greedily
-            int act = 0, greedy = 0;
-            for (const Slot& sl : slots)
-                if (sl.active) {
-                    ++act;
-                    greedy += !sl.smp.needs_logits();
-                }
-            if (greedy > 0 && Engine::kVerify - act > 0) {
+        if (E.bmtp && E.mtp_d > 0) {   // proposals need a row to spare
+            int act = 0;
+            for (const Slot& sl : slots) act += sl.active ? 1 : 0;
+            if (act > 0 && Engine::kVerify - act > 0) {
                 window_mtp();
                 return;
             }
@@ -5319,6 +5335,19 @@ struct Serve {
             }
         if (rows.empty()) return;
         E.step_rows(rows.data(), (int) rows.size());
+        // a sampled slot's row by its chain on the GPU (its token at the position it takes: the window moved the
+        // session there), a greedy slot's the window's pick
+        std::vector<int32_t> drawn(rows.size(), 0);
+        bool any_drawn = false;
+        const int V = (int) E.m->g.n_vocab;
+        for (size_t r = 0; r < rows.size(); ++r) {
+            const Slot& sl = slots[(size_t) who[r]];
+            if (plain_argmax(sl.sp)) continue;
+            E.sampler.queue(sl.sp, E.logits + r * (size_t) V, 1, V, E.sess[(size_t) sl.sess].pos, sl.hist.data(),
+                            (int64_t) sl.hist.size(), nullptr, E.st, (int) r);
+            any_drawn = true;
+        }
+        if (any_drawn) E.sampler.take((int) rows.size(), drawn.data(), E.st);
         const size_t Nb = (size_t) E.m->g.n_embd * 4;
         for (size_t r = 0; r < rows.size(); ++r) {
             const int b = who[r];
@@ -5327,13 +5356,7 @@ struct Serve {
             if (E.bmtp)   // (the hidden state a later first proposal starts from)
                 CK(cudaMemcpyAsync(ss.hlast, E.hmain + r * (size_t) E.m->g.n_embd, Nb, cudaMemcpyDeviceToDevice, E.st));
             sl.draft_ready = false;
-            int y;
-            if (sl.smp.needs_logits()) {
-                E.host_logits_row((int) r, lg);
-                y = sample(lg, sl.smp, sl.hist, sl.rng);
-            } else {
-                y = E.rows_pick[r];
-            }
+            const int y = plain_argmax(sl.sp) ? E.rows_pick[r] : drawn[r];
             if (y < 0) {   // no finite logit: the slot ends, and its state is not continued
                 serve_print("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced, ms_since(sl.t0));
                 std::fprintf(stderr, "lamina batch: slot %d: non-finite logits: the request ends\n", b);
@@ -5576,17 +5599,7 @@ struct Serve {
             }
             const std::string key = tk.substr(0, eq);
             const char* v = tk.c_str() + eq + 1;
-            if (key == "temperature") smp.temperature = std::strtof(v, nullptr);
-            else if (key == "top_p") smp.top_p = std::strtof(v, nullptr);
-            else if (key == "top_k") smp.top_k = std::atoi(v);
-            else if (key == "min_p") smp.min_p = std::strtof(v, nullptr);
-            else if (key == "penalty_last_n") smp.last_n = std::atoi(v);
-            else if (key == "penalty_repeat") smp.repeat = std::strtof(v, nullptr);
-            else if (key == "penalty_freq") smp.freq = std::strtof(v, nullptr);
-            else if (key == "penalty_present") smp.present = std::strtof(v, nullptr);
-            else if (key == "seed") smp.seed = std::strtoull(v, nullptr, 10);
-            else if (key == "lora") {   // every adapter's scale, comma-separated
-                                        // in --lora's order (the ones left out: 0)
+            if (key == "lora") {   // every adapter's scale, comma-separated in --lora's order (the ones left out: 0)
                 lsc.assign((size_t) E.n_ad, 0.f);
                 size_t k = 0;
                 for (const char* q = v; *q;) {
@@ -5620,6 +5633,8 @@ struct Serve {
                         break;
                     }
                 }
+            } else {
+                smp.set(key, v);   // the sampler's keys (another path's are left)
             }
         }
         std::string emb;
@@ -5863,22 +5878,32 @@ struct Serve {
             cache_idle();
             return;
         }
-        std::mt19937_64 rng(lamina::program::draw_seed(smp.seed));
-        std::vector<int32_t> hist = ids;
+        const lamina::kernels::SamplerParams sp = sampler_params(smp);
+        const bool drawn = !plain_argmax(sp);   // a token by the request's chain on the GPU, else the greedy pick
+        // the penalties' history: the prompt's text (as llama.cpp's sampler counts it: no picture's cells), then each
+        // token emitted
+        std::vector<int32_t> hist;
+        if (ir.imgs.empty()) {
+            hist = ids;
+        } else {
+            std::vector<char> pic(ids.size(), 0);
+            for (const ImgKey& k : ir.imgs)
+                std::fill(pic.begin() + k.cell, pic.begin() + std::min<int64_t>(k.cell + k.n, (int64_t) ids.size()),
+                          (char) 1);
+            for (size_t c = 0; c < ids.size(); ++c)
+                if (!pic[c]) hist.push_back(ids[c]);
+        }
         const auto d0 = Clock::now();
         long long produced = 0, offered = 0, accepted = 0;
         const char* finish = "length";
-        // greedy requests alone with the MTP block: speculative steps of mtp_d drafts (verified, so the text is the
-        // greedy text); sampled ones, and requests beside others, one token at a time
-        const bool spec = E.mtp_d > 0 && !smp.needs_logits() && !adm;
+        // a request alone with the MTP block: speculative steps of mtp_d drafts, verified (a greedy request's text is
+        // the greedy text, a sampled one's the text its draws give: a draft passes only as the token drawn); requests
+        // beside others, one token at a time
+        const bool spec = E.mtp_d > 0 && !adm;
         std::vector<int32_t> fix, drafts;
         int32_t picks[16];
-        int nx = smp.needs_logits() ? -1 : E.greedy();
+        int nx = drawn ? E.sampled(sp, hist) : E.greedy();
         if (adm) {
-            if (smp.needs_logits()) {
-                E.host_logits(lg);
-                nx = sample(lg, smp, hist, rng);
-            }
             if (nx < 0) {   // no finite logit: the slot is not taken, and its state is not continued
                 ss.live.clear();
                 ss.imgs.clear();
@@ -5913,8 +5938,7 @@ struct Serve {
                 sl.x = nx;
                 sl.produced = 1;
                 sl.max_new = max_new;
-                sl.smp = smp;
-                sl.rng = rng;
+                sl.sp = sp;
                 sl.hist = hist;
                 sl.t0 = Clock::now();
                 ss.active = true;
@@ -5931,11 +5955,7 @@ struct Serve {
             return;
         }
         for (;;) {
-            poll_loan();   // (the encoder's loan beside this request's decoding: its prompt is read)
-            if (smp.needs_logits()) {
-                E.host_logits(lg);
-                nx = sample(lg, smp, hist, rng);
-            }
+            poll_loan();               // (the encoder's loan beside this request's decoding: its prompt is read)
             auto emit = [&](int t) {   // false: the answer ends here
                 if (t < 0) {
                     finish = "nonfinite";
@@ -5958,7 +5978,7 @@ struct Serve {
             if (!emit(nx)) break;
             if (n_active > 0) window();
             if (spec && n_active == 0 && E.pos + E.mtp_d + 1 <= E.ctx) {
-                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &in->stop);
+                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &in->stop, drawn ? &sp : nullptr, &hist);
                 offered += (long long) drafts.size();   // the drafts made (--spec-min-p can end them early)
                 accepted += a;
                 // the state now holds x and every accepted draft, whether or not the answer ends inside them (an end of
@@ -5980,7 +6000,7 @@ struct Serve {
             E.process(&one, 1, [](int64_t) {});
             ss.live.push_back(nx);
             fix.clear();
-            if (!smp.needs_logits()) nx = E.greedy();
+            nx = drawn ? E.sampled(sp, hist) : E.greedy();
         }
         if (std::strcmp(finish, "nonfinite") == 0) {   // the state holds the non-finite rows: not continued
             ss.live.clear();

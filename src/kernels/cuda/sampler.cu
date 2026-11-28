@@ -24,6 +24,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -1004,6 +1005,31 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
     if (stream == nullptr) cudaDeviceSynchronize();
 }
 
-namespace {}   // namespace
+namespace {
+
+constexpr int kFlagParts = 16;   // the blocks a row's scan is split over
+
+/// flags[row] |= 1 where the block's part of the row (n floats) holds a NaN or an infinity
+__global__ void __launch_bounds__(256) rows_nonfinite_kernel(const float* __restrict__ logits, int n,
+                                                             int32_t* __restrict__ flags) {
+    const float* l = logits + (size_t) blockIdx.y * (size_t) n;
+    const int span = (n + kFlagParts - 1) / kFlagParts, lo = (int) blockIdx.x * span, hi = min(n, lo + span);
+    int bad = 0;
+    for (int v = lo + (int) threadIdx.x; v < hi; v += (int) blockDim.x) bad |= !(fabsf(l[v]) <= FLT_MAX);
+    if (__syncthreads_or(bad) && threadIdx.x == 0) atomicOr(&flags[blockIdx.y], 1);
+}
+
+}   // namespace
+
+void rows_nonfinite(const float* logits, int n_rows, int n, int32_t* flags, void* stream) {
+    if (n_rows <= 0) return;
+    cudaMemsetAsync(flags, 0, (size_t) n_rows * sizeof(int32_t), (cudaStream_t) stream);
+    rows_nonfinite_kernel<<<dim3(kFlagParts, (unsigned) n_rows), 256, 0, (cudaStream_t) stream>>>(logits, n, flags);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "rows_nonfinite launch: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+}
 
 }   // namespace lamina::kernels
